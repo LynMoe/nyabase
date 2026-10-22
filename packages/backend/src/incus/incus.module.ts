@@ -1,13 +1,17 @@
 import { Module } from '@nestjs/common';
-import { DatabaseIncusClientFactory, INCUS_CLIENT_FACTORY } from './incus-client.factory.js';
-import { IncusClientIdentityService } from './incus-client-identity.service.js';
+import { AgentCredentialVerifier } from './agent-credentials.js';
+import { AgentGateway } from './agent-gateway.js';
+import { AgentRegistry } from './agent-registry.service.js';
+import { AgentIncusClientFactory, INCUS_CLIENT_FACTORY } from './incus-client.factory.js';
 
 @Module({
   providers: [
-    IncusClientIdentityService,
-    DatabaseIncusClientFactory,
-    { provide: INCUS_CLIENT_FACTORY, useExisting: DatabaseIncusClientFactory },
+    AgentRegistry,
+    AgentCredentialVerifier,
+    AgentGateway,
+    AgentIncusClientFactory,
+    { provide: INCUS_CLIENT_FACTORY, useExisting: AgentIncusClientFactory },
   ],
-  exports: [INCUS_CLIENT_FACTORY, IncusClientIdentityService],
+  exports: [INCUS_CLIENT_FACTORY, AgentRegistry, AgentGateway],
 })
 export class IncusModule {}

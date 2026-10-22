@@ -22,28 +22,8 @@ export function formatGibInput(bytes: number): string {
   return Number.isInteger(gib) ? String(gib) : parseFloat(gib.toFixed(3)).toString();
 }
 
-/** Human-friendly vCPU string for number inputs (millis → cores). */
-export function formatVcpuInput(millis: number): string {
-  const vcpu = millis / 1000;
-  return Number.isInteger(vcpu) ? String(vcpu) : parseFloat(vcpu.toFixed(3)).toString();
-}
-
 export function gibToBytes(gib: number): number {
   return Math.round(gib * GIB);
-}
-
-export function vcpuToMillis(vcpu: number): number {
-  return Math.round(vcpu * 1000);
-}
-
-export function formatCpu(millis: number): string {
-  if (millis === 0) return '不限制';
-  if (millis >= 1000) {
-    const cores = millis / 1000;
-    const label = Number.isInteger(cores) ? String(cores) : cores.toFixed(1);
-    return `${label} 核`;
-  }
-  return `${millis}m`;
 }
 
 /** Soft hint under GiB inputs — avoid raw byte clutter. */

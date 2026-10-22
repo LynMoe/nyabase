@@ -4,6 +4,7 @@ import { ValidationPipe, Logger, type LogLevel } from '@nestjs/common';
 import type { NestExpressApplication } from '@nestjs/platform-express';
 import { existsSync } from 'fs';
 import { join } from 'path';
+import { AGENT_CONTROL_PATH, AGENT_STREAM_PATH } from '@nyabase/common';
 import { AppModule } from './app.module.js';
 import { NyabaseConfigService } from './platform/config/nyabase-config.service.js';
 import { RouteIdPipe, SpaFallbackFilter, ZodExceptionFilter } from './platform/http-filters.js';
@@ -12,6 +13,7 @@ import { RuntimeLifecycleService } from './health/runtime-lifecycle.service.js';
 import { ConsoleBridgeGateway } from './containers/console-bridge.gateway.js';
 import { SshProxyGateway } from './ssh/ssh-proxy-gateway.js';
 import { HttpProxyGateway } from './http-proxy/http-proxy-gateway.js';
+import { AgentGateway } from './incus/agent-gateway.js';
 
 const LOG_LEVELS_BY_VERBOSITY: readonly LogLevel[] = ['fatal', 'error', 'warn', 'log', 'debug', 'verbose'];
 
@@ -82,7 +84,14 @@ async function bootstrap() {
   app.get(ConsoleBridgeGateway).attachToHttpServer(httpServer);
   app.get(SshProxyGateway).attachToHttpServer(httpServer);
   app.get(HttpProxyGateway).attachToHttpServer(httpServer);
-  const websocketPaths = new Set(['/ws/console', '/ws/ssh-proxy', '/ws/http-proxy']);
+  app.get(AgentGateway).attachToHttpServer(httpServer);
+  const websocketPaths = new Set([
+    '/ws/console',
+    '/ws/ssh-proxy',
+    '/ws/http-proxy',
+    AGENT_CONTROL_PATH,
+    AGENT_STREAM_PATH,
+  ]);
   httpServer.on('upgrade', (request, socket) => {
     const path = request.url?.split('?')[0] ?? '';
     if (!websocketPaths.has(path)) socket.destroy();

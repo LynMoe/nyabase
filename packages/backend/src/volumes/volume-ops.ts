@@ -84,6 +84,7 @@ export function scanNeedsEnsure(
   const actualSize = asBytes(listed.config?.size);
   const desiredSize = asBytes(row.size_bytes);
   if (listed.config?.['security.shifted'] !== 'true') return true;
+  if (listed.config?.['security.unmapped'] !== undefined) return true;
   if (actualSize === null || desiredSize === null) return false;
   return actualSize !== desiredSize;
 }

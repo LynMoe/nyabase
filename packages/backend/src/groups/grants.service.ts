@@ -32,7 +32,7 @@ export interface GrantSubject {
 }
 
 export interface ServerGrantInput {
-  cpuMillis: number | null;
+  cpuCores: number | null;
   memBytes: number | null;
   diskBytes: number | null;
   gpuPciAddresses: string[];
@@ -111,7 +111,7 @@ export class GrantsService {
         });
       }
       const values = {
-        cpu_millis: input.cpuMillis,
+        cpu_cores: input.cpuCores,
         mem_bytes: input.memBytes,
         disk_bytes: input.diskBytes,
         gpu_pci_addresses: gpuPciAddresses,
@@ -352,7 +352,7 @@ export class GrantsService {
     row: {
       id: string;
       server_id: string;
-      cpu_millis: number | null;
+      cpu_cores: number | null;
       mem_bytes: string | number | null;
       disk_bytes: string | number | null;
       gpu_pci_addresses: string[];
@@ -366,7 +366,7 @@ export class GrantsService {
       scope: subject.kind,
       scopeId: subject.id,
       serverId: row.server_id,
-      cpuMillis: row.cpu_millis,
+      cpuCores: row.cpu_cores,
       memBytes: row.mem_bytes === null ? null : Number(row.mem_bytes),
       diskBytes: row.disk_bytes === null ? null : Number(row.disk_bytes),
       gpuPciAddresses: [...row.gpu_pci_addresses],

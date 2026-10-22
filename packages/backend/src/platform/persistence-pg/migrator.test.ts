@@ -40,7 +40,8 @@ describe('SQL migration discovery', () => {
     expect(initial.sql).toContain('CREATE TABLE infra.storage_pools');
     expect(initial.sql).toContain('CREATE TABLE infra.shared_backends');
     expect(initial.sql).toContain('CREATE TABLE infra.image_server_assignments');
-    expect(initial.sql).toContain('CREATE TABLE system.incus_client_identity');
+    expect(initial.sql).toContain('CREATE TABLE control.user_cpu_sets');
+    expect(initial.sql).not.toContain('incus_client_identity');
     expect(initial.sql).not.toMatch(/incus_client_certificate|blocked_by_intent_id|certificate_rotation|snapshot_token/);
     expect(initial.sql).toContain('CREATE TABLE interaction.ssh_proxy_host_keys');
     expect(initial.sql).toContain('CREATE TABLE interaction.http_proxy_bindings');
@@ -52,7 +53,7 @@ describe('SQL migration discovery', () => {
     expect(initial.sql).not.toMatch(/policy_state|authz_version|CREATE TRIGGER \w+_authorization_(barrier|touch)/);
     expect(initial.sql).not.toMatch(/\bCREATE\s+SCHEMA\s+workflow\b/i);
     expect(initial.sql).not.toMatch(/\bworkflow\./i);
-    expect(initial.sql).not.toMatch(/\b(agent|docker|macvlan|xfs|quarantine)\b/i);
+    expect(initial.sql).not.toMatch(/\b(docker|macvlan|xfs|quarantine)\b/i);
     expect(initial.sql).not.toMatch(/\b(gpu_indices|agent_token_hash|bridge_parent)\b/i);
     expect(initial.sql).not.toMatch(/\b(remote_fs|data_directories|container_mounts|quota_desired)\b/i);
     expect(initial.sql).not.toMatch(/\b(image_grants|mount_source_grants)\b/i);

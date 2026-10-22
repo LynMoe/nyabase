@@ -1,81 +1,63 @@
 #!/usr/bin/env bash
 # `e2e.sh up`: build, create the run directory and database, start the
-# control plane and both proxies, then register the lab (lib/bootstrap.ts).
+# control plane and both proxies, register the servers, start their agents,
+# then register the rest of the lab (lib/bootstrap.ts).
 
-# host:port of an https URL, defaulting to the Incus port.
-api_host() { local hp="${1#https://}"; hp="${hp%%/*}"; printf '%s' "${hp%:*}"; }
-api_port() { local hp="${1#https://}"; hp="${hp%%/*}"; [[ "$hp" == *:* ]] && printf '%s' "${hp##*:}" || printf '8443'; }
-
-# Pins every lab server certificate: they become the backend's Incus CA bundle,
-# and the sha256 fingerprints are what the trust-token connect flow expects.
-fetch_server_certs() {
-  local idx var api host port pem fp
-  mkdir -p "$RUN_DIR/certs"
-  : >"$RUN_DIR/certs/ca.pem"
-  for idx in $E2E_SERVERS; do
-    [[ "$idx" =~ ^[0-9]+$ ]] || die "E2E_SERVERS must be a list of numbers, got: $E2E_SERVERS"
-    var="E2E_SERVER_${idx}_API"
-    api="${!var:-}"
-    [[ -n "$api" ]] || die "$var is required in lab.env"
-    host="$(api_host "$api")"; port="$(api_port "$api")"
-    pem="$RUN_DIR/certs/s$idx.pem"
-    openssl s_client -connect "$host:$port" -servername "$host" </dev/null 2>/dev/null \
-      | openssl x509 >"$pem" 2>/dev/null || die "cannot read the TLS certificate of $host:$port"
-    fp="$(openssl x509 -in "$pem" -noout -fingerprint -sha256 | cut -d= -f2)"
-    [[ ${#fp} -eq 95 ]] || die "unexpected fingerprint for $host:$port"
-    cat "$pem" >>"$RUN_DIR/certs/ca.pem"
-    printf 'export E2E_SERVER_%s_CERT_FINGERPRINT=%q\n' "$idx" "$fp" >>"$RUN_DIR/run.env"
-  done
-}
-
-# A self-contained node-exporter tree: its dist plus @nyabase/common and zod.
-bundle_node_exporter() {
-  local out="$RUN_DIR/node-exporter" common="$REPO_ROOT/packages/common" zod
+# A self-contained agent tree: its dist plus @nyabase/common, zod and ws.
+bundle_agent() {
+  local out="$RUN_DIR/agent" agent="$REPO_ROOT/packages/agent" common="$REPO_ROOT/packages/common" zod ws
   zod="$(cd "$common" && node -p 'require("path").dirname(require.resolve("zod/package.json"))')"
+  ws="$(cd "$agent" && node -p 'require("path").dirname(require.resolve("ws/package.json"))')"
   mkdir -p "$out/node_modules/@nyabase/common"
-  cp -R "$REPO_ROOT/packages/node-exporter/dist" "$REPO_ROOT/packages/node-exporter/package.json" "$out/"
+  cp -R "$agent/dist" "$agent/package.json" "$out/"
   cp -R "$common/dist" "$common/package.json" "$out/node_modules/@nyabase/common/"
   cp -RL "$zod" "$out/node_modules/zod"
+  cp -RL "$ws" "$out/node_modules/ws"
 }
 
-# Preflight reads the host network facts from node-exporter, so every lab host
-# gets a run-scoped one: a transient systemd unit named nyabase-e2e-node-<run>-s<n>,
-# files in /var/tmp/<that name>, a fresh TLS certificate (pinned) and token.
-# `down` stops the unit and removes the directory (lib/lab-sweep.sh).
-start_node_exporters() {
-  local idx var target host parent name port token fp san i
-  port="${E2E_NODE_EXPORTER_PORT:-19109}"
-  bundle_node_exporter
+# Every lab host gets a run-scoped agent: a transient systemd unit named
+# nyabase-e2e-agent-<run>-s<n> with its files and credential in /var/tmp/<that name>.
+# The agent dials the Backend; for a remote host that goes through an ssh reverse
+# tunnel (pid in tunnel-s<n>.pid), so the Backend can stay on a loopback address.
+# The one-time enrollment tokens come from the first bootstrap phase (enroll.env).
+# `down` stops the unit, removes the directory and the tunnel (lib/lab-sweep.sh).
+start_agents() {
+  local idx var target name port url token i
+  port="${E2E_AGENT_TUNNEL_PORT:-13901}"
+  bundle_agent
+  # shellcheck disable=SC1091
+  source "$RUN_DIR/enroll.env"
   for idx in $E2E_SERVERS; do
     var="E2E_SERVER_${idx}_SSH"; target="${!var:-}"
     [[ -n "$target" ]] || die "$var is required in lab.env"
-    var="E2E_SERVER_${idx}_API"; host="$(api_host "${!var}")"
-    var="E2E_SERVER_${idx}_PARENT"; parent="${!var:-}"
-    name="nyabase-e2e-node-$RUN_ID-s$idx"
-    [[ "$host" =~ ^[0-9.]+$ ]] && san="IP:$host" || san="DNS:$host"
-    openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 7 \
-      -subj "/CN=$host" -addext "subjectAltName=$san" \
-      -keyout "$RUN_DIR/certs/node-s$idx.key" -out "$RUN_DIR/certs/node-s$idx.crt" 2>/dev/null \
-      || die "cannot create the node-exporter certificate for $host"
-    fp="$(openssl x509 -in "$RUN_DIR/certs/node-s$idx.crt" -noout -fingerprint -sha256 | cut -d= -f2)"
-    token="$(openssl rand -hex 32)"
-    printf 'NODE_EXPORTER_TOKEN=%s\nNODE_EXPORTER_TLS_KEY=/var/tmp/%s/certs/node-s%s.key\nNODE_EXPORTER_TLS_CERT=/var/tmp/%s/certs/node-s%s.crt\nNODE_EXPORTER_HOST=0.0.0.0\nNODE_EXPORTER_PORT=%s\nNODE_EXPORTER_PARENT_INTERFACE=%s\n' \
-      "$token" "$name" "$idx" "$name" "$idx" "$port" "$parent" >"$RUN_DIR/node-s$idx.env"
-    chmod 600 "$RUN_DIR/node-s$idx.env"
-    log "starting node-exporter on $target ($host:$port)"
-    tar -C "$RUN_DIR" -cz node-exporter "certs/node-s$idx.key" "certs/node-s$idx.crt" "node-s$idx.env" \
+    var="E2E_SERVER_${idx}_ENROLLMENT_TOKEN"; token="${!var:-}"
+    [[ -n "$token" ]] || die "bootstrap issued no enrollment token for server $idx"
+    name="nyabase-e2e-agent-$RUN_ID-s$idx"
+    if [[ "$target" == local ]]; then
+      url="http://$E2E_LISTEN_HOST:$E2E_BACKEND_PORT"
+    else
+      start_detached "tunnel-s$idx" ssh -N -o BatchMode=yes -o ExitOnForwardFailure=yes \
+        -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
+        -R "127.0.0.1:$port:$E2E_LISTEN_HOST:$E2E_BACKEND_PORT" "$target"
+      sleep 2
+      run_owns_pid "$RUN_DIR/tunnel-s$idx.pid" \
+        || die "the reverse tunnel to $target did not come up (see $RUN_DIR/tunnel-s$idx.log)"
+      url="http://127.0.0.1:$port"
+    fi
+    printf 'NYABASE_BACKEND_URL=%s\nNYABASE_AGENT_ENROLLMENT_TOKEN=%s\nNYABASE_AGENT_STATE_DIR=/var/tmp/%s/state\n' \
+      "$url" "$token" "$name" >"$RUN_DIR/agent-s$idx.env"
+    chmod 600 "$RUN_DIR/agent-s$idx.env"
+    log "starting the agent on $target (backend $url)"
+    tar -C "$RUN_DIR" -cz agent "agent-s$idx.env" \
       | lab_sh "$target" "rm -rf /var/tmp/$name && mkdir -m 700 /var/tmp/$name && tar -xz -C /var/tmp/$name \
-          && systemd-run --quiet --collect --unit=$name --property=WorkingDirectory=/var/tmp/$name/node-exporter \
-             --property=EnvironmentFile=/var/tmp/$name/node-s$idx.env /usr/bin/env node dist/main.js" \
-      || die "cannot start node-exporter on $target"
+          && systemd-run --quiet --collect --unit=$name --property=WorkingDirectory=/var/tmp/$name/agent \
+             --property=EnvironmentFile=/var/tmp/$name/agent-s$idx.env /usr/bin/env node dist/main.js" \
+      || die "cannot start the agent on $target"
     for i in $(seq 1 30); do
-      curl --silent --insecure --max-time 3 -o /dev/null -H "Authorization: Bearer $token" \
-        "https://$host:$port/metrics" && break
-      [[ $i -eq 30 ]] && die "node-exporter on $host:$port did not come up (journalctl -u $name on $target)"
+      lab_sh "$target" "test -s /var/tmp/$name/state/credential" && break
+      [[ $i -eq 30 ]] && die "the agent on $target did not enroll (journalctl -u $name on $target)"
       sleep 1
     done
-    printf 'export E2E_SERVER_%s_NODE_ENDPOINT=%q E2E_SERVER_%s_NODE_FINGERPRINT=%q E2E_SERVER_%s_NODE_TOKEN=%q\n' \
-      "$idx" "https://$host:$port/metrics" "$idx" "$fp" "$idx" "$token" >>"$RUN_DIR/run.env"
   done
 }
 
@@ -101,6 +83,18 @@ wait_ready() {
   die "$url did not become ready"
 }
 
+# lib/bootstrap.ts <phase> with the run's environment.
+bootstrap() {
+  (
+    cd "$E2E_DIR"
+    set -a
+    # shellcheck disable=SC1091
+    source "$RUN_DIR/run.env"
+    set +a
+    node --import tsx lib/bootstrap.ts "$1"
+  )
+}
+
 cmd_up() {
   load_lab
   need E2E_PG_URL E2E_SERVERS E2E_BACKEND_PORT E2E_SSH_PROXY_PORT E2E_HTTP_PROXY_PORT \
@@ -122,14 +116,14 @@ cmd_up() {
   if [[ "${E2E_SKIP_BUILD:-0}" != 1 ]]; then
     log "building backend (tsc -b with @nyabase/common) and the Rust proxies"
     (cd "$REPO_ROOT" && pnpm --filter @nyabase/backend build \
-      && pnpm --filter @nyabase/node-exporter build \
+      && pnpm --filter @nyabase/agent build \
       && cargo build --release --locked --manifest-path tools/Cargo.toml)
     (cd "$E2E_DIR" && pnpm install --frozen-lockfile --ignore-workspace >/dev/null)
   fi
   local ssh_proxy="$REPO_ROOT/tools/target/release/nyabase-ssh-proxy"
   local http_proxy="$REPO_ROOT/tools/target/release/nyabase-http-proxy"
   [[ -x "$ssh_proxy" && -x "$http_proxy" && -f "$REPO_ROOT/packages/backend/dist/main.js" \
-    && -f "$REPO_ROOT/packages/node-exporter/dist/main.js" ]] \
+    && -f "$REPO_ROOT/packages/agent/dist/main.js" ]] \
     || die "build outputs are missing (set E2E_SKIP_BUILD=0)"
 
   log "creating database $DB_NAME"
@@ -147,7 +141,7 @@ cmd_up() {
       printf 'export %s=%q\n' "$name" "${!name:-}"
     done
     for idx in $E2E_SERVERS; do
-      for suffix in SSH API PARENT DNS POOL SHARED_POOL GPU_PCI; do
+      for suffix in SSH PARENT DNS POOL SHARED_POOL GPU_PCI RESERVED_CPUS; do
         name="E2E_SERVER_${idx}_${suffix}"
         printf 'export %s=%q\n' "$name" "${!name:-}"
       done
@@ -157,9 +151,6 @@ cmd_up() {
       "http://$E2E_LISTEN_HOST:$E2E_BACKEND_PORT" "$(run_db_url)" "$admin_password"
   } >"$RUN_DIR/run.env"
   chmod 600 "$RUN_DIR/run.env"
-  fetch_server_certs
-  start_node_exporters
-
   log "starting the backend on $E2E_LISTEN_HOST:$E2E_BACKEND_PORT"
   # NYABASE_CONFIG_FILE points at a file that does not exist so the host's own
   # /etc/nyabase/config.yaml can never leak in; the environment alone configures the run.
@@ -169,7 +160,6 @@ cmd_up() {
     JWT_SECRET="$jwt" JWT_EXPIRES_IN=12h SSH_KEY_ENCRYPTION_SECRET="$key" ADMIN_INIT_PASSWORD="$admin_password" \
     SSH_PROXY_TOKEN="$ssh_token" HTTP_PROXY_TOKEN="$http_token" AUTH_COOKIE_SECURE=false \
     SSH_PROXY_PUBLIC_HOST="$E2E_LISTEN_HOST" SSH_PROXY_PUBLIC_PORT="$E2E_SSH_PROXY_PORT" \
-    INCUS_CA_FILE="$RUN_DIR/certs/ca.pem" \
     INCUS_PREFLIGHT_IMAGE_ALIAS="$E2E_IMAGE_ALIAS" \
     INCUS_PREFLIGHT_IMAGE_FINGERPRINT="$E2E_PREFLIGHT_IMAGE_FINGERPRINT" \
     INCUS_PREFLIGHT_EGRESS_URL="$E2E_PREFLIGHT_EGRESS_URL" \
@@ -186,14 +176,10 @@ cmd_up() {
     NYABASE_BACKEND_WS="ws://$E2E_LISTEN_HOST:$E2E_BACKEND_PORT/ws/http-proxy" HTTP_PROXY_TOKEN="$http_token" \
     NYABASE_HTTP_LISTEN="$E2E_LISTEN_HOST:$E2E_HTTP_PROXY_PORT" "$http_proxy"
 
-  log "registering the lab (servers, pools, IP pool, shared backend, image, preflight)"
-  (
-    cd "$E2E_DIR"
-    set -a
-    # shellcheck disable=SC1091
-    source "$RUN_DIR/run.env"
-    set +a
-    node --import tsx lib/bootstrap.ts
-  )
+  log "registering the lab servers"
+  bootstrap servers
+  start_agents
+  log "registering the rest of the lab (pools, IP pool, shared backend, image, preflight)"
+  bootstrap finish
   log "up: run $RUN_ID is ready; \`bash tests/e2e/e2e.sh run\` executes the scenarios"
 }

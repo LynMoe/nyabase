@@ -56,7 +56,6 @@ describe('canonical server network contract', () => {
   const server = {
     name: 'Incus one',
     slug: 'incus-one',
-    apiEndpoint: 'https://incus.example.test:8443',
     parentInterface: 'eno1',
     dnsServers: ['192.0.2.53'],
   };
@@ -130,7 +129,6 @@ describe('canonical container and volume contracts', () => {
       imageId,
       name: 'work',
       rootSizeBytes: 10_000,
-      cpuMillis: 2_000,
       memBytes: 2_000_000_000,
       gpuPciAddresses: [],
       powerIntent: ContainerPowerIntent.Running,
@@ -140,7 +138,6 @@ describe('canonical container and volume contracts', () => {
       imageId,
       name: 'work',
       rootSizeBytes: 10_000,
-      cpuMillis: 2_000,
       memBytes: 2_000_000_000,
       powerIntent: ContainerPowerIntent.Running,
       ownerId: id,
@@ -150,7 +147,6 @@ describe('canonical container and volume contracts', () => {
       imageId,
       name: 'work',
       rootSizeBytes: 10_000,
-      cpuMillis: 2_000,
       memBytes: 2_000_000_000,
             powerIntent: ContainerPowerIntent.Running,
       volumes: [{ volumeId: id, containerPath: '/data', readOnly: false }],
@@ -159,20 +155,20 @@ describe('canonical container and volume contracts', () => {
 
   it('canonicalizes GPU PCI addresses on grants and defaults to none', () => {
     expect(zPutServerGrantRequest.parse({
-      cpuMillis: null,
+      cpuCores: null,
       memBytes: null,
       diskBytes: null,
       expiresAt: null,
     }).gpuPciAddresses).toEqual([]);
     expect(zPutServerGrantRequest.parse({
-      cpuMillis: null,
+      cpuCores: null,
       memBytes: null,
       diskBytes: null,
       gpuPciAddresses: ['0000:41:00.0'],
       expiresAt: null,
     }).gpuPciAddresses).toEqual(['00000000:41:00.0']);
     expect(zPutServerGrantRequest.safeParse({
-      cpuMillis: null,
+      cpuCores: null,
       memBytes: null,
       diskBytes: null,
       gpuPciAddresses: ['0000:41:00.*'],
@@ -483,8 +479,6 @@ describe('canonical DTO shapes', () => {
       id: serverId,
       name: 'Incus one',
       slug: 'incus-one',
-      apiEndpoint: 'https://incus.example.test:8443',
-      serverCertFingerprint: null,
       incusVersion: null,
       apiExtensions: [],
       systemPoolId: null,
@@ -501,17 +495,22 @@ describe('canonical DTO shapes', () => {
       preflightStatus: PreflightStatus.NotRun,
       preflightCheckedAt: null,
       preflightReport: null,
-      nodeMetrics: {
-        endpoint: null,
-        serverCertFingerprint: null,
-        tokenFingerprint: null,
-        health: {
-          status: NodeMetricsStatus.Unconfigured,
-          lastSuccessAt: null,
-          outageSince: null,
-          lastError: null,
-        },
+      agent: {
+        connected: false,
+        enrolled: false,
+        version: null,
+        hostname: null,
+        connectedAt: null,
+        enrollmentExpiresAt: null,
       },
+      metricsHealth: {
+        status: NodeMetricsStatus.Unknown,
+        lastSuccessAt: null,
+        outageSince: null,
+        lastError: null,
+      },
+      reservedCpus: [],
+      cpuTopology: null,
       createdAt: '2026-08-07T00:00:00.000Z',
       updatedAt: '2026-08-07T00:00:00.000Z',
     };
@@ -536,7 +535,7 @@ describe('canonical DTO shapes', () => {
         shrinkNever: false,
         enforceUsageFloor: true,
       },
-      cpuMillis: 2_000,
+      cpuSet: [0, 1],
       memBytes: 2_000_000_000,
       gpu: null,
       powerIntent: ContainerPowerIntent.Running,

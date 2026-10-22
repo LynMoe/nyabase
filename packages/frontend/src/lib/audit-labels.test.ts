@@ -24,4 +24,11 @@ describe('audit labels', () => {
     expect(auditActionLabel(AuditAction.CreateIpPool)).toBe('创建 IP 池');
     expect(auditActionLabel(AuditAction.DisconnectSshProxySessions)).toBe('断开 SSH 代理会话');
   });
+
+  it('maps host agent enrollment and container drift correction', () => {
+    expect(auditActionLabel(AuditAction.IssueAgentEnrollment)).toBe('签发 Agent 接入令牌');
+    expect(auditActionLabel(AuditAction.EnrollAgent)).toBe('Agent 接入');
+    expect(auditActionLabel(AuditAction.ContainerDriftCorrected)).toBe('纠正容器配置漂移');
+    expect(auditActionLabel('server.connect')).toBe('server.connect');
+  });
 });

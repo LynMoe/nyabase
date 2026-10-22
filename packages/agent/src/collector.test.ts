@@ -154,7 +154,6 @@ describe('LinuxNodeMetricsCollector', () => {
 
     const source = [
       readFileSync(resolve(process.cwd(), 'src/collector.ts'), 'utf8'),
-      readFileSync(resolve(process.cwd(), 'src/server.ts'), 'utf8'),
     ].join('\n');
     expect(source).not.toMatch(/\b(?:writeFile|appendFile|unlink|rm|rename)\s*\(/);
     expect(source).not.toMatch(/\b(?:docker|WebSocket)\b/i);

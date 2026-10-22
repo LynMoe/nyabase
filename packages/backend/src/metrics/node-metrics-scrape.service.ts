@@ -17,7 +17,7 @@ import {
 import { sql, type Kysely, type RawBuilder } from 'kysely';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
-import { AuthenticatedNodeMetricsPullAdapter } from './node-metrics-pull.adapter.js';
+import { AgentNodeMetricsPullAdapter } from './node-metrics-pull.adapter.js';
 import { NyabaseConfigService } from '../platform/config/nyabase-config.service.js';
 import {
   type MetricPoint,
@@ -28,10 +28,7 @@ import {
 interface NodeMetricsServerRow {
   id: string;
   revision: string;
-  node_metrics_endpoint: string | null;
-  node_metrics_token_ciphertext: string | null;
-  node_metrics_token_fingerprint: string | null;
-  node_metrics_status: 'unconfigured' | 'online' | 'unreachable' | 'unknown';
+  node_metrics_status: 'online' | 'unreachable' | 'unknown';
   node_metrics_last_success_at: Date | string | null;
 }
 
@@ -61,7 +58,7 @@ export class NodeMetricsScrapeService implements OnModuleInit, OnModuleDestroy {
 
   constructor(
     @Inject(PG_DATABASE) private readonly database: Kysely<NyabaseDatabase>,
-    private readonly nodeMetrics: AuthenticatedNodeMetricsPullAdapter,
+    private readonly nodeMetrics: AgentNodeMetricsPullAdapter,
     private readonly metricsWriter: MetricsWriter,
     private readonly config: NyabaseConfigService,
   ) {}
@@ -98,14 +95,11 @@ export class NodeMetricsScrapeService implements OnModuleInit, OnModuleDestroy {
         .select([
           'id',
           'revision',
-          'node_metrics_endpoint',
-          'node_metrics_token_ciphertext',
-          'node_metrics_token_fingerprint',
           'node_metrics_status',
           'node_metrics_last_success_at',
         ])
-        .where('node_metrics_endpoint', 'is not', null)
-        .where('node_metrics_token_ciphertext', 'is not', null)
+        // Only enrolled servers have an agent that could answer.
+        .where('agent_credential_hash', 'is not', null)
         .execute();
     } catch (error) {
       this.logScrapeFailure('load node metrics configuration', error);
@@ -123,8 +117,6 @@ export class NodeMetricsScrapeService implements OnModuleInit, OnModuleDestroy {
     if (
       this.shuttingDown
       || this.inFlight.has(server.id)
-      || !server.node_metrics_endpoint
-      || !server.node_metrics_token_ciphertext
     ) return Promise.resolve();
     const controller = new AbortController();
     const promise = Promise.resolve().then(() => this.executeScrape(server, controller.signal));
@@ -142,13 +134,7 @@ export class NodeMetricsScrapeService implements OnModuleInit, OnModuleDestroy {
     signal: AbortSignal,
   ): Promise<void> {
     try {
-      if (!server.node_metrics_endpoint || !server.node_metrics_token_ciphertext) return;
-      const result = await this.nodeMetrics.pull(
-        server.id,
-        server.node_metrics_endpoint,
-        server.node_metrics_token_ciphertext,
-        signal,
-      );
+      const result = await this.nodeMetrics.pull(server.id, signal);
       if (this.shuttingDown || signal.aborted) return;
       if (result.status !== 'online' || !result.report?.samples) {
         throw new Error('NODE_METRICS_INVALID_RESPONSE');
@@ -366,19 +352,10 @@ export class NodeMetricsScrapeService implements OnModuleInit, OnModuleDestroy {
   private async isCurrentConfiguration(server: NodeMetricsServerRow): Promise<boolean> {
     const current = await this.database
       .selectFrom('infra.servers')
-      .select([
-        'revision',
-        'node_metrics_endpoint',
-        'node_metrics_token_ciphertext',
-        'node_metrics_token_fingerprint',
-      ])
+      .select(['revision'])
       .where('id', '=', server.id)
       .executeTakeFirst();
-    return current !== undefined
-      && String(current.revision) === String(server.revision)
-      && current.node_metrics_endpoint === server.node_metrics_endpoint
-      && current.node_metrics_token_ciphertext === server.node_metrics_token_ciphertext
-      && current.node_metrics_token_fingerprint === server.node_metrics_token_fingerprint;
+    return current !== undefined && String(current.revision) === String(server.revision);
   }
 
   private async updateNodeMetricsHealth(
@@ -390,9 +367,6 @@ export class NodeMetricsScrapeService implements OnModuleInit, OnModuleDestroy {
       .set(values)
       .where('id', '=', server.id)
       .where('revision', '=', server.revision)
-      .where('node_metrics_endpoint', '=', server.node_metrics_endpoint)
-      .where('node_metrics_token_ciphertext', '=', server.node_metrics_token_ciphertext)
-      .where('node_metrics_token_fingerprint', '=', server.node_metrics_token_fingerprint)
       .execute();
     if (!result || typeof result !== 'object' || !('numUpdatedRows' in result)) return true;
     return Number(result.numUpdatedRows) > 0;
@@ -445,10 +419,5 @@ export function gpuMemoryLimitPoints(
 }
 
 function configurationKey(server: NodeMetricsServerRow): string {
-  return [
-    server.id,
-    String(server.revision),
-    server.node_metrics_endpoint ?? '',
-    server.node_metrics_token_fingerprint ?? '',
-  ].join('\u0000');
+  return [server.id, String(server.revision)].join('\u0000');
 }

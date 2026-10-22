@@ -7,7 +7,6 @@ export interface RunServer {
   slug: string;
   /** SSH target of the lab host (`local` = this machine). Used by cleanup only. */
   ssh: string;
-  apiEndpoint: string;
   /** Registered pool that holds root disks and local volumes. */
   poolId: string;
   poolName: string;
@@ -31,7 +30,6 @@ export interface RunState {
   ipPoolId: string;
   image: { id: string; alias: string };
   sharedBackendId: string | null;
-  incusClientFingerprint: string;
   rootSizeBytes: number;
   /** Free LAN address the preflight probe instance takes. */
   probeAddress: string;

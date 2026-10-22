@@ -26,7 +26,6 @@ describe('container API contract', () => {
       imageId: 'image-a',
       name: 'demo',
       rootSizeBytes: 1_073_741_824,
-      cpuMillis: 500,
       memBytes: 536_870_912,
       gpuPciAddresses: [],
       powerIntent: ContainerPowerIntent.Stopped,

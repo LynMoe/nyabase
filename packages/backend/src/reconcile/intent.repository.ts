@@ -105,9 +105,6 @@ export class IntentRepository {
     if (source.status !== IntentStatus.Failed) {
       throw new Error('Only failed intents can be retried');
     }
-    if (source.kind === IntentKind.ServerConnect) {
-      throw new Error('Server connect retries require a fresh trust-token reference');
-    }
     const targetRevision = await this.currentRevision(source.resource_type, source.resource_id, executor)
       ?? source.target_revision;
     const request = objectValue(source.request_json) ?? {};

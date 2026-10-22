@@ -1,9 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { EphemeralStore, TRUST_TOKEN_TTL_MS } from './ephemeral-store.js';
-
-const SERVER_ID = '00000000-0000-4000-8000-000000000001';
-const CLAIM_A = '00000000-0000-4000-8000-0000000000a1';
-const CLAIM_B = '00000000-0000-4000-8000-0000000000b2';
+import { EphemeralStore } from './ephemeral-store.js';
 
 describe('EphemeralStore', () => {
   let store: EphemeralStore;
@@ -54,50 +50,6 @@ describe('EphemeralStore', () => {
     expect(store.delete('console-session:a')).toBe(true);
     expect(store.delete('console-session:a')).toBe(false);
     expect(store.get('console-session:a')).toBeNull();
-  });
-
-  it('stores trust tokens under opaque references with a ten-minute TTL', () => {
-    const reference = store.storeTrustToken(SERVER_ID, 'one-time-secret');
-    expect(reference).toMatch(/^[0-9a-f-]{36}$/);
-    expect(reference).not.toContain('one-time-secret');
-
-    vi.advanceTimersByTime(TRUST_TOKEN_TTL_MS - 1);
-    expect(store.claimTrustToken(SERVER_ID, reference, CLAIM_A)).toBe('one-time-secret');
-    store.releaseClaimedTrustToken(SERVER_ID, reference, CLAIM_A);
-    vi.advanceTimersByTime(1);
-    expect(store.claimTrustToken(SERVER_ID, reference, CLAIM_A)).toBeNull();
-  });
-
-  it('scopes trust-token references to their server', () => {
-    const reference = store.storeTrustToken(SERVER_ID, 'one-time-secret');
-    expect(store.claimTrustToken(
-      '00000000-0000-4000-8000-000000000009',
-      reference,
-      CLAIM_A,
-    )).toBeNull();
-  });
-
-  it('lets one claimant lease a trust token and consume it exactly once', () => {
-    const reference = store.storeTrustToken(SERVER_ID, 'one-time-secret');
-
-    expect(store.claimTrustToken(SERVER_ID, reference, CLAIM_A)).toBe('one-time-secret');
-    expect(store.claimTrustToken(SERVER_ID, reference, CLAIM_B)).toBeNull();
-    expect(store.consumeClaimedTrustToken(SERVER_ID, reference, CLAIM_B)).toBe(false);
-    expect(store.consumeClaimedTrustToken(SERVER_ID, reference, CLAIM_A)).toBe(true);
-    expect(store.consumeClaimedTrustToken(SERVER_ID, reference, CLAIM_A)).toBe(false);
-    expect(store.claimTrustToken(SERVER_ID, reference, CLAIM_B)).toBeNull();
-  });
-
-  it('returns a released claim to the next claimant and expires abandoned claims', () => {
-    const reference = store.storeTrustToken(SERVER_ID, 'one-time-secret');
-
-    expect(store.claimTrustToken(SERVER_ID, reference, CLAIM_A)).toBe('one-time-secret');
-    expect(store.releaseClaimedTrustToken(SERVER_ID, reference, CLAIM_B)).toBe(false);
-    expect(store.releaseClaimedTrustToken(SERVER_ID, reference, CLAIM_A)).toBe(true);
-    expect(store.claimTrustToken(SERVER_ID, reference, CLAIM_B)).toBe('one-time-secret');
-
-    vi.advanceTimersByTime(30_000);
-    expect(store.claimTrustToken(SERVER_ID, reference, CLAIM_A)).toBe('one-time-secret');
   });
 
   it('refuses new entries once the store is full of live values', () => {

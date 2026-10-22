@@ -1,6 +1,8 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { AuditAction, FailureCode } from '@nyabase/common';
 import { AuditService } from '../iam/audit.service.js';
+import { AccessChangeNotifier } from '../iam/access-resolver.service.js';
+import { ReconcileWakeService } from '../reconcile/reconcile-wake.service.js';
 import {
   compareManagedFields,
   deriveInstanceName,
@@ -9,7 +11,11 @@ import {
   observeRootQuotaPending,
   type DesiredInstanceSpec,
   type IncusClientPort,
+  type ManagedFieldsDiff,
 } from '../incus/index.js';
+import { CpuSetService } from '../cpu/cpu-sets.service.js';
+import { resolveContainerRuntime, sameCpus } from './container-runtime.js';
+import { NyabaseConfigService } from '../platform/config/nyabase-config.service.js';
 import type {
   IntentFailure,
   IntentRecord,
@@ -88,10 +94,16 @@ export class ContainerReconciler implements ManagedReconciler, OnModuleInit {
     private readonly proxySnapshots: ProxySnapshotNotifierService,
     private readonly audit: AuditService,
     private readonly registry: ReconcilerRegistry,
+    private readonly cpuSets: CpuSetService,
+    private readonly config: NyabaseConfigService,
+    private readonly accessChanges: AccessChangeNotifier,
+    private readonly wake: ReconcileWakeService,
   ) {}
 
   onModuleInit(): void {
     this.registry.register(this);
+    // A grant change can resize or move an owner's CPU set; re-pin without waiting for the next scan.
+    this.accessChanges.onChange(() => this.wake.wake({ reason: 'scan' }));
   }
 
   supports(intent: IntentRecord): boolean {
@@ -137,7 +149,8 @@ export class ContainerReconciler implements ManagedReconciler, OnModuleInit {
     const prepared = await this.prepareAttachments(context, client, row);
     if ('outcome' in prepared) return prepared.outcome;
     const desiredAttachments = prepared.attachments;
-    const desired = buildContainerSpec(row, toSpecAttachments(desiredAttachments));
+    const runtime = await resolveContainerRuntime(this.cpuSets, this.config, row);
+    const desired = buildContainerSpec(row, toSpecAttachments(desiredAttachments), runtime);
 
     const actual = await this.ensureInstance(context, client, row, desired, expectedName);
     const identityOutcome = this.checkIdentity(actual, row, expectedName);
@@ -167,6 +180,7 @@ export class ContainerReconciler implements ManagedReconciler, OnModuleInit {
           );
       }
       await this.auditMutate(context.intent, 'PUT', `/1.0/instances/${expectedName}`, expectedName);
+      if (context.intent.request?.source === 'full_scan') await this.auditDrift(context.intent, diff);
       await putManagedFields(client, expectedName, desired, desiredAttachments.length > 0);
     }
 
@@ -200,7 +214,11 @@ export class ContainerReconciler implements ManagedReconciler, OnModuleInit {
       running(sshState),
       context.signal,
     );
-    return this.verifyAndSettle(client, row, desired, expectedName, ssh);
+    const outcome = await this.verifyAndSettle(client, row, desired, expectedName, ssh);
+    if (outcome.outcome === 'succeeded' && !sameCpus(row.cpu_set, runtime.cpus)) {
+      await this.store.recordCpuSet(row.id, runtime.cpus);
+    }
+    return outcome;
   }
 
   // --- loading and preparation ---------------------------------------------------
@@ -664,6 +682,23 @@ export class ContainerReconciler implements ManagedReconciler, OnModuleInit {
     }
   }
 
+  /** A full scan found the instance changed outside the platform; record what is being reverted. */
+  private async auditDrift(intent: IntentRecord, diff: ManagedFieldsDiff): Promise<void> {
+    await this.audit.log(
+      intent.requestedBy,
+      AuditAction.ContainerDriftCorrected,
+      intent.resourceId,
+      intent.resourceType,
+      {
+        serverId: intent.serverId,
+        intentId: intent.id,
+        config: Object.keys(diff.config).slice(0, 64),
+        devices: Object.keys(diff.devices).slice(0, 64),
+        profiles: diff.profiles === true,
+      },
+    );
+  }
+
   private async auditMutate(
     intent: IntentRecord,
     method: string,
@@ -709,13 +744,19 @@ export class ContainerReconciler implements ManagedReconciler, OnModuleInit {
       if (usage !== null) {
         await this.store.recordRootUsage(desired.id, usage);
       }
-      if (await this.scanNeedsUpdate(desired, deriveInstanceName(desired.id), actual)) {
-        await this.store.enqueueScanIntent(desired, 'container.update');
+      try {
+        if (await this.scanNeedsUpdate(desired, deriveInstanceName(desired.id), actual)) {
+          await this.store.enqueueScanIntent(desired, 'container.update');
+        }
+      } catch (error) {
+        // One container that cannot be specified must not stop the scan of the others.
+        this.logger.warn(`Full scan could not check container ${desired.id}: ${String(error)}`);
       }
     }
     for (const document of orphanInstances(documents, serverId, known)) {
       await this.deleteInstance(client, document.name!);
     }
+    await this.cpuSets.releaseIdle(serverId);
   }
 
   /** Does the live instance differ from what the platform wants (name, power, managed fields)? */
@@ -740,6 +781,7 @@ export class ContainerReconciler implements ManagedReconciler, OnModuleInit {
     const desired = buildContainerSpec(
       full,
       toSpecAttachments(attachments.filter((attachment) => attachment.bind_state !== 'detaching')),
+      await resolveContainerRuntime(this.cpuSets, this.config, full, 'preview'),
     );
     return compareManagedFields(actual.document, desired, MANAGED_FIELD_OWNERSHIP).kind !== 'empty';
   }

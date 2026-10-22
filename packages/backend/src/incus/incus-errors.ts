@@ -14,9 +14,8 @@ export type IncusFailureCode =
   | 'OPERATION_FAILED'
   | 'SERVER_UNREACHABLE'
   | 'INCUS_TIMEOUT'
-  | 'TLS_ERROR'
-  | 'TLS_PIN_MISMATCH'
-  | 'INVALID_ENDPOINT'
+  | 'AGENT_POLICY_DENIED'
+  | 'AGENT_REQUEST_FAILED'
   | 'MISSING_MANAGED_NETWORK_ADDRESS'
   | 'INVALID_MANAGED_NETWORK_TYPE'
   | 'INVALID_MANAGED_FILTER_IDENTITY'
@@ -42,9 +41,6 @@ export type IncusFailureCode =
   | 'PREFLIGHT_IDENTITY_MISMATCH'
   | 'PREFLIGHT_CLEANUP_FAILED'
   | 'PREFLIGHT_FAILED'
-  | 'TRUST_TOKEN_MISSING'
-  | 'TRUST_TOKEN_UNAVAILABLE'
-  | 'TRUST_TOKEN_REJECTED'
   | 'MISSING_STORAGE_POOL'
   | 'RESOURCE_NEEDS_ATTENTION'
   | 'VOLUME_PLACEMENT_PENDING'
@@ -74,9 +70,8 @@ const FAILURE_MESSAGES: Record<IncusFailureCode, string> = {
   OPERATION_FAILED: 'The Incus operation failed',
   SERVER_UNREACHABLE: 'The Incus server is unreachable',
   INCUS_TIMEOUT: 'The Incus request timed out',
-  TLS_ERROR: 'The Incus TLS connection failed',
-  TLS_PIN_MISMATCH: 'The Incus server certificate did not match its pin',
-  INVALID_ENDPOINT: 'The Incus endpoint is invalid',
+  AGENT_POLICY_DENIED: 'The server agent refused the Incus request',
+  AGENT_REQUEST_FAILED: 'The server agent could not complete the request; it will be retried',
   MISSING_MANAGED_NETWORK_ADDRESS: 'The managed Incus network device is missing',
   INVALID_MANAGED_NETWORK_TYPE: 'The managed Incus network device is not bridged',
   INVALID_MANAGED_FILTER_IDENTITY: 'The managed Incus network filter identity is invalid',
@@ -102,9 +97,6 @@ const FAILURE_MESSAGES: Record<IncusFailureCode, string> = {
   PREFLIGHT_IDENTITY_MISMATCH: 'The Incus server identity did not match the registered server',
   PREFLIGHT_CLEANUP_FAILED: 'The preflight probe cleanup failed',
   PREFLIGHT_FAILED: 'The server preflight checks failed',
-  TRUST_TOKEN_MISSING: 'The server trust token is missing, expired, or was lost in a restart; submit the connect request again',
-  TRUST_TOKEN_UNAVAILABLE: 'The server trust token claim was lost before it was consumed',
-  TRUST_TOKEN_REJECTED: 'The Incus server rejected the trust token',
   MISSING_STORAGE_POOL: 'The managed storage pool is unavailable',
   RESOURCE_NEEDS_ATTENTION: 'The resource requires operator attention',
   VOLUME_PLACEMENT_PENDING: 'The custom volume is not yet present on this Incus',
@@ -298,23 +290,5 @@ export function mapIncusTransportError(
     return new IncusError('SERVER_UNREACHABLE', 'retry', { phase });
   }
 
-  if (
-    typeof errorCode === 'string' &&
-    (errorCode.startsWith('CERT_') ||
-      errorCode.startsWith('ERR_TLS_') ||
-      errorCode === 'DEPTH_ZERO_SELF_SIGNED_CERT' ||
-      errorCode === 'UNABLE_TO_VERIFY_LEAF_SIGNATURE')
-  ) {
-    return new IncusError('TLS_ERROR', 'retry', { phase });
-  }
-
   return new IncusError('SERVER_UNREACHABLE', 'retry', { phase });
-}
-
-export function normalizeCertificateFingerprint(value: string): string {
-  const normalized = value.replace(/[:-\s]/g, '').toLowerCase();
-  if (!/^[0-9a-f]{64}$/.test(normalized)) {
-    throw new IncusError('TLS_PIN_MISMATCH', 'managed_failure');
-  }
-  return normalized;
 }

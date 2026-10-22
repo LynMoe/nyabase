@@ -22,8 +22,9 @@ export interface ContainerRow {
   revision: number;
   image_fingerprint: string;
   root_size_bytes: string | number;
-  cpu_millis: number;
   mem_bytes: string | number;
+  /** CPU set last applied to the instance. */
+  cpu_set: number[] | null;
   gpu_enabled: boolean;
   gpu_state: unknown;
   nesting: boolean;
@@ -160,7 +161,7 @@ export class ContainerReconcileStore {
         'c.revision as revision',
         'c.image_fingerprint as image_fingerprint',
         'c.root_size_bytes as root_size_bytes',
-        'c.cpu_millis as cpu_millis',
+        'c.cpu_set as cpu_set',
         'c.mem_bytes as mem_bytes',
         'c.gpu_state as gpu_state',
         's.gpu_enabled as gpu_enabled',
@@ -486,6 +487,15 @@ export class ContainerReconcileStore {
       .set({ root_used_bytes: usage.toString() })
       .where('id', '=', containerId)
       .where('lifecycle_phase', '!=', 'deleting')
+      .execute();
+  }
+
+  /** Record the CPU set the instance is now pinned to. */
+  async recordCpuSet(containerId: string, cpus: readonly number[]): Promise<void> {
+    await this.database
+      .updateTable('control.containers')
+      .set({ cpu_set: [...cpus] })
+      .where('id', '=', containerId)
       .execute();
   }
 

@@ -4,4 +4,4 @@ export * from './incus-errors.js';
 export * from './incus-events.js';
 export * from './incus-operation.js';
 export * from './instance-spec.js';
-export { assertLeafCertificateFingerprint, encodeImageAliasName, leafCertificateFingerprint } from './incus-transport.js';
+export { encodeImageAliasName } from './incus-transport.js';

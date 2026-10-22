@@ -47,7 +47,11 @@ export default function ServerDetailPage() {
     queryFn: () => api.get<ServerDto>(`/servers/${id}?scope=all`),
     refetchInterval: (query) => refetchWhileInProgress(query.state, {
       steadyIntervalMs: false,
-      isSettled: (server) => !preflightPending(server.preflightStatus),
+      // Also poll while an issued enrollment token waits for the agent to dial in.
+      isSettled: (server) => !preflightPending(server.preflightStatus)
+        && (server.agent.connected
+          || server.agent.enrollmentExpiresAt === null
+          || Date.parse(server.agent.enrollmentExpiresAt) <= Date.now()),
     }),
   });
   const server = serverQuery.data;

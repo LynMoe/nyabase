@@ -101,10 +101,23 @@ describe('Incus transport and preflight configuration', () => {
       .toBe(false);
   });
 
-  it('keeps only the Incus server CA as deployment input; the client identity is generated', () => {
-    expect(definition('incus.caFile')?.defaultValue).toBe('/run/secrets/incus_ca');
-    expect(definition('incus.caPem')?.secret).toBe(true);
+  it('has no Incus TLS inputs: the Backend reaches Incus only through host agents', () => {
+    expect(definition('incus.caFile')).toBeUndefined();
+    expect(definition('incus.caPem')).toBeUndefined();
     expect(definition('incus.clientCertificateFile')).toBeUndefined();
     expect(definition('incus.clientPrivateKeyPem')).toBeUndefined();
+  });
+
+  it('keeps the uniform container limits online-editable', () => {
+    for (const key of [
+      'containers.processLimit',
+      'containers.networkIngressMbit',
+      'containers.networkEgressMbit',
+      'containers.diskReadMBps',
+      'containers.diskWriteMBps',
+    ]) {
+      expect(definition(key)?.editable).toBe(true);
+      expect(definition(key)?.restartRequired).toBe(false);
+    }
   });
 });

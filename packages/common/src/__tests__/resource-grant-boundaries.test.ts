@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   FailureCode,
   MAX_RESOURCE_BYTES,
-  MAX_RESOURCE_CPU_MILLIS,
+  MAX_SERVER_LOGICAL_CPU_ID,
   zCreateContainerRequest,
   zCreateSharedBackendRequest,
   zPatchSharedBackendRequest,
@@ -18,15 +18,37 @@ const backendId = '44444444-4444-4444-8444-444444444444';
 describe('grant resource bounds', () => {
   it('accepts GPU grants at the safe numeric limits', () => {
     expect(zPutServerGrantRequest.parse({
-      cpuMillis: MAX_RESOURCE_CPU_MILLIS,
+      cpuCores: MAX_SERVER_LOGICAL_CPU_ID + 1,
       memBytes: MAX_RESOURCE_BYTES,
       diskBytes: MAX_RESOURCE_BYTES,
       gpuPciAddresses: [],
       expiresAt: null,
     })).toMatchObject({
-      cpuMillis: MAX_RESOURCE_CPU_MILLIS,
+      cpuCores: MAX_SERVER_LOGICAL_CPU_ID + 1,
       gpuPciAddresses: [],
     });
+  });
+
+  it('grants CPU only in whole cores', () => {
+    const base = { memBytes: null, diskBytes: null, gpuPciAddresses: [], expiresAt: null };
+    expect(zPutServerGrantRequest.safeParse({ ...base, cpuCores: null }).success).toBe(true);
+    expect(zPutServerGrantRequest.safeParse({ ...base, cpuCores: 4 }).success).toBe(true);
+    expect(zPutServerGrantRequest.safeParse({ ...base, cpuCores: 0 }).success).toBe(false);
+    expect(zPutServerGrantRequest.safeParse({ ...base, cpuCores: 1.5 }).success).toBe(false);
+    expect(zPutServerGrantRequest.safeParse({ ...base, cpuMillis: 1_000 }).success).toBe(false);
+  });
+
+  it('never lets a container request a CPU size or zero memory', () => {
+    const base = {
+      serverId,
+      imageId: poolId,
+      name: 'work',
+      rootSizeBytes: 1_024,
+      powerIntent: 'running',
+    };
+    expect(zCreateContainerRequest.safeParse({ ...base, memBytes: 1_024 }).success).toBe(true);
+    expect(zCreateContainerRequest.safeParse({ ...base, memBytes: 0 }).success).toBe(false);
+    expect(zCreateContainerRequest.safeParse({ ...base, memBytes: 1_024, cpuMillis: 0 }).success).toBe(false);
   });
 
   it('uses independent pool and shared-backend grant bodies', () => {
@@ -50,7 +72,6 @@ describe('canonical resource mutation boundaries', () => {
       imageId: poolId,
       name: 'work',
       rootSizeBytes: 1_024,
-      cpuMillis: 1_000,
       memBytes: 1_024,
             powerIntent: 'running',
       volumeSource: backendId,

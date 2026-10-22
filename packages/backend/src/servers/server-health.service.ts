@@ -5,6 +5,7 @@ import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.
 import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
 import type { IncusClientPort } from '../incus/index.js';
 import { GpuService } from '../gpu/gpu.service.js';
+import { parseCpuTopology } from '../cpu/cpu-allocation.js';
 import type { IntentRecord } from '../reconcile/intent.repository.js';
 import type { ServerHealthPort } from '../reconcile/managed-reconciler.js';
 import { ReconcilerRegistry } from '../reconcile/reconciler-registry.service.js';
@@ -28,7 +29,7 @@ export class ServerHealthService implements ServerHealthPort, OnModuleInit {
     if (
       intent.resourceType !== 'server'
       || !intent.serverId
-      || (intent.kind !== 'server.connect' && intent.kind !== 'server.preflight')
+      || intent.kind !== 'server.preflight'
     ) {
       return true;
     }
@@ -88,6 +89,14 @@ export class ServerHealthService implements ServerHealthPort, OnModuleInit {
     signal: AbortSignal,
   ): Promise<void> {
     const resources = await client.getResources({ signal });
+    const topology = parseCpuTopology(resources.metadata);
+    if (topology.length > 0) {
+      await this.database
+        .updateTable('infra.servers')
+        .set({ cpu_topology: JSON.stringify(topology) })
+        .where('id', '=', serverId)
+        .execute();
+    }
     await this.gpu.refreshHealth(serverId, resources.metadata, []);
     await this.storagePools.refreshObservedUsage(serverId, client, signal);
   }

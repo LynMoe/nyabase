@@ -2,6 +2,8 @@ import { createHash } from 'node:crypto';
 import {
   IncusError,
   deriveInstanceHwaddr,
+  deriveNicHostName,
+  GUEST_IPV6_SYSCTL_CONFIG,
   isOperationWaitNotFound,
   readAfterTimeout,
   requestAndWait,
@@ -205,6 +207,8 @@ function createProbe(run: ProbeRun) {
             // Debian+wget TLS can SIGKILL (rc 137) under tight/default pressure.
             'limits.memory': PREFLIGHT_PROBE_MEMORY,
             'security.privileged': 'false',
+            'security.idmap.isolated': 'true',
+            ...GUEST_IPV6_SYSCTL_CONFIG,
           },
           devices: {
             root: {
@@ -219,6 +223,7 @@ function createProbe(run: ProbeRun) {
               name: 'eth0',
               parent: run.parentInterface,
               hwaddr: deriveInstanceHwaddr(probeHardwareId(run.server.id)),
+              host_name: deriveNicHostName(probeHardwareId(run.server.id)),
               'ipv4.address': options.probeAddress,
               'security.ipv4_filtering': 'true',
               'security.mac_filtering': 'true',
@@ -294,6 +299,12 @@ async function verifyProbe(run: ProbeRun, probe: InstanceFull): Promise<void> {
   checks.guestAddress =
     probe.config?.[PROBE_SERVER_KEY] === normalized(server.id) ? 'pass' : 'fail';
   const secondSamples = metricSamplesFrom((await run.secondMetricsPull()).report);
+  if (unlabeledGauge(secondSamples, 'nyabase_node_ipv6_guard_present') !== 1) {
+    throw new IncusError('PREFLIGHT_FAILED', 'managed_failure', {
+      reason: 'preflight_ipv6_guard_missing',
+      serverId: server.id,
+    });
+  }
   if (unlabeledGauge(secondSamples, 'nyabase_node_network_nft_available') !== 1) {
     throw new IncusError('PREFLIGHT_FAILED', 'managed_failure', {
       reason: 'preflight_nft_unavailable',

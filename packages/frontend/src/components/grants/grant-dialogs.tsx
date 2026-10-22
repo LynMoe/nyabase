@@ -1,6 +1,6 @@
 import { type ReactNode, useState } from 'react';
 import type { ServerGrantDto, SharedBackendGrantDto, StoragePoolGrantDto } from '@nyabase/common';
-import { formatGibInput, formatVcpuInput } from '../../lib/utils.js';
+import { formatGibInput } from '../../lib/utils.js';
 import { api } from '../../lib/api.js';
 import { useActionMutation } from '../../hooks/use-action-mutation.js';
 import { FormField, SelectField } from '../layout/form-field.js';
@@ -13,7 +13,6 @@ import { ServerGrantGpu } from '../gpu/gpu-sections.js';
 import { grantSubjectPath } from '../../lib/scoped-paths.js';
 import {
   backendName,
-  coresToMillis,
   defaultExpiryLocal,
   expirySummary,
   gibHint,
@@ -22,6 +21,7 @@ import {
   type GrantSubject,
   initialExpiry,
   isoOrNull,
+  parseCoreCount,
   poolName,
   serverName,
   useGrantBackends,
@@ -162,18 +162,20 @@ export function ServerGrantDialog({
   const invalidate = useInvalidateGrants(subject);
   const allServers = serversQuery.data ?? [];
   const servers = grant ? allServers : allServers.filter((server) => !grantedIds.has(server.id));
-  const [cpuCores, setCpuCores] = useState(() => grant?.cpuMillis == null ? '' : formatVcpuInput(grant.cpuMillis));
+  const [cpuCores, setCpuCores] = useState(() => grant?.cpuCores == null ? '' : String(grant.cpuCores));
   const [memGib, setMemGib] = useState(() => grant?.memBytes == null ? '' : formatGibInput(grant.memBytes));
   const [diskGib, setDiskGib] = useState(() => grant?.diskBytes == null ? '' : formatGibInput(grant.diskBytes));
   const [gpuPciAddresses, setGpuPciAddresses] = useState<string[]>(() => [...(grant?.gpuPciAddresses ?? [])]);
   const [expiresAt, setExpiresAt] = useState(() => initialExpiry(grant?.expiresAt));
   const idPrefix = grant ? `grant-${grant.serverId}` : 'grant';
+  const parsedCores = parseCoreCount(cpuCores);
 
   return (
     <GrantDialog
       noun="服务器授权"
       idPrefix={idPrefix}
       wide
+      canSave={parsedCores !== undefined}
       target={grant
         ? { mode: 'edit', id: grant.serverId, name: serverName(grant.serverId, allServers) }
         : {
@@ -188,7 +190,7 @@ export function ServerGrantDialog({
         }}
       onTargetChange={() => setGpuPciAddresses([])}
       save={(serverId) => api.put<ServerGrantDto>(`${grantSubjectPath(subject.kind, subject.id)}/server-grants/${serverId}`, {
-        cpuMillis: coresToMillis(cpuCores),
+        cpuCores: parsedCores ?? null,
         memBytes: gibToBytes(memGib),
         diskBytes: gibToBytes(diskGib),
         gpuPciAddresses,
@@ -200,7 +202,15 @@ export function ServerGrantDialog({
       {(serverId) => (
         <>
           <div className="grid gap-3 sm:grid-cols-3">
-            <NumberField id={`${idPrefix}-cpu`} label="CPU（核，留空为不限）" value={cpuCores} onChange={setCpuCores} />
+            <NumberField
+              id={`${idPrefix}-cpu`}
+              label="CPU（整核，留空为不限）"
+              value={cpuCores}
+              onChange={setCpuCores}
+              step="1"
+              hint="按整核绑定，该用户的容器共享；不限 = 全部未保留 CPU"
+              error={parsedCores === undefined ? '请输入不小于 1 的整数' : undefined}
+            />
             <NumberField id={`${idPrefix}-memory`} label="内存（GiB，留空为不限）" value={memGib} onChange={setMemGib} hint={gibHint(memGib)} />
             <NumberField id={`${idPrefix}-disk`} label="磁盘（GiB，留空为不限，不含共享卷）" value={diskGib} onChange={setDiskGib} hint={gibHint(diskGib)} />
           </div>
@@ -366,16 +376,28 @@ function NumberField({
   value,
   onChange,
   hint,
+  error,
+  step = 'any',
 }: {
   id: string;
   label: string;
   value: string;
   onChange: (value: string) => void;
   hint?: string;
+  error?: string;
+  step?: string;
 }) {
   return (
-    <FormField id={id} label={label} hint={hint}>
-      <Input id={id} type="number" min="0" step="any" value={value} onChange={(event) => onChange(event.target.value)} />
+    <FormField id={id} label={label} hint={hint} error={error}>
+      <Input
+        id={id}
+        type="number"
+        min="0"
+        step={step}
+        value={value}
+        aria-invalid={error ? true : undefined}
+        onChange={(event) => onChange(event.target.value)}
+      />
     </FormField>
   );
 }

@@ -1,8 +1,11 @@
-// Second half of `e2e.sh up`: runs against the freshly started control plane.
-// Everything comes from the environment that `e2e.sh` exported from lab.env
-// and the run's generated values; the result is written to <run dir>/state.json.
+// Runs against the freshly started control plane in two phases of `e2e.sh up`:
+//   servers  registers every lab server and writes its one-time agent
+//            enrollment token to <run dir>/enroll.env (e2e.sh then starts the agents);
+//   finish   waits for the agents, registers pools, the IP pool, the shared backend
+//            and the image, runs preflight and writes <run dir>/state.json.
+// Everything comes from the environment that `e2e.sh` exported from lab.env.
 import { execFile } from 'node:child_process';
-import { writeFileSync } from 'node:fs';
+import { appendFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import {
@@ -11,8 +14,8 @@ import {
   type AdminImageDto,
   type CreateIpPoolRequest,
   type CreateServerRequest,
+  type CreatedServerDto,
   type ImageAssignmentDto,
-  type IncusClientIdentityDto,
   type IntentAcceptedDto,
   type IpPoolDto,
   type ServerDto,
@@ -21,7 +24,7 @@ import {
   type StoragePoolDiscoverResult,
   type StoragePoolDto,
 } from '@nyabase/common';
-import { login } from '../client/api.js';
+import { login, type Api } from '../client/api.js';
 import { pollUntil, waitIntent } from '../client/poll.js';
 import type { RunServer, RunState } from '../client/state.js';
 
@@ -45,55 +48,60 @@ async function incus(target: string, args: string[]): Promise<string> {
   return stdout;
 }
 
+const serverIndexes = (): number[] => need('E2E_SERVERS').split(/\s+/).map(Number);
+const slugOf = (runId: string, index: number): string => `e2e-${runId}-s${index}`;
+
+/** Phase `servers`: register each server; its agent enrolls with the token written here. */
+async function registerServers(api: Api, runId: string, runDir: string): Promise<void> {
+  const file = join(runDir, 'enroll.env');
+  writeFileSync(file, '', { mode: 0o600 });
+  for (const index of serverIndexes()) {
+    const prefix = `E2E_SERVER_${index}_`;
+    const ssh = need(`${prefix}SSH`);
+    const serverName = (JSON.parse(await incus(ssh, ['query', '/1.0'])) as {
+      environment?: { server_name?: string };
+    }).environment?.server_name ?? slugOf(runId, index);
+    const create: CreateServerRequest = {
+      name: serverName,
+      slug: slugOf(runId, index),
+      parentInterface: need(`${prefix}PARENT`),
+      dnsServers: list(opt(`${prefix}DNS`)),
+      reservedCpus: list(opt(`${prefix}RESERVED_CPUS`)).map(Number),
+    };
+    const server = await api.post<CreatedServerDto>('/servers', create);
+    console.log(`server ${create.slug} registered as ${server.id}`);
+    appendFileSync(file, `export ${prefix}ENROLLMENT_TOKEN='${server.enrollment.enrollmentToken}'\n`);
+  }
+}
+
 async function main(): Promise<void> {
+  const phase = process.argv[2];
   const runId = need('E2E_RUN_ID');
   const runDir = need('E2E_RUN_DIR');
   const baseUrl = need('E2E_BASE_URL');
   const admin = { username: 'admin', password: need('E2E_ADMIN_PASSWORD') };
   const { api } = await login(baseUrl, admin.username, admin.password);
+  if (phase === 'servers') {
+    await registerServers(api, runId, runDir);
+    return;
+  }
+  if (phase !== 'finish') throw new Error('usage: bootstrap.ts servers|finish');
 
-  const identity = await api.get<IncusClientIdentityDto>('/admin/system-settings/incus-client-identity');
-  console.log(`incus client fingerprint ${identity.fingerprint}`);
-
-  // 1. Servers: register, connect with a one-time trust token, register pools.
+  // 1. Servers: wait for each agent to connect, then register its pools.
+  const listed = await api.get<ServerDto[]>('/servers', { scope: 'all' });
   const servers: RunServer[] = [];
-  for (const index of need('E2E_SERVERS').split(/\s+/).map(Number)) {
+  for (const index of serverIndexes()) {
     const prefix = `E2E_SERVER_${index}_`;
     const ssh = need(`${prefix}SSH`);
-    const slug = `e2e-${runId}-s${index}`;
-    // The backend checks the registered name against the Incus server_name.
-    const serverName = (JSON.parse(await incus(ssh, ['query', '/1.0'])) as {
-      environment?: { server_name?: string };
-    }).environment?.server_name;
-    if (!serverName) throw new Error(`incus on ${ssh} reported no server_name`);
-    const create: CreateServerRequest = {
-      name: serverName,
-      slug,
-      apiEndpoint: need(`${prefix}API`),
-      parentInterface: need(`${prefix}PARENT`),
-      dnsServers: list(opt(`${prefix}DNS`)),
-      nodeMetrics: {
-        endpoint: need(`${prefix}NODE_ENDPOINT`),
-        serverCertFingerprint: need(`${prefix}NODE_FINGERPRINT`),
-        token: need(`${prefix}NODE_TOKEN`),
-      },
-    };
-    let server = await api.post<ServerDto>('/servers', create);
-    console.log(`server ${slug} registered as ${server.id}`);
-
-    const output = await incus(ssh, ['config', 'trust', 'add', `nyabase-e2e-${runId}-s${index}`]);
-    const trustToken = output.split('\n').map((line) => line.trim()).filter(Boolean).pop();
-    if (!trustToken) throw new Error(`incus gave no trust token on ${ssh}`);
-    const connect = await api.post<IntentAcceptedDto>(`/servers/${server.id}/connect`, {
-      trustToken,
-      expectedServerCertFingerprint: need(`${prefix}CERT_FINGERPRINT`),
-    });
-    await waitIntent(api, connect);
-    server = await pollUntil(async () => {
-      const current = await api.get<ServerDto>(`/servers/${server.id}`, { scope: 'all' });
-      return current.status === ServerStatus.Online ? current : undefined;
-    }, { what: `${slug} to be online`, timeoutMs: 60_000 });
-
+    const slug = slugOf(runId, index);
+    const registered = listed.find((entry) => entry.slug === slug);
+    if (!registered) throw new Error(`server ${slug} was not registered`);
+    let server = await pollUntil(async () => {
+      const current = await api.get<ServerDto>(`/servers/${registered.id}`, { scope: 'all' });
+      return current.status === ServerStatus.Online && current.agent.connected && current.cpuTopology
+        ? current
+        : undefined;
+    }, { what: `${slug} agent to connect`, timeoutMs: 90_000 });
     const discovered = await api.post<StoragePoolDiscoverResult>(`/servers/${server.id}/storage-pools/discover`);
     const wanted = need(`${prefix}POOL`);
     const found = discovered.pools.find((pool) => pool.incusName === wanted);
@@ -114,7 +122,6 @@ async function main(): Promise<void> {
       id: server.id,
       slug,
       ssh,
-      apiEndpoint: server.apiEndpoint,
       poolId: pool.id,
       poolName: pool.incusName,
       sharedPoolId: null,
@@ -200,7 +207,6 @@ async function main(): Promise<void> {
     ipPoolId: createdPool.id,
     image: { id: image.id, alias: image.alias },
     sharedBackendId,
-    incusClientFingerprint: identity.fingerprint,
     rootSizeBytes: Number(opt('E2E_ROOT_SIZE_GIB') || '8') * 1024 ** 3,
     probeAddress: need('E2E_PROBE_ADDRESS'),
   };

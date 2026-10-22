@@ -9,7 +9,10 @@ import { StoragePoolsModule } from '../storage-pools/storage-pools.module.js';
 import { UsersModule } from '../users/users.module.js';
 import { VolumesModule } from '../volumes/volumes.module.js';
 import { IncusPreflightChecksAdapter } from './preflight-checks.adapter.js';
-import { ServerConnectIntentService, ServerPreflightIntentService } from './server-intents.service.js';
+import { ServerPreflightIntentService } from './server-intents.service.js';
+import { AgentEnrollController } from './agent-enroll.controller.js';
+import { AgentEnrollmentService } from './agent-enrollment.service.js';
+import { AgentPresenceService } from './agent-presence.service.js';
 import { ServerConnector } from './server-connector.js';
 import { ServerPreflightStore } from './server-preflight.store.js';
 import { ServerHealthService } from './server-health.service.js';
@@ -36,10 +39,11 @@ import { ServersService } from './servers.service.js';
     ServerConnector,
     ServerHealthService,
     IncusPreflightChecksAdapter,
-    ServerConnectIntentService,
     ServerPreflightIntentService,
+    AgentEnrollmentService,
+    AgentPresenceService,
   ],
-  controllers: [ServersController],
+  controllers: [ServersController, AgentEnrollController],
   exports: [ServersService],
 })
 export class ServersModule {}

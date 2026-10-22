@@ -1,5 +1,5 @@
 import type { IncomingHttpHeaders } from 'node:http';
-import { IncusError, normalizeCertificateFingerprint } from './incus-errors.js';
+import { IncusError } from './incus-errors.js';
 import type {
   IncusClientOptions,
   IncusClientPort,
@@ -13,7 +13,6 @@ import type {
   IncusRequestOptions,
   IncusResponse,
   IncusSchema,
-  IncusTrustCertificateOptions,
   IncusWebSocketLike,
 } from './incus-client-types.js';
 import { headerValue, parseNumberHeader } from './incus-http-exchange.js';
@@ -22,7 +21,6 @@ import {
   IncusTransport,
   appendQuery,
   boundedTimeout,
-  encodeCertificateForPost,
   encodeImageAliasName,
   encodeSegment,
 } from './incus-transport.js';
@@ -30,21 +28,13 @@ import { isRecord } from '../platform/domain-utils.js';
 
 /**
  * The Incus REST client: every endpoint is declared here and issued through an
- * IncusTransport (endpoint allow-listing, mTLS pinning, request execution).
+ * IncusTransport, which carries it to the server's host agent.
  */
 export class IncusClient implements IncusClientPort {
   private readonly transport: IncusTransport;
 
   constructor(options: IncusClientOptions) {
     this.transport = new IncusTransport(options);
-  }
-
-  get endpoint(): string {
-    return this.transport.endpoint;
-  }
-
-  get pinnedFingerprint(): string | undefined {
-    return this.transport.pinnedFingerprint;
   }
 
   requestJson<T>(
@@ -69,81 +59,6 @@ export class IncusClient implements IncusClientPort {
 
   getServer(options?: IncusRequestOptions): Promise<IncusResponse<IncusSchema<'Server'>>> {
     return this.transport.requestJson('GET', '/1.0', options);
-  }
-
-  trustClientCertificate(
-    trustToken: string,
-    name: string,
-    options: IncusTrustCertificateOptions = {},
-  ): Promise<IncusResponse<unknown>> {
-    const certificatePem =
-      options.certificatePem ??
-      (typeof this.transport.tlsOptions.cert === 'string'
-        ? this.transport.tlsOptions.cert
-        : this.transport.tlsOptions.cert.toString('utf8'));
-    return this.transport.requestJson('POST', '/1.0/certificates', {
-      ...options,
-      body: {
-        certificate: encodeCertificateForPost(certificatePem),
-        name,
-        type: 'client',
-        ...(trustToken ? { trust_token: trustToken } : {}),
-      },
-    });
-  }
-
-  trustCertificate(
-    certificatePem: string,
-    name: string,
-    options: IncusRequestOptions = {},
-  ): Promise<IncusResponse<unknown>> {
-    return this.trustClientCertificate('', name, {
-      ...options,
-      certificatePem,
-    });
-  }
-
-  async deleteClientCertificate(
-    fingerprint: string,
-    options: IncusRequestOptions = {},
-  ): Promise<IncusResponse<unknown>> {
-    const normalized = normalizeCertificateFingerprint(fingerprint);
-    try {
-      return await this.transport.requestJson(
-        'DELETE',
-        `/1.0/certificates/${encodeSegment(normalized, 'certificate_fingerprint')}`,
-        options,
-      );
-    } catch (error) {
-      if (error instanceof IncusError && error.code === 'INCUS_NOT_FOUND') {
-        return {
-          status: 404,
-          headers: {},
-          envelope: {
-            type: 'sync',
-            status: 'Success',
-            status_code: 200,
-            metadata: {},
-          },
-          metadata: {},
-        };
-      }
-      throw error;
-    }
-  }
-
-  updateServer(
-    document: IncusSchema<'ServerPut'>,
-    options?: IncusRequestOptions,
-  ): Promise<IncusResponse<unknown>> {
-    return this.transport.requestJson('PUT', '/1.0', { ...options, body: document });
-  }
-
-  patchServer(
-    document: Partial<IncusSchema<'ServerPut'>>,
-    options?: IncusRequestOptions,
-  ): Promise<IncusResponse<unknown>> {
-    return this.transport.requestJson('PATCH', '/1.0', { ...options, body: document });
   }
 
   getResources(options?: IncusRequestOptions): Promise<IncusResponse<IncusSchema<'Resources'>>> {

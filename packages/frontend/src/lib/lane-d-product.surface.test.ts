@@ -85,9 +85,14 @@ describe('lane D product UI copy', () => {
     expect(volumes).not.toMatch(/volumeAttachments\(/);
     expect(page).toMatch(/volume-server-table/);
     expect(page).not.toMatch(/\/admin\//);
-    const identity = read('components/servers/connect-card.tsx');
-    expect(identity).toMatch(/\/admin\/system-settings\/incus-client-identity/);
-    expect(identity).not.toMatch(/rotate|轮换/);
+    // Servers are reached through the host agent: no Incus trust token, no client certificate.
+    const servers = readDir('components/servers');
+    expect(servers).not.toMatch(/incus-client-identity|trustToken|\/connect`/);
+    const agent = read('components/servers/agent-card.tsx');
+    expect(agent).toMatch(/\/agent-enrollment/);
+    expect(agent).toMatch(/expectedRevision: server\.revision/);
+    expect(read('components/servers/agent-enrollment.tsx')).toMatch(/NYABASE_AGENT_ENROLLMENT_TOKEN/);
+    expect(read('pages/servers-page/server-onboarding-dialog.tsx')).toMatch(/EnrollmentInstructions/);
     expect(read('components/layout/app-layout.tsx')).not.toMatch(/Cert/);
   });
 

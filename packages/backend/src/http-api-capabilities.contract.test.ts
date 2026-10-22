@@ -44,7 +44,7 @@ const ADMIN_ONLY_OPERATIONS: Record<string, { all: Capability[]; any: Capability
   'POST /images': { all: [Capability.ManageImages], any: [] },
   'POST /images/:id/repull': { all: [Capability.ManageImages], any: [] },
   'POST /servers': { all: [Capability.ManageServers], any: [] },
-  'POST /servers/:id/connect': { all: [Capability.ManageServers], any: [] },
+  'POST /servers/:id/agent-enrollment': { all: [Capability.ManageServers], any: [] },
   'POST /servers/:id/preflight': { all: [Capability.ManageServers], any: [] },
   'POST /servers/:serverId/storage-pools/discover': { all: [Capability.ManageServers], any: [] },
   'POST /shared-backends': { all: [Capability.ManageSharedBackends], any: [] },

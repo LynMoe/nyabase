@@ -25,7 +25,7 @@ const FRONTEND_FOLDER_FILE_LIMIT = 4;
 const tracked = execFileSync('git', ['ls-files', 'packages/*.ts', 'packages/*.tsx'], { cwd: root, encoding: 'utf8' })
   .split('\n')
   .filter(Boolean)
-  .filter((f) => /^packages\/(backend|frontend|common|node-exporter)\/src\//.test(f))
+  .filter((f) => /^packages\/(backend|frontend|common|agent)\/src\//.test(f))
   .filter((f) => !GENERATED.some((g) => f.endsWith(g)))
   .filter((f) => !/\.(test|spec|test-helper|pg-test-helper)\.tsx?$/.test(f) && !f.endsWith('.d.ts'));
 

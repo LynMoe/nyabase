@@ -25,8 +25,8 @@ export interface ContainerControlTable {
   root_size_bytes: ContainerBigInt;
   root_size_pending_bytes: ContainerBigInt | null;
   root_used_bytes: ColumnType<string | null, string | number | bigint | null | undefined, string | number | bigint | null>;
-  cpu_millis: number;
   mem_bytes: ContainerBigInt;
+  cpu_set: ColumnType<number[] | null, number[] | null | undefined, number[] | null>;
   gpu_state: ColumnType<
     GpuContainerState | null,
     GpuContainerState | string | null | undefined,
@@ -50,6 +50,13 @@ export interface ContainerGpuClaimTable {
   server_id: string;
   pci_address: string;
   created_at: ContainerGeneratedTimestamp;
+}
+
+export interface UserCpuSetTable {
+  server_id: string;
+  user_id: string;
+  cpus: number[];
+  updated_at: ColumnType<Date, Date | string | undefined, Date | string>;
 }
 
 export interface ContainerNetworkClaimTable {
@@ -113,6 +120,7 @@ export interface ReconcileClaimTable {
 export interface ContainerControlDatabase {
   'control.containers': ContainerControlTable;
   'control.container_gpu_claims': ContainerGpuClaimTable;
+  'control.user_cpu_sets': UserCpuSetTable;
   'control.container_network_claims': ContainerNetworkClaimTable;
   'control.container_ssh_routes': ContainerSshRouteTable;
   'control.intents': IntentTable;

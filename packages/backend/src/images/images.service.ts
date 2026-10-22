@@ -412,14 +412,14 @@ export class ImagesService {
     const servers = assignments.length === 0
       ? []
       : await this.database.selectFrom('infra.servers')
-        .select(['id', 'name', 'api_endpoint', 'status'])
+        .select(['id', 'name', 'agent_hostname', 'status'])
         .where('id', 'in', assignments.map((assignment) => assignment.server_id))
         .execute();
     const serverById = new Map(servers.map((server) => [server.id, server]));
     return assignments.map((assignment) => ({
       serverId: assignment.server_id,
       serverName: serverById.get(assignment.server_id)?.name ?? assignment.server_id,
-      hostname: serverById.get(assignment.server_id)?.api_endpoint ?? assignment.server_id,
+      hostname: serverById.get(assignment.server_id)?.agent_hostname ?? assignment.server_id,
       online: serverById.get(assignment.server_id)?.status === 'online',
       present: assignment.lifecycle_phase === 'active'
         && assignment.managed_fingerprint === image.fingerprint,

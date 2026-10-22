@@ -17,7 +17,7 @@ export type AccessExecutor = Kysely<NyabaseDatabase> | Transaction<NyabaseDataba
 
 export interface ServerAccess {
   /** null = unlimited */
-  cpuMillis: number | null;
+  cpuCores: number | null;
   /** null = unlimited */
   memBytes: number | null;
   /** null = unlimited */
@@ -49,14 +49,14 @@ function bytes(value: string | number | null): number | null {
 const notExpired = sql<boolean>`(expires_at IS NULL OR expires_at > now())`;
 
 function serverAccess(row: {
-  cpu_millis: number | null;
+  cpu_cores: number | null;
   mem_bytes: string | null;
   disk_bytes: string | null;
   gpu_pci_addresses: string[];
   expires_at: Date | null;
 }): ServerAccess {
   return {
-    cpuMillis: row.cpu_millis,
+    cpuCores: row.cpu_cores,
     memBytes: bytes(row.mem_bytes),
     diskBytes: bytes(row.disk_bytes),
     gpuPciAddresses: [...row.gpu_pci_addresses],
@@ -70,7 +70,7 @@ export async function resolveServerAccess(
   serverId: string,
 ): Promise<ServerAccess | null> {
   const row = await executor.selectFrom('iam.effective_server_access')
-    .select(['cpu_millis', 'mem_bytes', 'disk_bytes', 'gpu_pci_addresses', 'expires_at'])
+    .select(['cpu_cores', 'mem_bytes', 'disk_bytes', 'gpu_pci_addresses', 'expires_at'])
     .where('user_id', '=', userId)
     .where('server_id', '=', serverId)
     .where(notExpired)
@@ -113,7 +113,7 @@ export async function listServerAccess(
 ): Promise<Array<ServerAccess & { serverId: string }>> {
   const rows = await executor.selectFrom('iam.effective_server_access')
     .select([
-      'server_id', 'cpu_millis', 'mem_bytes', 'disk_bytes', 'gpu_pci_addresses', 'expires_at',
+      'server_id', 'cpu_cores', 'mem_bytes', 'disk_bytes', 'gpu_pci_addresses', 'expires_at',
     ])
     .where('user_id', '=', userId)
     .where(notExpired)

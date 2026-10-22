@@ -163,8 +163,6 @@ CREATE TABLE infra.servers (
     id uuid NOT NULL,
     name text NOT NULL,
     slug text NOT NULL,
-    api_endpoint text NOT NULL,
-    server_cert_fingerprint text,
     incus_version text,
     api_extensions text[] DEFAULT ARRAY[]::text[] NOT NULL,
     system_pool_id uuid,
@@ -177,11 +175,19 @@ CREATE TABLE infra.servers (
     last_seen_at timestamp with time zone,
     last_error text,
     revision bigint DEFAULT 1 NOT NULL,
-    node_metrics_endpoint text,
-    node_metrics_server_cert_fingerprint text,
-    node_metrics_token_ciphertext text,
-    node_metrics_token_fingerprint text,
-    node_metrics_status text DEFAULT 'unconfigured'::text NOT NULL,
+    -- The host agent dials the Backend; the Backend never dials the host.
+    -- Both secrets are stored as sha256 hex digests only.
+    agent_credential_hash text,
+    agent_enrollment_token_hash text,
+    agent_enrollment_expires_at timestamp with time zone,
+    agent_version text,
+    agent_hostname text,
+    agent_connected_at timestamp with time zone,
+    -- Logical CPUs no container is pinned to (host / Incus / storage daemons).
+    reserved_cpus integer[] DEFAULT ARRAY[]::integer[] NOT NULL,
+    -- Logical CPU topology from Incus resources: [{id, core, socket, numa}].
+    cpu_topology jsonb,
+    node_metrics_status text DEFAULT 'unknown'::text NOT NULL,
     node_metrics_last_success_at timestamp with time zone,
     node_metrics_outage_since timestamp with time zone,
     node_metrics_last_error text,
@@ -198,22 +204,19 @@ CREATE TABLE infra.servers (
     CONSTRAINT servers_name_check CHECK (length(btrim(name)) > 0),
     CONSTRAINT servers_slug_check
         CHECK (slug = lower(slug) AND slug ~ '^[a-z0-9][a-z0-9_-]*$'),
-    CONSTRAINT servers_api_endpoint_check
-        CHECK (api_endpoint ~ '^https://[^[:space:]]+$'),
-    CONSTRAINT servers_cert_fingerprint_check
-        CHECK (server_cert_fingerprint IS NULL OR server_cert_fingerprint ~ '^[0-9A-Fa-f:]{32,95}$'),
-    CONSTRAINT servers_node_metrics_endpoint_check
-        CHECK (node_metrics_endpoint IS NULL OR node_metrics_endpoint ~ '^https://[^[:space:]]+/metrics$'),
-    CONSTRAINT servers_node_metrics_token_shape_check
-        CHECK ((node_metrics_status = 'unconfigured'
-                AND node_metrics_token_ciphertext IS NULL
-                AND node_metrics_token_fingerprint IS NULL)
-            OR (node_metrics_status <> 'unconfigured'
-                AND node_metrics_endpoint IS NOT NULL
-                AND node_metrics_token_ciphertext IS NOT NULL
-                AND node_metrics_token_fingerprint IS NOT NULL)),
+    CONSTRAINT servers_agent_credential_hash_check
+        CHECK (agent_credential_hash IS NULL OR agent_credential_hash ~ '^[0-9a-f]{64}$'),
+    CONSTRAINT servers_agent_enrollment_shape_check
+        CHECK ((agent_enrollment_token_hash IS NULL AND agent_enrollment_expires_at IS NULL)
+            OR (agent_enrollment_token_hash ~ '^[0-9a-f]{64}$'
+                AND agent_enrollment_expires_at IS NOT NULL)),
+    CONSTRAINT servers_reserved_cpus_check
+        CHECK (array_position(reserved_cpus, NULL::integer) IS NULL
+               AND 0 <= ALL (reserved_cpus)),
+    CONSTRAINT servers_cpu_topology_check
+        CHECK (cpu_topology IS NULL OR jsonb_typeof(cpu_topology) = 'array'),
     CONSTRAINT servers_node_metrics_status_check
-        CHECK (node_metrics_status = ANY (ARRAY['unconfigured', 'online', 'unreachable', 'unknown'])),
+        CHECK (node_metrics_status = ANY (ARRAY['online', 'unreachable', 'unknown'])),
     CONSTRAINT servers_dns_servers_check
         CHECK (array_position(dns_servers, NULL::text) IS NULL),
     CONSTRAINT servers_status_check
@@ -368,7 +371,8 @@ CREATE TABLE iam.server_grants (
     user_id uuid REFERENCES iam.users(id) ON DELETE CASCADE,
     group_id uuid REFERENCES iam.groups(id) ON DELETE CASCADE,
     server_id uuid NOT NULL REFERENCES infra.servers(id) ON DELETE RESTRICT,
-    cpu_millis integer,
+    -- Whole logical CPUs pinned for the user on this server (NULL = every unreserved CPU).
+    cpu_cores integer,
     mem_bytes bigint,
     disk_bytes bigint,
     -- Canonical 8-hex-domain PCI addresses of the GPUs this grant allows.
@@ -379,7 +383,7 @@ CREATE TABLE iam.server_grants (
     updated_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
     CONSTRAINT server_grants_scope_check
         CHECK ((user_id IS NOT NULL)::integer + (group_id IS NOT NULL)::integer = 1),
-    CONSTRAINT server_grants_cpu_millis_check CHECK (cpu_millis IS NULL OR cpu_millis >= 0),
+    CONSTRAINT server_grants_cpu_cores_check CHECK (cpu_cores IS NULL OR cpu_cores > 0),
     CONSTRAINT server_grants_mem_bytes_check CHECK (mem_bytes IS NULL OR mem_bytes >= 0),
     CONSTRAINT server_grants_disk_bytes_check CHECK (disk_bytes IS NULL OR disk_bytes >= 0),
     CONSTRAINT server_grants_gpu_pci_addresses_check
@@ -427,8 +431,9 @@ CREATE TABLE control.containers (
     root_pool_id uuid NOT NULL REFERENCES infra.storage_pools(id) ON DELETE RESTRICT,
     root_size_bytes bigint NOT NULL,
     root_size_pending_bytes bigint,
-    cpu_millis integer DEFAULT 0 NOT NULL,
-    mem_bytes bigint DEFAULT 0 NOT NULL,
+    mem_bytes bigint NOT NULL,
+    -- The CPU set last applied to the instance (observed; NULL until reconciled).
+    cpu_set integer[],
     -- NULL until GPU admission ran; otherwise {"nvidiaRuntime": bool, "pciAddresses": [...]}.
     gpu_state jsonb,
     nesting boolean DEFAULT true NOT NULL,
@@ -452,8 +457,10 @@ CREATE TABLE control.containers (
     CONSTRAINT containers_root_size_check CHECK (root_size_bytes > 0),
     CONSTRAINT containers_root_size_pending_check
         CHECK (root_size_pending_bytes IS NULL OR root_size_pending_bytes > 0),
-    CONSTRAINT containers_cpu_millis_check CHECK (cpu_millis >= 0),
-    CONSTRAINT containers_mem_bytes_check CHECK (mem_bytes >= 0),
+    CONSTRAINT containers_mem_bytes_check CHECK (mem_bytes > 0),
+    CONSTRAINT containers_cpu_set_check
+        CHECK (cpu_set IS NULL OR (cardinality(cpu_set) > 0
+               AND array_position(cpu_set, NULL::integer) IS NULL)),
     CONSTRAINT containers_root_used_bytes_check
         CHECK (root_used_bytes IS NULL OR root_used_bytes >= 0),
     CONSTRAINT containers_gpu_state_check
@@ -608,6 +615,22 @@ CREATE TABLE control.container_gpu_claims (
         UNIQUE (server_id, pci_address)
 );
 
+-- Every container a user owns on a server is pinned to the user's CPU set;
+-- users whose grant does not limit CPU have no row and use every unreserved CPU.
+CREATE TABLE control.user_cpu_sets (
+    server_id uuid NOT NULL REFERENCES infra.servers(id) ON DELETE CASCADE,
+    user_id uuid NOT NULL REFERENCES iam.users(id) ON DELETE CASCADE,
+    cpus integer[] NOT NULL,
+    updated_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    PRIMARY KEY (server_id, user_id),
+    CONSTRAINT user_cpu_sets_cpus_check
+        CHECK (cardinality(cpus) > 0
+               AND array_position(cpus, NULL::integer) IS NULL
+               AND 0 <= ALL (cpus))
+);
+
+CREATE INDEX user_cpu_sets_user_idx ON control.user_cpu_sets (user_id);
+
 CREATE TABLE control.container_ssh_routes (
     container_id uuid NOT NULL REFERENCES control.containers(id) ON DELETE CASCADE,
     server_id uuid NOT NULL REFERENCES infra.servers(id) ON DELETE RESTRICT,
@@ -670,7 +693,6 @@ CREATE TABLE control.intents (
             'volume.destroy',
             'image_assignment.ensure',
             'image_assignment.delete',
-            'server.connect',
             'server.preflight'
         ])),
     CONSTRAINT intents_resource_type_check
@@ -766,22 +788,6 @@ COMMENT ON COLUMN system.settings.revision IS
   'Absolute monotonic CAS version; updates must present the revision they read';
 COMMENT ON COLUMN system.settings."values" IS
   'Complete validated online-editable values; deployment YAML is bootstrap/read-only only';
-
-CREATE TABLE system.incus_client_identity (
-    singleton boolean DEFAULT true NOT NULL,
-    certificate_pem text NOT NULL,
-    encrypted_private_key text NOT NULL,
-    fingerprint text NOT NULL,
-    not_after timestamp with time zone NOT NULL,
-    created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
-    CONSTRAINT incus_client_identity_singleton_check CHECK (singleton),
-    CONSTRAINT incus_client_identity_fingerprint_check
-        CHECK (fingerprint ~ '^[0-9A-Fa-f:]{32,95}$'),
-    PRIMARY KEY (singleton)
-);
-
-COMMENT ON TABLE system.incus_client_identity IS
-  'Single control-plane mTLS client identity, generated on first use; private key encrypted with ssh.keyEncryptionSecret';
 
 CREATE TABLE interaction.http_domain_pools (
     id uuid NOT NULL,
@@ -1114,12 +1120,12 @@ CREATE INDEX http_proxy_bindings_pool_idx
 --   * expires_at is the latest one; NULL (never expires) wins over any date.
 CREATE VIEW iam.merged_server_access AS
 WITH inherited AS (
-    SELECT grants.user_id, grants.server_id, grants.cpu_millis, grants.mem_bytes,
+    SELECT grants.user_id, grants.server_id, grants.cpu_cores, grants.mem_bytes,
            grants.disk_bytes, grants.gpu_pci_addresses, grants.expires_at
     FROM iam.server_grants AS grants
     WHERE grants.user_id IS NOT NULL
     UNION ALL
-    SELECT members.user_id, grants.server_id, grants.cpu_millis, grants.mem_bytes,
+    SELECT members.user_id, grants.server_id, grants.cpu_cores, grants.mem_bytes,
            grants.disk_bytes, grants.gpu_pci_addresses, grants.expires_at
     FROM iam.server_grants AS grants
     JOIN iam.group_members AS members ON members.group_id = grants.group_id
@@ -1139,8 +1145,8 @@ WITH inherited AS (
 )
 SELECT merged.user_id,
        merged.server_id,
-       CASE WHEN bool_or(merged.cpu_millis IS NULL) THEN NULL
-            ELSE max(merged.cpu_millis) END AS cpu_millis,
+       CASE WHEN bool_or(merged.cpu_cores IS NULL) THEN NULL
+            ELSE max(merged.cpu_cores) END AS cpu_cores,
        CASE WHEN bool_or(merged.mem_bytes IS NULL) THEN NULL
             ELSE max(merged.mem_bytes) END AS mem_bytes,
        CASE WHEN bool_or(merged.disk_bytes IS NULL OR merged.disk_bytes = 0) THEN NULL

@@ -3,6 +3,8 @@ import {
   buildDesiredInstanceSpec,
   deriveAttachmentDeviceName,
   deriveInstanceHwaddr,
+  deriveNicHostName,
+  formatCpuSet,
   deriveInstanceName,
   deriveVolumeName,
   type InstanceSpecInput,
@@ -27,7 +29,7 @@ function input(overrides: Partial<InstanceSpecInput['container']> = {}): Instanc
         server: 'https://images.example.test',
         protocol: 'simplestreams',
       },
-      cpuMillis: 2500,
+      cpus: [2, 3, 8],
       memBytes: 1073741824n,
       rootPool: 'default',
       rootSizeBytes: 21474836480n,
@@ -45,11 +47,19 @@ function input(overrides: Partial<InstanceSpecInput['container']> = {}): Instanc
           id: volumeId,
           incusName: deriveVolumeName(volumeId),
           poolName: 'data',
+          throttled: true,
         },
         containerPath: '/data/work',
         readOnly: true,
       },
     ],
+    limits: {
+      processes: 4096,
+      networkIngressMbit: 1000,
+      networkEgressMbit: 500,
+      diskReadMBps: 300,
+      diskWriteMBps: 200,
+    },
   };
 }
 
@@ -74,10 +84,13 @@ describe('buildDesiredInstanceSpec', () => {
         protocol: 'simplestreams',
       },
       config: {
-        'limits.cpu': '3',
-        'limits.cpu.allowance': '2500ms/3000ms',
+        'limits.cpu': '2-3,8-8',
         'limits.memory': '1073741824',
+        'limits.processes': '4096',
         'security.privileged': 'false',
+        'security.idmap.isolated': 'true',
+        'linux.sysctl.net.ipv6.conf.all.disable_ipv6': '1',
+        'linux.sysctl.net.ipv6.conf.default.disable_ipv6': '1',
         'security.nesting': 'true',
         'security.syscalls.intercept.mknod': 'true',
         'security.syscalls.intercept.setxattr': 'true',
@@ -87,15 +100,27 @@ describe('buildDesiredInstanceSpec', () => {
         'user.nyabase.revision': '7',
       },
       devices: {
+        root: {
+          type: 'disk',
+          path: '/',
+          pool: 'default',
+          size: '21474836480',
+          'limits.read': '300MB',
+          'limits.write': '200MB',
+        },
         eth0: {
           type: 'nic',
           nictype: 'bridged',
           parent: 'eno1',
           name: 'eth0',
           hwaddr: deriveInstanceHwaddr(containerId),
+          host_name: deriveNicHostName(containerId),
           'ipv4.address': '192.0.2.20',
           'security.ipv4_filtering': 'true',
           'security.mac_filtering': 'true',
+          'security.port_isolation': 'true',
+          'limits.ingress': '1000Mbit',
+          'limits.egress': '500Mbit',
         },
         [deriveAttachmentDeviceName(attachmentId)]: {
           type: 'disk',
@@ -103,28 +128,35 @@ describe('buildDesiredInstanceSpec', () => {
           source: deriveVolumeName(volumeId),
           path: '/data/work',
           readonly: 'true',
+          'limits.read': '300MB',
+          'limits.write': '200MB',
         },
       },
     });
     expect(JSON.stringify(first)).not.toMatch(/runtimeId|docker|routed|169\.254/);
   });
 
-  it('maps millicores to integer limits.cpu plus CFS allowance (never fractional cpu)', () => {
-    expect(buildDesiredInstanceSpec(input({ cpuMillis: 500 })).config).toMatchObject({
-      'limits.cpu': '1',
-      'limits.cpu.allowance': '500ms/1000ms',
+  it('pins to an explicit CPU set and never emits a CPU count', () => {
+    expect(formatCpuSet([5])).toBe('5-5');
+    expect(formatCpuSet([0, 1, 2, 3])).toBe('0-3');
+    expect(buildDesiredInstanceSpec(input({ cpus: [4] })).config?.['limits.cpu']).toBe('4-4');
+    expect(buildDesiredInstanceSpec(input()).config).not.toHaveProperty('limits.cpu.allowance');
+    expect(() => buildDesiredInstanceSpec(input({ cpus: [] }))).toThrowError(
+      expect.objectContaining({ code: 'INVALID_INSTANCE_SPEC' }),
+    );
+  });
+
+  it('puts every managed NIC behind the IPv6 guard prefix', () => {
+    expect(deriveNicHostName(containerId)).toMatch(/^nyh[0-9a-f]{12}$/);
+    expect(deriveNicHostName(containerId)).not.toBe(deriveNicHostName(serverId));
+  });
+
+  it('does not throttle network filesystem attachments', () => {
+    const spec = buildDesiredInstanceSpec({
+      ...input(),
+      attachments: [{ ...input().attachments[0]!, volume: { ...input().attachments[0]!.volume, throttled: false } }],
     });
-    expect(buildDesiredInstanceSpec(input({ cpuMillis: 1500 })).config).toMatchObject({
-      'limits.cpu': '2',
-      'limits.cpu.allowance': '1500ms/2000ms',
-    });
-    expect(buildDesiredInstanceSpec(input({ cpuMillis: 1000 })).config).toMatchObject({
-      'limits.cpu': '1',
-    });
-    expect(
-      buildDesiredInstanceSpec(input({ cpuMillis: 1000 })).config?.['limits.cpu.allowance'],
-    ).toBeUndefined();
-    expect(buildDesiredInstanceSpec(input({ cpuMillis: 0 })).config?.['limits.cpu']).toBeUndefined();
+    expect(spec.devices?.[deriveAttachmentDeviceName(attachmentId)]).not.toHaveProperty('limits.read');
   });
 
   it('keeps attachment add and remove changes in one desired document', () => {
@@ -139,6 +171,7 @@ describe('buildDesiredInstanceSpec', () => {
             id: '66666666-6666-4666-8666-666666666666',
             incusName: deriveVolumeName('66666666-6666-4666-8666-666666666666'),
             poolName: 'data',
+            throttled: true,
           },
           containerPath: '/data/cache',
           readOnly: false,

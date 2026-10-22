@@ -193,6 +193,7 @@ const GROUP_LABELS: Record<string, string> = {
   audit: '审计',
   metrics: '监控',
   ssh: 'SSH 代理',
+  containers: '容器统一限制',
 };
 
 const FIELD_LABELS: Record<string, { label: string; description: string }> = {
@@ -287,6 +288,26 @@ const FIELD_LABELS: Record<string, { label: string; description: string }> = {
   'ssh.proxyPublicPort': {
     label: 'SSH 代理公网端口',
     description: '用户通过 SSH 代理连接时使用的端口。',
+  },
+  'containers.processLimit': {
+    label: '进程数上限',
+    description: '每个容器可同时存在的进程与线程总数（limits.processes），对所有容器统一生效。',
+  },
+  'containers.networkIngressMbit': {
+    label: '入站带宽上限（Mbit/s）',
+    description: '每个容器网卡的入站带宽上限（limits.ingress）。',
+  },
+  'containers.networkEgressMbit': {
+    label: '出站带宽上限（Mbit/s）',
+    description: '每个容器网卡的出站带宽上限（limits.egress）。',
+  },
+  'containers.diskReadMBps': {
+    label: '磁盘读速率上限（MB/s）',
+    description: '系统盘与本地数据卷每块盘的读速率上限（limits.read）；CephFS 等网络文件系统无法限速。',
+  },
+  'containers.diskWriteMBps': {
+    label: '磁盘写速率上限（MB/s）',
+    description: '系统盘与本地数据卷每块盘的写速率上限（limits.write）；CephFS 等网络文件系统无法限速。',
   },
   'ssh.proxySnapshotStaleMs': {
     label: 'SSH 代理快照过期时间',

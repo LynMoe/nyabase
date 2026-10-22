@@ -28,7 +28,8 @@ export const MAX_HTTP_PROXY_CERTIFICATE_PEM_LENGTH = 64 * 1024;
 export const MAX_HTTP_PROXY_PRIVATE_KEY_PEM_LENGTH = 16 * 1024;
 export const MAX_HTTP_PROXY_SNAPSHOT_BYTES = 8 * 1024 * 1024;
 
-export const MAX_RESOURCE_CPU_MILLIS = Math.floor(Number.MAX_SAFE_INTEGER / 1_000_000);
+/** Highest logical CPU id the platform accepts (reserved CPUs, topology, pinning). */
+export const MAX_SERVER_LOGICAL_CPU_ID = 4095;
 export const MAX_RESOURCE_BYTES = Number.MAX_SAFE_INTEGER;
 export const MAX_STORAGE_OVERCOMMIT_RATIO = 100;
 export const GRANT_EXPIRY_GRACE_DAYS = 14;
@@ -39,10 +40,8 @@ export const MAX_METRIC_LABELS_PER_POINT = 16;
 export const MAX_METRIC_LABEL_KEY_LENGTH = 64;
 export const MAX_METRIC_LABEL_VALUE_LENGTH = 512;
 export const MAX_NODE_METRICS_BODY_BYTES = 4 * 1024 * 1024;
-export const NODE_METRICS_ENDPOINT_PATH = '/metrics';
-export const NODE_METRICS_CONNECT_TIMEOUT_MS = 500;
-export const NODE_METRICS_RESPONSE_HEADER_TIMEOUT_MS = 1_000;
-export const NODE_METRICS_REQUEST_TIMEOUT_MS = 2_000;
+/** Bound on one agent metrics.collect round trip. */
+export const NODE_METRICS_REQUEST_TIMEOUT_MS = 5_000;
 export const NODE_METRICS_PARSE_TIMEOUT_MS = 250;
 export const NODE_METRICS_SCRAPE_INTERVAL_MS = 15_000;
 export const NODE_METRICS_FRESHNESS_MS = 45_000;
@@ -64,6 +63,7 @@ export const NODE_METRIC_NAMES = [
   'nyabase_node_network_nft_available',
   'nyabase_node_network_bridge_filter_present',
   'nyabase_node_network_bridge_filter_address',
+  'nyabase_node_ipv6_guard_present',
   'nyabase_container_cpu_usage_seconds_total',
   'nyabase_container_cpu_limit_cores',
   'nyabase_container_mem_used_bytes',

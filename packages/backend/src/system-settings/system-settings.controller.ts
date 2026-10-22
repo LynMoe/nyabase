@@ -8,12 +8,10 @@ import {
 import {
   Capability,
   zPatchSystemSettingsRequest,
-  type IncusClientIdentityDto,
   type PublicSettingsDto,
   type SystemSettingsDto,
 } from '@nyabase/common';
-import { Public, RequireAnyCaps, RequireCaps, CurrentUser } from '../iam/decorators.js';
-import { IncusClientIdentityService } from '../incus/incus-client-identity.service.js';
+import { Public, RequireCaps, CurrentUser } from '../iam/decorators.js';
 import { NyabaseConfigService } from '../platform/config/nyabase-config.service.js';
 import type { UserRecord } from '../iam/auth-persistence.js';
 import { AccessResolverService } from '../iam/access-resolver.service.js';
@@ -28,7 +26,6 @@ export class SystemSettingsController {
     private config: NyabaseConfigService,
     private accessResolver: AccessResolverService,
     private authority: SystemSettingsAuthorityService,
-    private incusIdentity: IncusClientIdentityService,
   ) {}
 
   @Public()
@@ -41,13 +38,6 @@ export class SystemSettingsController {
   @RequireCaps(Capability.ManageSystemSettings)
   getSettings(): SystemSettingsDto {
     return this.systemSettingsDto();
-  }
-
-  /** Read-only: the certificate fingerprint operators see in Incus's trust list. */
-  @Get('admin/system-settings/incus-client-identity')
-  @RequireAnyCaps(Capability.ManageSystemSettings, Capability.ManageServers)
-  getIncusClientIdentity(): Promise<IncusClientIdentityDto> {
-    return this.incusIdentity.describe();
   }
 
   @Patch('admin/system-settings')

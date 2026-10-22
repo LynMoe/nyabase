@@ -20,7 +20,7 @@ import { Alert, AlertDescription } from '../components/ui/alert.js';
 import { useMySshKeys } from '../hooks/use-my-ssh-keys.js';
 import { StatusBadge } from '../components/layout/status-badge.js';
 import { Button } from '../components/ui/button.js';
-import { formatBytesCompact, formatCpu, relativeTime } from '../lib/utils.js';
+import { formatBytesCompact, relativeTime } from '../lib/utils.js';
 import { containerInProgress } from '../lib/in-progress.js';
 import { containerStatusLabel, serverStatusLabel } from '../lib/status-labels.js';
 import { queryPollInterval, refetchWhileInProgress } from '../lib/query-lifecycle.js';
@@ -261,7 +261,7 @@ function ContainerResourceRow({
         </p>
       </div>
       <dl className="flex flex-wrap gap-x-4 gap-y-1 pl-6 text-xs tabular-nums text-muted-foreground sm:pl-0" title="已用 / 规格">
-        <div className="flex gap-1"><dt>CPU</dt><dd className="text-foreground">{usedOf(cpuUsed, formatCpu(container.cpuMillis))}</dd></div>
+        <div className="flex gap-1"><dt>CPU</dt><dd className="text-foreground">{usedOf(cpuUsed, container.cpuSet?.length ? `${container.cpuSet.length} 核` : '待分配')}</dd></div>
         <div className="flex gap-1"><dt>内存</dt><dd className="text-foreground">{usedOf(memUsed, formatBytesCompact(container.memBytes))}</dd></div>
         <div className="flex gap-1"><dt>磁盘</dt><dd className="text-foreground">{usedOf(diskUsed, formatBytesCompact(container.rootSizeBytes))}</dd></div>
         {gpuUsed ? <div className="flex gap-1"><dt>显存</dt><dd className="text-foreground">{gpuUsed}</dd></div> : null}

@@ -186,7 +186,7 @@ export class ContainerDtoAssembler {
           pool.block_filesystem,
         )
         : missingStoragePoolCapability(),
-      cpuMillis: row.cpu_millis,
+      cpuSet: row.cpu_set,
       memBytes: numberValue(row.mem_bytes),
       gpu: parseContainerState(row.gpu_state),
       powerIntent: row.power_intent as ContainerPowerIntent,

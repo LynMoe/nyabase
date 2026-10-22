@@ -13,7 +13,8 @@ import { Button } from '../ui/button.js';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '../ui/dialog.js';
 import { Input } from '../ui/input.js';
 import { FormField } from '../layout/form-field.js';
-import { approxGibHint, formatGibInput, formatVcpuInput, gibToBytes, vcpuToMillis } from '../../lib/utils.js';
+import { approxGibHint, formatGibInput, gibToBytes } from '../../lib/utils.js';
+import { cpuCoresLabel, cpuSetLabel } from '../../lib/cpu-set.js';
 import {
   classifySizeChange,
   observedRootUsedBytes,
@@ -50,9 +51,8 @@ export function LimitsDialog({
     queryFn: () => api.get<EffectiveAccessDto>('/me/access'),
     enabled: !admin && Boolean(container.serverId),
   });
-  const gpuPciAddresses = admin
-    ? null
-    : accessQuery.data?.servers.find((row) => row.serverId === container.serverId)?.gpuPciAddresses ?? null;
+  const serverAccess = admin ? undefined : accessQuery.data?.servers.find((row) => row.serverId === container.serverId);
+  const gpuPciAddresses = serverAccess?.gpuPciAddresses ?? null;
   const updateLimits = useActionMutation({
     mutationFn: (body: PatchContainerLimitsRequest) => api.patch<IntentAcceptedDto>(`${base}/limits`, body),
     successTitle: '已提交规格更新，正在生效',
@@ -65,10 +65,8 @@ export function LimitsDialog({
     errorTitle: 'GPU 更新失败',
     onSuccess: invalidate,
   });
-  const [cpuVcpus, setCpuVcpus] = useState(formatVcpuInput(container.cpuMillis));
   const [memGib, setMemGib] = useState(formatGibInput(container.memBytes));
   const [gpuSelection, setGpuSelection] = useState<string[]>(container.gpu?.pciAddresses ?? []);
-  const cpuMillis = Number.isFinite(Number(cpuVcpus)) ? vcpuToMillis(Number(cpuVcpus)) : NaN;
   const memBytes = Number.isFinite(Number(memGib)) ? gibToBytes(Number(memGib)) : NaN;
 
   return (
@@ -78,27 +76,35 @@ export function LimitsDialog({
           <DialogTitle>编辑规格</DialogTitle>
         </DialogHeader>
         <div className="space-y-3">
-          <div className="grid gap-3 sm:grid-cols-2">
-            <UnitField id="limit-cpu" label="CPU (核)" value={cpuVcpus} onChange={setCpuVcpus} step="0.1" />
-            <UnitField
-              id="limit-memory"
-              label="内存 (GiB)"
-              value={memGib}
-              onChange={setMemGib}
-              hint={Number.isFinite(memBytes) ? approxGibHint(memBytes) : undefined}
-            />
+          <div className="rounded-md border bg-muted/20 p-3 text-sm" data-testid="container-spec-cpu">
+            <p>
+              CPU：<span className="font-mono">{cpuSetLabel(container.cpuSet)}</span>
+              {serverAccess ? <span className="text-muted-foreground">（授权 {cpuCoresLabel(serverAccess.cpuCores)}）</span> : null}
+            </p>
+            <p className="mt-1 text-xs text-muted-foreground">
+              CPU 不能按容器调整：同一服务器上同一用户的所有容器共享一组按整核绑定的 CPU，核数由管理员在授权中设置。
+            </p>
           </div>
+          <UnitField
+            id="limit-memory"
+            label="内存 (GiB)"
+            value={memGib}
+            onChange={setMemGib}
+            hint={Number.isFinite(memBytes)
+              ? `${approxGibHint(memBytes)}；内存额度按你在这台服务器上所有容器的合计计算`
+              : undefined}
+          />
           <Button
             onClick={() => {
-              if (!Number.isFinite(cpuMillis) || !Number.isFinite(memBytes)) {
-                toast({ title: '请输入有效的 CPU / 内存', variant: 'destructive' });
+              if (!Number.isFinite(memBytes) || memBytes <= 0) {
+                toast({ title: '请输入大于 0 的内存', variant: 'destructive' });
                 return;
               }
-              updateLimits.mutate({ cpuMillis, memBytes });
+              updateLimits.mutate({ memBytes });
             }}
             disabled={updateLimits.isPending}
           >
-            {updateLimits.isPending ? '提交中...' : '应用 CPU / 内存'}
+            {updateLimits.isPending ? '提交中...' : '应用内存'}
           </Button>
         </div>
         <ContainerSpecGpu

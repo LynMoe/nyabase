@@ -51,15 +51,19 @@ describe('container lifecycle and SSH through the ssh-proxy', () => {
     await assert.rejects(h.ssh(stranger, container, 'true', `${stranger.username}.${container.name}`));
   });
 
-  it('changes CPU/memory limits and grows the root disk', async () => {
+  it('changes the memory limit, keeps the CPU pinning, and grows the root disk', async () => {
     const api = owner.session.api;
     await waitIntent(api, await api.patch<IntentAcceptedDto>(`/containers/${container.id}/limits`, {
-      cpuMillis: 2000,
       memBytes: 2 * GIB,
     }));
     const limited = await api.get<ContainerDto>(`/containers/${container.id}`);
-    assert.equal(limited.cpuMillis, 2000);
     assert.equal(limited.memBytes, 2 * GIB);
+    assert.equal(limited.cpuSet?.length, 2, 'pinned to the owner\'s two granted cores');
+    assert.equal(
+      await api.status('PATCH', `/containers/${container.id}/limits`, { cpuMillis: 1000, memBytes: GIB }),
+      400,
+      'CPU is no longer sized per container',
+    );
 
     const grown = container.rootSizeBytes + GIB;
     await waitIntent(api, await api.patch<IntentAcceptedDto>(`/containers/${container.id}/root-size`, {
@@ -103,7 +107,6 @@ describe('container lifecycle and SSH through the ssh-proxy', () => {
       serverId: h.server.id,
       imageId: h.state.image.id,
       rootSizeBytes: h.state.rootSizeBytes,
-      cpuMillis: 1000,
       memBytes: GIB,
       powerIntent: 'stopped',
     };
@@ -112,7 +115,8 @@ describe('container lifecycle and SSH through the ssh-proxy', () => {
       api.post('/containers', { ...base, name: container.name }),
       (error: unknown) => error instanceof ApiError && error.status === 409,
     );
-    assert.equal(await api.status('POST', '/containers', { ...base, name: h.name('x'), cpuMillis: 99_000 }), 403);
+    assert.equal(await api.status('POST', '/containers', { ...base, name: h.name('x'), memBytes: 0 }), 400);
+    assert.equal(await api.status('POST', '/containers', { ...base, name: h.name('x'), memBytes: 64 * GIB }), 403);
   });
 
   it('deletes the container and withdraws its SSH route', async () => {

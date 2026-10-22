@@ -9,14 +9,13 @@
 run_query() { psql "$(run_db_url)" -X -q -A -t -F $'\t' -v ON_ERROR_STOP=1 -c "$1" 2>/dev/null || true; }
 
 # Merges what the run's database knows (if it still exists) into resources.tsv:
-#   client <fingerprint>  |  server <slug> <id>  |  container <slug> <instance>
+#   server <slug> <id>  |  container <slug> <instance>
 #   volume <slug> <pool> <volume>
 record_resources() {
   local file="$RUN_DIR/resources.tsv" tmp
   tmp="$(mktemp)"
   {
     [[ -f "$file" ]] && cat "$file"
-    run_query "SELECT 'client', lower(replace(fingerprint, ':', '')) FROM system.incus_client_identity"
     run_query "SELECT 'server', slug, id FROM infra.servers"
     run_query "SELECT 'container', s.slug, c.instance_name FROM control.containers c
                  JOIN infra.servers s ON s.id = c.server_id WHERE c.instance_name IS NOT NULL"
@@ -45,10 +44,13 @@ cmd_down() {
   stop_run_process "$RUN_DIR/http-proxy.pid"
   stop_run_process "$RUN_DIR/ssh-proxy.pid"
   stop_run_process "$RUN_DIR/backend.pid"
+  local tunnel
+  for tunnel in "$RUN_DIR"/tunnel-s*.pid; do
+    [[ -e "$tunnel" ]] && stop_run_process "$tunnel"
+  done
 
   record_resources
-  local failed=0 idx var target slug sid token fp instances volumes
-  fp="$(awk -F'\t' '$1 == "client" { print $2; exit }' "$RUN_DIR/resources.tsv" 2>/dev/null || true)"
+  local failed=0 idx var target slug sid instances volumes
   # Servers that share a host are swept once per host entry; each uses its own server id.
   for idx in ${E2E_SERVERS:-}; do
     [[ "$idx" =~ ^[0-9]+$ ]] || continue
@@ -56,7 +58,6 @@ cmd_down() {
     [[ -n "$target" ]] || continue
     slug="e2e-$RUN_ID-s$idx"
     sid="$(awk -F'\t' -v s="$slug" '$1 == "server" && $2 == s { print $3; exit }' "$RUN_DIR/resources.tsv" 2>/dev/null || true)"
-    token="nyabase-e2e-$RUN_ID-s$idx"
     instances="$(awk -F'\t' -v s="$slug" '$1 == "container" && $2 == s { printf "%s%s", sep, $3; sep = "," }' "$RUN_DIR/resources.tsv")"
     volumes="$(awk -F'\t' -v s="$slug" '$1 == "volume" && $2 == s { printf "%s%s/%s", sep, $3, $4; sep = "," }' "$RUN_DIR/resources.tsv")"
     if [[ -z "$sid" ]]; then
@@ -64,7 +65,7 @@ cmd_down() {
       sid="00000000-0000-0000-0000-000000000000"
     fi
     log "sweeping $target (server $slug ${sid})"
-    if ! lab_bash "$target" "$sid" "${fp:--}" "$token" "${instances:--}" "${volumes:--}" "nyabase-e2e-node-$RUN_ID-s$idx" <"$E2E_DIR/lib/lab-sweep.sh"; then
+    if ! lab_bash "$target" "$sid" "${instances:--}" "${volumes:--}" "nyabase-e2e-agent-$RUN_ID-s$idx" <"$E2E_DIR/lib/lab-sweep.sh"; then
       log "sweep of $target failed; resources stay recorded in $RUN_DIR/resources.tsv"
       failed=1
     fi

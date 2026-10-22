@@ -104,6 +104,7 @@ export class ReconcileWorkerService implements OnApplicationBootstrap, OnModuleD
   private wakeTimer?: NodeJS.Timeout;
   private running = false;
   private scanning = false;
+  private rescanRequested = false;
   private started = false;
   private stopping = false;
   private runPromise?: Promise<void>;
@@ -125,6 +126,11 @@ export class ReconcileWorkerService implements OnApplicationBootstrap, OnModuleD
     if (this.started || this.stopping) return;
     this.started = true;
     this.unsubscribeWake = this.wake.onWake((payload) => {
+      if (payload.reason === 'scan') {
+        // Desired state outside any one intent changed (grants, reserved CPUs, limits).
+        this.requestFullScan();
+        return;
+      }
       if (payload.reason === 'event' || payload.reason === 'reconnect') {
         this.scheduleWake(0);
       } else {
@@ -274,11 +280,7 @@ export class ReconcileWorkerService implements OnApplicationBootstrap, OnModuleD
           return;
         }
         if (serverId) {
-          const expectedFingerprint = intent.kind === 'server.connect'
-            && typeof intent.request?.expectedServerCertFingerprint === 'string'
-            ? intent.request.expectedServerCertFingerprint
-            : undefined;
-          client = await this.clients.get(serverId, { expectedFingerprint });
+          client = await this.clients.get(serverId);
         }
         const reconciler = this.registry.forIntent(intent);
         if (!reconciler) {
@@ -378,31 +380,6 @@ export class ReconcileWorkerService implements OnApplicationBootstrap, OnModuleD
         await this.markServer(
           serverId,
           'unreachable',
-          failure.message,
-          intent.resourceType === 'server' ? intent.targetRevision : undefined,
-        );
-      }
-      await this.retryOrNeedsAttention(intent, failure, 30_000, false);
-      return;
-    }
-    if (isIncusError(error, 'TLS_PIN_MISMATCH')) {
-      if (serverId) {
-        await this.markServer(
-          serverId,
-          'unknown',
-          failure.message,
-          intent.resourceType === 'server' ? intent.targetRevision : undefined,
-        );
-      }
-      await this.markResourceFailure(intent, failure, false);
-      await this.settlePhysical(intent, intent.targetRevision, { outcome: 'failed', failure });
-      return;
-    }
-    if (isIncusError(error, 'TLS_ERROR')) {
-      if (serverId) {
-        await this.markServer(
-          serverId,
-          'unknown',
           failure.message,
           intent.resourceType === 'server' ? intent.targetRevision : undefined,
         );
@@ -588,6 +565,19 @@ export class ReconcileWorkerService implements OnApplicationBootstrap, OnModuleD
   private finishScan(operation: Promise<void>): void {
     if (this.scanPromise !== operation) return;
     this.scanPromise = undefined;
+    if (this.rescanRequested) {
+      this.rescanRequested = false;
+      this.startBackgroundFullScan();
+    }
+  }
+
+  /** Run a full scan now, or right after the one in progress. */
+  private requestFullScan(): void {
+    if (this.scanning) {
+      this.rescanRequested = true;
+      return;
+    }
+    this.startBackgroundFullScan();
   }
 
   private async startEventWatchers(): Promise<void> {

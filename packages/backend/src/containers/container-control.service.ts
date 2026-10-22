@@ -28,6 +28,7 @@ import {
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 import { nullableNumber, numberValue } from '../platform/domain-utils.js';
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
+import { lockOwnerServerQuota } from '../platform/persistence-pg/advisory-locks.js';
 import { AccessResolverService } from '../iam/access-resolver.service.js';
 import type { ServerAccess } from '../iam/effective-access.js';
 import { assertListScope, isSystemActor, type Actor } from '../iam/actor.js';
@@ -47,7 +48,7 @@ import { assertRootCapacity, ContainerCreateService } from './container-create.s
 import { ContainerDtoAssembler } from './container-dtos.js';
 import {
   assertCanAccess,
-  assertComputeGrant,
+  assertMemoryGrant,
   assertContainerName,
   assertCreateNumbers,
   checkRootResize,
@@ -140,18 +141,22 @@ export class ContainerControlService {
     containerId: string,
     input: PatchContainerLimitsRequest,
   ): Promise<IntentAcceptedDto> {
-    if (!Number.isSafeInteger(input.cpuMillis) || input.cpuMillis < 0
-      || !Number.isSafeInteger(input.memBytes) || input.memBytes < 0) {
+    if (!Number.isSafeInteger(input.memBytes) || input.memBytes <= 0) {
       throw new BadRequestException({
         code: FailureCode.InvalidInput,
-        message: 'Container limits must be non-negative safe integers',
+        message: 'Container memory must be a positive safe integer',
       });
     }
     return this.updateDesired(actor, containerId, {
-      cpu_millis: input.cpuMillis,
       mem_bytes: input.memBytes,
-    }, { operation: 'limits' }, AuditAction.UpdateContainerLimits, async (_transaction, _current, grant) => {
-      if (grant) assertComputeGrant(grant, input.cpuMillis, input.memBytes);
+    }, { operation: 'limits' }, AuditAction.UpdateContainerLimits, async (transaction, current, grant) => {
+      if (!grant) return;
+      await lockOwnerServerQuota(transaction, current.owner_id, current.server_id);
+      assertMemoryGrant(grant, input.memBytes, await this.repository.sumLiveMemBytes({
+        ownerId: current.owner_id,
+        serverId: current.server_id,
+        excludeContainerId: current.id,
+      }, transaction));
     });
   }
 

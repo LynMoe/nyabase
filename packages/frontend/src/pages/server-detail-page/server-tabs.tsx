@@ -11,7 +11,8 @@ import { ServerStorageTab } from '../../components/servers/server-storage-tab.js
 import { ResourceIntentFailures } from '../../components/intents/resource-intent-failures.js';
 import { ServerGpuCard } from '../../components/gpu/gpu-sections.js';
 import { Field } from '../../components/layout/form-field.js';
-import { ConnectCard } from '../../components/servers/connect-card.js';
+import { AgentCard, agentStateLabel } from '../../components/servers/agent-card.js';
+import { ReservedCpusCard } from '../../components/servers/reserved-cpus-card.js';
 import { TechnicalId } from '../../components/refs/technical-id.js';
 import { useServerPools } from '../../lib/server-queries.js';
 import { useAuthStore } from '../../store/auth.js';
@@ -60,19 +61,7 @@ export function ServerDetailTabs({
         <ServerOverviewTab server={server} onSelectTab={onSelectTab} />
       </TabsContent>
       <TabsContent value="connect" className="space-y-6">
-        <div className="grid items-start gap-4 xl:grid-cols-2">
-          <ConnectCard server={server} />
-          <Card>
-            <CardHeader>
-              <CardTitle className="text-base">客户端证书</CardTitle>
-              <CardDescription>
-                所有服务器共用一张自动生成的 Incus 客户端证书，在
-                <Link to="/servers" hash="client-identity" className="mx-1 underline underline-offset-4">服务器列表</Link>
-                查看指纹。
-              </CardDescription>
-            </CardHeader>
-          </Card>
-        </div>
+        <AgentCard server={server} />
       </TabsContent>
       <TabsContent value="storage" className="space-y-6" data-testid="server-storage-tab">
         <ServerStorageTab serverId={serverId}>
@@ -124,7 +113,10 @@ function ServerOverviewTab({
         </CardHeader>
         <CardContent className="grid gap-3 text-sm sm:grid-cols-2">
           <Field label="slug" value={<TechnicalId label="slug" value={server.slug} kind="text" />} />
-          <Field label="接入地址" value={<TechnicalId label="接入地址" value={server.apiEndpoint} kind="text" />} />
+          <Field
+            label="Agent 主机名"
+            value={server.agent.hostname ? <TechnicalId label="Agent 主机名" value={server.agent.hostname} kind="text" /> : '—'}
+          />
           <Field label="Incus 版本" value={server.incusVersion ?? '未连接'} />
           <Field label="系统盘池" value={server.systemPoolName ?? server.systemPoolId ?? '未指定'} />
           <Field label="存储超分比例" value={storageOvercommitLabel(server.storageOvercommitRatio)} />
@@ -137,8 +129,8 @@ function ServerOverviewTab({
         <CardContent>
           <ol className="list-decimal space-y-1.5 pl-5 text-sm">
             <li>
-              <button type="button" className="underline" onClick={() => onSelectTab('connect')}>互信</button>
-              {server.incusVersion || server.serverCertFingerprint ? ' · 已连接' : ' · 未连接'}
+              <button type="button" className="underline" onClick={() => onSelectTab('connect')}>主机 Agent</button>
+              {` · ${agentStateLabel(server.agent)}`}
             </li>
             <li>
               <button type="button" className="underline" onClick={() => onSelectTab('storage')}>存储池</button>
@@ -155,6 +147,7 @@ function ServerOverviewTab({
           </ol>
         </CardContent>
       </Card>
+      <ReservedCpusCard server={server} />
     </>
   );
 }

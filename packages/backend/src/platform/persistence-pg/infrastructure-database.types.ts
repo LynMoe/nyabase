@@ -10,12 +10,18 @@ type InfrastructureBigInt = ColumnType<string, string | number | bigint, string 
 type InfrastructureNumeric = ColumnType<string, string | number, string | number>;
 type InfrastructureJson<T> = ColumnType<T, T | string, T | string>;
 
+/** One logical CPU as reported by Incus resources. */
+export interface ServerCpuTopologyEntry {
+  readonly id: number;
+  readonly core: number;
+  readonly socket: number;
+  readonly numa: number;
+}
+
 export interface InfrastructureServerTable {
   id: string;
   name: string;
   slug: string;
-  api_endpoint: string;
-  server_cert_fingerprint: string | null;
   incus_version: string | null;
   api_extensions: string[];
   system_pool_id: string | null;
@@ -26,11 +32,15 @@ export interface InfrastructureServerTable {
   last_seen_at: InfrastructureTimestamp | null;
   last_error: string | null;
   revision: InfrastructureBigInt;
-  node_metrics_endpoint: string | null;
-  node_metrics_server_cert_fingerprint: string | null;
-  node_metrics_token_ciphertext: string | null;
-  node_metrics_token_fingerprint: string | null;
-  node_metrics_status: 'unconfigured' | 'online' | 'unreachable' | 'unknown';
+  agent_credential_hash: string | null;
+  agent_enrollment_token_hash: string | null;
+  agent_enrollment_expires_at: InfrastructureTimestamp | null;
+  agent_version: string | null;
+  agent_hostname: string | null;
+  agent_connected_at: InfrastructureTimestamp | null;
+  reserved_cpus: ColumnType<number[], number[] | undefined, number[]>;
+  cpu_topology: InfrastructureJson<ServerCpuTopologyEntry[]> | null;
+  node_metrics_status: 'online' | 'unreachable' | 'unknown';
   node_metrics_last_success_at: InfrastructureTimestamp | null;
   node_metrics_outage_since: InfrastructureTimestamp | null;
   node_metrics_last_error: string | null;

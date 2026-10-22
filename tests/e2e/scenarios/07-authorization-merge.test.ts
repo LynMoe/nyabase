@@ -24,7 +24,7 @@ describe('authorization merge', () => {
   let server: RunServer;
   let firstGroup: GroupDto;
   const grant = (overrides: Partial<PutServerGrantRequest>): PutServerGrantRequest => ({
-    cpuMillis: 1000, memBytes: GIB, diskBytes: 10 * GIB, gpuPciAddresses: [], expiresAt: null, ...overrides,
+    cpuCores: 1, memBytes: GIB, diskBytes: 10 * GIB, gpuPciAddresses: [], expiresAt: null, ...overrides,
   });
 
   const effective = async (): Promise<EffectiveServerAccessDto | undefined> => {
@@ -58,7 +58,7 @@ describe('authorization merge', () => {
     h.defer('delete direct grant', () => h.api.delete(`/users/${user.id}/server-grants/${server.id}`));
     const access = await effective();
     assert.ok(access);
-    assert.equal(access.cpuMillis, 1000);
+    assert.equal(access.cpuCores, 1);
     assert.equal(access.memBytes, GIB);
     assert.equal(access.diskBytes, 10 * GIB);
     assert.equal(access.accessPhase, 'live');
@@ -68,54 +68,54 @@ describe('authorization merge', () => {
   it('takes the maximum of a user grant and a group grant', async () => {
     const group = (firstGroup = await newGroup('g1'));
     await h.api.put(`/admin/groups/${group.id}/server-grants/${server.id}`, grant({
-      cpuMillis: 2000, memBytes: GIB / 2, diskBytes: 20 * GIB, expiresAt: inDays(60),
+      cpuCores: 2, memBytes: GIB / 2, diskBytes: 20 * GIB, expiresAt: inDays(60),
     }));
     await h.api.post(`/admin/groups/${group.id}/members`, { userId: user.id });
     const access = (await effective())!;
-    assert.equal(access.cpuMillis, 2000);
+    assert.equal(access.cpuCores, 2);
     assert.equal(access.memBytes, GIB, 'the larger memory is the direct 1 GiB');
     assert.equal(access.diskBytes, 20 * GIB);
     assert.ok(Math.abs(Date.parse(access.expiresAt!) - Date.parse(inDays(60))) < 120_000, 'the latest expiry wins');
 
-    // The merged cap, not the smaller direct one, is what admission enforces.
+    // The merged memory cap, not the smaller group one, is what admission enforces.
     const denied = await (await login(h.state.baseUrl, user.username, user.password)).api.post('/containers', {
       serverId: server.id, imageId: h.state.image.id, name: h.name('cap'),
-      rootSizeBytes: h.state.rootSizeBytes, cpuMillis: 2500, memBytes: GIB, powerIntent: 'stopped',
+      rootSizeBytes: h.state.rootSizeBytes, memBytes: GIB + 1, powerIntent: 'stopped',
     }).then(() => undefined, (error: unknown) => error);
     assert.ok(denied instanceof ApiError);
     assert.equal(denied.status, 403);
     assert.equal(denied.code, 'PERMISSION_DENIED');
-    assert.equal((denied.body as { details: { grantCpuMillis: number } }).details.grantCpuMillis, 2000);
+    assert.equal((denied.body as { details: { grantMemBytes: number } }).details.grantMemBytes, GIB);
   });
 
   it('lets an unlimited grant win and treats a zero disk grant as unlimited', async () => {
     const group = await newGroup('g2');
     await h.api.put(`/admin/groups/${group.id}/server-grants/${server.id}`, grant({
-      cpuMillis: null, memBytes: GIB / 4, diskBytes: 5 * GIB, expiresAt: null,
+      cpuCores: null, memBytes: GIB / 4, diskBytes: 5 * GIB, expiresAt: null,
     }));
     await h.api.post(`/admin/groups/${group.id}/members`, { userId: user.id });
     let access = (await effective())!;
-    assert.equal(access.cpuMillis, null, 'null CPU is unlimited and wins');
+    assert.equal(access.cpuCores, null, 'null CPU is unlimited and wins');
     assert.equal(access.memBytes, GIB);
     assert.equal(access.diskBytes, 20 * GIB);
     assert.equal(access.expiresAt, null, 'a grant that never expires wins');
 
     await h.api.put(`/admin/groups/${group.id}/server-grants/${server.id}`, grant({
-      cpuMillis: null, memBytes: GIB / 4, diskBytes: 0, expiresAt: null,
+      cpuCores: null, memBytes: GIB / 4, diskBytes: 0, expiresAt: null,
     }));
     access = (await effective())!;
     assert.equal(access.diskBytes, null, 'zero disk means unlimited');
 
     await h.api.delete(`/admin/groups/${group.id}/members/${user.id}`);
     access = (await effective())!;
-    assert.equal(access.cpuMillis, 2000, 'leaving the group drops its contribution');
+    assert.equal(access.cpuCores, 2, 'leaving the group drops its contribution');
     assert.equal(access.diskBytes, 20 * GIB);
   });
 
   it('falls back to the direct grant when the last group is gone', async () => {
     await h.api.delete(`/admin/groups/${firstGroup.id}/members/${user.id}`);
     const access = (await effective())!;
-    assert.equal(access.cpuMillis, 1000);
+    assert.equal(access.cpuCores, 1);
     assert.equal(access.memBytes, GIB);
     assert.equal(access.diskBytes, 10 * GIB);
   });

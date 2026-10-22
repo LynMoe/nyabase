@@ -1,8 +1,4 @@
-import { createHash } from 'node:crypto';
-import { EventEmitter } from 'node:events';
-import type { IncomingMessage } from 'node:http';
-import type { RequestOptions } from 'node:https';
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import busyResponse from './fixtures/busy-500.json';
 import etagResponse from './fixtures/etag-412.json';
 import execAcceptedResponse from './fixtures/exec-accepted.json';
@@ -13,153 +9,63 @@ import serverResponse from './fixtures/server.json';
 import { IncusClient } from './incus-client.js';
 import type {
   IncusClientOptions,
-  IncusRequestFactory,
-  IncusRequestLike,
-  IncusWebSocketFactory,
+  IncusTunnel,
+  IncusTunnelRequest,
   IncusWebSocketLike,
 } from './incus-client-types.js';
 import { isOperationWaitNotFound, readAfterTimeout } from './incus-operation.js';
-import {
-  assertLeafCertificateFingerprint,
-  encodeImageAliasName,
-  leafCertificateFingerprint,
-} from './incus-transport.js';
+import { encodeImageAliasName } from './incus-transport.js';
 import { IncusError } from './incus-errors.js';
-
-const leafCertificate = Buffer.from('incus-test-leaf');
-const leafFingerprint = createHash('sha256').update(leafCertificate).digest('hex');
 
 interface ResponsePlan {
   readonly status: number;
   readonly body: string | Buffer;
   readonly headers?: Readonly<Record<string, string>>;
-  readonly defer?: boolean;
 }
 
-class FakeSocket extends EventEmitter {
-  private timeoutCallback?: () => void;
-  connecting = true;
-  secureConnecting = true;
-  authorized = false;
-  hasCertificate = true;
-
-  setTimeout(_timeout: number, callback?: () => void): void {
-    this.timeoutCallback = callback;
-  }
-
-  getPeerCertificate(): { readonly raw?: Buffer } {
-    return this.hasCertificate ? { raw: leafCertificate } : {};
-  }
-
-  triggerTimeout(): void {
-    this.timeoutCallback?.();
-  }
-
-  markSecure(): void {
-    this.connecting = false;
-    this.secureConnecting = false;
-    this.authorized = true;
-  }
+interface RecordedRequest {
+  readonly options: IncusTunnelRequest;
+  readonly body: Buffer | undefined;
 }
 
-class FakeResponse extends EventEmitter {
-  readonly statusCode: number;
-  readonly headers: Readonly<Record<string, string>>;
+/** Stands in for the agent: answers each request from a fixture plan. */
+class RequestDriver implements IncusTunnel {
+  readonly requests: RecordedRequest[] = [];
+  readonly websocketPaths: string[] = [];
 
-  constructor(plan: ResponsePlan) {
-    super();
-    this.statusCode = plan.status;
-    this.headers = plan.headers ?? {};
-  }
-}
+  constructor(private readonly plans: ResponsePlan[]) {}
 
-class FakeRequest extends EventEmitter {
-  readonly socket: FakeSocket;
-  readonly chunks: Buffer[] = [];
-  destroyed = false;
-
-  constructor(
-    readonly options: RequestOptions,
-    private readonly plan: ResponsePlan,
-    private readonly callback: (response: IncomingMessage) => void,
-    socket = new FakeSocket(),
-    private readonly emitSecureConnect = true,
-  ) {
-    super();
-    this.socket = socket;
-  }
-
-  setTimeout(_timeout: number, _callback?: () => void): this {
-    return this;
-  }
-
-  write(chunk: string | Buffer): boolean {
-    this.chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
-    return true;
-  }
-
-  end(): void {
-    if (this.plan.defer) return;
-    queueMicrotask(() => {
-      this.emit('socket', this.socket);
-      if (this.emitSecureConnect) {
-        this.socket.markSecure();
-        this.socket.emit('secureConnect');
-      }
-      const response = new FakeResponse(this.plan);
-      this.callback(response as unknown as IncomingMessage);
-      queueMicrotask(() => {
-        if (this.destroyed) return;
-        if (this.plan.body !== '') response.emit('data', this.plan.body);
-        response.emit('end');
-      });
-    });
-  }
-
-  destroy(error?: Error): this {
-    this.destroyed = true;
-    if (error) this.emit('error', error);
-    return this;
-  }
-}
-
-class RequestDriver {
-  readonly requests: FakeRequest[] = [];
-
-  constructor(
-    private readonly plans: ResponsePlan[],
-    private readonly sharedSocket?: FakeSocket,
-    private readonly sockets?: readonly FakeSocket[],
-  ) {}
-
-  readonly factory: IncusRequestFactory = (options, callback): IncusRequestLike => {
+  async request(options: IncusTunnelRequest) {
+    if (options.signal?.aborted) {
+      throw new IncusError('INCUS_TIMEOUT', 'retry', { phase: 'total', reason: 'aborted' });
+    }
+    this.requests.push({ options, body: options.body });
     const plan = this.plans.shift();
     if (!plan) throw new Error('No response fixture configured');
-    const socket = this.sockets?.[this.requests.length] ?? this.sharedSocket;
-    const request = new FakeRequest(
-      options,
-      plan,
-      callback,
-      socket,
-      this.sockets ? true : !this.sharedSocket || this.requests.length === 0,
-    );
-    this.requests.push(request);
-    return request;
-  };
+    return {
+      status: plan.status,
+      headers: { ...(plan.headers ?? {}) },
+      body: Buffer.isBuffer(plan.body) ? plan.body : Buffer.from(plan.body),
+    };
+  }
+
+  async openWebSocket(path: string): Promise<IncusWebSocketLike> {
+    this.websocketPaths.push(path);
+    return {
+      on() {
+        return this;
+      },
+      once() {
+        return this;
+      },
+      send: () => undefined,
+      close: () => undefined,
+    } as IncusWebSocketLike;
+  }
 }
 
 function client(driver: RequestDriver, overrides: Partial<IncusClientOptions> = {}): IncusClient {
-  return new IncusClient({
-    endpoint: 'https://incus.test:8443',
-    allowedHosts: ['incus.test'],
-    tls: {
-      cert: 'client-certificate',
-      key: 'client-key',
-      fingerprint: leafFingerprint,
-    },
-    requestFactory: driver.factory,
-    ...overrides,
-  });
+  return new IncusClient({ tunnel: driver, ...overrides });
 }
 
 function fixture(value: unknown): string {
@@ -181,7 +87,7 @@ describe('encodeImageAliasName', () => {
 });
 
 describe('IncusClient', () => {
-  it('uses the bounded mTLS request transport and preserves request semantics', async () => {
+  it('sends requests through the agent tunnel and preserves request semantics', async () => {
     const driver = new RequestDriver([
       { status: 200, body: fixture(serverResponse) },
       { status: 202, body: fixture(operationAcceptedResponse) },
@@ -198,169 +104,18 @@ describe('IncusClient', () => {
     );
 
     expect(server.metadata.api_version).toBe('1.0');
-    expect(driver.requests[0].options).toMatchObject({
-      method: 'GET',
-      path: '/1.0',
-      hostname: 'incus.test',
-    });
-    expect(driver.requests[0].options.headers).toMatchObject({
-      accept: 'application/json',
-    });
+    expect(driver.requests[0].options).toMatchObject({ method: 'GET', path: '/1.0' });
     expect(driver.requests[1].options.path).toBe('/1.0/instances');
     expect(driver.requests[1].options.headers).toMatchObject({
       'If-Match': 'etag-1',
       'content-type': 'application/json',
-      'content-length': String(
-        Buffer.byteLength(
-          JSON.stringify({
-            name: 'nyc-11111111111141118111111111111111',
-            type: 'container',
-          }),
-        ),
-      ),
     });
-    expect(driver.requests[1].chunks[0].toString('utf8')).toBe(
+    expect(driver.requests[1].body!.toString('utf8')).toBe(
       JSON.stringify({
         name: 'nyc-11111111111141118111111111111111',
         type: 'container',
       }),
     );
-  });
-
-  it('verifies an already-established TLS socket reused by the HTTPS agent', async () => {
-    const sharedSocket = new FakeSocket();
-    const driver = new RequestDriver(
-      [
-        { status: 200, body: fixture(serverResponse) },
-        { status: 200, body: fixture(serverResponse) },
-      ],
-      sharedSocket,
-    );
-    const incus = client(driver, {
-      timeouts: { connectMs: 5, headersMs: 5, bodyMs: 5, totalMs: 20 },
-    });
-
-    await incus.getServer();
-    const second = incus.getServer();
-    setTimeout(() => sharedSocket.triggerTimeout(), 10);
-
-    await expect(second).resolves.toMatchObject({ status: 200 });
-    expect(driver.requests).toHaveLength(2);
-  });
-
-  it('accepts a pinned TLS session resumption without a peer certificate payload', async () => {
-    const resumedSocket = new FakeSocket();
-    resumedSocket.hasCertificate = false;
-    const driver = new RequestDriver(
-      [
-        { status: 200, body: fixture(serverResponse) },
-        { status: 200, body: fixture(serverResponse) },
-      ],
-      undefined,
-      [new FakeSocket(), resumedSocket],
-    );
-    const incus = client(driver, {
-      timeouts: { connectMs: 5, headersMs: 5, bodyMs: 5, totalMs: 20 },
-    });
-
-    await incus.getServer();
-
-    await expect(incus.getServer()).resolves.toMatchObject({ status: 200 });
-  });
-
-  it('posts the DER certificate encoding and accepts Incus 201 sync responses', async () => {
-    const certificatePem = [
-      '-----BEGIN CERTIFICATE-----',
-      'Y2VydGlmaWNhdGU=',
-      '-----END CERTIFICATE-----',
-    ].join('\n');
-    const driver = new RequestDriver([
-      {
-        status: 201,
-        body: fixture({
-          type: 'sync',
-          status: 'Success',
-          status_code: 200,
-          metadata: null,
-        }),
-      },
-    ]);
-    const incus = client(driver, {
-      tls: {
-        cert: certificatePem,
-        key: 'client-key',
-        fingerprint: leafFingerprint,
-      },
-    });
-
-    const response = await incus.trustClientCertificate('trust-token', 'probe-client');
-
-    expect(response).toMatchObject({
-      status: 201,
-      envelope: {
-        type: 'sync',
-        status_code: 200,
-        metadata: null,
-      },
-      metadata: null,
-    });
-    expect(JSON.parse(driver.requests[0]!.chunks[0]!.toString('utf8'))).toEqual({
-      certificate: 'Y2VydGlmaWNhdGU=',
-      name: 'probe-client',
-      type: 'client',
-      trust_token: 'trust-token',
-    });
-  });
-
-  it('deletes a client certificate by the normalized fingerprint', async () => {
-    const fingerprint = Array.from({ length: 32 }, (_, index) =>
-      index.toString(16).padStart(2, '0'),
-    ).join(':');
-    const driver = new RequestDriver([
-      {
-        status: 200,
-        body: fixture({
-          type: 'sync',
-          status: 'Success',
-          status_code: 200,
-          metadata: {},
-        }),
-      },
-    ]);
-    const incus = client(driver);
-
-    await expect(incus.deleteClientCertificate(fingerprint)).resolves.toMatchObject({
-      status: 200,
-    });
-    expect(driver.requests[0]!.options).toMatchObject({
-      method: 'DELETE',
-      path: `/1.0/certificates/${fingerprint.replaceAll(':', '')}`,
-    });
-  });
-
-  it('treats deleteClientCertificate 404 as success', async () => {
-    const fingerprint = 'ab'.repeat(32);
-    const driver = new RequestDriver([
-      {
-        status: 404,
-        body: fixture({
-          type: 'error',
-          status_code: 0,
-          error_code: 404,
-          error: 'Not Found',
-          metadata: null,
-        }),
-      },
-    ]);
-    const incus = client(driver);
-
-    await expect(incus.deleteClientCertificate(fingerprint)).resolves.toMatchObject({
-      status: 404,
-      envelope: {
-        type: 'sync',
-        status_code: 200,
-      },
-    });
   });
 
   it('treats deleteImageAlias 404 as success', async () => {
@@ -392,7 +147,7 @@ describe('IncusClient', () => {
   });
 
   it('covers the canonical server, instance, storage, image, and operation endpoints', async () => {
-    const responsePlans = Array.from({ length: 33 }, () => ({
+    const responsePlans = Array.from({ length: 31 }, () => ({
       status: 200,
       body: fixture(serverResponse),
     }));
@@ -402,8 +157,6 @@ describe('IncusClient', () => {
     const volumeName = 'nyv-33333333333343338333333333333333';
     const fingerprint = 'a'.repeat(64);
 
-    await incus.updateServer({ config: { 'core.https_address': ':8443' } });
-    await incus.patchServer({ config: { 'core.https_address': ':8443' } });
     await incus.getResources();
     await incus.getNetwork('vmbr0');
     await incus.getNetworkState('vmbr0');
@@ -447,8 +200,6 @@ describe('IncusClient', () => {
       path: request.options.path,
     }));
     expect(requestSummary).toEqual([
-      { method: 'PUT', path: '/1.0' },
-      { method: 'PATCH', path: '/1.0' },
       { method: 'GET', path: '/1.0/resources' },
       { method: 'GET', path: '/1.0/networks/vmbr0' },
       { method: 'GET', path: '/1.0/networks/vmbr0/state' },
@@ -595,7 +346,7 @@ describe('IncusClient', () => {
     expect(driver.requests[1].options.headers).toMatchObject({
       'If-Match': 'etag-actual',
     });
-    const body = JSON.parse(driver.requests[1].chunks[0].toString('utf8')) as {
+    const body = JSON.parse(driver.requests[1].body!.toString('utf8')) as {
       config: Record<string, string>;
       devices: Record<string, Record<string, string>>;
       profiles: string[];
@@ -624,13 +375,39 @@ describe('IncusClient', () => {
       document.devices = devices;
       return document;
     });
-    const body = JSON.parse(driver.requests[1].chunks[0].toString('utf8')) as {
+    const body = JSON.parse(driver.requests[1].body!.toString('utf8')) as {
       devices: Record<string, Record<string, string>>;
       profiles: string[];
     };
     expect(body.profiles).toEqual([]);
     expect(body.devices.operatorDisk).toBeUndefined();
     expect(body.devices.eth0).toBeDefined();
+  });
+
+  it('passes the operation wait timeout and abort signal to the tunnel', async () => {
+    const driver = new RequestDriver([{ status: 200, body: fixture(serverResponse) }]);
+    const controller = new AbortController();
+    const incus = client(driver, { operationWaitTimeoutMs: 50_000 });
+    await incus.getOperationWait('11111111-1111-4111-8111-111111111111', { signal: controller.signal });
+    expect(driver.requests[0].options.timeoutMs).toBe(50_000);
+    expect(driver.requests[0].options.signal).toBe(controller.signal);
+    expect(driver.requests[0].options.path).toBe(
+      '/1.0/operations/11111111-1111-4111-8111-111111111111/wait?timeout=50',
+    );
+  });
+
+  it('surfaces tunnel failures unchanged', async () => {
+    const incus = new IncusClient({
+      tunnel: {
+        request: async () => {
+          throw new IncusError('SERVER_UNREACHABLE', 'retry', { reason: 'agent_disconnected' });
+        },
+        openWebSocket: async () => {
+          throw new IncusError('SERVER_UNREACHABLE', 'retry', { reason: 'agent_disconnected' });
+        },
+      },
+    });
+    await expect(incus.getServer()).rejects.toMatchObject({ code: 'SERVER_UNREACHABLE', disposition: 'retry' });
   });
 
   it('enforces the response body limit', async () => {
@@ -710,12 +487,7 @@ describe('IncusClient', () => {
     });
   });
 
-  it('honors TLS leaf fingerprint pinning and read-after-timeout contract', async () => {
-    expect(leafCertificateFingerprint(leafCertificate)).toBe(leafFingerprint);
-    expect(() => assertLeafCertificateFingerprint(leafCertificate, '0'.repeat(64))).toThrowError(
-      'certificate did not match',
-    );
-
+  it('honors the read-after-timeout contract', async () => {
     let reads = 0;
     await expect(
       readAfterTimeout(
@@ -770,163 +542,18 @@ describe('IncusClient', () => {
     ).rejects.toBe(instance404);
   });
 
-  it('performs one-time leaf fingerprint TOFU before reusing the pin', async () => {
-    const driver = new RequestDriver([
-      { status: 200, body: fixture(serverResponse) },
-      { status: 200, body: fixture(serverResponse) },
-    ]);
-    const observed: string[] = [];
-    const incus = client(driver, {
-      tls: {
-        cert: 'client-certificate',
-        key: 'client-key',
-        onFirstFingerprint: (fingerprint) => {
-          observed.push(fingerprint);
-        },
-      },
-    });
-    await incus.getServer();
-    await incus.getServer();
-    expect(observed).toEqual([leafFingerprint]);
-    expect(incus.pinnedFingerprint).toBe(leafFingerprint);
-  });
-
-  it('checks the submitted expected fingerprint before invoking TOFU persistence', async () => {
-    const driver = new RequestDriver([{ status: 200, body: fixture(serverResponse) }]);
-    const observed: string[] = [];
-    const incus = client(driver, {
-      tls: {
-        cert: 'client-certificate',
-        key: 'client-key',
-        ca: 'server-ca',
-        expectedFingerprint: '0'.repeat(64),
-        onFirstFingerprint: (fingerprint) => {
-          observed.push(fingerprint);
-        },
-      },
-    });
-
-    await expect(incus.getServer()).rejects.toMatchObject({ code: 'TLS_PIN_MISMATCH' });
-    expect(observed).toEqual([]);
-    expect(incus.pinnedFingerprint).toBeUndefined();
-  });
-
-  it('passes pin-mode TLS options when a leaf fingerprint is configured', async () => {
-    const driver = new RequestDriver([{ status: 200, body: fixture(serverResponse) }]);
-    const incus = client(driver, {
-      tls: {
-        cert: 'client-certificate',
-        key: 'client-key',
-        ca: 'server-ca',
-        fingerprint: leafFingerprint,
-      },
-      operationWaitTimeoutMs: 7_000,
-    });
-
-    await incus.getOperationWait('11111111-1111-4111-8111-111111111111');
-    expect(driver.requests[0].options).toMatchObject({
-      // Bootstrap CA is host-specific; pin mode disables CA rejection.
-      ca: undefined,
-      rejectUnauthorized: false,
-    });
-    expect(driver.requests[0].options.path).toBe(
-      '/1.0/operations/11111111-1111-4111-8111-111111111111/wait?timeout=7',
-    );
-  });
-
-  it('uses the operation wait timeout as the HTTPS deadline for a long wait', async () => {
-    vi.useFakeTimers();
-    try {
-      const driver = new RequestDriver([{ status: 200, body: '', defer: true }]);
-      const incus = client(driver, {
-        timeouts: { connectMs: 5, headersMs: 5, bodyMs: 5, totalMs: 5 },
-        operationWaitTimeoutMs: 50,
-      });
-      const pending = incus.getOperationWait('11111111-1111-4111-8111-111111111111');
-      const outcome = pending.then(
-        () => null,
-        (error: unknown) => error,
-      );
-
-      await vi.advanceTimersByTimeAsync(49);
-      expect(driver.requests[0].destroyed).toBe(false);
-      await vi.advanceTimersByTimeAsync(1);
-      await expect(outcome).resolves.toMatchObject({
-        code: 'INCUS_TIMEOUT',
-        details: { phase: 'total' },
-      });
-      expect(driver.requests[0].destroyed).toBe(true);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it('aborts a long operation wait through the underlying HTTPS request', async () => {
-    const driver = new RequestDriver([{ status: 200, body: '', defer: true }]);
-    const controller = new AbortController();
-    const incus = client(driver, {
-      operationWaitTimeoutMs: 60_000,
-    });
-    const pending = incus.getOperationWait('11111111-1111-4111-8111-111111111111', {
-      signal: controller.signal,
-    });
-    const assertion = expect(pending).rejects.toMatchObject({
-      code: 'INCUS_TIMEOUT',
-      details: { phase: 'total' },
-    });
-
-    controller.abort();
-    await assertion;
-    expect(driver.requests[0].destroyed).toBe(true);
-  });
-
-  it('aborts a deferred request within the total timeout', async () => {
-    const driver = new RequestDriver([{ status: 200, body: '', defer: true }]);
-    const incus = client(driver, {
-      timeouts: { connectMs: 20, headersMs: 20, bodyMs: 20, totalMs: 5 },
-    });
-    await expect(incus.getServer()).rejects.toMatchObject({
-      code: 'INCUS_TIMEOUT',
-      disposition: 'retry',
-    });
-    expect(driver.requests[0].destroyed).toBe(true);
-  });
-
-  it('honors an already-aborted AbortSignal without creating a socket', async () => {
-    const controller = new AbortController();
-    controller.abort();
-    const driver = new RequestDriver([]);
-    const incus = client(driver);
-    await expect(incus.getServer({ signal: controller.signal })).rejects.toMatchObject({
-      code: 'INCUS_TIMEOUT',
-      disposition: 'retry',
-    });
-    expect(driver.requests).toHaveLength(0);
-  });
-
   it('keeps exec fd secrets in the backend websocket URL and out of the session object', async () => {
     const driver = new RequestDriver([{ status: 202, body: fixture(execAcceptedResponse) }]);
-    const websocketUrls: string[] = [];
-    const websocketFactory: IncusWebSocketFactory = (url) => {
-      websocketUrls.push(url);
-      const socket = new EventEmitter() as EventEmitter & {
-        close: () => void;
-        send: (data: string | Buffer) => void;
-      };
-      socket.close = () => undefined;
-      socket.send = () => undefined;
-      queueMicrotask(() => socket.emit('open'));
-      return socket as unknown as IncusWebSocketLike;
-    };
-    const incus = client(driver, { websocketFactory });
+    const incus = client(driver);
     const session = await incus.openExecWebSockets('nyc-11111111111141118111111111111111', {
       command: ['/bin/sh'],
       interactive: true,
     });
 
-    expect(websocketUrls).toHaveLength(2);
-    expect(websocketUrls.join('\n')).toContain('fixture-stdin-secret');
-    expect(websocketUrls.join('\n')).toContain('fixture-control-secret');
+    expect(driver.websocketPaths).toHaveLength(2);
+    expect(driver.websocketPaths.join('\n')).toContain('fixture-stdin-secret');
+    expect(driver.websocketPaths.join('\n')).toContain('fixture-control-secret');
+    expect(driver.websocketPaths.every((path) => path.startsWith('/1.0/operations/'))).toBe(true);
     expect(JSON.stringify(session)).not.toContain('fixture-stdin-secret');
     expect(JSON.stringify(session)).not.toContain('fixture-control-secret');
     session.close();

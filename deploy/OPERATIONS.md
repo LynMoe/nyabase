@@ -2,15 +2,15 @@
 
 The deployment is one Backend process (HTTP API, `/ws/*` gateways and
 background workers) over PostgreSQL as the authoritative control-plane database
-and VictoriaMetrics Single for metrics. Short-lived state (server trust tokens,
-console sessions) lives in Backend memory and is lost on restart. Workloads run
+and VictoriaMetrics Single for metrics. Short-lived state (console sessions)
+lives in Backend memory and is lost on restart. Workloads run
 as Incus system containers; Compose is only the control-plane infrastructure and
 smoke-test boundary.
 
-The Backend connects directly to each Incus server over HTTPS with mutual TLS.
-Each server also exposes the read-only node-exporter metrics endpoint. The
-node-exporter has no control or Incus mutation capability; durable desired state,
-intents, and reconciliation claims remain in PostgreSQL.
+The Backend never connects to an Incus server. Each server runs `nyabase-agent`,
+which dials the Backend over WebSocket, fronts the local Incus unix socket behind
+a fixed policy, and supplies host metrics. Durable desired state, intents, and
+reconciliation claims remain in PostgreSQL.
 
 ## Prepare
 
@@ -295,11 +295,10 @@ rebuilding vmbr.
 
 - PostgreSQL is the sole source of truth. A PostgreSQL outage must stop new
   control mutations and reconciliation.
-- Server trust tokens and console sessions are held only in Backend memory.
-  Durable intents and reconciliation claims remain in PostgreSQL. A Backend
-  restart discards unconsumed trust tokens: the affected `server.connect`
-  intent fails with `TRUST_TOKEN_MISSING` and the operator resubmits the
-  connect request. Open console sessions end with the process.
+- Console sessions are held only in Backend memory and end with the process.
+  Durable intents and reconciliation claims remain in PostgreSQL. Agents
+  reconnect on their own after a Backend restart; agent enrollment tokens and
+  credentials are stored (as digests) in PostgreSQL.
 - Login rate limits are per Backend process and reset on restart.
 - Metrics samples queue in Backend memory (bounded by point and byte limits)
   and are written directly to VictoriaMetrics. When VictoriaMetrics is down or
@@ -580,125 +579,88 @@ from the product SLO and measured baseline, not from this example deployment.
   已存在的到期/撤销台账行在用户被禁用期间照常推进并清除。删除账号仍要求其名下没有任何资源。
 - 管理员仍可对某用户在某服务器上的资源手动清除：`POST /api/users/:userId/servers/:serverId/purge-resources`。
 
-## Incus 客户端证书（首次启动自动生成，不轮换）
+## 主机 Agent（每台 Incus 主机一个）
 
-控制平面使用一张**共享**的 Incus 客户端证书，以 mTLS 调用每台 Incus。
-首次需要它时（通常是第一次连接服务器）后端用 `openssl req -x509 -days 3650`
-自动生成（约 10 年），私钥以 `ssh.keyEncryptionSecret` 加密，存入单行表
-`system.incus_client_identity`（`certificate_pem`、`encrypted_private_key`、
-`fingerprint`、`not_after`、`created_at`）。并发首启动是安全的：生成方
-`INSERT … ON CONFLICT DO NOTHING` 后重读，最终只有一行。
+Backend **不直连** Incus，也不主动连接任何主机。每台 Incus 主机运行
+`nyabase-agent`（`packages/agent`），由它主动连到 Backend：
 
-- 不提供轮换、导入或配置项；`incus.clientCertificate*` / `incus.clientPrivateKey*`
-  与 Compose secrets `incus_client_cert` / `incus_client_key` 已删除。
-  部署只需提供 Incus 服务器 CA（`INCUS_CA_FILE` / `incus_ca`）。
-- 只读查看指纹与过期时间：`GET /api/admin/system-settings/incus-client-identity`
-  （`ManageSystemSettings` 或 `ManageServers`），前端在服务器列表页展示。
-- 连接服务器时，一次性 trust token 把这张证书加入 Incus 信任。后端是否已被信任
-  由 Incus 自己回答（`GET /1.0` 的 `auth=trusted`），重试不再需要 token。
-- 10 年到期前需要人工处理：备份并清空 `system.incus_client_identity` 行后重启，
-  重新生成，再在每台 Incus 上用新的 trust token 重新信任（`incus config trust list`
-  查看旧指纹并清理）。这是极低频的运维动作，没有自动化。
+- 控制连接 `wss://<backend>/ws/agent`，以 `Authorization: Bearer <凭据>` 鉴权；
+  Backend 只存凭据的 sha256。backend 发来的 Incus 请求、指标采集都走这条连接。
+- 每个 Incus WebSocket（事件、exec/控制台）由 agent 另开一条
+  `wss://<backend>/ws/agent/stream?id=…` 回连，逐帧转发。
+- agent 经本机 `/var/lib/incus/unix.socket` 访问 Incus，不开监听端口，Incus 也
+  不需要开 `core.https_address`、不需要任何 trust 条目。
+- agent 是安全边界：每个请求先过 `packages/agent/src/policy.ts`。只允许操作
+  `nyc-*` 实例与 `nyv-*` 卷；配置白名单；禁止 `raw.*`、特权容器、宿主路径设备、
+  profiles、证书/服务器配置/网络/存储池写入；`security.idmap.isolated` 必须为
+  true；网卡必须开 IPv4/MAC 过滤且 `host_name` 为 `nyh*`；`volatile.*` 一律改回
+  Incus 当前值。即使 Backend 被攻破，也拿不到宿主机 root。
+- agent 常驻维护 nft 表 `bridge nyabase_guard`：在 `nyh*` veth 上双向丢弃所有
+  IPv6 与 802.1Q/802.1ad 帧（不依赖 `br_netfilter`，与 Docker 的 iptables 规则不
+  冲突），并以 `nyabase_node_ipv6_guard_present` 上报；预检要求它为 1。
 
-### 控制平面被锁在外面时的恢复
+### 接入（enrollment）
 
-在**每一台** Incus 主机上以 root 执行：
-
-```bash
-incus config trust list
-incus config trust add /path/to/nyabase-client.crt
-```
-
-从 `system.incus_client_identity.certificate_pem` 导出证书，确认已作为受信任的
-root 客户端加入后再让控制平面重试。
-
-## 在每台 Incus 主机安装 node-exporter
-
-node-exporter 是独立进程（`packages/node-exporter`），**不是** Backend
-的一部分。它只提供只读 HTTPS `/metrics`，没有 Incus 变更能力。仓库
-单元文件为 `deploy/nyabase-node-exporter.service`。
+1. 管理员在前端添加服务器（或 `POST /api/servers`），响应里带一次性接入令牌
+   `nyae.…`（24 小时有效，只显示一次，库里只存摘要）。之后可用
+   `POST /api/servers/:id/agent-enrollment {expectedRevision}` 重新签发；
+   重新签发不会断开正在运行的 agent。
+2. agent 首次启动时用令牌调用 `POST /api/agent/enroll`，换得长期凭据 `nyak.…`，
+   保存在 `/var/lib/nyabase-agent/credential`（0600）。之后令牌不再被读取。
+3. 新 agent 用令牌接入成功会替换凭据并断开旧连接。若要在已接入过的主机上
+   重新接入：停 agent、删 `/var/lib/nyabase-agent/credential`、写入新令牌后再启动。
 
 ### 构建与安装
 
 ```bash
 pnpm --filter @nyabase/common build
-pnpm --filter @nyabase/node-exporter build
-sudo install -d -o nyabase-node -g nyabase-node /opt/nyabase/node-exporter
-# Copy packages/node-exporter/dist and production node_modules
-# (workspace package @nyabase/common must resolve).
-sudo install -D -m 0644 deploy/nyabase-node-exporter.service \
-  /etc/systemd/system/nyabase-node-exporter.service
-```
-
-进程用户使用 `nyabase-node`，不要用 root。CPU / PSI / sysctl 指标不需要
-特权。`nvidia-smi`（GPU 显示序号）通常只需 `video` / `render` 组；若进程
-跑不了 `nvidia-smi`，GPU 指标会被省略而不是崩溃。`smartctl` 权限不足时省略。
-`nft list table bridge incus` 需要 `CAP_NET_ADMIN`（unit 的
-`AmbientCapabilities` + `CapabilityBoundingSet`，保持 `NoNewPrivileges=true`）。
-**不要写 sudoers**——与 `NoNewPrivileges` 不兼容。`CAP_NET_ADMIN` 比 `nft list`
-更宽（可以改宿主机网络），bounding set 仅此一项。nft 不可用时 exporter 必须
-显式输出 `nyabase_node_network_nft_available 0`，不能静默省略。
-
-### TLS、token、监听地址
-
-```bash
+pnpm --filter @nyabase/agent build
 sudo useradd --system --no-create-home --home-dir /nonexistent \
-  --shell /usr/sbin/nologin nyabase-node
-sudo install -d -o nyabase-node -g nyabase-node -m 0750 /etc/nyabase/node-exporter
-# Issue a server certificate whose leaf fingerprint will be pinned on the
-# Server object (nodeMetrics.serverCertFingerprint).
-sudo openssl req -x509 -newkey rsa:3072 -nodes -days 365 \
-  -subj "/CN=$(hostname -f)" \
-  -keyout /etc/nyabase/node-exporter/tls.key \
-  -out /etc/nyabase/node-exporter/tls.crt
-sudo chmod 0400 /etc/nyabase/node-exporter/tls.key
-sudo chmod 0440 /etc/nyabase/node-exporter/tls.crt
-sudo chown nyabase-node:nyabase-node /etc/nyabase/node-exporter/tls.*
-```
-
-`/etc/nyabase/node-exporter.env`（mode 0600，属主 `nyabase-node`）：
-
-```bash
-NODE_EXPORTER_TOKEN=<openssl rand -base64 48，32–1024 字符且无空白>
-NODE_EXPORTER_TLS_KEY=/etc/nyabase/node-exporter/tls.key
-NODE_EXPORTER_TLS_CERT=/etc/nyabase/node-exporter/tls.crt
-NODE_EXPORTER_HOST=0.0.0.0
-NODE_EXPORTER_PORT=9109
-# Optional LAN bridge name (vmbr0) used only as a fallback if
-# /proc/sys/net/ipv4/conf cannot be listed. Prefer scanning all
-# interfaces so bridge slaves are visible.
-# NODE_EXPORTER_PARENT_INTERFACE=vmbr0
-```
-
-启动命令与软件包 `scripts.start` 相同：`node dist/main.js`（需要 Node.js 22+）。
-
-```bash
+  --shell /usr/sbin/nologin nyabase-agent
+sudo install -d /opt/nyabase/agent
+# Copy packages/agent/dist + package.json and production node_modules
+# (@nyabase/common, zod, ws must resolve).
+sudo install -D -m 0644 deploy/nyabase-agent.service /etc/systemd/system/nyabase-agent.service
+sudo install -d -m 0700 /etc/nyabase
+sudo tee /etc/nyabase/agent.env >/dev/null <<ENV
+NYABASE_BACKEND_URL=https://nyabase.example.com
+NYABASE_AGENT_ENROLLMENT_TOKEN=<控制台显示的一次性令牌>
+# NYABASE_BACKEND_CA_FILE=/etc/nyabase/backend-ca.pem   # 私有 CA 时
+ENV
+sudo chmod 0600 /etc/nyabase/agent.env
 sudo systemctl daemon-reload
-sudo systemctl enable --now nyabase-node-exporter.service
-sudo systemctl status nyabase-node-exporter.service
+sudo systemctl enable --now nyabase-agent
 ```
 
-防火墙只允许控制平面主机访问 TCP `9109`（或你设置的 `NODE_EXPORTER_PORT`）。
-不要把该端口暴露到宾客 / 公网网段。若主机有独立管理地址，把
-`NODE_EXPORTER_HOST` 绑到该地址。
+unit 以 `nyabase-agent` 用户运行，附加 `incus-admin` 组（访问 Incus socket），
+只保留 `CAP_NET_ADMIN`（维护 `nyabase_guard`、读取 `bridge incus`）。需要 Node.js 20+。
+`nvidia-smi` 需要 `video`/`render` 组时自行追加 `SupplementaryGroups`。
 
-### 控制平面如何 scrape / pull
+### 指标
 
-在 Server 对象上配置（创建或 PATCH）：
+Backend 的 `NodeMetricsScrapeService` 每 15 秒经控制连接请求一次
+`metrics.collect`（主机、cgroup、GPU、nft 与 IPv6 拦截状态），写入 VictoriaMetrics
+并更新服务器的 `metricsHealth`。agent 断开时服务器标记为 `unreachable`，重连后
+自动恢复并刷新 CPU 拓扑、GPU 与存储池清点。
 
-- `nodeMetrics.endpoint`：固定 HTTPS URL，路径必须是 `/metrics`，例如
-  `https://incus-host.example:9109/metrics`（对应库列
-  `node_metrics_endpoint`）。
-- `nodeMetrics.token`：与 `NODE_EXPORTER_TOKEN` 相同的 bearer；入库后加密，
-  API 只回 `tokenFingerprint`。
-- `nodeMetrics.serverCertFingerprint`：exporter 叶子证书指纹（TLS pin）。
+### 容器资源约束
 
-Backend 由 `NodeMetricsScrapeService`
-每隔 15 秒（`NODE_METRICS_SCRAPE_INTERVAL_MS`）通过
-`AuthenticatedNodeMetricsPullAdapter` 拉取：HTTPS Bearer + 证书钉扎，写入
-VictoriaMetrics，并更新 `nodeMetrics.health`（`online` /
-`unreachable` / `unknown` / `unconfigured`）。服务器预检也会拉一次同一端
-点；GPU 的 nvidia-smi 序号来自这些只读样本，而不是 Incus。
+- **CPU**：授权给整数核数（`cpuCores`，NULL = 不限）。Backend 为每个（服务器, 用户）
+  分配一组逻辑 CPU（`control.user_cpu_sets`：尽量不与其他用户重叠、超线程成对、
+  同 NUMA），该用户在该服务器上的所有容器都绑定到这整组核（`limits.cpu` 一律为
+  cpuset），合计最多用满这组核。服务器的 `reservedCpus` 永不分配给容器；修改后所有
+  容器在线改绑。不限核的用户绑定全部未预留的核。
+- **内存**：每个容器单独设大小，但（用户, 服务器）的总和不超过授权。
+- **统一限额**（系统设置，在线生效）：`containers.processLimit`（`limits.processes`）、
+  `containers.networkIngressMbit` / `networkEgressMbit`（网卡 `limits.ingress/egress`）、
+  `containers.diskReadMBps` / `diskWriteMBps`（root 与本地卷 `limits.read/write`；
+  CephFS 无块设备，限不了）。
+- **隔离**：`security.idmap.isolated=true`（每个容器独立 uid 段，需要 `/etc/subuid`
+  给 root 足够的范围），自定义卷 `security.shifted=true`，同一用户的容器共享卷时
+  属主一致；`security.port_isolation=true`；IPv6 由 `nyabase_guard` 禁用。
+- **漂移**：全量扫描比较实例的全部配置（只放过 `volatile.*`、`image.*`）与全部设备，
+  设备键双向比较，`profiles` 必须为空；有差异就整份写回并记审计
+  `container.drift_corrected`。
 
 ### GPU 直通（NVIDIA）
 
@@ -738,13 +700,14 @@ catalog DTO 的 version 字符串是 bake serial（`v20260921_nb01`），不是�
   `nyabase_e2e_<run id>` on the PostgreSQL given in `tests/e2e/lab.env`, generates
   the four boot secrets and starts a single-process Backend (clean environment,
   `NYABASE_CONFIG_FILE` pointing at a missing file) plus the two Rust proxies on the
-  configured ports, then registers the lab Incus servers through the trust-token
-  connect flow and writes `state.json` in the run directory.
+  configured ports, registers the lab servers, starts a run-scoped agent on each
+  lab host (through an ssh reverse tunnel) that enrolls with the server's one-time
+  token, then finishes the registration and writes `state.json` in the run directory.
 - `pnpm e2e:run [word...]` runs the `scenarios/*.test.ts` files (all, or those whose
   name contains one of the words).
 - `pnpm e2e:down` stops the processes and, on each lab host, deletes only instances
-  labelled with the run's server ids, volumes the run's database recorded, and the
-  trust entry with the run's Incus client fingerprint; then drops the database and
+  labelled with the run's server ids, volumes the run's database recorded, the run's
+  agent unit and the agent's nft guard table; then drops the database and
   removes the run directory. It is safe to repeat after a partial `up`.
 
 Inputs are documented in `tests/e2e/lab.env.example`; the full description is in

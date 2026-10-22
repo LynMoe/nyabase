@@ -250,7 +250,7 @@ describe('volume API placement paths', () => {
       })
       // Current coverage: the server (merged view row), then the shared backend.
       .mockResolvedValueOnce({
-        cpu_millis: null,
+        cpu_cores: null,
         mem_bytes: null,
         disk_bytes: null,
         gpu_pci_addresses: [],

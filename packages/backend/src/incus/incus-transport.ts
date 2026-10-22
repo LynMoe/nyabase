@@ -1,26 +1,17 @@
-import { createHash } from 'node:crypto';
-import * as https from 'node:https';
-import { checkServerIdentity } from 'node:tls';
-import type { RequestOptions } from 'node:https';
-import WebSocket, { type ClientOptions as WebSocketClientOptions } from 'ws';
-import {
-  IncusError,
-  mapIncusTransportError,
-  normalizeCertificateFingerprint,
-} from './incus-errors.js';
+import type { IncomingHttpHeaders } from 'node:http';
+import { MAX_AGENT_INCUS_BODY_BYTES } from '@nyabase/common';
+import { IncusError } from './incus-errors.js';
 import type {
   IncusClientOptions,
   IncusFileResponse,
   IncusHttpMethod,
-  IncusRequestFactory,
   IncusRequestOptions,
   IncusResponse,
   IncusTimeouts,
-  IncusTlsOptions,
-  IncusWebSocketFactory,
+  IncusTunnel,
   IncusWebSocketLike,
 } from './incus-client-types.js';
-import { sendExchange, type ExchangeHost, type ExchangeResult } from './incus-http-exchange.js';
+import { parseResponse, type ExchangeResult } from './incus-http-exchange.js';
 
 const DEFAULT_TIMEOUTS: IncusTimeouts = {
   connectMs: 5_000,
@@ -30,7 +21,6 @@ const DEFAULT_TIMEOUTS: IncusTimeouts = {
 };
 
 const MAX_TIMEOUT_MS = 600_000;
-const DEFAULT_MAX_BODY_BYTES = 16 * 1024 * 1024;
 
 export function boundedTimeout(value: number | undefined, fallback: number): number {
   const timeout = value ?? fallback;
@@ -92,103 +82,46 @@ export function appendQuery(
   return queryString ? `${path}${path.includes('?') ? '&' : '?'}${queryString}` : path;
 }
 
-function mutableCa(
-  ca: string | Buffer | readonly (string | Buffer)[] | undefined,
-): string | Buffer | (string | Buffer)[] | undefined {
-  if (Array.isArray(ca)) {
-    return Array.from(ca) as (string | Buffer)[];
+function assertApiPath(path: string): void {
+  const rawPath = path.split(/[?#]/, 1)[0] ?? '';
+  if (
+    !path.startsWith('/1.0')
+    || path.startsWith('//')
+    || /[\u0000-\u001f\u007f#]/.test(path)
+    || /%2e|%5c/i.test(rawPath)
+    || (rawPath !== '/1.0' && !rawPath.startsWith('/1.0/'))
+  ) {
+    throw new IncusError('INCUS_BAD_REQUEST', 'managed_failure', { reason: 'path' });
   }
-  return ca as string | Buffer | undefined;
-}
-
-export function encodeCertificateForPost(certificatePem: string): string {
-  const match = /^-----BEGIN CERTIFICATE-----\s*([\s\S]*?)\s*-----END CERTIFICATE-----\s*$/.exec(
-    certificatePem.trim(),
-  );
-  const encoded = match?.[1]?.replace(/\s/g, '');
-  if (!encoded || encoded.length % 4 !== 0 || !/^[A-Za-z0-9+/]+={0,2}$/.test(encoded)) {
-    throw new IncusError('INCUS_BAD_REQUEST', 'managed_failure', {
-      reason: 'invalid_certificate_pem',
-    });
-  }
-  const der = Buffer.from(encoded, 'base64');
-  if (der.byteLength === 0) {
-    throw new IncusError('INCUS_BAD_REQUEST', 'managed_failure', {
-      reason: 'invalid_certificate_pem',
-    });
-  }
-  return der.toString('base64');
-}
-
-export function leafCertificateFingerprint(raw: Buffer): string {
-  return createHash('sha256').update(raw).digest('hex');
-}
-
-export function assertLeafCertificateFingerprint(raw: Buffer, expected: string): string {
-  const actual = leafCertificateFingerprint(raw);
-  if (actual !== normalizeCertificateFingerprint(expected)) {
-    throw new IncusError('TLS_PIN_MISMATCH', 'managed_failure');
-  }
-  return actual;
 }
 
 /**
- * Connection handling shared by every Incus endpoint: endpoint allow-listing,
- * mTLS with leaf-fingerprint pinning (trust on first use), request execution
- * and websocket dialing.
+ * Request framing shared by every Incus endpoint: path checks, body encoding
+ * and response parsing. The bytes travel through the server's host agent.
  */
-export class IncusTransport implements ExchangeHost {
-  readonly endpoint: string;
-
-  private readonly baseUrl: URL;
-  readonly tlsOptions: IncusTlsOptions;
-  private readonly allowedHosts: ReadonlySet<string>;
+export class IncusTransport {
   readonly timeouts: IncusTimeouts;
   readonly operationWaitTimeoutMs: number;
   readonly maxBodyBytes: number;
-  readonly requestFactory: IncusRequestFactory;
-  private readonly websocketFactory: IncusWebSocketFactory;
-  serverFingerprint?: string;
-  private firstFingerprintPromise?: Promise<void>;
+  private readonly tunnel: IncusTunnel;
 
   constructor(options: IncusClientOptions) {
-    this.baseUrl = this.validateEndpoint(options.endpoint, options.allowedHosts);
-    this.endpoint = this.baseUrl.origin;
-    this.allowedHosts = new Set(options.allowedHosts.map((host) => host.toLowerCase()));
-    this.tlsOptions = options.tls;
+    this.tunnel = options.tunnel;
     this.timeouts = normalizeTimeouts(options.timeouts);
     this.operationWaitTimeoutMs = boundedTimeout(
       options.operationWaitTimeoutMs,
       DEFAULT_TIMEOUTS.totalMs,
     );
-    this.maxBodyBytes = options.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES;
+    this.maxBodyBytes = options.maxBodyBytes ?? MAX_AGENT_INCUS_BODY_BYTES;
     if (
-      !Number.isSafeInteger(this.maxBodyBytes) ||
-      this.maxBodyBytes <= 0 ||
-      this.maxBodyBytes > 128 * 1024 * 1024
+      !Number.isSafeInteger(this.maxBodyBytes)
+      || this.maxBodyBytes <= 0
+      || this.maxBodyBytes > MAX_AGENT_INCUS_BODY_BYTES
     ) {
       throw new IncusError('INCUS_INVALID_RESPONSE', 'managed_failure', {
         reason: 'body_limit',
       });
     }
-    if (!options.tls.cert || !options.tls.key) {
-      throw new IncusError('TLS_ERROR', 'managed_failure');
-    }
-    if (options.tls.fingerprint) {
-      this.serverFingerprint = normalizeCertificateFingerprint(options.tls.fingerprint);
-    }
-    if (!this.serverFingerprint && !options.tls.onFirstFingerprint) {
-      throw new IncusError('TLS_PIN_MISMATCH', 'managed_failure');
-    }
-    this.requestFactory =
-      options.requestFactory ??
-      ((requestOptions, callback) => https.request(requestOptions, callback));
-    this.websocketFactory =
-      options.websocketFactory ?? ((url, websocketOptions) => new WebSocket(url, websocketOptions));
-  }
-
-  get pinnedFingerprint(): string | undefined {
-    return this.serverFingerprint;
   }
 
   async requestJson<T>(
@@ -222,216 +155,19 @@ export class IncusTransport implements ExchangeHost {
     return response.value;
   }
 
-  private tlsPin(): string | undefined {
-    return this.serverFingerprint ?? this.tlsOptions.expectedFingerprint;
+  dialWebSocket(path: string, signal?: AbortSignal): Promise<IncusWebSocketLike> {
+    assertApiPath(path);
+    return this.tunnel.openWebSocket(path, signal);
   }
 
-  private pinnedTlsSocketOptions(): {
-    readonly ca: string | Buffer | Array<string | Buffer> | undefined;
-    readonly rejectUnauthorized: boolean;
-  } {
-    // Multi-server Incus deployments each have their own self-signed leaf.
-    // The control-plane bootstrap CA only matches the first host; once a leaf
-    // fingerprint pin is present, disable CA rejection and enforce the pin in
-    // checkServerIdentity / acceptPeerFingerprint instead.
-    if (this.tlsPin()) {
-      return { ca: undefined, rejectUnauthorized: false };
-    }
-    return {
-      ca: mutableCa(this.tlsOptions.ca),
-      rejectUnauthorized: true,
-    };
-  }
-
-  async dialWebSocket(path: string, signal?: AbortSignal): Promise<IncusWebSocketLike> {
-    const url = this.urlForPath(path);
-    url.protocol = 'wss:';
-    let peerFingerprintRaw: Buffer | undefined;
-    const pinned = this.pinnedTlsSocketOptions();
-
-    const websocketOptions: WebSocketClientOptions = {
-      cert: this.tlsOptions.cert,
-      key: this.tlsOptions.key,
-      ca: pinned.ca,
-      rejectUnauthorized: pinned.rejectUnauthorized,
-      checkServerIdentity: ((hostname: string, certificate: unknown) => {
-        const peerCertificate = certificate as Parameters<typeof checkServerIdentity>[1];
-        if (!peerCertificate.raw) {
-          return new Error('Incus TLS peer certificate is unavailable');
-        }
-        peerFingerprintRaw = peerCertificate.raw;
-        // Fingerprint-pin mode is authoritative for Incus mTLS. Remote Incus
-        // leaves often omit the LAN listen IP from SAN (only 127.0.0.1), so a
-        // hostname check would reject a correctly pinned server certificate.
-        const pin = this.tlsPin();
-        if (pin) {
-          try {
-            assertLeafCertificateFingerprint(peerCertificate.raw, pin);
-            return undefined;
-          } catch {
-            return new Error('Incus TLS certificate pin mismatch');
-          }
-        }
-        return checkServerIdentity(hostname, peerCertificate);
-      }) as unknown as NonNullable<WebSocketClientOptions['checkServerIdentity']>,
-    };
-
-    return new Promise<IncusWebSocketLike>((resolve, reject) => {
-      let settled = false;
-      let timer: NodeJS.Timeout | undefined;
-      let socket: IncusWebSocketLike | undefined;
-      const cleanup = (): void => {
-        signal?.removeEventListener('abort', abort);
-      };
-      const fail = (error: unknown): void => {
-        if (settled) return;
-        settled = true;
-        if (timer) clearTimeout(timer);
-        cleanup();
-        socket?.close();
-        reject(error instanceof IncusError ? error : mapIncusTransportError(error, 'connect'));
-      };
-      const abort = (): void => {
-        if (settled) {
-          socket?.close(1000, 'aborted');
-          socket?.terminate?.();
-          return;
-        }
-        fail(new IncusError('INCUS_TIMEOUT', 'retry', { phase: 'connect' }));
-      };
-      if (signal?.aborted) {
-        abort();
-        return;
-      }
-      signal?.addEventListener('abort', abort, { once: true });
-      timer = setTimeout(() => {
-        fail(new IncusError('INCUS_TIMEOUT', 'retry', { phase: 'connect' }));
-      }, this.timeouts.totalMs);
-      try {
-        socket = this.websocketFactory(url.toString(), websocketOptions);
-        socket.once('open', () => {
-          if (settled) return;
-          void (async () => {
-            if (!this.serverFingerprint) {
-              if (!peerFingerprintRaw) {
-                throw new IncusError('TLS_ERROR', 'retry', { phase: 'connect' });
-              }
-              await this.acceptPeerFingerprint(peerFingerprintRaw);
-            }
-            if (settled) return;
-            settled = true;
-            if (timer) clearTimeout(timer);
-            cleanup();
-            resolve(socket as IncusWebSocketLike);
-          })().catch((error: unknown) => fail(error));
-        });
-        socket.once('close', () => {
-          cleanup();
-        });
-        socket.once('error', (error: unknown) => fail(error));
-        socket.once('close', () => {
-          if (!settled) {
-            fail(new Error('Incus websocket closed during connect'));
-          }
-        });
-      } catch (error) {
-        fail(error);
-      }
-    });
-  }
-
-  private validateEndpoint(endpoint: string, allowedHosts: readonly string[]): URL {
-    let url: URL;
-    try {
-      url = new URL(endpoint);
-    } catch {
-      throw new IncusError('INVALID_ENDPOINT', 'managed_failure');
-    }
-    if (
-      url.protocol !== 'https:' ||
-      url.username ||
-      url.password ||
-      url.search ||
-      url.hash ||
-      (url.pathname !== '' && url.pathname !== '/')
-    ) {
-      throw new IncusError('INVALID_ENDPOINT', 'managed_failure');
-    }
-    const allowed = new Set(allowedHosts.map((host) => host.toLowerCase()));
-    if (allowed.size === 0 || !allowed.has(url.hostname.toLowerCase())) {
-      throw new IncusError('INVALID_ENDPOINT', 'managed_failure', {
-        reason: 'host_not_allowlisted',
-      });
-    }
-    return url;
-  }
-
-  private urlForPath(path: string): URL {
-    const rawPath = path.split(/[?#]/, 1)[0];
-    if (
-      !path.startsWith('/') ||
-      path.startsWith('//') ||
-      /[\u0000-\u001f\u007f]/.test(path) ||
-      /%2e|%5c/i.test(rawPath)
-    ) {
-      throw new IncusError('INCUS_BAD_REQUEST', 'managed_failure', { reason: 'path' });
-    }
-    const url = new URL(path, this.baseUrl);
-    if (
-      url.origin !== this.baseUrl.origin ||
-      !this.allowedHosts.has(url.hostname.toLowerCase()) ||
-      (url.pathname !== '/1.0' && !url.pathname.startsWith('/1.0/'))
-    ) {
-      throw new IncusError('INVALID_ENDPOINT', 'managed_failure');
-    }
-    return url;
-  }
-
-  acceptPeerFingerprint(raw: Buffer): Promise<void> {
-    const actualFingerprint = leafCertificateFingerprint(raw);
-    const expectedFingerprint = this.tlsOptions.expectedFingerprint;
-    if (
-      expectedFingerprint &&
-      actualFingerprint !== normalizeCertificateFingerprint(expectedFingerprint)
-    ) {
-      return Promise.reject(new IncusError('TLS_PIN_MISMATCH', 'managed_failure'));
-    }
-    if (this.serverFingerprint) {
-      assertLeafCertificateFingerprint(raw, this.serverFingerprint);
-      return Promise.resolve();
-    }
-    if (!this.tlsOptions.onFirstFingerprint) {
-      return Promise.reject(new IncusError('TLS_PIN_MISMATCH', 'managed_failure'));
-    }
-    if (!this.firstFingerprintPromise) {
-      const acceptance = Promise.resolve()
-        .then(() => this.tlsOptions.onFirstFingerprint?.(actualFingerprint))
-        .then(() => {
-          this.serverFingerprint = actualFingerprint;
-        });
-      this.firstFingerprintPromise = acceptance.catch((error: unknown) => {
-        this.firstFingerprintPromise = undefined;
-        throw error;
-      });
-    }
-    return this.firstFingerprintPromise.then(() => {
-      if (this.serverFingerprint !== actualFingerprint) {
-        throw new IncusError('TLS_PIN_MISMATCH', 'managed_failure');
-      }
-    });
-  }
-
-  /** Execute one HTTPS request and return the parsed JSON or raw response. */
-  executeRequest(
+  /** Execute one request through the agent and return the parsed JSON or raw response. */
+  async executeRequest(
     method: IncusHttpMethod,
     path: string,
     options: IncusRequestOptions,
   ): Promise<ExchangeResult> {
-    const url = this.urlForPath(path);
-    const headers: Record<string, string> = {
-      accept: options.responseType === 'raw' ? '*/*' : 'application/json',
-      ...options.headers,
-    };
+    assertApiPath(path);
+    const headers: Record<string, string> = { ...options.headers };
     for (const [name, value] of Object.entries(headers)) {
       assertHeaderValue(value, name);
     }
@@ -440,9 +176,23 @@ export class IncusTransport implements ExchangeHost {
       headers['If-Match'] = options.ifMatch;
     }
     const body = this.encodeBody(options, headers);
-    const requestOptions = this.requestOptionsFor(method, url, headers);
-    const requestDeadlineMs = boundedTimeout(options.timeoutMs, this.timeouts.totalMs);
-    return sendExchange(this, requestOptions, body, options, path, requestDeadlineMs);
+    const timeoutMs = boundedTimeout(options.timeoutMs, this.timeouts.totalMs);
+    const response = await this.tunnel.request({
+      method,
+      path,
+      headers,
+      body,
+      timeoutMs,
+      signal: options.signal,
+    });
+    if (response.body.byteLength > this.maxBodyBytes) {
+      throw new IncusError('INCUS_INVALID_RESPONSE', 'managed_failure', { reason: 'body_too_large' });
+    }
+    return parseResponse(
+      { status: response.status, headers: response.headers as IncomingHttpHeaders, body: response.body },
+      options.responseType ?? 'json',
+      path,
+    );
   }
 
   /** The serialized request body, with content headers set; refuses oversized or unserializable bodies. */
@@ -464,51 +214,11 @@ export class IncusTransport implements ExchangeHost {
       }
       headers['content-type'] ??= 'application/json';
     }
-    headers['content-length'] = String(body.byteLength);
     if (body.byteLength > this.maxBodyBytes) {
       throw new IncusError('INCUS_BAD_REQUEST', 'managed_failure', {
         reason: 'request_body_too_large',
       });
     }
     return body;
-  }
-
-  private requestOptionsFor(
-    method: IncusHttpMethod,
-    url: URL,
-    headers: Record<string, string>,
-  ): RequestOptions {
-    const pinned = this.pinnedTlsSocketOptions();
-    return {
-      protocol: 'https:',
-      hostname: url.hostname,
-      port: url.port ? Number(url.port) : 443,
-      path: `${url.pathname}${url.search}`,
-      method,
-      headers,
-      cert: this.tlsOptions.cert,
-      key: this.tlsOptions.key,
-      ca: pinned.ca,
-      rejectUnauthorized: pinned.rejectUnauthorized,
-      servername: url.hostname,
-      checkServerIdentity: (hostname, certificate) => {
-        // Prefer the leaf fingerprint pin over hostname/SAN matching. Incus
-        // server certs commonly list only 127.0.0.1 even when core.https_address
-        // is a LAN IP; connect/onboarding still pins the expected leaf.
-        const pin = this.tlsPin();
-        if (pin) {
-          try {
-            if (!certificate.raw) {
-              return new Error('Incus TLS peer certificate is unavailable');
-            }
-            assertLeafCertificateFingerprint(certificate.raw, pin);
-            return undefined;
-          } catch {
-            return new Error('Incus TLS certificate pin mismatch');
-          }
-        }
-        return checkServerIdentity(hostname, certificate);
-      },
-    };
   }
 }

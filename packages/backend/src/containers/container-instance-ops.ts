@@ -8,6 +8,7 @@ import {
   mergeInstanceSpecContributions,
   readAfterTimeout,
   requestAndWait,
+  type ContainerRuntimeLimits,
   type DesiredInstanceSpec,
   type IncusClientPort,
   type IncusSchema,
@@ -15,7 +16,7 @@ import {
   type ManagedFieldOwnership,
   type ManagedInstanceDocument,
 } from '../incus/index.js';
-import { GPU_CONFIG_PREFIXES, GPU_DEVICE_PREFIXES, gpuInstanceSpec } from '../gpu/instance-spec.js';
+import { gpuInstanceSpec } from '../gpu/instance-spec.js';
 import type { ContainerAttachment, ContainerRow } from './container-reconcile.store.js';
 
 /*
@@ -32,12 +33,14 @@ export interface ActualInstance {
   readonly document: InstanceFull;
 }
 
-/** Managed Incus fields: core plus the NVIDIA GPU config and device prefixes. */
-export const MANAGED_FIELD_OWNERSHIP: ManagedFieldOwnership = {
-  configPrefixes: [...CORE_MANAGED_FIELD_OWNERSHIP.configPrefixes, ...GPU_CONFIG_PREFIXES],
-  deviceNames: CORE_MANAGED_FIELD_OWNERSHIP.deviceNames,
-  devicePrefixes: [...CORE_MANAGED_FIELD_OWNERSHIP.devicePrefixes, ...GPU_DEVICE_PREFIXES],
-};
+/** The platform owns the whole instance document except Incus-maintained config. */
+export const MANAGED_FIELD_OWNERSHIP: ManagedFieldOwnership = CORE_MANAGED_FIELD_OWNERSHIP;
+
+/** What the spec needs beyond the container row: its CPU pinning and the platform limits. */
+export interface ContainerSpecRuntime {
+  readonly cpus: readonly number[];
+  readonly limits: ContainerRuntimeLimits;
+}
 
 const MANAGED_KEY = 'user.nyabase.managed';
 const CONTAINER_ID_KEY = 'user.nyabase.container_id';
@@ -112,6 +115,8 @@ export function toSpecAttachments(
       id: attachment.volume_id,
       incusName: attachment.incus_name,
       poolName: attachment.pool_name,
+      // Shared volumes live on CephFS, which has no block device to throttle.
+      throttled: !attachment.shared,
     },
   }));
 }
@@ -120,6 +125,7 @@ export function toSpecAttachments(
 export function buildContainerSpec(
   row: ContainerRow,
   attachments: readonly InstanceSpecAttachmentInput[],
+  runtime: ContainerSpecRuntime,
 ): DesiredInstanceSpec {
   const base = buildDesiredInstanceSpec({
     container: {
@@ -127,7 +133,7 @@ export function buildContainerSpec(
       serverId: row.server_id,
       revision: row.revision,
       imageFingerprint: row.image_fingerprint,
-      cpuMillis: row.cpu_millis,
+      cpus: runtime.cpus,
       memBytes: row.mem_bytes,
       nesting: row.nesting,
       syscallIntercept: row.syscall_intercept,
@@ -140,6 +146,7 @@ export function buildContainerSpec(
       parentInterface: row.parent_interface ?? '',
     },
     attachments,
+    limits: runtime.limits,
   });
   // GPU contributes only while the server has it enabled.
   const contributions = row.gpu_enabled ? [gpuInstanceSpec(row.gpu_state)] : [];
@@ -339,6 +346,7 @@ export async function putManagedFields(
             );
             document.config = merged.config;
             document.devices = merged.devices;
+            document.profiles = [];
             return document;
           },
           options,

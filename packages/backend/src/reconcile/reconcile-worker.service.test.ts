@@ -256,7 +256,7 @@ describe('ReconcileWorkerService', () => {
     expect(setup.intents.scheduleRetry).toHaveBeenCalledTimes(8);
   });
 
-  it.each(['SERVER_UNREACHABLE', 'TLS_ERROR'] as const)(
+  it.each(['SERVER_UNREACHABLE', 'INCUS_TIMEOUT'] as const)(
     'does not count or reset on %s',
     async (code) => {
       const busy = new IncusError('INSTANCE_BUSY', 'retry', { action: 'start' });
@@ -416,49 +416,6 @@ describe('ReconcileWorkerService', () => {
     },
   );
 
-  it('passes each connect intent fingerprint to its own client lookup', async () => {
-    const firstFingerprint = 'a'.repeat(64);
-    const secondFingerprint = 'b'.repeat(64);
-    const first = {
-      ...intent(),
-      id: '00000000-0000-4000-8000-000000000011',
-      kind: 'server.connect',
-      resourceType: 'server',
-      resourceId: serverId,
-      serverId,
-      request: {
-        trustTokenRef: '00000000-0000-4000-8000-000000000021',
-        expectedServerCertFingerprint: firstFingerprint,
-      },
-    };
-    const second = {
-      ...first,
-      id: '00000000-0000-4000-8000-000000000012',
-      request: {
-        trustTokenRef: '00000000-0000-4000-8000-000000000022',
-        expectedServerCertFingerprint: secondFingerprint,
-      },
-    };
-    const setup = makeWorker();
-    setup.listPending.mockResolvedValue({
-      items: [first, second],
-      nextCursor: null,
-    });
-
-    await setup.worker.runOnce();
-
-    expect(setup.clients.get).toHaveBeenNthCalledWith(
-      1,
-      serverId,
-      { expectedFingerprint: firstFingerprint },
-    );
-    expect(setup.clients.get).toHaveBeenNthCalledWith(
-      2,
-      serverId,
-      { expectedFingerprint: secondFingerprint },
-    );
-  });
-
   it('starts the reconciliation loop on bootstrap and cleans it up on destroy', async () => {
     const setup = makeWorker({});
     setup.worker.onApplicationBootstrap();
@@ -529,37 +486,6 @@ describe('ReconcileWorkerService', () => {
     } finally {
       error.mockRestore();
     }
-  });
-
-  it('processes a pending connect intent before excluding its unknown server from scans', async () => {
-    const unknownServerId = '00000000-0000-4000-8000-000000000013';
-    const expectedFingerprint = 'c'.repeat(64);
-    const clients = {
-      get: vi.fn().mockResolvedValue(stubIncusClient()),
-      listServerIds: vi.fn().mockResolvedValue([]),
-    };
-    const setup = makeWorker({ clients });
-    setup.listPending.mockResolvedValue({
-      items: [{
-        ...intent(),
-        kind: 'server.connect',
-        resourceType: 'server',
-        resourceId: unknownServerId,
-        serverId: unknownServerId,
-        request: {
-          trustTokenRef: '00000000-0000-4000-8000-000000000014',
-          expectedServerCertFingerprint: expectedFingerprint,
-        },
-      }],
-      nextCursor: null,
-    });
-
-    await (setup.worker as unknown as { fullScan: () => Promise<void> }).fullScan();
-
-    expect(clients.get).toHaveBeenCalledWith(
-      unknownServerId,
-      { expectedFingerprint },
-    );
   });
 
   it('waits for a server to become online before opening its event watcher', async () => {

@@ -120,11 +120,10 @@ export function gpuDeviceClaimed(pciAddress?: string): ConflictException {
 
 export function assertCreateNumbers(request: CreateContainerRequest): void {
   if (!Number.isSafeInteger(request.rootSizeBytes) || request.rootSizeBytes <= 0
-    || !Number.isSafeInteger(request.cpuMillis) || request.cpuMillis < 0
-    || !Number.isSafeInteger(request.memBytes) || request.memBytes < 0) {
+    || !Number.isSafeInteger(request.memBytes) || request.memBytes <= 0) {
     throw new BadRequestException({
       code: FailureCode.InvalidInput,
-      message: 'Container resource limits must be non-negative safe integers with a positive root size',
+      message: 'Container memory and root size must be positive safe integers',
     });
   }
 }
@@ -140,23 +139,27 @@ export function stringArray(value: string[] | string | null | undefined): string
   }
 }
 
-export function assertComputeGrant(
-  grant: { cpuMillis: number | null; memBytes: number | null },
-  cpuMillis: number,
-  memBytes: number,
+/**
+ * Memory is granted per server, not per container: every container the user
+ * keeps there (stopped ones included) counts against the grant. CPU needs no
+ * check here; all of the user's containers share the user's pinned CPU set.
+ */
+export function assertMemoryGrant(
+  grant: { memBytes: number | null },
+  requestedMemBytes: number,
+  otherContainersMemBytes: number,
 ): void {
-  if (grant.cpuMillis !== null && cpuMillis > grant.cpuMillis) {
+  if (grant.memBytes === null) return;
+  if (otherContainersMemBytes + requestedMemBytes > grant.memBytes) {
     throw new ForbiddenException({
       code: FailureCode.PermissionDenied,
-      message: 'The requested CPU exceeds the server grant',
-      details: { requestedCpuMillis: cpuMillis, grantCpuMillis: grant.cpuMillis },
-    });
-  }
-  if (grant.memBytes !== null && memBytes > grant.memBytes) {
-    throw new ForbiddenException({
-      code: FailureCode.PermissionDenied,
-      message: 'The requested memory exceeds the server grant',
-      details: { requestedMemBytes: memBytes, grantMemBytes: grant.memBytes },
+      message: 'The requested memory exceeds what remains of the server grant',
+      details: {
+        requestedMemBytes,
+        usedMemBytes: otherContainersMemBytes,
+        grantMemBytes: grant.memBytes,
+        availableMemBytes: Math.max(0, grant.memBytes - otherContainersMemBytes),
+      },
     });
   }
 }

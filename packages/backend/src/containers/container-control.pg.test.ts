@@ -154,6 +154,10 @@ describePg('PostgreSQL container create admission and capacity', () => {
         { notify: vi.fn() } as never,
         { log: vi.fn() } as never,
         { register: vi.fn() } as never,
+        { resolve: vi.fn().mockResolvedValue([0]), preview: vi.fn().mockResolvedValue([0]), releaseIdle: vi.fn() } as never,
+        { get: vi.fn().mockReturnValue(1_000) } as never,
+        { onChange: vi.fn() } as never,
+        { wake: vi.fn() } as never,
       );
       const client = {
         listInstances: vi.fn().mockResolvedValue({ metadata: [] }),
@@ -515,7 +519,7 @@ describePg('PostgreSQL container actor authorization', () => {
       await expect(service.get(operator, containerId)).resolves.toMatchObject({ id: containerId });
       await expect(service.get(stranger, containerId)).rejects.toMatchObject({ status: 403 });
       await expect(service.action(stranger, containerId, 'stop')).rejects.toMatchObject({ status: 403 });
-      await expect(service.updateLimits(stranger, containerId, { cpuMillis: 1, memBytes: 1 }))
+      await expect(service.updateLimits(stranger, containerId, { memBytes: 1 }))
         .rejects.toMatchObject({ status: 404 });
 
       // scope=mine only returns the caller's rows; scope=all needs the capability.
@@ -591,22 +595,21 @@ describePg('PostgreSQL container admission needs current coverage', () => {
       await database.insertInto('iam.group_members')
         .values({ id: randomUUID(), group_id: group, user_id: fixture.userId }).execute();
       await grantServer(database, { user: fixture.userId }, fixture.serverId, {
-        cpuMillis: 250, memBytes: 1_000,
+        cpuCores: 1, memBytes: 1_000,
       });
-      await grantServer(database, { group }, fixture.serverId, { cpuMillis: 1_000, memBytes: 400 });
+      await grantServer(database, { group }, fixture.serverId, { cpuCores: 4, memBytes: 400 });
 
       await expectCode(
-        service.create(owner, request(fixture, 'cpu-too-big', { cpuMillis: 1_500, memBytes: 100 })),
+        service.create(owner, request(fixture, 'mem-too-big', { memBytes: 2_000 })),
         FailureCode.PermissionDenied,
       );
+      // Memory comes from the larger (direct) grant and is a total across the user's containers.
+      await expect(service.create(owner, request(fixture, 'first', { memBytes: 600 }))).resolves.toBeDefined();
       await expectCode(
-        service.create(owner, request(fixture, 'mem-too-big', { cpuMillis: 100, memBytes: 2_000 })),
+        service.create(owner, request(fixture, 'second', { memBytes: 500 })),
         FailureCode.PermissionDenied,
       );
-      // CPU from the group grant, memory from the direct grant.
-      await expect(service.create(owner, request(fixture, 'merged', {
-        cpuMillis: 900, memBytes: 900,
-      }))).resolves.toBeDefined();
+      await expect(service.create(owner, request(fixture, 'third', { memBytes: 400 }))).resolves.toBeDefined();
     });
   });
 
@@ -725,13 +728,13 @@ async function enableGpu(
 }
 
 function grant(options: GrantOptions): {
-  cpuMillis: number;
+  cpuCores: number;
   memBytes: number;
   diskBytes: number | null;
   gpuPciAddresses: string[];
 } {
   return {
-    cpuMillis: 10_000,
+    cpuCores: 10,
     memBytes: 10_000,
     diskBytes: options.diskBytes,
     gpuPciAddresses: options.gpuPciAddresses ?? [],
@@ -748,7 +751,6 @@ function request(
     imageId: fixture.imageId,
     name,
     rootSizeBytes: 100,
-    cpuMillis: 500,
     memBytes: 500,
     powerIntent: ContainerPowerIntent.Stopped,
     ...overrides,
@@ -787,8 +789,6 @@ async function seedFixture(
     id: serverId,
     name: 'Container Test Server',
     slug: `container-${serverId.slice(0, 8)}`,
-    api_endpoint: 'https://incus.example.test:8443',
-    server_cert_fingerprint: null,
     incus_version: null,
     api_extensions: [],
     system_pool_id: null,
@@ -799,11 +799,7 @@ async function seedFixture(
     last_seen_at: new Date(),
     last_error: null,
     revision: 1,
-    node_metrics_endpoint: null,
-    node_metrics_server_cert_fingerprint: null,
-    node_metrics_token_ciphertext: null,
-    node_metrics_token_fingerprint: null,
-    node_metrics_status: 'unconfigured',
+    node_metrics_status: 'unknown',
     node_metrics_last_success_at: null,
     node_metrics_outage_since: null,
     node_metrics_last_error: null,

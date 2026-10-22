@@ -4,7 +4,7 @@ import { StoragePoolsModule } from '../storage-pools/storage-pools.module.js';
 import { AdminRuntimeMetricsController } from './admin-runtime-metrics.controller.js';
 import { ContainerStateMetricsPublisher } from './container-state-metrics.service.js';
 import { MetricsWriter } from './metrics-writer.js';
-import { AuthenticatedNodeMetricsPullAdapter } from './node-metrics-pull.adapter.js';
+import { AgentNodeMetricsPullAdapter } from './node-metrics-pull.adapter.js';
 import { NodeMetricsScrapeService } from './node-metrics-scrape.service.js';
 import { PerformanceController } from './performance.controller.js';
 import { PerformanceQueryService } from './performance-query.service.js';
@@ -13,7 +13,7 @@ import { PerformanceQueryService } from './performance-query.service.js';
   imports: [IncusModule, StoragePoolsModule],
   providers: [
     MetricsWriter,
-    AuthenticatedNodeMetricsPullAdapter,
+    AgentNodeMetricsPullAdapter,
     NodeMetricsScrapeService,
     ContainerStateMetricsPublisher,
     PerformanceQueryService,
@@ -22,6 +22,6 @@ import { PerformanceQueryService } from './performance-query.service.js';
     AdminRuntimeMetricsController,
     PerformanceController,
   ],
-  exports: [MetricsWriter, NodeMetricsScrapeService, AuthenticatedNodeMetricsPullAdapter],
+  exports: [MetricsWriter, NodeMetricsScrapeService, AgentNodeMetricsPullAdapter],
 })
 export class MetricsModule {}

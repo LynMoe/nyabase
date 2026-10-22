@@ -215,8 +215,8 @@ function assertCleanCutoverArtifacts() {
     join(backendRoot, 'src', 'reconcile', 'intent.repository.ts'),
     join(backendRoot, 'src', 'reconcile', 'reconcile-worker.service.ts'),
     join(backendRoot, 'src', 'reconcile', 'reconciler-registry.service.ts'),
-    join(repoRoot, 'packages', 'node-exporter', 'package.json'),
-    join(repoRoot, 'packages', 'node-exporter', 'src'),
+    join(repoRoot, 'packages', 'agent', 'package.json'),
+    join(repoRoot, 'packages', 'agent', 'src'),
   ];
   for (const path of requiredSourcePaths) {
     if (!existsSync(path)) {
@@ -225,7 +225,7 @@ function assertCleanCutoverArtifacts() {
   }
 
   const retiredPaths = [
-    join(repoRoot, 'packages', 'agent'),
+    join(repoRoot, 'packages', 'node-exporter'),
     join(backendRoot, 'src', 'agent-tasks'),
     join(backendRoot, 'src', 'gateway'),
     join(backendRoot, 'src', 'datadirs'),

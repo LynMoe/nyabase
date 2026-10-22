@@ -7,7 +7,8 @@ import { StatusBadge } from '../layout/status-badge.js';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../ui/table.js';
 import { useResourceMutationPending } from '../../lib/resource-mutation-gate.js';
 import { containerLifecyclePending, containerStatusPending } from '../../lib/in-progress.js';
-import { formatBytes, formatCpu } from '../../lib/utils.js';
+import { formatBytes } from '../../lib/utils.js';
+import { cpuSetLabel } from '../../lib/cpu-set.js';
 import { containerStatusLabel, lifecyclePhaseLabel } from '../../lib/status-labels.js';
 import { ResourceRef } from '../refs/resource-ref.js';
 import { useIsNarrow } from '../../hooks/use-dom-state.js';
@@ -117,7 +118,7 @@ function ContainerTableRow({
         <ContainerStatusBadges container={container} />
       </TableCell>
       <TableCell className="font-mono">{container.routedIp ?? '等待容器 IP'}</TableCell>
-      <TableCell>{formatCpu(container.cpuMillis)}</TableCell>
+      <TableCell className="tabular-nums" title="该用户在此服务器上的 CPU 组，容器间共享">{cpuSetLabel(container.cpuSet)}</TableCell>
       <TableCell>{formatBytes(container.memBytes)}</TableCell>
       <TableCell className="text-right">
         <div className="flex justify-end gap-1">
@@ -197,7 +198,7 @@ function ContainerCard({
         {' · '}
         <span className="font-mono">{container.routedIp ?? '等待容器 IP'}</span>
         {' · '}
-        {formatCpu(container.cpuMillis)} / {formatBytes(container.memBytes)}
+        CPU {cpuSetLabel(container.cpuSet)} / {formatBytes(container.memBytes)}
       </p>
     </li>
   );

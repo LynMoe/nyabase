@@ -19,7 +19,7 @@ import {
   MAX_INTENT_LIST_PAGE_SIZE,
   MAX_PLATFORM_SERVERS,
   MAX_RESOURCE_BYTES,
-  MAX_RESOURCE_CPU_MILLIS,
+  MAX_SERVER_LOGICAL_CPU_ID,
   MAX_SSH_PUBLIC_KEY_TEXT_LENGTH,
   MAX_STORAGE_OVERCOMMIT_RATIO,
 } from '../constants.js';
@@ -40,7 +40,6 @@ const SERVER_SLUG_RE = /^[a-z0-9][a-z0-9_-]*$/;
 const NETWORK_INTERFACE_RE = /^[A-Za-z0-9_.:-]+$/;
 const LOGIN_USER_RE = /^[a-z_][a-z0-9_-]{0,31}$/;
 const SHA256_RE = /^[0-9a-f]{64}$/;
-const FINGERPRINT_RE = /^[0-9A-Fa-f:]{32,95}$/;
 
 export const zCapability = z.nativeEnum(Capability);
 export const zExpectedRevision = z.number().int().positive().safe();
@@ -51,7 +50,6 @@ export const zResourceIdentity = z.string()
 export const zUuid = z.string().uuid();
 export const zPositiveBytes = z.number().int().positive().safe().max(MAX_RESOURCE_BYTES);
 export const zNonNegativeBytes = z.number().int().nonnegative().safe().max(MAX_RESOURCE_BYTES);
-export const zCpuMillis = z.number().int().nonnegative().safe().max(MAX_RESOURCE_CPU_MILLIS);
 export const zIsoDateTime = z.string().datetime({ offset: true });
 
 export const zIpv4Address = z.string().superRefine((value, context) => {
@@ -69,37 +67,6 @@ export const zIpv4Cidr = z.string().superRefine((value, context) => {
     context.addIssue({ code: z.ZodIssueCode.custom, message: 'Expected an IPv4 CIDR' });
   }
 }).transform(canonicalIpv4Cidr);
-
-const zHttpsUrl = (label: string) => z.string().url().superRefine((value, context) => {
-  try {
-    const parsed = new URL(value);
-    if (parsed.protocol !== 'https:') {
-      context.addIssue({ code: z.ZodIssueCode.custom, message: `${label} must use HTTPS` });
-    }
-  } catch {
-    context.addIssue({ code: z.ZodIssueCode.custom, message: `${label} must be an HTTPS URL` });
-  }
-});
-
-export const zApiEndpoint = zHttpsUrl('apiEndpoint');
-export const zServerCertFingerprint = z.string().regex(FINGERPRINT_RE);
-export const zMetricsEndpoint = z.string().url().superRefine((value, context) => {
-  try {
-    const parsed = new URL(value);
-    if (parsed.protocol !== 'https:' || parsed.pathname !== '/metrics'
-      || parsed.search !== '' || parsed.hash !== '') {
-      context.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: 'Node metrics endpoint must be an HTTPS /metrics URL without query parameters',
-      });
-    }
-  } catch {
-    context.addIssue({
-      code: z.ZodIssueCode.custom,
-      message: 'Node metrics endpoint must be an HTTPS /metrics URL',
-    });
-  }
-});
 
 const zName = z.string().trim().min(1).max(128);
 const zResourceName = z.string().min(1).max(63).regex(RESOURCE_NAME_RE);
@@ -254,30 +221,21 @@ export const zAddSshKeyRequest = z.object({
 }).strict();
 
 // Server registration, connection, and bootstrap.
-export const zNodeMetricsCreateConfig = z.object({
-  endpoint: zMetricsEndpoint,
-  serverCertFingerprint: zServerCertFingerprint,
-  token: z.string().min(32).max(1024),
-}).strict();
-
-export const zNodeMetricsPatchConfig = z.object({
-  endpoint: zMetricsEndpoint,
-  serverCertFingerprint: zServerCertFingerprint,
-  token: z.string().min(32).max(1024).optional(),
-}).strict();
-
 export const zServerNetworkFields = z.object({
   parentInterface: zNetworkInterface,
   dnsServers: z.array(zIpv4Address).max(8),
 }).strict();
 
+export const zReservedCpus = z.array(z.number().int().min(0).max(MAX_SERVER_LOGICAL_CPU_ID))
+  .max(MAX_SERVER_LOGICAL_CPU_ID + 1)
+  .refine((cpus) => new Set(cpus).size === cpus.length, 'Reserved CPUs must be unique');
+
 export const zCreateServerRequest = z.object({
   name: zName,
   slug: zServerSlug,
-  apiEndpoint: zApiEndpoint,
   parentInterface: zNetworkInterface,
   dnsServers: z.array(zIpv4Address).max(8),
-  nodeMetrics: zNodeMetricsCreateConfig.nullable().optional(),
+  reservedCpus: zReservedCpus.default([]),
 }).strict();
 
 export const zPatchServerRequest = z.object({
@@ -291,15 +249,14 @@ export const zPatchServerRequest = z.object({
     .min(1)
     .max(MAX_STORAGE_OVERCOMMIT_RATIO)
     .optional(),
-  nodeMetrics: zNodeMetricsPatchConfig.nullable().optional(),
+  reservedCpus: zReservedCpus.optional(),
 }).strict().refine(
   (value) => Object.keys(value).some((key) => key !== 'expectedRevision'),
   'At least one server field is required',
 );
 
-export const zConnectServerRequest = z.object({
-  trustToken: z.string().min(1).max(16_384),
-  expectedServerCertFingerprint: zServerCertFingerprint,
+export const zRotateServerEnrollmentRequest = z.object({
+  expectedRevision: zExpectedRevision,
 }).strict();
 
 export const zRunPreflightRequest = z.object({
@@ -461,8 +418,7 @@ export const zCreateContainerRequest = z.object({
   imageId: zResourceIdentity,
   name: zResourceName,
   rootSizeBytes: zPositiveBytes,
-  cpuMillis: zCpuMillis,
-  memBytes: zNonNegativeBytes,
+  memBytes: zPositiveBytes,
   /**
    * Requested GPUs by PCI address. Omit when the server has GPU disabled;
    * `[]` opens the NVIDIA runtime without assigning a card. Address-level
@@ -474,8 +430,7 @@ export const zCreateContainerRequest = z.object({
 }).strict();
 
 export const zPatchContainerLimitsRequest = z.object({
-  cpuMillis: zCpuMillis,
-  memBytes: zNonNegativeBytes,
+  memBytes: zPositiveBytes,
 }).strict();
 
 export const zPatchContainerRootSizeRequest = z.object({
@@ -526,11 +481,11 @@ export const zPutImageAssignmentRequest = z.object({
 }).strict();
 
 // Grant mutations use complete canonical bodies and PCI identity.
-const zNullableCpuMillis = zCpuMillis.nullable();
 const zNullableBytes = zNonNegativeBytes.nullable();
 
 export const zPutServerGrantRequest = z.object({
-  cpuMillis: zNullableCpuMillis,
+  /** Whole logical CPUs pinned for the user on this server; null = every unreserved CPU. */
+  cpuCores: z.number().int().min(1).max(MAX_SERVER_LOGICAL_CPU_ID + 1).nullable(),
   memBytes: zNullableBytes,
   diskBytes: zNullableBytes,
   gpuPciAddresses: zGpuPciAddresses.default([]),
@@ -675,12 +630,10 @@ export type CreateApiTokenRequest = z.infer<typeof zCreateApiTokenRequest>;
 export type CreateUserRequest = z.infer<typeof zCreateUserRequest>;
 export type UpdateUserRequest = z.infer<typeof zUpdateUserRequest>;
 export type AddSshKeyRequest = z.infer<typeof zAddSshKeyRequest>;
-export type NodeMetricsCreateConfig = z.infer<typeof zNodeMetricsCreateConfig>;
-export type NodeMetricsPatchConfig = z.infer<typeof zNodeMetricsPatchConfig>;
 export type ServerNetworkFields = z.infer<typeof zServerNetworkFields>;
 export type CreateServerRequest = z.infer<typeof zCreateServerRequest>;
 export type PatchServerRequest = z.infer<typeof zPatchServerRequest>;
-export type ConnectServerRequest = z.infer<typeof zConnectServerRequest>;
+export type RotateServerEnrollmentRequest = z.infer<typeof zRotateServerEnrollmentRequest>;
 export type RunPreflightRequest = z.infer<typeof zRunPreflightRequest>;
 export type PatchStoragePoolRequest = z.infer<typeof zPatchStoragePoolRequest>;
 export type PatchSharedBackendExecutorRequest = z.infer<typeof zPatchSharedBackendExecutorRequest>;
