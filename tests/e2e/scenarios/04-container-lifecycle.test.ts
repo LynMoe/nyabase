@@ -5,6 +5,7 @@ import {
   ContainerPhase,
   ContainerStatus,
   type ContainerDto,
+  type CreateApiTokenRequest,
   type ExecSessionResponse,
   type IntentAcceptedDto,
 } from '@nyabase/common';
@@ -96,7 +97,9 @@ describe('container lifecycle and SSH through the ssh-proxy', () => {
 
     const session = await api.post<ExecSessionResponse>(`/containers/${container.id}/exec-sessions`, {});
     assert.ok(session.sessionId && session.consoleUrl && session.expiresAt);
-    const token = await api.post<{ secret: string }>('/auth/tokens', { name: 'console-denied' });
+    const token = await api.post<{ secret: string }>('/auth/tokens', {
+      name: 'console-denied', currentPassword: owner.password,
+    } satisfies CreateApiTokenRequest);
     const viaToken = api.withToken(token.secret);
     assert.equal(await viaToken.status('POST', `/containers/${container.id}/exec-sessions`, {}), 403);
   });

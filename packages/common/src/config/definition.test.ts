@@ -121,3 +121,11 @@ describe('Incus transport and preflight configuration', () => {
     }
   });
 });
+
+describe('runtime environment', () => {
+  it('defaults to production so insecure development fallbacks need an explicit opt-in', () => {
+    const field = controlPlaneConfigDefinitions.find((definition) => definition.key === 'runtime.nodeEnv');
+    expect(field?.defaultValue).toBe('production');
+    expect(field?.schema.safeParse('development').success).toBe(true);
+  });
+});

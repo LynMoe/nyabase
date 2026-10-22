@@ -177,6 +177,7 @@ export enum FailureCode {
   PreflightCleanupFailed = 'PREFLIGHT_CLEANUP_FAILED',
   PreflightFailed = 'PREFLIGHT_FAILED',
   PermissionDenied = 'PERMISSION_DENIED',
+  CurrentPasswordIncorrect = 'CURRENT_PASSWORD_INCORRECT',
   NotFound = 'NOT_FOUND',
   InvalidInput = 'INVALID_INPUT',
   InternalError = 'INTERNAL_ERROR',

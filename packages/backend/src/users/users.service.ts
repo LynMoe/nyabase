@@ -20,12 +20,13 @@ import {
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
-import { AuthService } from '../iam/auth.service.js';
+import { AuthService, currentPasswordIncorrect } from '../iam/auth.service.js';
 import { AccessResolverService, AccessChangeNotifier } from '../iam/access-resolver.service.js';
 import type { Actor } from '../iam/actor.js';
 import { NyabaseConfigService } from '../platform/config/nyabase-config.service.js';
 import { ProxySnapshotNotifierService } from '../proxy-snapshots/proxy-snapshot-notifier.service.js';
 import { AuditService } from '../iam/audit.service.js';
+import { SessionRevocationService } from '../iam/session-revocation.service.js';
 import {
   assertActorRole,
   assertNotLastAdministrator,
@@ -78,6 +79,7 @@ export class UsersService {
     private readonly config: NyabaseConfigService,
     private readonly auditService: AuditService,
     private readonly changes: AccessChangeNotifier,
+    private readonly sessions: SessionRevocationService,
   ) {}
 
   async createUser(
@@ -291,8 +293,15 @@ export class UsersService {
       }
       const securityChanged = passwordHash !== undefined
         || (dto.status !== undefined && dto.status !== user.status);
-      if (securityChanged) {
+      // A reset password ends every credential, API tokens included; a status
+      // change ends browser sessions (a disabled user's API tokens are inert).
+      if (passwordHash !== undefined) {
+        await this.authService.revokeAllCredentialsInTransaction(transaction, id);
+      } else if (securityChanged) {
         await this.authService.revokeBrowserSessionsInTransaction(transaction, id);
+      }
+      if (securityChanged || demoting) {
+        afterCommit(transaction, () => this.sessions.revoke(id));
       }
       const updated = await transaction.updateTable('iam.users').set({
         ...(displayName !== undefined ? { display_name: displayName } : {}),
@@ -389,6 +398,7 @@ export class UsersService {
         userId,
         'user',
       );
+      afterCommit(transaction, () => this.sessions.revoke(userId));
     });
     return { deleted: true };
   }
@@ -412,9 +422,11 @@ export class UsersService {
       const row = await this.database.selectFrom('iam.users')
         .selectAll().where('id', '=', id).executeTakeFirst();
       snapshot = row ? this.toUser(row) : null;
-      if (!snapshot || snapshot.status !== UserStatus.Active
-        || !await this.authService.verifyPassword(snapshot.passwordHash, currentPassword)) {
-        throw new UnauthorizedException('Current password is incorrect');
+      if (!snapshot || snapshot.status !== UserStatus.Active) {
+        throw new UnauthorizedException('User not found or disabled');
+      }
+      if (!await this.authService.verifyCurrentPassword(snapshot, currentPassword)) {
+        throw currentPasswordIncorrect();
       }
       passwordHash = await this.authService.hashPassword(dto.password);
     }
@@ -430,7 +442,8 @@ export class UsersService {
         || user.status !== snapshot.status
       )) throw new UnauthorizedException('Credentials changed while the request was being processed');
       if (passwordHash !== undefined) {
-        await this.authService.revokeBrowserSessionsInTransaction(transaction, id);
+        await this.authService.revokeAllCredentialsInTransaction(transaction, id);
+        afterCommit(transaction, () => this.sessions.revoke(id));
       }
       const updated = await transaction.updateTable('iam.users').set({
         ...(displayName !== undefined ? { display_name: displayName } : {}),
@@ -480,16 +493,18 @@ export class UsersService {
       await this.promoteBootstrapAdmin(admin.id);
       return;
     }
-    const isProd = this.config.get<string>('runtime.nodeEnv') === 'production';
+    // The well-known password only for an explicit development/test runtime.
+    const nodeEnv = this.config.get<string>('runtime.nodeEnv');
+    const developmentDefaults = nodeEnv === 'development' || nodeEnv === 'test';
     let initPassword = this.config.get<string>('auth.adminInitPassword');
     let generatedInitPassword = false;
     if (!initPassword) {
-      if (isProd) {
+      if (developmentDefaults) {
+        initPassword = 'admin123';
+      } else {
         const { randomBytes } = await import('crypto');
         initPassword = randomBytes(12).toString('hex');
         generatedInitPassword = true;
-      } else {
-        initPassword = 'admin123';
       }
     }
     try {

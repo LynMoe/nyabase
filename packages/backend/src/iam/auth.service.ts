@@ -1,6 +1,7 @@
 import {
   BadRequestException,
   ConflictException,
+  ForbiddenException,
   HttpException,
   HttpStatus,
   Injectable,
@@ -11,12 +12,22 @@ import { JwtService } from '@nestjs/jwt';
 import * as argon2 from 'argon2';
 import { v4 as uuidv4 } from 'uuid';
 import { createHash, createHmac, randomBytes } from 'crypto';
-import { AuditAction, UserStatus } from '@nyabase/common';
+import { AuditAction, FailureCode, UserStatus } from '@nyabase/common';
 import { NyabaseConfigService } from '../platform/config/nyabase-config.service.js';
 import { type AuthApiToken, type AuthUser, isPgIamTransaction } from './auth-persistence.js';
 import { IamAuthRepository } from './iam-auth.repository.js';
 import { MonotonicClock } from '../platform/monotonic-clock.js';
 import { AuditService } from './audit.service.js';
+import type { Actor } from './actor.js';
+import { clientAddressBucket } from './client-address.js';
+import {
+  LoginAttemptLimiter,
+  type LoginAttemptReservation,
+} from './login-attempt-limiter.js';
+import {
+  PasswordVerificationBusyError,
+  PasswordVerificationGate,
+} from './password-verification-gate.js';
 
 export interface JwtPayload {
   sub: string;
@@ -29,31 +40,32 @@ export interface JwtPayload {
 
 export const MAX_REFRESH_SESSIONS_PER_USER = 16;
 export const MAX_API_TOKENS_PER_USER = 64;
-export const MAX_CONCURRENT_PASSWORD_VERIFICATIONS = 4;
-export const LOGIN_ATTEMPT_WINDOW_MS = 5 * 60_000;
-export const MAX_LOGIN_ATTEMPTS_PER_PRINCIPAL = 10;
-export const MAX_LOGIN_ATTEMPTS_PER_IP = 50;
-export const MAX_LOGIN_LIMITER_KEYS = 4_096;
+/** Failed logins per (client address bucket, username) per window. */
+export const MAX_LOGIN_FAILURES_PER_IP_USERNAME = 10;
+/** Failed logins per client address bucket (any usernames) per window. */
+export const MAX_LOGIN_FAILURES_PER_IP = 30;
+/** Wrong current-password entries per signed-in user per window. */
+export const MAX_REAUTH_FAILURES_PER_USER = 10;
+
+/**
+ * A signed-in user typed the wrong current password. Not a 401: the session is
+ * fine, and a 401 would make the browser client refresh and resend the request.
+ */
+export function currentPasswordIncorrect(): ForbiddenException {
+  return new ForbiddenException({
+    code: FailureCode.CurrentPasswordIncorrect,
+    message: 'Current password is incorrect',
+  });
+}
 
 const MAX_LOGIN_USERNAME_CHARS = 256;
 const MAX_LOGIN_PASSWORD_CHARS = 1_024;
 const DUMMY_PASSWORD_HASH = '$argon2id$v=19$m=65536,t=3,p=4$DCw8KRwf+V7pMnhiRFOb6g$KSjgFxwH2WqyoDT2q5Hz0Z18Zv/+eAHbnRgKiC6dI5A';
 
-interface LoginAttemptEntry {
-  count: number;
-  windowStartedAt: number;
-  lastSeenAt: number;
-}
-
-interface LoginAttemptReservation {
-  key: string;
-  entry: LoginAttemptEntry;
-}
-
 @Injectable()
 export class AuthService {
-  private activePasswordVerifications = 0;
-  private readonly loginAttempts = new Map<string, LoginAttemptEntry>();
+  private readonly passwordGate = new PasswordVerificationGate();
+  private readonly loginAttempts: LoginAttemptLimiter;
 
   constructor(
     private readonly persistence: IamAuthRepository,
@@ -61,13 +73,16 @@ export class AuthService {
     private config: NyabaseConfigService,
     private readonly audit: AuditService,
     private readonly clock: MonotonicClock,
-  ) {}
+  ) {
+    this.loginAttempts = new LoginAttemptLimiter(() => this.clock.now());
+  }
 
   /**
    * Verify credentials without issuing a session. Missing and disabled users
    * take the same Argon2 path as a wrong password to avoid a username oracle.
+   * `holder` is the client address bucket that the Argon2 gate accounts to.
    */
-  async validateUser(username: string, password: string): Promise<AuthUser> {
+  async validateUser(username: string, password: string, holder = 'internal'): Promise<AuthUser> {
     const user = username.length <= MAX_LOGIN_USERNAME_CHARS
       ? await this.persistence.findUserByUsername(username)
       : null;
@@ -75,7 +90,7 @@ export class AuthService {
       ? user.passwordHash
       : DUMMY_PASSWORD_HASH;
     const valid = password.length <= MAX_LOGIN_PASSWORD_CHARS
-      && await this.verifyPasswordBounded(candidateHash, password);
+      && await this.verifyPasswordBounded(holder, candidateHash, password);
     if (!valid || !user || user.status !== UserStatus.Active) {
       throw new UnauthorizedException('Invalid credentials');
     }
@@ -88,8 +103,18 @@ export class AuthService {
    * old password cannot win a race with reset/disable.
    */
   async authenticateAndLogin(username: string, password: string, clientIp: string) {
-    const reservations = this.consumeLoginAttempt(clientIp, username);
-    const snapshot = await this.validateUser(username, password);
+    const bucket = clientAddressBucket(clientIp);
+    const reservations = this.consumeLoginAttempt(bucket, username);
+    let snapshot: AuthUser;
+    try {
+      snapshot = await this.validateUser(username, password, `ip:${bucket}`);
+    } catch (error) {
+      // A busy Argon2 gate is not a failed guess.
+      if (error instanceof HttpException && error.getStatus() === HttpStatus.TOO_MANY_REQUESTS) {
+        this.loginAttempts.release(reservations);
+      }
+      throw error;
+    }
     const issued = await this.issueRefreshSession(snapshot.id, {
       id: snapshot.id,
       passwordHash: snapshot.passwordHash,
@@ -105,7 +130,7 @@ export class AuthService {
     // success is not abuse, so release only this call's exact reservations.
     // Entry identity fences concurrent failures and a replacement time window:
     // neither may be decremented by an older successful call.
-    this.releaseSuccessfulLoginReservations(reservations);
+    this.loginAttempts.release(reservations);
     return result;
   }
 
@@ -220,10 +245,30 @@ export class AuthService {
     );
   }
 
-  async createApiToken(userId: string, name: string) {
+  /**
+   * Minting a long-lived credential needs a browser session and the current
+   * password: a leaked 15-minute access token or an API token alone cannot
+   * turn itself into a permanent one. The token is inserted only if the
+   * verified password and auth version are still current under the row lock.
+   */
+  async createApiToken(actor: Actor, name: string, currentPassword: string) {
+    if (actor.userId === null || actor.authKind !== 'jwt') {
+      throw new ForbiddenException({
+        code: 'API_TOKEN_REQUIRES_BROWSER_SESSION',
+        message: 'API tokens can only be created from a signed-in browser session',
+      });
+    }
+    const userId = actor.userId;
     const normalizedName = name.trim();
     if (normalizedName.length === 0 || normalizedName.length > 128) {
       throw new BadRequestException('API token name must contain 1-128 non-whitespace characters');
+    }
+    const user = await this.persistence.findUserById(userId);
+    if (!user || user.status !== UserStatus.Active) {
+      throw new UnauthorizedException('User not found or disabled');
+    }
+    if (!await this.verifyCurrentPassword(user, currentPassword)) {
+      throw currentPasswordIncorrect();
     }
     const raw = randomBytes(32).toString('hex');
     const entity: AuthApiToken = {
@@ -238,6 +283,7 @@ export class AuthService {
       userId,
       entity,
       MAX_API_TOKENS_PER_USER,
+      { id: user.id, passwordHash: user.passwordHash, authVersion: user.authVersion },
       (transaction, token) => this.audit.append(
         transaction,
         userId,
@@ -284,8 +330,29 @@ export class AuthService {
     return argon2.hash(password);
   }
 
-  async verifyPassword(hash: string, password: string): Promise<boolean> {
-    return this.verifyPasswordBounded(hash, password);
+  /**
+   * Re-authentication of a signed-in user (password change, API token mint).
+   * Wrong entries are counted per user so a stolen access token cannot be
+   * used to brute-force the password; a correct one gives its unit back.
+   */
+  async verifyCurrentPassword(
+    user: Pick<AuthUser, 'id' | 'passwordHash'>,
+    password: string,
+  ): Promise<boolean> {
+    if (password.length === 0 || password.length > MAX_LOGIN_PASSWORD_CHARS) return false;
+    const reservations = this.loginAttempts.reserve([
+      { key: `reauth:${user.id}`, limit: MAX_REAUTH_FAILURES_PER_USER },
+    ]);
+    if (!reservations) throw this.tooManyRequests('Too many incorrect password attempts');
+    let valid: boolean;
+    try {
+      valid = await this.verifyPasswordBounded(`user:${user.id}`, user.passwordHash, password);
+    } catch (error) {
+      this.loginAttempts.release(reservations);
+      throw error;
+    }
+    if (valid) this.loginAttempts.release(reservations);
+    return valid;
   }
 
   async revokeBrowserSessionsInTransaction(manager: unknown, userId: string): Promise<void> {
@@ -293,6 +360,14 @@ export class AuthService {
       throw new Error('IAM credential deletion requires a PostgreSQL/Kysely transaction');
     }
     await this.persistence.revokeBrowserSessions(manager, userId);
+  }
+
+  /** Refresh sessions and API tokens: a password change or reset ends every credential. */
+  async revokeAllCredentialsInTransaction(manager: unknown, userId: string): Promise<void> {
+    if (!isPgIamTransaction(manager)) {
+      throw new Error('IAM credential deletion requires a PostgreSQL/Kysely transaction');
+    }
+    await this.persistence.deleteUserCredentials(manager, userId);
   }
 
   private async issueRefreshSession(
@@ -351,83 +426,34 @@ export class AuthService {
       .digest('hex');
   }
 
-  private async verifyPasswordBounded(hash: string, password: string): Promise<boolean> {
-    if (this.activePasswordVerifications >= MAX_CONCURRENT_PASSWORD_VERIFICATIONS) {
-      throw this.tooManyRequests('Password verification capacity is temporarily exhausted');
-    }
-    this.activePasswordVerifications += 1;
+  private async verifyPasswordBounded(
+    holder: string,
+    hash: string,
+    password: string,
+  ): Promise<boolean> {
     try {
-      return await argon2.verify(hash, password);
-    } finally {
-      this.activePasswordVerifications -= 1;
+      return await this.passwordGate.run(holder, () => argon2.verify(hash, password));
+    } catch (error) {
+      if (error instanceof PasswordVerificationBusyError) {
+        throw this.tooManyRequests('Password verification capacity is temporarily exhausted');
+      }
+      throw error;
     }
   }
 
-  private consumeLoginAttempt(
-    clientIp: string,
-    username: string,
-  ): LoginAttemptReservation[] {
-    const now = this.localLimiterNow();
-    this.pruneLoginAttempts(now);
-    const normalizedIp = clientIp.trim() || 'unknown';
+  /**
+   * Failures are counted per (client address, username) and per client
+   * address, never per username alone: nobody can lock another user (or
+   * `admin`) out from a different address.
+   */
+  private consumeLoginAttempt(bucket: string, username: string): LoginAttemptReservation[] {
     const normalizedUsername = username.trim().toLowerCase().slice(0, MAX_LOGIN_USERNAME_CHARS);
-    const attempts = [
-      {
-        localKey: `ip:${normalizedIp}`,
-        limit: MAX_LOGIN_ATTEMPTS_PER_IP,
-      },
-      {
-        localKey: `principal:${normalizedUsername}`,
-        limit: MAX_LOGIN_ATTEMPTS_PER_PRINCIPAL,
-      },
-    ];
-    const reservations: LoginAttemptReservation[] = [];
-    for (const attempt of attempts) {
-      const existing = this.loginAttempts.get(attempt.localKey);
-      const entry = !existing || now - existing.windowStartedAt >= LOGIN_ATTEMPT_WINDOW_MS
-        ? { count: 0, windowStartedAt: now, lastSeenAt: now }
-        : existing;
-      if (!existing && this.loginAttempts.size >= MAX_LOGIN_LIMITER_KEYS) {
-        throw this.tooManyRequests(
-          'Login limiter capacity is temporarily exhausted',
-        );
-      }
-      if (entry.count >= attempt.limit) {
-        throw this.tooManyRequests('Too many login attempts');
-      }
-      entry.count += 1;
-      entry.lastSeenAt = now;
-      this.loginAttempts.delete(attempt.localKey);
-      this.loginAttempts.set(attempt.localKey, entry);
-      reservations.push({ key: attempt.localKey, entry });
-    }
+    const reservations = this.loginAttempts.reserve([
+      { key: `ip:${bucket}`, limit: MAX_LOGIN_FAILURES_PER_IP },
+      { key: `login:${bucket}\0${normalizedUsername}`, limit: MAX_LOGIN_FAILURES_PER_IP_USERNAME },
+    ]);
+    if (!reservations) throw this.tooManyRequests('Too many login attempts');
     return reservations;
-  }
-
-  private releaseSuccessfulLoginReservations(
-    reservations: readonly LoginAttemptReservation[],
-  ): void {
-    for (const reservation of reservations) {
-      const { key, entry } = reservation;
-      if (this.loginAttempts.get(key) !== entry) continue;
-      if (entry.count <= 0) continue;
-      entry.count -= 1;
-      if (entry.count === 0 && this.loginAttempts.get(key) === entry) {
-        this.loginAttempts.delete(key);
-      }
-    }
-  }
-
-  private pruneLoginAttempts(now: number): void {
-    for (const [key, entry] of this.loginAttempts) {
-      if (now - entry.windowStartedAt >= LOGIN_ATTEMPT_WINDOW_MS) {
-        this.loginAttempts.delete(key);
-      }
-    }
-  }
-
-  private localLimiterNow(): number {
-    return this.clock.now();
   }
 
   private tooManyRequests(message: string): HttpException {

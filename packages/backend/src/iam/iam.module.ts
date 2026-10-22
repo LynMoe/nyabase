@@ -11,6 +11,7 @@ import { AuthController } from './auth.controller.js';
 import { AuthService } from './auth.service.js';
 import { RolesGuard, JwtAuthGuard, JwtStrategy } from './guards.js';
 import { IamAuthRepository } from './iam-auth.repository.js';
+import { SessionRevocationService } from './session-revocation.service.js';
 
 /**
  * Authentication, authorization resolution and the audit writer. The two
@@ -40,6 +41,7 @@ import { IamAuthRepository } from './iam-auth.repository.js';
     AuditRepository,
     AuditSnapshotResolver,
     AuditService,
+    SessionRevocationService,
     JwtAuthGuard,
     RolesGuard,
     // Registration order is execution order: authenticate, then authorize.
@@ -53,6 +55,7 @@ import { IamAuthRepository } from './iam-auth.repository.js';
     AccessResolverService,
     AuditRepository,
     AuditService,
+    SessionRevocationService,
   ],
 })
 export class IamModule {}

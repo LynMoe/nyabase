@@ -299,16 +299,25 @@ export class IamAuthRepository implements AuthPersistence {
     userId: string,
     token: AuthApiToken,
     maximumTokens: number,
+    credentialSnapshot: LoginCredentialSnapshot,
     onCreated?: AuthTransactionHook<AuthApiToken>,
   ): Promise<'created' | 'inactive-user' | 'capacity'> {
     return this.transactions.run(async (transaction) => {
       const user = await transaction
         .selectFrom('iam.users')
-        .select(['id', 'status'])
+        .select(['id', 'status', 'password_hash', 'auth_version'])
         .where('id', '=', userId)
         .forUpdate()
         .executeTakeFirst();
-      if (!user || user.status !== 'active') return 'inactive-user';
+      // The password was verified against this exact credential generation;
+      // a concurrent password change/reset/disable must not let it through.
+      if (
+        !user
+        || user.status !== 'active'
+        || user.id !== credentialSnapshot.id
+        || user.password_hash !== credentialSnapshot.passwordHash
+        || user.auth_version !== credentialSnapshot.authVersion
+      ) return 'inactive-user';
       const count = await transaction
         .selectFrom('iam.api_tokens')
         .select(sql<number>`count(*)::integer`.as('count'))

@@ -4,6 +4,7 @@ import { vi, type Mock } from 'vitest';
 import { AccessChangeNotifier, AccessResolverService } from '../iam/access-resolver.service.js';
 import type { PostgresTestDatabase } from '../platform/persistence-pg/postgres-test-harness.js';
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
+import { SessionRevocationService } from '../iam/session-revocation.service.js';
 import { UserSshKeysService } from './user-ssh-keys.service.js';
 import { UsersService } from './users.service.js';
 
@@ -13,6 +14,7 @@ export interface UsersPgFixture {
   transactions: PgTransactionManager;
   access: AccessResolverService;
   changes: AccessChangeNotifier;
+  sessions: SessionRevocationService;
   auth: Record<string, Mock>;
   audit: Record<string, Mock>;
   proxySnapshots: Record<string, Mock>;
@@ -37,9 +39,11 @@ export async function usersPgFixture(
   const userId = randomUUID();
   const auth = {
     hashPassword: vi.fn(async (password: string) => `hash:${password}`),
-    verifyPassword: vi.fn().mockResolvedValue(true),
+    verifyCurrentPassword: vi.fn().mockResolvedValue(true),
     revokeBrowserSessionsInTransaction: vi.fn().mockResolvedValue(undefined),
+    revokeAllCredentialsInTransaction: vi.fn().mockResolvedValue(undefined),
   };
+  const sessions = new SessionRevocationService();
   const audit = { log: vi.fn().mockResolvedValue(undefined) };
   Object.assign(audit, {
     append: vi.fn(async (_transaction: unknown, ...args: unknown[]) => audit.log(...args)),
@@ -55,6 +59,7 @@ export async function usersPgFixture(
     { get: vi.fn((key: string) => key === 'runtime.nodeEnv' ? 'test' : 'admin123') } as never,
     audit as never,
     changes,
+    sessions,
   );
   const sshKeys = new UserSshKeysService(
     fixture.database,
@@ -79,6 +84,7 @@ export async function usersPgFixture(
     transactions,
     access,
     changes,
+    sessions,
     auth,
     audit,
     proxySnapshots,

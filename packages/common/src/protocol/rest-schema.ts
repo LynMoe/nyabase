@@ -185,8 +185,10 @@ export const zRotateRefreshTokenRequest = z.object({
   requestId: z.string().length(64).regex(SHA256_RE),
 }).strict();
 
+/** Minting a long-lived token re-checks the current password (browser sessions only). */
 export const zCreateApiTokenRequest = z.object({
   name: z.string().trim().min(1).max(128),
+  currentPassword: z.string().min(1).max(1024),
 }).strict();
 
 export const zCreateUserRequest = z.object({

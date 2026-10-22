@@ -28,6 +28,9 @@ function startApp() {
   app = spawn(process.execPath, ['--watch', '--enable-source-maps', 'dist/main.js'], {
     cwd: root,
     stdio: 'inherit',
+    // runtime.nodeEnv defaults to production; local dev opts into the
+    // development fallbacks explicitly (an exported NODE_ENV still wins).
+    env: { ...process.env, NODE_ENV: process.env.NODE_ENV || 'development' },
   });
   app.on('exit', (code) => {
     if (!stopping) shutdown(code ?? 1);

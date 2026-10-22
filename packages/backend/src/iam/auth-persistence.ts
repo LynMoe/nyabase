@@ -79,6 +79,7 @@ export interface AuthPersistence {
     userId: string,
     token: AuthApiToken,
     maximumTokens: number,
+    credentialSnapshot: LoginCredentialSnapshot,
     onCreated?: AuthTransactionHook<AuthApiToken>,
   ): Promise<'created' | 'inactive-user' | 'capacity'>;
   listApiTokens(userId: string): Promise<AuthApiToken[]>;

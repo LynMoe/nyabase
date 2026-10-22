@@ -5,6 +5,7 @@ import type { Kysely } from 'kysely';
 import { describe, expect, it } from 'vitest';
 import { AccessChangeNotifier, AccessResolverService } from '../iam/access-resolver.service.js';
 import { AuthService } from '../iam/auth.service.js';
+import { SessionRevocationService } from '../iam/session-revocation.service.js';
 import { IamAuthRepository } from '../iam/iam-auth.repository.js';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
@@ -89,6 +90,22 @@ describePg('API IAM bootstrap', () => {
     });
   });
 
+  it.each([
+    ['production', false],
+    ['development', true],
+  ] as const)('uses the well-known admin password only for an explicit development runtime (%s)', async (nodeEnv, wellKnown) => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const context = createBootstrapContext(database, {
+        'runtime.nodeEnv': nodeEnv,
+        'auth.adminInitPassword': '',
+      });
+      await context.app.onApplicationBootstrap();
+      const login = context.auth.authenticateAndLogin('admin', 'admin123', '127.0.0.1');
+      if (wellKnown) await expect(login).resolves.toMatchObject({ accessToken: expect.any(String) });
+      else await expect(login).rejects.toMatchObject({ status: 401 });
+    });
+  });
+
   it('refuses to start when the reserved admin is disabled and no other active admin exists', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const context = createBootstrapContext(database);
@@ -112,6 +129,7 @@ describePg('API IAM bootstrap', () => {
 
 function createBootstrapContext(
   database: Kysely<NyabaseDatabase>,
+  overrides: Record<string, unknown> = {},
 ): {
   app: IamBootstrapService;
   auth: AuthService;
@@ -128,6 +146,7 @@ function createBootstrapContext(
         'auth.adminInitPassword': 'bootstrap-password',
         'auth.jwtSecret': 'bootstrap-jwt-secret-bootstrap-jwt-secret',
         'auth.refreshTokenExpiresDays': 7,
+        ...overrides,
       };
       return values[key] as T;
     },
@@ -151,6 +170,7 @@ function createBootstrapContext(
     config as never,
     audit as never,
     new AccessChangeNotifier(),
+    new SessionRevocationService(),
   );
   const app = new IamBootstrapService(users);
   return { app, auth };
