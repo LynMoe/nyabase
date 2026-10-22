@@ -47,7 +47,19 @@ export function parseBackendUrl(value: string): URL {
   ) {
     throw new Error('NYABASE_BACKEND_URL must be a bare http(s) origin');
   }
+  // The credential and every Incus request cross this link: plaintext only
+  // where it never leaves the host (e.g. an ssh -R tunnel to loopback).
+  if (url.protocol === 'http:' && !isLoopbackHost(url.hostname)) {
+    throw new Error('NYABASE_BACKEND_URL must use https:// unless the host is loopback');
+  }
   return url;
+}
+
+/** localhost, 127.0.0.0/8 or ::1, as the WHATWG URL parser normalizes them. */
+function isLoopbackHost(hostname: string): boolean {
+  return hostname === 'localhost'
+    || hostname === '[::1]'
+    || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(hostname);
 }
 
 export function controlUrl(config: Pick<AgentConfig, 'backendUrl'>): string {

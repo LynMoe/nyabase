@@ -78,7 +78,8 @@ async function incusHttp(
       method: params.method,
       path: params.path,
       headers: params.headers,
-      body: verdict.body ?? body,
+      // Never the raw bytes: Incus would decode them differently from the policy.
+      body: verdict.body,
       timeoutMs: params.timeoutMs,
       signal,
     });
