@@ -1,5 +1,6 @@
 use anyhow::Result;
 use proxy_common::backend_tls::{backend_tls_config_from_env, validate_backend_ws_url};
+use proxy_common::conn_limit::validate_limit;
 use proxy_common::control_token::required_control_token;
 use proxy_common::env::{env_u64, env_usize, validate_status_interval_ms};
 use std::sync::Arc;
@@ -10,6 +11,14 @@ pub(crate) const SSH_PROXY_SNAPSHOT_STALE_MIN_MS: u64 = 120_000;
 pub(crate) const SSH_PROXY_SNAPSHOT_STALE_MAX_MS: u64 = 300_000;
 
 pub(crate) const MAX_PROXY_CONNECTIONS: usize = 1024;
+
+pub(crate) const DEFAULT_MAX_CONNECTIONS_PER_IP: usize = 16;
+
+pub(crate) const DEFAULT_AUTH_TIMEOUT_MS: u64 = 30_000;
+
+pub(crate) const MIN_AUTH_TIMEOUT_MS: u64 = 1_000;
+
+pub(crate) const MAX_AUTH_TIMEOUT_MS: u64 = 600_000;
 
 pub(crate) const SSH_PROXY_CONTROL_HOLD_MIN_MS: u64 = 180_000;
 
@@ -28,6 +37,9 @@ pub(crate) struct ProxyConfig {
     pub(crate) token: String,
     pub(crate) listen: String,
     pub(crate) max_connections: usize,
+    pub(crate) max_connections_per_ip: usize,
+    /// From accept to successful public-key authentication.
+    pub(crate) auth_timeout: Duration,
     pub(crate) reconnect_delay: Duration,
     pub(crate) route_connect_timeout: Duration,
     pub(crate) status_interval: Duration,
@@ -45,6 +57,19 @@ impl ProxyConfig {
             std::env::var("NYABASE_SSH_LISTEN").unwrap_or_else(|_| "0.0.0.0:2222".to_string());
         let max_connections =
             validate_connection_cap(env_usize("NYABASE_SSH_MAX_CONNECTIONS", 512)?)?;
+        let max_connections_per_ip = validate_limit(
+            "NYABASE_SSH_MAX_CONNECTIONS_PER_IP",
+            env_usize(
+                "NYABASE_SSH_MAX_CONNECTIONS_PER_IP",
+                DEFAULT_MAX_CONNECTIONS_PER_IP,
+            )?,
+            1,
+            MAX_PROXY_CONNECTIONS,
+        )?;
+        let auth_timeout_ms = validate_auth_timeout(env_u64(
+            "NYABASE_SSH_AUTH_TIMEOUT_MS",
+            DEFAULT_AUTH_TIMEOUT_MS,
+        )?)?;
         let reconnect_delay_ms = env_u64("NYABASE_BACKEND_RECONNECT_MS", 2_000)?;
         let route_connect_timeout_ms = env_u64("NYABASE_SSH_ROUTE_CONNECT_TIMEOUT_MS", 10_000)?;
         let status_interval_ms = validate_status_interval_ms(
@@ -62,6 +87,8 @@ impl ProxyConfig {
             token,
             listen,
             max_connections,
+            max_connections_per_ip,
+            auth_timeout: Duration::from_millis(auth_timeout_ms),
             reconnect_delay: Duration::from_millis(reconnect_delay_ms),
             route_connect_timeout: Duration::from_millis(route_connect_timeout_ms),
             status_interval: Duration::from_millis(status_interval_ms),
@@ -73,6 +100,15 @@ impl ProxyConfig {
 pub(crate) fn validate_connection_cap(value: usize) -> Result<usize> {
     if !(1..=MAX_PROXY_CONNECTIONS).contains(&value) {
         anyhow::bail!("NYABASE_SSH_MAX_CONNECTIONS must be in 1..={MAX_PROXY_CONNECTIONS}");
+    }
+    Ok(value)
+}
+
+pub(crate) fn validate_auth_timeout(value: u64) -> Result<u64> {
+    if !(MIN_AUTH_TIMEOUT_MS..=MAX_AUTH_TIMEOUT_MS).contains(&value) {
+        anyhow::bail!(
+            "NYABASE_SSH_AUTH_TIMEOUT_MS must be in {MIN_AUTH_TIMEOUT_MS}..={MAX_AUTH_TIMEOUT_MS}"
+        );
     }
     Ok(value)
 }

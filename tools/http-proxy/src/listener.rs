@@ -4,13 +4,14 @@ use crate::runtime::{ActiveConnectionGuard, Runtime};
 use crate::snapshot::{RouteAuthorization, SnapshotCertResolver, SnapshotStore};
 use crate::upstream::proxy_request;
 use anyhow::{anyhow, Context, Result};
+use proxy_common::conn_limit::ConnectionLimiter;
 use std::net::SocketAddr;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpListener;
-use tokio::sync::{watch, Semaphore};
+use tokio::sync::watch;
 use tokio::time;
 use tokio_rustls::TlsAcceptor;
 use tracing::{debug, info};
@@ -19,11 +20,21 @@ pub(crate) async fn http_listener(
     listen: String,
     store: Arc<SnapshotStore>,
     runtime: Arc<Runtime>,
-    connection_slots: Arc<Semaphore>,
+    connection_slots: Arc<ConnectionLimiter>,
     tls: bool,
 ) -> Result<()> {
     let listener = TcpListener::bind(&listen).await?;
     info!(listen, tls, "HTTP proxy listener ready");
+    serve_http(listener, store, runtime, connection_slots, tls).await
+}
+
+pub(crate) async fn serve_http(
+    listener: TcpListener,
+    store: Arc<SnapshotStore>,
+    runtime: Arc<Runtime>,
+    connection_slots: Arc<ConnectionLimiter>,
+    tls: bool,
+) -> Result<()> {
     let acceptor = if tls {
         let resolver = Arc::new(SnapshotCertResolver {
             store: store.clone(),
@@ -37,13 +48,15 @@ pub(crate) async fn http_listener(
     };
     loop {
         let (stream, peer) = listener.accept().await?;
-        let permit = match connection_slots.clone().try_acquire_owned() {
+        // Admission happens before TLS or any read, and the permit lives
+        // until the connection (or its upgraded tunnel) ends.
+        let permit = match connection_slots.try_acquire(peer.ip()) {
             Ok(permit) => permit,
-            Err(_) => {
+            Err(limit) => {
                 runtime
                     .total_rejected_requests
                     .fetch_add(1, Ordering::Relaxed);
-                debug!(%peer, "HTTP proxy connection limit reached");
+                debug!(%peer, limit = limit.as_str(), "HTTP proxy connection limit reached");
                 drop(stream);
                 continue;
             }
@@ -152,8 +165,9 @@ where
     if is_websocket {
         // An upgraded tunnel is a connection, not a bounded HTTP request.
         // Its connect/handshake stages retain their own deadlines, while the
-        // established relay remains governed by route lease/revocation and
-        // peer EOF rather than the ordinary request lifetime.
+        // established relay remains governed by route lease/revocation, the
+        // bidirectional idle timeout and peer EOF rather than the ordinary
+        // request lifetime.
         tokio::select! {
             biased;
             _ = wait_until_route_revoked(&store, &authorization, &mut changes) => {

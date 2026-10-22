@@ -26,6 +26,10 @@ fn connection_cap_and_status_interval_reject_zero_or_excessive_values() {
         MAX_STATUS_INTERVAL_MS + 1
     )
     .is_err());
+    assert!(validate_auth_timeout(DEFAULT_AUTH_TIMEOUT_MS).is_ok());
+    assert!(validate_auth_timeout(MIN_AUTH_TIMEOUT_MS - 1).is_err());
+    assert!(validate_auth_timeout(MAX_AUTH_TIMEOUT_MS + 1).is_err());
+    const { assert!(DEFAULT_MAX_CONNECTIONS_PER_IP <= MAX_PROXY_CONNECTIONS) };
     assert!(validate_control_hold(SSH_PROXY_CONTROL_HOLD_MIN_MS).is_ok());
     assert!(validate_control_hold(SSH_PROXY_CONTROL_HOLD_MAX_MS).is_ok());
     assert!(validate_control_hold(SSH_PROXY_CONTROL_HOLD_MIN_MS - 1).is_err());

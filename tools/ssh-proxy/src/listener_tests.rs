@@ -136,3 +136,145 @@ async fn pre_auth_connections_are_closed_on_pause() {
         .is_err());
     assert!(connection.revoked.load(Ordering::Acquire));
 }
+
+#[tokio::test]
+async fn auth_deadline_only_fires_for_unauthenticated_sessions() {
+    let (pending_connection, _) = ConnectionState::new(1, "127.0.0.1:2400".parse().unwrap());
+    let error = with_auth_deadline(
+        std::future::pending::<Result<()>>(),
+        &pending_connection,
+        Duration::from_millis(20),
+    )
+    .await
+    .unwrap_err();
+    assert!(error.to_string().contains("authentication deadline"));
+
+    let (authenticated, _) = ConnectionState::new(2, "127.0.0.1:2401".parse().unwrap());
+    authenticated
+        .authenticated_at
+        .store(1, std::sync::atomic::Ordering::Release);
+    let outlived = tokio::time::timeout(
+        Duration::from_millis(100),
+        with_auth_deadline(
+            std::future::pending::<Result<()>>(),
+            &authenticated,
+            Duration::from_millis(20),
+        ),
+    )
+    .await;
+    assert!(
+        outlived.is_err(),
+        "authenticated session was cut by the auth deadline"
+    );
+}
+
+struct PublicListener {
+    address: std::net::SocketAddr,
+    task: tokio::task::JoinHandle<Result<()>>,
+    _telemetry: mpsc::Receiver<crate::protocol::ProxyEvent>,
+}
+
+async fn start_public_listener(config: crate::config::ProxyConfig) -> PublicListener {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let store = Arc::new(SnapshotStore::default());
+    let control = Arc::new(ControlPlane::new());
+    control.begin_epoch();
+    assert!(store
+        .store(fixture_proxy_snapshot(7), control.epoch())
+        .unwrap());
+    control.resume_authoritative();
+    let runtime = Arc::new(ProxyRuntime::new(&config));
+    let (tx, rx) = mpsc::channel(1024);
+    let task = tokio::spawn(serve_public(listener, config, store, runtime, control, tx));
+    PublicListener {
+        address,
+        task,
+        _telemetry: rx,
+    }
+}
+
+async fn connect_from(source: &str, target: std::net::SocketAddr) -> TcpStream {
+    let socket = tokio::net::TcpSocket::new_v4().unwrap();
+    socket.bind(format!("{source}:0").parse().unwrap()).unwrap();
+    socket.connect(target).await.unwrap()
+}
+
+/// Reads the server's SSH identification line, or `None` if the socket was
+/// closed without one.
+async fn read_banner(stream: &mut TcpStream) -> Option<String> {
+    let mut banner = Vec::new();
+    let mut byte = [0_u8; 1];
+    loop {
+        match tokio::time::timeout(Duration::from_secs(2), stream.read(&mut byte))
+            .await
+            .expect("no banner or close within the timeout")
+        {
+            Ok(0) | Err(_) => return None,
+            Ok(_) => {
+                banner.push(byte[0]);
+                if byte[0] == b'\n' {
+                    return Some(String::from_utf8_lossy(&banner).into_owned());
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn silent_pre_auth_clients_are_closed_by_the_auth_deadline() {
+    let mut config = test_config();
+    config.auth_timeout = Duration::from_millis(200);
+    let listener = start_public_listener(config).await;
+    let mut client = TcpStream::connect(listener.address).await.unwrap();
+    let banner = read_banner(&mut client).await.expect("server banner");
+    assert!(banner.starts_with("SSH-2.0-"));
+
+    let started = std::time::Instant::now();
+    let mut buffer = [0_u8; 256];
+    let closed = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            match client.read(&mut buffer).await {
+                Ok(0) | Err(_) => break,
+                Ok(_) => continue,
+            }
+        }
+    })
+    .await;
+    assert!(closed.is_ok(), "pre-auth client outlived the auth deadline");
+    assert!(started.elapsed() >= Duration::from_millis(100));
+    listener.task.abort();
+}
+
+#[tokio::test]
+async fn one_client_ip_cannot_exhaust_pre_auth_slots() {
+    let mut config = test_config();
+    config.max_connections_per_ip = 2;
+    let listener = start_public_listener(config).await;
+
+    let mut first = connect_from("127.0.0.1", listener.address).await;
+    let mut second = connect_from("127.0.0.1", listener.address).await;
+    assert!(read_banner(&mut first).await.is_some());
+    assert!(read_banner(&mut second).await.is_some());
+    let mut third = connect_from("127.0.0.1", listener.address).await;
+    assert!(read_banner(&mut third).await.is_none());
+
+    let mut other = connect_from("127.0.0.2", listener.address).await;
+    assert!(read_banner(&mut other).await.is_some());
+
+    drop(first);
+    let mut retry = None;
+    for _ in 0..100 {
+        let mut candidate = connect_from("127.0.0.1", listener.address).await;
+        if read_banner(&mut candidate).await.is_some() {
+            retry = Some(candidate);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(
+        retry.is_some(),
+        "closing a connection did not free its slot"
+    );
+    listener.task.abort();
+}

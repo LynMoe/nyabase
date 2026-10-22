@@ -2,6 +2,7 @@ use crate::config::{
     MAX_UPSTREAM_UPGRADE_HEADER_BYTES, UPSTREAM_CONNECT_DEADLINE, UPSTREAM_UPGRADE_HEADER_DEADLINE,
 };
 use crate::listener::reject;
+use crate::relay::relay_with_idle_timeout;
 use crate::request::{
     find_header_end, header_has_token, initial_body_bytes_allowed, invalid_header_value,
     is_http_token, RequestMode, RequestPlan,
@@ -64,26 +65,62 @@ pub(crate) async fn proxy_single_request<S: AsyncRead + AsyncWrite + Unpin>(
     header: Vec<u8>,
     body_len: usize,
 ) -> Result<()> {
-    let mut body = received[header_end..].to_vec();
-    if !initial_body_bytes_allowed(body_len, body.len()) {
+    let initial_body = &received[header_end..];
+    if !initial_body_bytes_allowed(body_len, initial_body.len()) {
         reject(inbound, runtime, "400 Bad Request").await?;
         return Err(anyhow!(
             "pipelined or cross-host follow-up request is forbidden"
         ));
     }
-    body.resize(body_len, 0);
-    if body_len > received.len().saturating_sub(header_end) {
-        inbound
-            .read_exact(&mut body[received.len().saturating_sub(header_end)..])
-            .await?;
-    }
 
     let mut upstream = connect_upstream(inbound, runtime, route).await?;
-    upstream.write_all(&header).await?;
-    upstream.write_all(&body).await?;
-    upstream.shutdown().await?;
+    // The body is streamed, not buffered, so a connection costs bounded
+    // memory; the whole-body budget stops a slow drip from holding the
+    // connection and its upstream socket for the full request lifetime.
+    match time::timeout(
+        runtime.limits.body_deadline,
+        forward_request(inbound, &mut upstream, &header, initial_body, body_len),
+    )
+    .await
+    {
+        Ok(result) => result?,
+        Err(_) => {
+            reject(inbound, runtime, "408 Request Timeout").await?;
+            return Err(anyhow!("request body deadline exceeded"));
+        }
+    }
+    // Never half-close the upstream here: Node's HTTP server (and others with
+    // `allowHalfOpen` off) treats the FIN as an aborted request and drops the
+    // response. The request carries `Connection: close`, so the upstream
+    // closes once it has answered.
     io::copy(&mut upstream, inbound).await?;
     inbound.shutdown().await?;
+    Ok(())
+}
+
+async fn forward_request<S, U>(
+    inbound: &mut S,
+    upstream: &mut U,
+    header: &[u8],
+    initial_body: &[u8],
+    body_len: usize,
+) -> Result<()>
+where
+    S: AsyncRead + Unpin,
+    U: AsyncWrite + Unpin,
+{
+    upstream.write_all(header).await?;
+    upstream.write_all(initial_body).await?;
+    let remaining = (body_len - initial_body.len()) as u64;
+    if remaining > 0 {
+        let copied = io::copy(&mut (&mut *inbound).take(remaining), upstream).await?;
+        if copied != remaining {
+            return Err(anyhow!(
+                "client closed the connection before sending the full request body"
+            ));
+        }
+    }
+    upstream.flush().await?;
     Ok(())
 }
 
@@ -143,10 +180,7 @@ pub(crate) async fn proxy_websocket_upgrade<S: AsyncRead + AsyncWrite + Unpin>(
         return Err(error);
     }
     inbound.write_all(&response).await?;
-    let _ = io::copy_bidirectional(inbound, &mut upstream).await?;
-    inbound.shutdown().await?;
-    upstream.shutdown().await?;
-    Ok(())
+    relay_with_idle_timeout(inbound, &mut upstream, runtime.limits.upgraded_idle).await
 }
 
 pub(crate) async fn read_response_head<S: AsyncRead + Unpin>(upstream: &mut S) -> Result<Vec<u8>> {

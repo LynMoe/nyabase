@@ -1,7 +1,7 @@
 use super::*;
 use crate::config::MAX_UPSTREAM_UPGRADE_HEADER_BYTES;
 use crate::listener::handle_connection_with_fixed_request_deadline;
-use crate::request::{read_request_head, request_plan, RequestMode};
+use crate::request::{find_header_end, read_request_head, request_plan, RequestMode};
 use crate::snapshot::SnapshotStore;
 use crate::test_support::*;
 use std::sync::Arc;
@@ -240,4 +240,127 @@ async fn early_websocket_bytes_are_rejected_as_smuggling() {
     assert!(String::from_utf8(response)
         .unwrap()
         .starts_with("HTTP/1.1 400 Bad Request"));
+}
+
+/// Models Node's HTTP server with `httpAllowHalfOpen=false`: a FIN from the
+/// client before the response is written aborts the request with no reply.
+async fn half_close_intolerant_upstream(listener: TcpListener) {
+    let (mut socket, _) = listener.accept().await.unwrap();
+    let mut request = read_request_head(&mut socket).await.unwrap();
+    let header_end = find_header_end(&request).unwrap();
+    let mut body = request.split_off(header_end);
+    let missing = 4 - body.len();
+    let mut rest = vec![0_u8; missing];
+    socket.read_exact(&mut rest).await.unwrap();
+    body.extend_from_slice(&rest);
+    assert_eq!(body, b"ping");
+    assert!(String::from_utf8(request)
+        .unwrap()
+        .contains("Connection: close\r\n"));
+    let mut probe = [0_u8; 1];
+    if let Ok(read) = time::timeout(Duration::from_millis(200), socket.read(&mut probe)).await {
+        assert_eq!(read.unwrap(), 0, "unexpected bytes after the request body");
+        // EOF before responding: abort, exactly like Node does.
+        return;
+    }
+    socket
+        .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello")
+        .await
+        .unwrap();
+    socket.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn upstreams_that_abort_on_half_close_still_return_a_full_response() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream_port = listener.local_addr().unwrap().port();
+    let upstream = tokio::spawn(half_close_intolerant_upstream(listener));
+    let store = Arc::new(SnapshotStore::default());
+    store
+        .store(test_snapshot(1, 30_000, vec![test_route(upstream_port)]))
+        .unwrap();
+    let (mut client, proxy_side) = tokio::io::duplex(4096);
+    let handler = tokio::spawn(crate::listener::handle_connection(
+        proxy_side,
+        "127.0.0.1:12345".parse().unwrap(),
+        store,
+        test_runtime(),
+    ));
+    client
+        .write_all(b"POST /echo HTTP/1.1\r\nHost: app.example.test\r\nContent-Length: 4\r\n\r\npi")
+        .await
+        .unwrap();
+    time::sleep(Duration::from_millis(20)).await;
+    client.write_all(b"ng").await.unwrap();
+
+    let mut response = Vec::new();
+    time::timeout(Duration::from_secs(2), client.read_to_end(&mut response))
+        .await
+        .expect("proxy did not finish the response")
+        .unwrap();
+    let response = String::from_utf8(response).unwrap();
+    assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response:?}");
+    assert!(response.ends_with("\r\n\r\nhello"), "{response:?}");
+    handler.await.unwrap().unwrap();
+    upstream.await.unwrap();
+}
+
+#[tokio::test]
+async fn a_slow_drip_request_body_hits_the_body_deadline() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream_port = listener.local_addr().unwrap().port();
+    let upstream = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut sink = Vec::new();
+        let _ = socket.read_to_end(&mut sink).await;
+    });
+    let store = Arc::new(SnapshotStore::default());
+    store
+        .store(test_snapshot(1, 30_000, vec![test_route(upstream_port)]))
+        .unwrap();
+    let runtime = Arc::new({
+        let mut runtime = Arc::try_unwrap(test_runtime()).ok().unwrap();
+        runtime.limits.body_deadline = Duration::from_millis(100);
+        runtime
+    });
+    let (mut client, proxy_side) = tokio::io::duplex(4096);
+    let handler = tokio::spawn(crate::listener::handle_connection(
+        proxy_side,
+        "127.0.0.1:12345".parse().unwrap(),
+        store,
+        runtime,
+    ));
+    client
+        .write_all(
+            b"POST /upload HTTP/1.1\r\nHost: app.example.test\r\nContent-Length: 100\r\n\r\nab",
+        )
+        .await
+        .unwrap();
+    // Keep dripping well inside any per-read timeout; only a whole-body
+    // budget can stop this.
+    let drip = tokio::spawn(async move {
+        for _ in 0..50 {
+            time::sleep(Duration::from_millis(20)).await;
+            if client.write_all(b"x").await.is_err() {
+                break;
+            }
+        }
+        client
+    });
+
+    let result = time::timeout(Duration::from_secs(2), handler)
+        .await
+        .expect("slow body was not cut off")
+        .unwrap();
+    assert!(result
+        .unwrap_err()
+        .to_string()
+        .contains("request body deadline exceeded"));
+    let mut client = drip.await.unwrap();
+    let mut response = Vec::new();
+    client.read_to_end(&mut response).await.unwrap();
+    assert!(String::from_utf8(response)
+        .unwrap()
+        .starts_with("HTTP/1.1 408 Request Timeout"));
+    upstream.await.unwrap();
 }
