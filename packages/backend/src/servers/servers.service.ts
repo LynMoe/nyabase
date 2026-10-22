@@ -3,7 +3,6 @@ import { sql, type Kysely, type Selectable, type Transaction } from 'kysely';
 import { randomUUID } from 'node:crypto';
 import {
   AuditAction,
-  Capability,
   MAX_PLATFORM_SERVERS,
   NodeMetricsStatus,
   PreflightStatus,
@@ -14,6 +13,7 @@ import {
   type PatchServerRequest,
   type ServerDto,
   type UserServerDto,
+  Role,
 } from '@nyabase/common';
 import { allocatableCpus } from '../cpu/cpu-allocation.js';
 import { AgentRegistry } from '../incus/agent-registry.service.js';
@@ -26,12 +26,13 @@ import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
 import { AccessResolverService } from '../iam/access-resolver.service.js';
 import { AuditService } from '../iam/audit.service.js';
-import { assertListScope, type Actor } from '../iam/actor.js';
+import { assertListScope, type Actor, requireUserId } from '../iam/actor.js';
 import { numberValue, isoDate, poolLabel } from '../platform/domain-utils.js';
 import { lockServerOnboarding } from '../platform/persistence-pg/advisory-locks.js';
 import { ProxySnapshotNotifierService } from '../proxy-snapshots/proxy-snapshot-notifier.service.js';
 import { VOLUME_DESTROY_PLACEMENT_ID } from '../reconcile/reconcile-claim.repository.js';
 import { listEligibleDestroyExecutors } from '../volumes/volumes.repository.js';
+import { assertActorRole } from '../iam/administration.js';
 
 type ServerRow = Selectable<InfrastructureServerTable>;
 
@@ -50,9 +51,7 @@ export class ServersService {
 
   async create(actorId: string, input: CreateServerRequest): Promise<CreatedServerDto> {
     const { row, enrollment } = await this.transactions.run(async (transaction) => {
-      await this.access.assertActorCapabilitiesInTransaction(transaction, actorId, [
-        Capability.ManageServers,
-      ]);
+      await assertActorRole(transaction, actorId, Role.Operator);
       await lockServerOnboarding(transaction);
       const count = await transaction
         .selectFrom('infra.servers')
@@ -113,16 +112,16 @@ export class ServersService {
    * `scope=all`: every server, as full DTOs (`ManageServers` or `ManageGrants`).
    */
   async list(actor: Actor, scope: ListScope): Promise<ServerDto[] | UserServerDto[]> {
-    assertListScope(actor, scope, Capability.ManageServers, Capability.ManageGrants);
+    assertListScope(actor, scope, Role.Operator);
     if (scope === 'all') return this.findAllDtos();
-    return this.findUserDtosByIds(await this.access.listAccessibleServers(actor.userId));
+    return this.findUserDtosByIds(await this.access.listAccessibleServers(requireUserId(actor)));
   }
 
   /** `scope=mine` needs a grant (404 otherwise); `scope=all` needs `ManageServers`. */
   async get(actor: Actor, id: string, scope: ListScope): Promise<ServerDto | UserServerDto> {
-    assertListScope(actor, scope, Capability.ManageServers);
+    assertListScope(actor, scope, Role.Operator);
     if (scope === 'all') return this.findDtoById(id);
-    if (!(await this.access.listAccessibleServers(actor.userId)).includes(id)) {
+    if (!(await this.access.listAccessibleServers(requireUserId(actor))).includes(id)) {
       throw new NotFoundException('Server not found');
     }
     return this.findUserDtoById(id);
@@ -173,9 +172,7 @@ export class ServersService {
 
   async update(actorId: string, id: string, input: PatchServerRequest): Promise<ServerDto> {
     const row = await this.transactions.run(async (transaction) => {
-      await this.access.assertActorCapabilitiesInTransaction(transaction, actorId, [
-        Capability.ManageServers,
-      ]);
+      await assertActorRole(transaction, actorId, Role.Operator);
       const current = await transaction
         .selectFrom('infra.servers')
         .selectAll()
@@ -223,9 +220,7 @@ export class ServersService {
 
   async delete(actorId: string, id: string, expectedRevision?: number): Promise<void> {
     await this.transactions.run(async (transaction) => {
-      await this.access.assertActorCapabilitiesInTransaction(transaction, actorId, [
-        Capability.ManageServers,
-      ]);
+      await assertActorRole(transaction, actorId, Role.Operator);
       const server = await this.findById(id, transaction);
       if (expectedRevision !== undefined && Number(server.revision) !== expectedRevision) {
         throw new ConflictException({ code: 'REVISION_CONFLICT' });

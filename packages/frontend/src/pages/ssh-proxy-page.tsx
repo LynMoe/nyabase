@@ -1,14 +1,14 @@
 import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { RefreshCw, Unplug } from 'lucide-react';
-import { Capability, type SshProxyHostKeySummaryDto } from '@nyabase/common';
+import type { SshProxyHostKeySummaryDto } from '@nyabase/common';
 import { api } from '../lib/api.js';
 import { Button } from '../components/ui/button.js';
 import { ConfirmDialog } from '../components/layout/confirm-dialog.js';
 import { Page, PageHeader } from '../components/layout/page-header.js';
 import { QueryView } from '../components/layout/query-view.js';
-import { useAuthStore } from '../store/auth.js';
-import { canViewSshProxyStatus } from '../lib/proxy-access.js';
+import { ACCESS } from '../lib/route-access.js';
+import { useHasRole } from '../lib/use-role.js';
 import { queryPollInterval } from '../lib/query-lifecycle.js';
 import { queryKeys } from '../lib/query-keys.js';
 import { useSshProxyMutations } from './ssh-proxy-page/use-ssh-proxy-mutations.js';
@@ -21,9 +21,8 @@ import {
 } from './ssh-proxy-page/status-sections.js';
 
 export default function SshProxyPage() {
-  const user = useAuthStore((state) => state.user);
-  const canViewStatus = canViewSshProxyStatus(user?.capabilities ?? []);
-  const canManageSettings = user?.capabilities.includes(Capability.ManageSystemSettings) ?? false;
+  const canViewStatus = useHasRole(ACCESS.sshProxy);
+  const canManageSettings = canViewStatus;
   const [disconnectOpen, setDisconnectOpen] = useState(false);
   const [rotateOpen, setRotateOpen] = useState(false);
   const statusQuery = useQuery({

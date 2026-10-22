@@ -1,10 +1,10 @@
+import { randomUUID } from 'node:crypto';
 import { JwtService } from '@nestjs/jwt';
-import { SystemGroupKey, UserStatus } from '@nyabase/common';
+import { Role, UserStatus } from '@nyabase/common';
 import type { Kysely } from 'kysely';
 import { describe, expect, it } from 'vitest';
 import { AccessChangeNotifier, AccessResolverService } from '../iam/access-resolver.service.js';
 import { AuthService } from '../iam/auth.service.js';
-import { SystemGroupsService } from '../groups/system-groups.service.js';
 import { IamAuthRepository } from '../iam/iam-auth.repository.js';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
@@ -26,28 +26,15 @@ describePg('API IAM bootstrap', () => {
         second.app.onApplicationBootstrap(),
       ]);
 
-      const groups = await database.selectFrom('iam.groups')
-        .select(['id', 'system_key'])
-        .orderBy('system_key')
-        .execute();
-      expect(groups).toHaveLength(3);
-      expect(groups.map((group) => group.system_key)).toEqual([
-        SystemGroupKey.Administrators,
-        SystemGroupKey.Operators,
-        SystemGroupKey.Users,
-      ]);
+      // No system groups: roles live on the users.
+      await expect(database.selectFrom('iam.groups').select('id').execute()).resolves.toEqual([]);
 
       const admin = await database.selectFrom('iam.users')
-        .select(['id', 'username', 'status'])
+        .select(['id', 'username', 'status', 'role'])
         .where('username', '=', 'admin')
         .executeTakeFirstOrThrow();
       expect(admin.status).toBe(UserStatus.Active);
-      await expect(database.selectFrom('iam.group_members as member')
-        .innerJoin('iam.groups as group', 'group.id', 'member.group_id')
-        .select('member.id')
-        .where('member.user_id', '=', admin.id)
-        .where('group.system_key', '=', SystemGroupKey.Administrators)
-        .execute()).resolves.toHaveLength(1);
+      expect(admin.role).toBe(Role.Admin);
 
       const login = await first.auth.authenticateAndLogin(
         'admin',
@@ -61,6 +48,64 @@ describePg('API IAM bootstrap', () => {
       await first.app.onApplicationBootstrap();
       const after = await bootstrapCounts(database);
       expect(after).toEqual(before);
+    });
+  });
+
+  it('promotes a pre-existing reserved admin account to the admin role, and leaves a disabled one alone when another admin exists', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const context = createBootstrapContext(database);
+      const existing = await database.insertInto('iam.users').values({
+        id: randomUUID(), numeric_id: 7, username: 'admin', password_hash: 'unused',
+        display_name: 'Administrator', status: UserStatus.Active, auth_version: 0,
+      }).returning(['id', 'role']).executeTakeFirstOrThrow();
+      expect(existing.role).toBe(Role.User);
+
+      await context.app.onApplicationBootstrap();
+
+      const promoted = await database.selectFrom('iam.users').select('role').where('id', '=', existing.id)
+        .executeTakeFirstOrThrow();
+      expect(promoted.role).toBe(Role.Admin);
+    });
+  });
+
+  it('does not undo a demotion of the reserved admin while another active administrator exists', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const context = createBootstrapContext(database);
+      const demoted = await database.insertInto('iam.users').values({
+        id: randomUUID(), numeric_id: 7, username: 'admin', password_hash: 'unused',
+        display_name: 'Administrator', status: UserStatus.Active, role: Role.Operator, auth_version: 0,
+      }).returning('id').executeTakeFirstOrThrow();
+      await database.insertInto('iam.users').values({
+        id: randomUUID(), numeric_id: 8, username: 'other-admin', password_hash: 'unused',
+        display_name: 'Other', status: UserStatus.Active, role: Role.Admin, auth_version: 0,
+      }).execute();
+
+      await context.app.onApplicationBootstrap();
+      await context.app.onApplicationBootstrap();
+
+      const row = await database.selectFrom('iam.users').select('role').where('id', '=', demoted.id)
+        .executeTakeFirstOrThrow();
+      expect(row.role).toBe(Role.Operator);
+    });
+  });
+
+  it('refuses to start when the reserved admin is disabled and no other active admin exists', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const context = createBootstrapContext(database);
+      await database.insertInto('iam.users').values({
+        id: randomUUID(), numeric_id: 7, username: 'admin', password_hash: 'unused',
+        display_name: 'Administrator', status: UserStatus.Disabled, role: Role.Admin, auth_version: 0,
+      }).execute();
+
+      await expect(context.app.onApplicationBootstrap()).rejects.toMatchObject({
+        response: { code: 'ADMIN_BOOTSTRAP_UNAVAILABLE' },
+      });
+
+      await database.insertInto('iam.users').values({
+        id: randomUUID(), numeric_id: 8, username: 'other-admin', password_hash: 'unused',
+        display_name: 'Other', status: UserStatus.Active, role: Role.Admin, auth_version: 0,
+      }).execute();
+      await expect(context.app.onApplicationBootstrap()).resolves.toBeUndefined();
     });
   });
 });
@@ -107,7 +152,7 @@ function createBootstrapContext(
     audit as never,
     new AccessChangeNotifier(),
   );
-  const app = new IamBootstrapService(new SystemGroupsService(database, transactions), users);
+  const app = new IamBootstrapService(users);
   return { app, auth };
 }
 

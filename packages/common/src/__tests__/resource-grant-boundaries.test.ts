@@ -38,6 +38,14 @@ describe('grant resource bounds', () => {
     expect(zPutServerGrantRequest.safeParse({ ...base, cpuMillis: 1_000 }).success).toBe(false);
   });
 
+  it('spells unlimited only as null: a zero quota is rejected', () => {
+    const base = { cpuCores: null, memBytes: null, diskBytes: null, gpuPciAddresses: [], expiresAt: null };
+    expect(zPutServerGrantRequest.safeParse({ ...base, memBytes: 0 }).success).toBe(false);
+    expect(zPutServerGrantRequest.safeParse({ ...base, diskBytes: 0 }).success).toBe(false);
+    expect(zPutSharedBackendGrantRequest.safeParse({ limitBytes: 0, expiresAt: null }).success).toBe(false);
+    expect(zPutSharedBackendGrantRequest.safeParse({ limitBytes: null, expiresAt: null }).success).toBe(true);
+  });
+
   it('never lets a container request a CPU size or zero memory', () => {
     const base = {
       serverId,

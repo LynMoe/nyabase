@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { Plus } from 'lucide-react';
-import { Capability, type UserDto } from '@nyabase/common';
+import { Role, type UserDto } from '@nyabase/common';
 import { api } from '../lib/api.js';
 import { Button } from '../components/ui/button.js';
 import { EmptyState } from '../components/layout/empty-state.js';
@@ -11,13 +11,13 @@ import { SectionCard } from '../components/layout/section-card.js';
 import { ListSearch, matchesSearch } from '../components/layout/list-search.js';
 import { userDeleting } from '../lib/in-progress.js';
 import { queryKeys } from '../lib/query-keys.js';
-import { useAuthStore } from '../store/auth.js';
+import { useHasRole } from '../lib/use-role.js';
 import { isPermanentQueryError, refetchWhileInProgress } from '../lib/query-lifecycle.js';
 import { CreateUserDialog } from './users-page/create-user-dialog.js';
 import { UsersTable } from './users-page/users-table.js';
 
 export default function UsersPage() {
-  const canManageUsers = useAuthStore((state) => state.user?.capabilities.includes(Capability.ManageUsers) ?? false);
+  const canManageUsers = useHasRole(Role.Admin);
   const [createOpen, setCreateOpen] = useState(false);
   const [query, setQuery] = useState('');
   const usersQuery = useQuery({
@@ -71,7 +71,7 @@ export default function UsersPage() {
             flush
             toolbar={<ListSearch value={query} onChange={setQuery} placeholder="搜索用户名、显示名、用户组" />}
           >
-            <UsersTable users={visibleUsers} />
+            <UsersTable users={visibleUsers} allUsers={users} />
           </SectionCard>
           );
         }}

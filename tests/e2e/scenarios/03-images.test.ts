@@ -50,10 +50,12 @@ describe('image assignment and visibility', () => {
     assert.equal('assignments' in visible[0]!, false, 'the user view carries no assignment details');
     const access = await api.get<EffectiveAccessDto>('/me/access');
     assert.deepEqual(access.servers.map((entry) => entry.serverId), [h.server.id]);
-    assert.ok(access.servers[0]!.allowedImageIds.includes(h.state.image.id));
+    const live = access.servers[0]!;
+    assert.equal(live.accessPhase, 'live');
+    assert.ok(live.accessPhase === 'live' && live.allowedImageIds.includes(h.state.image.id));
   });
 
-  it('keeps image administration to ManageImages holders', async () => {
+  it('keeps image administration to operators and admins', async () => {
     const user = await h.newUser('imgadm');
     const api = user.session.api;
     assert.equal(await api.status('GET', '/images?scope=all'), 403);

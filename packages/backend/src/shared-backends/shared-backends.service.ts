@@ -7,11 +7,11 @@ import {
 } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import {
-  Capability,
   FailureCode,
   type ListScope,
   type SharedBackendDto,
   type SharedBackendExecutorDto,
+  Role,
 } from '@nyabase/common';
 import { SharedBackendsRepository } from './shared-backends.repository.js';
 import { SharedBackendExecutorsService } from '../storage-pools/shared-backend-executors.service.js';
@@ -21,7 +21,7 @@ import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.
 import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
 import { listSharedBackendAccess } from '../iam/effective-access.js';
-import { assertListScope, type Actor } from '../iam/actor.js';
+import { assertListScope, type Actor, requireUserId } from '../iam/actor.js';
 
 function normalizedIdentity(value: string): string {
   const identity = value.trim();
@@ -70,18 +70,18 @@ export class SharedBackendsService {
 
   /**
    * `scope=mine`: backends the caller holds a live grant for.
-   * `scope=all`: every backend (`ManageSharedBackends` or `ManageGrants`).
+   * `scope=all`: every backend (operator).
    */
   async list(actor: Actor, scope: ListScope): Promise<SharedBackendDto[]> {
-    assertListScope(actor, scope, Capability.ManageSharedBackends, Capability.ManageGrants);
-    return scope === 'all' ? this.listAll() : this.listGranted(actor.userId);
+    assertListScope(actor, scope, Role.Operator);
+    return scope === 'all' ? this.listAll() : this.listGranted(requireUserId(actor));
   }
 
-  /** `scope=mine` needs a grant (404 otherwise); `scope=all` needs `ManageSharedBackends`. */
+  /** `scope=mine` needs a grant (404 otherwise); `scope=all` needs the operator role. */
   async get(actor: Actor, id: string, scope: ListScope): Promise<SharedBackendDto> {
-    assertListScope(actor, scope, Capability.ManageSharedBackends);
+    assertListScope(actor, scope, Role.Admin);
     if (scope === 'all') return this.getAny(id);
-    const backend = (await this.listGranted(actor.userId)).find((item) => item.id === id);
+    const backend = (await this.listGranted(requireUserId(actor))).find((item) => item.id === id);
     if (!backend) throw new NotFoundException('Shared backend not found');
     return backend;
   }

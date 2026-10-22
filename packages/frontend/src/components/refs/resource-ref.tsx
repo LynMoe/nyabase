@@ -2,7 +2,7 @@ import { useEffect } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   type AdminImageDto,
-  Capability,
+  Role,
   type ContainerDto,
   type GroupDto,
   type ServerDto,
@@ -14,6 +14,7 @@ import {
 } from '@nyabase/common';
 import { api } from '../../lib/api.js';
 import { queryKeys } from '../../lib/query-keys.js';
+import { canAccess } from '../../lib/route-access.js';
 import { useAuthStore } from '../../store/auth.js';
 import { type ResourceRefProps, TechnicalId } from './technical-id.js';
 
@@ -25,10 +26,6 @@ type CatalogUser = {
 };
 
 const USER_NAME_CACHE_KEY = ['resource-names', 'user'] as const;
-
-function hasAny(capabilities: readonly string[], ...needed: Capability[]): boolean {
-  return needed.some((cap) => capabilities.includes(cap));
-}
 
 function userLabel(row: { displayName?: string | null; username?: string | null } | undefined): string | undefined {
   if (!row) return undefined;
@@ -66,8 +63,8 @@ function RefLabel({ id, name }: { id: string; name: string | undefined }) {
   return <TechnicalId label="标识" value={id} kind="opaque" />;
 }
 
-function useCapabilities(): readonly string[] {
-  return useAuthStore((state) => state.user?.capabilities ?? []);
+function useRole(): Role | undefined {
+  return useAuthStore((state) => state.user?.role);
 }
 
 export function ResourceRef({ kind, id, name }: ResourceRefProps) {
@@ -95,12 +92,12 @@ export function ResourceRef({ kind, id, name }: ResourceRefProps) {
 
 function UserRef({ id, name }: { id: string; name?: string }) {
   const queryClient = useQueryClient();
-  const caps = useCapabilities();
+  const role = useRole();
   const currentUser = useAuthStore((state) => state.user);
   const explicit = providedName(name);
   const selfName = currentUser?.id === id ? userLabel(currentUser) : undefined;
-  const hasCatalog = hasAny(caps, Capability.ManageUsers, Capability.ManageGroups, Capability.ManageGrants);
-  const hasUsersList = hasAny(caps, Capability.ManageUsers, Capability.ManageGrants);
+  const hasCatalog = canAccess(role, Role.Operator);
+  const hasUsersList = hasCatalog;
   const skipFetch = Boolean(explicit || selfName);
 
   const catalogQuery = useQuery({
@@ -152,23 +149,23 @@ function UserRef({ id, name }: { id: string; name?: string }) {
 }
 
 function GroupRef({ id, name }: { id: string; name?: string }) {
-  const caps = useCapabilities();
+  const role = useRole();
   const explicit = providedName(name);
   const query = useQuery({
     queryKey: queryKeys.groups.admin,
     queryFn: () => api.get<GroupDto[]>('/admin/groups'),
-    enabled: Boolean(id) && !explicit && hasAny(caps, Capability.ManageGroups, Capability.ManageGrants),
+    enabled: Boolean(id) && !explicit && canAccess(role, Role.Operator),
   });
   return <RefLabel id={id} name={explicit ?? query.data?.find((row) => row.id === id)?.name} />;
 }
 
 function ServerRef({ id, name }: { id: string; name?: string }) {
-  const caps = useCapabilities();
+  const role = useRole();
   const explicit = providedName(name);
   const listQuery = useQuery({
     queryKey: queryKeys.servers.admin,
     queryFn: () => api.get<ServerDto[]>('/servers?scope=all'),
-    enabled: Boolean(id) && !explicit && hasAny(caps, Capability.ManageServers),
+    enabled: Boolean(id) && !explicit && canAccess(role, Role.Operator),
   });
   const grantTargetsQuery = useQuery({
     queryKey: queryKeys.grants.targets.servers,
@@ -181,45 +178,45 @@ function ServerRef({ id, name }: { id: string; name?: string }) {
 }
 
 function ContainerRef({ id, name }: { id: string; name?: string }) {
-  const caps = useCapabilities();
+  const role = useRole();
   const explicit = providedName(name);
   const query = useQuery({
     queryKey: queryKeys.containers.adminList,
     queryFn: () => api.get<ContainerDto[]>('/containers?scope=all'),
-    enabled: Boolean(id) && !explicit && hasAny(caps, Capability.ManageContainersAny),
+    enabled: Boolean(id) && !explicit && canAccess(role, Role.Operator),
   });
   return <RefLabel id={id} name={explicit ?? query.data?.find((row) => row.id === id)?.name} />;
 }
 
 function VolumeRef({ id, name }: { id: string; name?: string }) {
-  const caps = useCapabilities();
+  const role = useRole();
   const explicit = providedName(name);
   const query = useQuery({
     queryKey: queryKeys.volumes.admin,
     queryFn: () => api.get<VolumeDto[]>('/volumes?scope=all'),
-    enabled: Boolean(id) && !explicit && hasAny(caps, Capability.ManageVolumes),
+    enabled: Boolean(id) && !explicit && canAccess(role, Role.Admin),
   });
   return <RefLabel id={id} name={explicit ?? query.data?.find((row) => row.id === id)?.name} />;
 }
 
 function SharedVolumeRef({ id, name }: { id: string; name?: string }) {
-  const caps = useCapabilities();
+  const role = useRole();
   const explicit = providedName(name);
   const query = useQuery({
     queryKey: queryKeys.sharedVolumes.admin,
     queryFn: () => api.get<SharedVolumeDto[]>('/shared-volumes?scope=all'),
-    enabled: Boolean(id) && !explicit && hasAny(caps, Capability.ManageSharedVolumes),
+    enabled: Boolean(id) && !explicit && canAccess(role, Role.Admin),
   });
   return <RefLabel id={id} name={explicit ?? query.data?.find((row) => row.id === id)?.name} />;
 }
 
 function ImageRef({ id, name }: { id: string; name?: string }) {
-  const caps = useCapabilities();
+  const role = useRole();
   const explicit = providedName(name);
   const query = useQuery({
     queryKey: queryKeys.images.admin,
     queryFn: () => api.get<AdminImageDto[]>('/images?scope=all'),
-    enabled: Boolean(id) && !explicit && hasAny(caps, Capability.ManageImages),
+    enabled: Boolean(id) && !explicit && canAccess(role, Role.Operator),
   });
   return <RefLabel id={id} name={explicit ?? query.data?.find((row) => row.id === id)?.alias} />;
 }
@@ -248,12 +245,12 @@ function PoolRef({ id, name }: { id: string; name?: string }) {
 }
 
 function SharedBackendRef({ id, name }: { id: string; name?: string }) {
-  const caps = useCapabilities();
+  const role = useRole();
   const explicit = providedName(name);
   const listQuery = useQuery({
     queryKey: queryKeys.sharedBackends.admin,
     queryFn: () => api.get<SharedBackendDto[]>('/shared-backends?scope=all'),
-    enabled: Boolean(id) && !explicit && hasAny(caps, Capability.ManageSharedBackends, Capability.ManageGrants),
+    enabled: Boolean(id) && !explicit && canAccess(role, Role.Operator),
   });
   const grantTargetsQuery = useQuery({
     queryKey: queryKeys.grants.targets.backends,

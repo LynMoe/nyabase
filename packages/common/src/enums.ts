@@ -113,42 +113,24 @@ export enum PreflightStatus {
   Failed = 'failed',
 }
 
-export enum Capability {
-  ManageUsers = 'manage_users',
-  ManageGroups = 'manage_groups',
-  ManageServers = 'manage_servers',
-  ManageImages = 'manage_images',
-  ManageStoragePools = 'manage_storage_pools',
-  ManageIpPools = 'manage_ip_pools',
-  ManageSharedBackends = 'manage_shared_backends',
-  ManageVolumes = 'manage_volumes',
-  ManageSharedVolumes = 'manage_shared_volumes',
-  ManageGrants = 'manage_grants',
-  ManageContainersAny = 'manage_containers_any',
-  ManagePreflight = 'manage_preflight',
-  ViewAudit = 'view_audit',
-  ViewMetricsAll = 'view_metrics_all',
-  ManageSystemSettings = 'manage_system_settings',
+/** Platform roles, strictly nested: admin ⊇ operator ⊇ user. */
+export enum Role {
+  User = 'user',
+  Operator = 'operator',
+  Admin = 'admin',
 }
 
-/** AnyCaps for GET /admin/intents and the admin 运维 page. Do not expand Operators to match. */
-export const ADMIN_INTENT_CAPABILITIES = [
-  Capability.ManageContainersAny,
-  Capability.ManageVolumes,
-  Capability.ManageSharedVolumes,
-  Capability.ManageServers,
-  Capability.ManageImages,
-] as const satisfies readonly Capability[];
+const ROLE_RANK: Record<Role, number> = { [Role.User]: 0, [Role.Operator]: 1, [Role.Admin]: 2 };
 
-export enum SystemGroupKey {
-  Administrators = 'administrators',
-  Operators = 'operators',
-  Users = 'users',
+/** True when `role` is `minimum` or a role above it. */
+export function roleAtLeast(role: Role, minimum: Role): boolean {
+  return ROLE_RANK[role] >= ROLE_RANK[minimum];
 }
 
 export enum FailureCode {
   RevisionConflict = 'REVISION_CONFLICT',
   StorageGrantExceeded = 'STORAGE_GRANT_EXCEEDED',
+  MemoryGrantExceeded = 'MEMORY_GRANT_EXCEEDED',
   StoragePoolExhausted = 'STORAGE_POOL_EXHAUSTED',
   StoragePoolQuotaIneffective = 'STORAGE_POOL_QUOTA_INEFFECTIVE',
   StoragePoolInUse = 'STORAGE_POOL_IN_USE',
@@ -181,6 +163,7 @@ export enum FailureCode {
   GpuInvalidPci = 'GPU_INVALID_PCI',
   GpuWildcardForbidden = 'GPU_WILDCARD_FORBIDDEN',
   GpuDuplicatePci = 'GPU_DUPLICATE_PCI',
+  GpuNotGranted = 'GPU_NOT_GRANTED',
   VolumeCatalogAdoptFailed = 'VOLUME_CATALOG_ADOPT_FAILED',
   VolumePlacementFailed = 'VOLUME_PLACEMENT_FAILED',
   ImageManagesOwnNetwork = 'IMAGE_MANAGES_OWN_NETWORK',
@@ -249,6 +232,7 @@ export enum AuditAction {
   UpdateSystemSettings = 'system_settings.update',
   CreateUser = 'user.create',
   UpdateUser = 'user.update',
+  ChangeUserRole = 'user.role_changed',
   DeleteUser = 'user.delete',
   AddUserSshPublicKey = 'user.ssh_public_key.add',
   DeleteUserSshPublicKey = 'user.ssh_public_key.delete',

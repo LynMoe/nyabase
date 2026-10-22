@@ -17,6 +17,7 @@ import { useActionMutation } from '../../hooks/use-action-mutation.js';
 import { useMySshKeys } from '../../hooks/use-my-ssh-keys.js';
 import { api } from '../../lib/api.js';
 import { useInvalidateContainer } from '../../lib/container-queries.js';
+import { scopedPath } from '../../lib/scoped-paths.js';
 
 /** How to log in over the jump host, the SSH state and the repair action. */
 export function SshLoginCard({ container, scope }: { container: ContainerDto; scope: ListScope }) {
@@ -27,7 +28,7 @@ export function SshLoginCard({ container, scope }: { container: ContainerDto; sc
   const login = useSshLogin(container);
   const invalidate = useInvalidateContainer(scope, container.id);
   const repairSsh = useActionMutation({
-    mutationFn: () => api.post<{ woken: boolean }>(`/containers/${container.id}/actions/repair-ssh`),
+    mutationFn: () => api.post<{ woken: boolean }>(scopedPath(`/containers/${container.id}/actions/repair-ssh`, scope)),
     successTitle: '已提交 SSH 修复',
     errorTitle: 'SSH 修复失败',
     onSuccess: invalidate,

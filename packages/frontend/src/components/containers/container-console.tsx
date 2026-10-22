@@ -1,15 +1,16 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Loader2, RotateCw, Terminal as TerminalIcon } from 'lucide-react';
 import type { IDisposable } from '@xterm/xterm';
-import { zConsoleToBrowser, type ContainerDto, type ExecSessionResponse } from '@nyabase/common';
+import { zConsoleToBrowser, type ContainerDto, type ExecSessionResponse, type ListScope } from '@nyabase/common';
 import { api } from '../../lib/api.js';
+import { scopedPath } from '../../lib/scoped-paths.js';
 import { useAuthStore } from '../../store/auth.js';
 import { Button } from '../ui/button.js';
 import { Badge } from '../ui/badge.js';
 
 type ConsoleStatus = 'idle' | 'connecting' | 'connected' | 'closed' | 'error';
 
-export function ContainerConsole({ container }: { container: ContainerDto }) {
+export function ContainerConsole({ container, scope }: { container: ContainerDto; scope: ListScope }) {
   const mountRef = useRef<HTMLDivElement | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
   const terminalRef = useRef<import('@xterm/xterm').Terminal | null>(null);
@@ -64,7 +65,7 @@ export function ContainerConsole({ container }: { container: ContainerDto }) {
         terminalRef.current = terminal;
         fitRef.current = fit;
         terminal.writeln('\x1b[90m正在连接控制台...\x1b[0m');
-        const session = await api.post<ExecSessionResponse>(`/containers/${container.id}/exec-sessions`, { tty: true, cols: terminal.cols || 100, rows: terminal.rows || 30 });
+        const session = await api.post<ExecSessionResponse>(scopedPath(`/containers/${container.id}/exec-sessions`, scope), { tty: true, cols: terminal.cols || 100, rows: terminal.rows || 30 });
         if (cancelled) return;
         const resolved = new URL(session.consoleUrl, window.location.href);
         if (resolved.protocol === 'http:') resolved.protocol = 'ws:';

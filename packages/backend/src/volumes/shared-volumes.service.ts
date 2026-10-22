@@ -3,15 +3,15 @@ import { randomUUID } from 'node:crypto';
 import type { Transaction } from 'kysely';
 import {
   AuditAction,
-  Capability,
   FailureCode,
   StoragePoolResizeFamily,
   type CreateSharedVolumeRequest,
   type IntentAcceptedDto,
   type ListScope,
   type SharedVolumeDto,
+  Role,
 } from '@nyabase/common';
-import { assertListScope, type Actor } from '../iam/actor.js';
+import { assertListScope, type Actor, requireUserId } from '../iam/actor.js';
 import { AuditService } from '../iam/audit.service.js';
 import { deterministicName, numberValue } from '../platform/domain-utils.js';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
@@ -61,10 +61,10 @@ export class SharedVolumesService {
     filters: { scope?: ListScope; attachableOnServerId?: string } = {},
   ): Promise<SharedVolumeDto[]> {
     const scope = filters.scope ?? 'mine';
-    assertListScope(actor, scope, Capability.ManageSharedVolumes);
+    assertListScope(actor, scope, Role.Admin);
     const rows = await this.repository.listByKind(
       'shared',
-      scope === 'mine' ? { ownerId: actor.userId } : {},
+      scope === 'mine' ? { ownerId: requireUserId(actor) } : {},
     );
     const filtered = filters.attachableOnServerId
       ? await this.filterAttachable(rows, filters.attachableOnServerId)
@@ -72,8 +72,8 @@ export class SharedVolumesService {
     return this.dtos.toSharedVolumeDtos(filtered);
   }
 
-  async get(actor: Actor, id: string): Promise<SharedVolumeDto> {
-    const { row } = assertCanAccess(actor, await this.repository.findById(id), 'shared');
+  async get(actor: Actor, id: string, scope: ListScope = 'mine'): Promise<SharedVolumeDto> {
+    const { row } = assertCanAccess(actor, await this.repository.findById(id), 'shared', scope);
     const [dto] = await this.dtos.toSharedVolumeDtos([row]);
     return dto!;
   }
@@ -98,8 +98,8 @@ export class SharedVolumesService {
 
   async create(actor: Actor, input: CreateSharedVolumeRequest): Promise<SharedVolumeDto> {
     assertValidVolumeSize(input.sizeBytes);
-    const actorId = actor.userId;
-    const ownerId = actor.userId;
+    const actorId = requireUserId(actor);
+    const ownerId = requireUserId(actor);
     const id = randomUUID();
     const incusName = deterministicName('nyv', id);
     let row: VolumeRow;
@@ -148,19 +148,21 @@ export class SharedVolumesService {
     actor: Actor,
     id: string,
     input: PatchInput,
+    scope: ListScope = 'mine',
   ): Promise<SharedVolumeDto | IntentAcceptedDto> {
     const { row: current, access } = assertCanAccess(
       actor,
       await this.repository.findById(id),
       'shared',
+      scope,
     );
     assertPatchable(current, input);
     if (input.sizeBytes === undefined || input.sizeBytes === numberValue(current.size_bytes)) {
-      return this.renameOnly(actor, current, input);
+      return this.renameOnly(actor, current, input, scope);
     }
     const liveUsedBytes = await this.precheckLiveUsage(current, input.sizeBytes);
     const changed = await this.transactions.run(
-      (transaction) => this.resizeInTransaction(transaction, actor, access, id, {
+      (transaction) => this.resizeInTransaction(transaction, actor, access, scope, id, {
         ...input,
         sizeBytes: input.sizeBytes!,
       }, liveUsedBytes),
@@ -177,6 +179,7 @@ export class SharedVolumesService {
     actor: Actor,
     current: VolumeRow,
     input: PatchInput,
+    scope: ListScope,
   ): Promise<SharedVolumeDto> {
     if (input.name === undefined || input.name === current.name) {
       const [dto] = await this.dtos.toSharedVolumeDtos([current]);
@@ -187,11 +190,12 @@ export class SharedVolumesService {
         actor,
         await this.repository.findById(current.id, transaction),
         'shared',
+        scope,
       );
       if (locked.revision !== input.expectedRevision) {
         throw new ConflictException({ code: FailureCode.RevisionConflict });
       }
-      return this.lifecycle.renameVolume(transaction, actor.userId, locked, input.name!);
+      return this.lifecycle.renameVolume(transaction, requireUserId(actor), locked, input.name!);
     }, VOLUME_TX);
     const [dto] = await this.dtos.toSharedVolumeDtos([updated]);
     return dto!;
@@ -239,6 +243,7 @@ export class SharedVolumesService {
     transaction: Tx,
     actor: Actor,
     access: VolumeAccess,
+    scope: ListScope,
     id: string,
     input: { expectedRevision: number; name?: string; sizeBytes: number },
     liveUsedBytes: number | undefined,
@@ -247,6 +252,7 @@ export class SharedVolumesService {
       actor,
       await this.repository.findById(id, transaction),
       'shared',
+      scope,
     );
     if (locked.revision !== input.expectedRevision) {
       throw new ConflictException({ code: FailureCode.RevisionConflict });
@@ -293,7 +299,7 @@ export class SharedVolumesService {
     }
     const { row, intents } = await this.lifecycle.applyResize(
       transaction,
-      actor.userId,
+      requireUserId(actor),
       locked,
       input,
       placements,
@@ -301,13 +307,14 @@ export class SharedVolumesService {
     return { row, intent: intents[0] ?? null };
   }
 
-  async delete(actor: Actor, id: string) {
-    const actorId = actor.userId;
+  async delete(actor: Actor, id: string, scope: ListScope = 'mine') {
+    const actorId = requireUserId(actor);
     const result = await this.transactions.run(async (transaction) => {
       const { row: current } = assertCanAccess(
         actor,
         await this.repository.findById(id, transaction),
         'shared',
+        scope,
       );
       if (current.lifecycle_phase === 'deleting') {
         throw new ConflictException({

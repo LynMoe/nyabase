@@ -9,7 +9,6 @@ import type { Kysely, Transaction } from 'kysely';
 import { randomUUID } from 'node:crypto';
 import {
   AuditAction,
-  Capability,
   IntentKind,
   IntentResourceType,
   MAX_PLATFORM_IMAGES,
@@ -22,18 +21,20 @@ import {
   type ListScope,
   type PatchImageRequest,
   type ResourceLifecyclePhase,
+  Role,
 } from '@nyabase/common';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
 import { AccessResolverService } from '../iam/access-resolver.service.js';
 import { AuditService } from '../iam/audit.service.js';
-import { assertListScope, type Actor } from '../iam/actor.js';
+import { assertListScope, type Actor, requireUserId } from '../iam/actor.js';
 import { lockImageCapacity } from '../platform/persistence-pg/advisory-locks.js';
 import { IntentRepository } from '../reconcile/intent.repository.js';
 import { isoDate, numberValue } from '../platform/domain-utils.js';
 import { acceptedIntent } from '../reconcile/accepted-intent.js';
 import { ImageCatalogService } from './image-catalog.js';
+import { assertActorRole } from '../iam/administration.js';
 
 type ImageRow = Awaited<ReturnType<ImagesService['findById']>>;
 type ImageAssignmentRow = Awaited<ReturnType<ImagesService['assignments']>>[number];
@@ -109,11 +110,7 @@ export class ImagesService {
     const current = await this.findById(imageId);
     const entry = await this.catalog.requireAlias(current.alias);
     const result = await this.transactions.run(async (transaction) => {
-      await this.access.assertActorCapabilitiesInTransaction(
-        transaction,
-        actorId,
-        [Capability.ManageImages],
-      );
+      await assertActorRole(transaction, actorId, Role.Operator);
       const image = await this.lockById(imageId, transaction);
       if (!image.is_active || image.deleting) {
         throw new ConflictException({
@@ -180,11 +177,7 @@ export class ImagesService {
 
   async create(actorId: string, input: CreateImageRequest, fingerprint: string | null = null): Promise<AdminImageDto> {
     const row = await this.transactions.run(async (transaction) => {
-      await this.access.assertActorCapabilitiesInTransaction(
-        transaction,
-        actorId,
-        [Capability.ManageImages],
-      );
+      await assertActorRole(transaction, actorId, Role.Operator);
       await lockImageCapacity(transaction);
       const count = await transaction.selectFrom('infra.images')
         .select(({ fn }) => fn.countAll<number>().as('count'))
@@ -234,18 +227,18 @@ export class ImagesService {
     scope: ListScope,
     activeOnly = false,
   ): Promise<ImageDto[] | AdminImageDto[]> {
-    assertListScope(actor, scope, Capability.ManageImages);
+    assertListScope(actor, scope, Role.Operator);
     return scope === 'all'
       ? this.listAll(activeOnly)
-      : this.listAccessible(actor.userId, activeOnly);
+      : this.listAccessible(requireUserId(actor), activeOnly);
   }
 
   /** `scope=mine` is the user view of an image the caller may use; `scope=all` adds assignments (`ManageImages`). */
   async get(actor: Actor, id: string, scope: ListScope): Promise<ImageDto | AdminImageDto> {
-    assertListScope(actor, scope, Capability.ManageImages);
+    assertListScope(actor, scope, Role.Operator);
     if (scope === 'all') return this.findAdminDtoById(id);
     const image = await this.findById(id);
-    if (!await this.access.isImageAccessible(actor.userId, image.id) || image.deleting) {
+    if (!await this.access.isImageAccessible(requireUserId(actor), image.id) || image.deleting) {
       throw new ForbiddenException();
     }
     return this.toDto(image);
@@ -260,7 +253,7 @@ export class ImagesService {
 
   private async listAccessible(userId: string, activeOnly: boolean): Promise<ImageDto[]> {
     const access = await this.access.getEffectiveAccess(userId);
-    const allowed = new Set(access.flatMap((server) => server.allowedImageIds));
+    const allowed = new Set(access.flatMap((server) => (server.accessPhase === 'live' ? server.allowedImageIds : [])));
     if (allowed.size === 0) return [];
     let query = this.database.selectFrom('infra.images')
       .selectAll()
@@ -322,11 +315,7 @@ export class ImagesService {
     input: PatchImageRequest,
   ): Promise<AdminImageDto> {
     const row = await this.transactions.run(async (transaction) => {
-      await this.access.assertActorCapabilitiesInTransaction(
-        transaction,
-        actorId,
-        [Capability.ManageImages],
-      );
+      await assertActorRole(transaction, actorId, Role.Operator);
       const current = await this.lockById(id, transaction);
       const updated = await transaction.updateTable('infra.images')
         .set({
@@ -354,11 +343,7 @@ export class ImagesService {
 
   async delete(actorId: string, id: string) {
     const result = await this.transactions.run(async (transaction) => {
-      await this.access.assertActorCapabilitiesInTransaction(
-        transaction,
-        actorId,
-        [Capability.ManageImages],
-      );
+      await assertActorRole(transaction, actorId, Role.Operator);
       const current = await this.lockById(id, transaction);
       const container = await transaction.selectFrom('control.containers')
         .select('id')
@@ -437,11 +422,7 @@ export class ImagesService {
     intent: Awaited<ReturnType<IntentRepository['ensurePending']>>;
   }> {
     const result = await this.transactions.run(async (transaction) => {
-      await this.access.assertActorCapabilitiesInTransaction(
-        transaction,
-        actorId,
-        [Capability.ManageImages],
-      );
+      await assertActorRole(transaction, actorId, Role.Operator);
       const image = await this.lockById(imageId, transaction);
       if (!image.is_active || image.deleting) {
         throw new ConflictException({
@@ -555,11 +536,7 @@ export class ImagesService {
     intents: Array<Awaited<ReturnType<IntentRepository['ensurePending']>>>;
   }> {
     const result = await this.transactions.run(async (transaction) => {
-      await this.access.assertActorCapabilitiesInTransaction(
-        transaction,
-        actorId,
-        [Capability.ManageImages],
-      );
+      await assertActorRole(transaction, actorId, Role.Operator);
       const image = await this.findById(imageId, transaction);
       const assignment = await transaction
         .selectFrom('infra.image_server_assignments')

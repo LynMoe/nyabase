@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { getRouteApi, useNavigate } from '@tanstack/react-router';
 import { Trash2 } from 'lucide-react';
-import { Capability, type ServerDto } from '@nyabase/common';
+import { Role, type ServerDto } from '@nyabase/common';
 import { api } from '../lib/api.js';
 import { errorMessage } from '../lib/api-error.js';
 import { toast } from '../hooks/use-toast.js';
@@ -15,7 +15,7 @@ import { serverStatusLabel } from '../lib/display-labels.js';
 import { preflightPending } from '../lib/in-progress.js';
 import { queryKeys } from '../lib/query-keys.js';
 import { refetchWhileInProgress } from '../lib/query-lifecycle.js';
-import { useAuthStore } from '../store/auth.js';
+import { useHasRole } from '../lib/use-role.js';
 import {
   SERVER_DETAIL_TABS,
   type ServerDetailTab,
@@ -38,9 +38,7 @@ export default function ServerDetailPage() {
   const navigate = useNavigate({ from: '/servers/$id' });
   const queryClient = useQueryClient();
   const [deleteOpen, setDeleteOpen] = useState(false);
-  const canManageServers = useAuthStore(
-    (state) => state.user?.capabilities.includes(Capability.ManageServers) ?? false,
-  );
+  const canManageServers = useHasRole(Role.Operator);
 
   const serverQuery = useQuery({
     queryKey: queryKeys.servers.detail(id),

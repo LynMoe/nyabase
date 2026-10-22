@@ -2,7 +2,6 @@ import { ForbiddenException, NotFoundException } from '@nestjs/common';
 import { describe, expect, it, vi } from 'vitest';
 import {
   AuditAction,
-  Capability,
   ContainerPhase,
   ContainerPowerIntent,
   ContainerStatus,
@@ -10,10 +9,11 @@ import {
   IntentKind,
   IntentResourceType,
   StoragePoolResizeFamily,
+  Role,
 } from '@nyabase/common';
 import { makeContainerControlService } from './container-services.test-helper.js';
 import { checkRootResize } from './container-rules.js';
-import { systemActor } from '../iam/actor.js';
+import { SYSTEM_ACTOR } from '../iam/actor.js';
 import { testActor } from '../iam/actor.test-helper.js';
 
 // The quota lock is plain SQL; this harness has no database behind its transaction.
@@ -22,11 +22,25 @@ vi.mock('../platform/persistence-pg/advisory-locks.js', async (importOriginal) =
   lockOwnerServerQuota: vi.fn().mockResolvedValue(undefined),
 }));
 
+// Role and coverage checks are plain SQL; stub them (the PG tests cover the real ones).
+const { assertActorRoleMock, resolveServerAccessMock } = vi.hoisted(() => ({
+  assertActorRoleMock: vi.fn(),
+  resolveServerAccessMock: vi.fn(),
+}));
+vi.mock('../iam/administration.js', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../iam/administration.js')>(),
+  assertActorRole: assertActorRoleMock,
+}));
+vi.mock('../iam/effective-access.js', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../iam/effective-access.js')>(),
+  resolveServerAccess: resolveServerAccessMock,
+}));
+
 const containerId = 'container-1';
 const serverId = 'server-1';
 const actorId = 'user-1';
 const owner = testActor(actorId);
-const operator = testActor('operator-1', Capability.ManageContainersAny);
+const operator = testActor('operator-1', Role.Operator);
 const stranger = testActor('stranger-1');
 
 function makeHarness() {
@@ -63,20 +77,20 @@ function makeHarness() {
       instance_started_at: new Date('2026-08-07T03:00:00.000Z'),
     }),
     updateDesired: vi.fn().mockResolvedValue({ ...row, revision: 2 }),
-    sumLiveMemBytes: vi.fn().mockResolvedValue(0),
+    sumRunningMemBytes: vi.fn().mockResolvedValue(0),
     findDetachingAttachment: vi.fn().mockResolvedValue(undefined),
 
   };
   const access = {
     assertAttachedStorageCoveredInTransaction: vi.fn().mockResolvedValue(undefined),
-    resolveServerInTransaction: vi.fn().mockResolvedValue({
-      cpuCores: 2,
-      memBytes: 4_000_000_000,
-      diskBytes: 8_000_000_000,
-      gpuPciAddresses: [],
-    }),
-    assertActorCapabilitiesInTransaction: vi.fn(),
   };
+  assertActorRoleMock.mockReset();
+  resolveServerAccessMock.mockReset().mockResolvedValue({
+    cpuCores: 2,
+    memBytes: 4_000_000_000,
+    diskBytes: 8_000_000_000,
+    gpuPciAddresses: [],
+  });
   const intent = {
     id: 'intent-1',
     kind: IntentKind.ContainerUpdate,
@@ -123,6 +137,7 @@ function makeHarness() {
       forContainer: vi.fn(),
       health: vi.fn(),
       releaseContainerClaims: vi.fn().mockResolvedValue(undefined),
+      listForContainer: vi.fn().mockResolvedValue([]),
     } as never,
   );
   return {
@@ -208,7 +223,7 @@ describe('ContainerControlService intent boundary', () => {
 
   it('rejects mutations once the owner has no current server coverage without writing desired state', async () => {
     const harness = makeHarness();
-    harness.access.resolveServerInTransaction.mockResolvedValueOnce(null);
+    resolveServerAccessMock.mockResolvedValueOnce(null);
 
     await expect(harness.service.updateLimits(owner, containerId, {
       memBytes: 2_000_000_000,
@@ -257,10 +272,10 @@ describe('ContainerControlService intent boundary', () => {
     expect(harness.intents.createPending).not.toHaveBeenCalled();
   });
 
-  it('lets nyabase-system stop a container without ManageContainersAny', async () => {
+  it('lets the system actor stop a container without a role', async () => {
     const harness = makeHarness();
-    await harness.service.action(systemActor('system-actor'), containerId, 'stop');
-    expect(harness.access.assertActorCapabilitiesInTransaction).not.toHaveBeenCalled();
+    await harness.service.action(SYSTEM_ACTOR, containerId, 'stop');
+    expect(assertActorRoleMock).not.toHaveBeenCalled();
     expect(harness.repository.updateDesired).toHaveBeenCalledWith(
       containerId,
       1,
@@ -274,15 +289,15 @@ describe('ContainerControlService intent boundary', () => {
     );
   });
 
-  it('still requires ManageContainersAny for operator admin stop', async () => {
+  it('still requires the operator role for an operator admin stop', async () => {
     const harness = makeHarness();
-    await harness.service.action(operator, containerId, 'stop');
-    expect(harness.access.assertActorCapabilitiesInTransaction).toHaveBeenCalledWith(
+    await harness.service.action(operator, containerId, 'stop', 'all');
+    expect(assertActorRoleMock).toHaveBeenCalledWith(
       harness.transaction,
       'operator-1',
-      [Capability.ManageContainersAny],
+      Role.Operator,
     );
-    expect(harness.access.resolveServerInTransaction).not.toHaveBeenCalled();
+    expect(resolveServerAccessMock).not.toHaveBeenCalled();
   });
 
   it('blocks root changes while a quota application is pending', async () => {
@@ -454,40 +469,64 @@ describe('ContainerControlService actor authorization', () => {
   it('lets the owner act under a live server grant', async () => {
     const harness = makeHarness();
     await harness.service.action(owner, containerId, 'stop');
-    expect(harness.access.resolveServerInTransaction).toHaveBeenCalled();
-    expect(harness.access.assertActorCapabilitiesInTransaction).not.toHaveBeenCalled();
+    expect(resolveServerAccessMock).toHaveBeenCalled();
+    expect(assertActorRoleMock).not.toHaveBeenCalled();
   });
 
-  it('refuses another user without the capability, with the owner-only route statuses', async () => {
+  it('hides another user\'s container with a 404, even from an operator without scope=all', async () => {
     const harness = makeHarness();
-    // reads and power actions were 403
-    await expect(harness.service.get(stranger, containerId)).rejects.toBeInstanceOf(ForbiddenException);
-    await expect(harness.service.action(stranger, containerId, 'stop'))
-      .rejects.toBeInstanceOf(ForbiddenException);
-    await expect(harness.service.repairSsh(stranger, containerId))
-      .rejects.toBeInstanceOf(ForbiddenException);
-    await expect(harness.service.getStats(stranger, containerId))
-      .rejects.toBeInstanceOf(ForbiddenException);
-    // desired-state edits and GPU changes hid the row with a 404
-    await expect(harness.service.updateLimits(stranger, containerId, { memBytes: 1 }))
-      .rejects.toBeInstanceOf(NotFoundException);
-    await expect(harness.service.resizeRoot(stranger, containerId, { sizeBytes: 2_147_483_648 }))
-      .rejects.toBeInstanceOf(NotFoundException);
-    await expect(harness.service.mutateGpus(stranger, containerId, {}))
-      .rejects.toBeInstanceOf(NotFoundException);
+    for (const actor of [stranger, operator]) {
+      await expect(harness.service.get(actor, containerId)).rejects.toBeInstanceOf(NotFoundException);
+      await expect(harness.service.action(actor, containerId, 'stop'))
+        .rejects.toBeInstanceOf(NotFoundException);
+      await expect(harness.service.repairSsh(actor, containerId))
+        .rejects.toBeInstanceOf(NotFoundException);
+      await expect(harness.service.getStats(actor, containerId))
+        .rejects.toBeInstanceOf(NotFoundException);
+      await expect(harness.service.updateLimits(actor, containerId, { memBytes: 1 }))
+        .rejects.toBeInstanceOf(NotFoundException);
+      await expect(harness.service.resizeRoot(actor, containerId, { sizeBytes: 2_147_483_648 }))
+        .rejects.toBeInstanceOf(NotFoundException);
+      await expect(harness.service.mutateGpus(actor, containerId, {}))
+        .rejects.toBeInstanceOf(NotFoundException);
+    }
     expect(harness.repository.updateDesired).not.toHaveBeenCalled();
     expect(harness.intents.createPending).not.toHaveBeenCalled();
   });
 
-  it('lets a ManageContainersAny holder act on someone else\'s container without a grant', async () => {
+  it('refuses scope=all without the operator role (403), also on the caller\'s own container', async () => {
     const harness = makeHarness();
-    await expect(harness.service.repairSsh(operator, containerId)).resolves.toEqual({ woken: true });
-    await harness.service.updateLimits(operator, containerId, { memBytes: 99_000_000_000 });
-    expect(harness.access.resolveServerInTransaction).not.toHaveBeenCalled();
+    await expect(harness.service.get(owner, containerId, 'all')).rejects.toBeInstanceOf(ForbiddenException);
+    await expect(harness.service.action(owner, containerId, 'stop', 'all'))
+      .rejects.toBeInstanceOf(ForbiddenException);
+    await expect(harness.service.updateLimits(owner, containerId, { memBytes: 1 }, 'all'))
+      .rejects.toBeInstanceOf(ForbiddenException);
+    await expect(harness.service.mutateGpus(stranger, containerId, {}, 'all'))
+      .rejects.toBeInstanceOf(ForbiddenException);
+    expect(harness.intents.createPending).not.toHaveBeenCalled();
+  });
+
+  it('lets an operator act on someone else\'s container with scope=all and no grant check', async () => {
+    const harness = makeHarness();
+    await expect(harness.service.repairSsh(operator, containerId, 'all')).resolves.toEqual({ woken: true });
+    await harness.service.updateLimits(operator, containerId, { memBytes: 99_000_000_000 }, 'all');
+    expect(resolveServerAccessMock).not.toHaveBeenCalled();
     expect(harness.repository.updateDesired).toHaveBeenCalled();
   });
 
-  it('rejects scope=all lists without the capability and scopes mine to the caller', async () => {
+  it('gives an operator the owner rules on their own container unless scope=all', async () => {
+    const harness = makeHarness();
+    Object.assign(harness.row, { owner_id: operator.userId });
+    await harness.service.updateLimits(operator, containerId, { memBytes: 99_000_000_000 });
+    expect(resolveServerAccessMock).toHaveBeenCalledWith(
+      harness.transaction,
+      operator.userId,
+      serverId,
+    );
+    expect(assertActorRoleMock).not.toHaveBeenCalled();
+  });
+
+  it('rejects scope=all lists without the operator role and scopes mine to the caller', async () => {
     const harness = makeHarness();
     await expect(harness.service.list(owner, { scope: 'all' })).rejects.toBeInstanceOf(ForbiddenException);
     const list = vi.fn().mockResolvedValue([]);
@@ -501,7 +540,7 @@ describe('ContainerControlService actor authorization', () => {
   it('requires a browser JWT for console admission', async () => {
     const harness = makeHarness();
     await expect(harness.service.createExecSession(
-      { ...owner, authKind: 'api-token' },
+      { ...owner, userId: actorId, authKind: 'api-token' as const },
       containerId,
       { command: ['/bin/sh'], tty: true, cols: 80, rows: 24 },
     )).rejects.toBeInstanceOf(ForbiddenException);

@@ -1,15 +1,19 @@
 import { ForbiddenException } from '@nestjs/common';
-import { Capability, SystemGroupKey } from '@nyabase/common';
+import { randomUUID } from 'node:crypto';
+import { Role, UserStatus } from '@nyabase/common';
 import { describe, expect, it } from 'vitest';
 import { GpuClaimsRepository } from '../gpu/gpu-claims.repository.js';
 import { GrantsService } from '../groups/grants.service.js';
 import { testActor } from './actor.test-helper.js';
-import { AccessChangeNotifier, AccessResolverService } from './access-resolver.service.js';
+import { AccessChangeNotifier } from './access-resolver.service.js';
+import { assertActorRole } from './administration.js';
+import { resolveServerAccess, resolveSharedBackendAccess } from './effective-access.js';
 import { withPostgresTestDatabase } from '../platform/persistence-pg/postgres-test-harness.js';
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
 import {
   addMember,
   grantServer,
+  seedBackend,
   seedGroup,
   seedServer,
   seedUser,
@@ -20,24 +24,19 @@ const describePg = process.env.NYABASE_TEST_DATABASE_URL ? describe : describe.s
 describePg('PostgreSQL canonical authorization', () => {
   function services(database: Parameters<typeof seedUser>[0]) {
     const transactions = new PgTransactionManager(database);
-    const access = new AccessResolverService(database, transactions);
     const changes = new AccessChangeNotifier();
     const grants = new GrantsService(
       database,
       transactions,
-      access,
       { append: async () => undefined } as never,
       new GpuClaimsRepository(database),
       changes,
     );
-    return { access, grants, changes };
+    return { grants, changes };
   }
 
   async function grantManager(database: Parameters<typeof seedUser>[0]): Promise<string> {
-    const actor = await seedUser(database);
-    const group = await seedGroup(database, { capabilities: [Capability.ManageGrants] });
-    await addMember(database, group, actor);
-    return actor;
+    return seedUser(database, undefined, UserStatus.Active, Role.Operator);
   }
 
   it('merges a direct grant with group grants instead of picking a winner', async () => {
@@ -49,23 +48,17 @@ describePg('PostgreSQL canonical authorization', () => {
       await grantServer(database, { user: userId }, serverId, { diskBytes: 10 });
       await grantServer(database, { group: groupId }, serverId, { diskBytes: 20 });
 
-      await expect(services(database).access.resolveServer(userId, serverId))
+      await expect(resolveServerAccess(database, userId, serverId))
         .resolves.toMatchObject({ diskBytes: 20 });
     });
   });
 
-  it('rejects an actor that lacks the capability being exercised', async () => {
+  it('rejects an actor that lacks the role being exercised', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const actorId = await seedUser(database);
-      const groupId = await seedGroup(database, { capabilities: [Capability.ManageUsers] });
-      await addMember(database, groupId, actorId);
 
       await expect(database.transaction().execute((transaction) =>
-        services(database).access.assertActorCapabilitiesInTransaction(
-          transaction,
-          actorId,
-          [Capability.ManageGrants],
-        ))).rejects.toBeInstanceOf(ForbiddenException);
+        assertActorRole(transaction, actorId, Role.Operator))).rejects.toBeInstanceOf(ForbiddenException);
     });
   });
 
@@ -121,7 +114,7 @@ describePg('PostgreSQL canonical authorization', () => {
     });
   });
 
-  it('refuses grant mutations from an actor without ManageGrants and for unknown holders', async () => {
+  it('refuses grant mutations from an actor without the operator role and for unknown holders', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const { grants } = services(database);
       const plain = testActor(await seedUser(database));
@@ -133,9 +126,9 @@ describePg('PostgreSQL canonical authorization', () => {
       };
 
       await expect(grants.putServerGrant(plain, { kind: 'user', id: userId }, serverId, input))
-        .rejects.toMatchObject({ response: { code: 'PRIVILEGE_ESCALATION_DENIED' } });
+        .rejects.toMatchObject({ response: { code: 'ROLE_REQUIRED' } });
       await expect(grants.deleteServerGrant(plain, { kind: 'user', id: userId }, serverId))
-        .rejects.toMatchObject({ response: { code: 'PRIVILEGE_ESCALATION_DENIED' } });
+        .rejects.toMatchObject({ response: { code: 'ROLE_REQUIRED' } });
       await expect(grants.putServerGrant(
         manager,
         { kind: 'group', id: '00000000-0000-4000-8000-0000000000aa' },
@@ -175,25 +168,55 @@ describePg('PostgreSQL canonical authorization', () => {
     });
   });
 
-  it('does not keep Administrators special in grant authorization', async () => {
+  it('lets an admin manage grants too: roles are nested', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const { grants } = services(database);
-      const adminGroup = await seedGroup(database, {
-        name: 'Administrators',
-        system: SystemGroupKey.Administrators,
-        capabilities: Object.values(Capability),
-      });
-      const admin = await seedUser(database);
-      await addMember(database, adminGroup, admin);
+      const admin = await seedUser(database, undefined, UserStatus.Active, Role.Admin);
       const serverId = await seedServer(database);
       const userId = await seedUser(database);
 
       await expect(grants.putServerGrant(
-        testActor(admin),
+        testActor(admin, Role.Admin),
         { kind: 'user', id: userId },
         serverId,
         { cpuCores: null, memBytes: null, diskBytes: null, gpuPciAddresses: [], expiresAt: null },
       )).resolves.toMatchObject({ serverId });
+    });
+  });
+
+  it('rejects zero quotas in the database: NULL is the only unlimited', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const userId = await seedUser(database);
+      const serverId = await seedServer(database);
+      const insert = (values: Record<string, unknown>) => database.insertInto('iam.server_grants')
+        .values({
+          id: randomUUID(), user_id: userId, group_id: null, server_id: serverId,
+          cpu_cores: null, mem_bytes: null, disk_bytes: null, gpu_pci_addresses: [],
+          expires_at: null, ...values,
+        } as never).execute();
+
+      await expect(insert({ mem_bytes: 0 })).rejects.toThrow(/server_grants_mem_bytes_check/);
+      await expect(insert({ disk_bytes: 0 })).rejects.toThrow(/server_grants_disk_bytes_check/);
+      await expect(insert({ cpu_cores: 0 })).rejects.toThrow(/server_grants_cpu_cores_check/);
+      await insert({ mem_bytes: 1, disk_bytes: 1 });
+    });
+  });
+
+  it('rejects a zero shared-backend limit in the database and accepts NULL as unlimited', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const userId = await seedUser(database);
+      const backendId = await seedBackend(database);
+      const insert = (limit: number | null) => database.insertInto('iam.shared_backend_grants')
+        .values({
+          id: randomUUID(), user_id: userId, group_id: null, shared_backend_id: backendId,
+          limit_bytes: limit, expires_at: null,
+        }).execute();
+
+      await expect(insert(0)).rejects.toThrow(/shared_backend_grants_limit_check/);
+      await insert(null);
+      await expect(
+        resolveSharedBackendAccess(database, userId, backendId),
+      ).resolves.toMatchObject({ limitBytes: null });
     });
   });
 });

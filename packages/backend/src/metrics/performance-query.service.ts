@@ -1,6 +1,5 @@
 import { BadRequestException, Inject, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import {
-  Capability,
   canonicalPciAddress,
   type ListScope,
   type PerformanceAdminUsageResponse,
@@ -10,13 +9,14 @@ import {
   type PerformanceSelfResponse,
   type PerformanceSeriesResponse,
   type PerformanceUsageResponse,
+  Role,
 } from '@nyabase/common';
 import type { Kysely } from 'kysely';
 import { NyabaseConfigService } from '../platform/config/nyabase-config.service.js';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
 import { AccessResolverService } from '../iam/access-resolver.service.js';
-import { assertListScope, type Actor } from '../iam/actor.js';
+import { assertListScope, type Actor, requireUserId } from '../iam/actor.js';
 import { isLocalPoolDto } from '../storage-pools/storage-pool-capability.js';
 import { StoragePoolsService } from '../storage-pools/storage-pools.service.js';
 import {
@@ -88,17 +88,17 @@ export class PerformanceQueryService {
 
   /**
    * `scope=mine`: the caller's own containers on granted servers.
-   * `scope=all`: every server, container and person (`ViewMetricsAll`).
+   * `scope=all`: every server, container and person (operator).
    */
   async usage(
     actor: Actor,
     query: PerformanceQuery,
     scope: ListScope,
   ): Promise<PerformanceUsageResponse | PerformanceAdminUsageResponse | PerformanceSelfResponse> {
-    assertListScope(actor, scope, Capability.ViewMetricsAll);
+    assertListScope(actor, scope, Role.Operator);
     return scope === 'all'
-      ? this.scopedUsage(actor.userId, query, 'all')
-      : this.ownUsage(actor.userId, query);
+      ? this.scopedUsage(requireUserId(actor), query, 'all')
+      : this.ownUsage(requireUserId(actor), query);
   }
 
   async series(
@@ -106,10 +106,10 @@ export class PerformanceQueryService {
     query: PerformanceQuery,
     scope: ListScope,
   ): Promise<PerformanceSeriesResponse | PerformanceMultiSeriesResponse> {
-    assertListScope(actor, scope, Capability.ViewMetricsAll);
+    assertListScope(actor, scope, Role.Operator);
     return scope === 'all'
-      ? this.scopedSeries(actor.userId, query, 'all')
-      : this.ownSeries(actor.userId, query);
+      ? this.scopedSeries(requireUserId(actor), query, 'all')
+      : this.ownSeries(requireUserId(actor), query);
   }
 
   private async ownUsage(userId: string, query: PerformanceQuery): Promise<PerformanceUsageResponse | PerformanceSelfResponse> {

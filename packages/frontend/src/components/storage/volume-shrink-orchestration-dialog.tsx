@@ -3,18 +3,21 @@ import {
   type AttachVolumeRequest,
   FailureCode,
   type IntentAcceptedDto,
+  IntentResourceType,
+  type ListScope,
   type PatchVolumeRequest,
   type VolumeDto,
 } from '@nyabase/common';
 import { api } from '../../lib/api.js';
 import { ApiError, errorMessage } from '../../lib/api-error.js';
-import { lookupLatestIntentFailure } from '../../lib/intent-visibility.js';
+import { lookupLatestIntentFailure, resourceIntentsPath } from '../../lib/intent-visibility.js';
 import {
   formatDetachProgress,
   parseVolumeShrinkAttachments,
   type VolumeShrinkAttachmentRef,
   waitUntil,
 } from '../../lib/storage-shrink.js';
+import { scopedPath } from '../../lib/scoped-paths.js';
 import { formatBytes } from '../../lib/utils.js';
 import { Button } from '../ui/button.js';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '../ui/dialog.js';
@@ -25,19 +28,21 @@ type VolumeShrinkFlow = ReturnType<typeof useVolumeShrinkFlow>;
 
 /** Shrinking an attached volume: unmount it everywhere, shrink, offer to mount it back. */
 export function VolumeShrinkOrchestrationDialog({
+  scope,
   volume,
   sizeBytes,
   open,
   onOpenChange,
   onComplete,
 }: {
+  scope: ListScope;
   volume: VolumeDto;
   sizeBytes: number;
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onComplete: () => void;
 }) {
-  const flow = useVolumeShrinkFlow({ volume, sizeBytes, open, onComplete });
+  const flow = useVolumeShrinkFlow({ scope, volume, sizeBytes, open, onComplete });
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent data-testid="volume-shrink-orchestration">
@@ -213,6 +218,7 @@ interface ShrinkState {
 
 /** What the workflow steps read, and how they report into the state. */
 interface ShrinkContext {
+  readonly scope: ListScope;
   readonly volume: VolumeDto;
   readonly sizeBytes: number;
   readonly attachments: VolumeShrinkAttachmentRef[];
@@ -225,11 +231,13 @@ interface ShrinkContext {
  * leave the dialog in a stage that says exactly what can be retried.
  */
 function useVolumeShrinkFlow({
+  scope,
   volume,
   sizeBytes,
   open,
   onComplete,
 }: {
+  scope: ListScope;
   volume: VolumeDto;
   sizeBytes: number;
   open: boolean;
@@ -248,12 +256,12 @@ function useVolumeShrinkFlow({
   });
   const patch = (change: Partial<ShrinkState>) => setState((current) => ({ ...current, ...change }));
   const { attachments, detached, shrinkSubmitted } = state;
-  const ctx: ShrinkContext = { volume, sizeBytes, attachments, patch };
+  const ctx: ShrinkContext = { scope, volume, sizeBytes, attachments, patch };
 
   /** Load the volume's attachments; on failure the dialog offers a reload. */
   const loadAttachments = async () => {
     try {
-      patch({ attachments: await loadAttachmentsForVolume(volume.id) });
+      patch({ attachments: await loadAttachmentsForVolume(scope, volume.id) });
       return true;
     } catch (loadError) {
       patch({ error: errorMessage(loadError), failureStage: 'load', phase: 'failed' });
@@ -334,8 +342,8 @@ function useVolumeShrinkFlow({
   };
 }
 
-async function loadAttachmentsForVolume(volumeId: string): Promise<VolumeShrinkAttachmentRef[]> {
-  const latest = await api.get<VolumeDto>(`/volumes/${volumeId}`);
+async function loadAttachmentsForVolume(scope: ListScope, volumeId: string): Promise<VolumeShrinkAttachmentRef[]> {
+  const latest = await api.get<VolumeDto>(scopedPath(`/volumes/${volumeId}`, scope));
   return latest.attachments.map((attachment) => ({
     attachmentId: attachment.attachmentId,
     containerId: attachment.containerId,
@@ -350,21 +358,21 @@ async function detachAll(
   targets: VolumeShrinkAttachmentRef[],
   succeeded: VolumeShrinkAttachmentRef[],
 ): Promise<boolean> {
-  const { patch, attachments, volume } = ctx;
+  const { scope, patch, attachments, volume } = ctx;
   for (let index = 0; index < targets.length; index += 1) {
     const attachment = targets[index]!;
     patch({ progress: formatDetachProgress(succeeded.length, attachments.length, null, null) });
     try {
       await api.delete<IntentAcceptedDto>(
-        `/containers/${attachment.containerId}/volumes/${attachment.attachmentId}`,
+        scopedPath(`/containers/${attachment.containerId}/volumes/${attachment.attachmentId}`, scope),
       );
       await waitUntil(async () => {
-        const remaining = await loadAttachmentsForVolume(volume.id);
+        const remaining = await loadAttachmentsForVolume(scope, volume.id);
         return !remaining.some((item) => item.attachmentId === attachment.attachmentId);
       }, {
         label: '等待卸载',
         timeoutMs: 90_000,
-        onTimeout: () => lookupLatestIntentFailure(`/containers/${attachment.containerId}/intents`),
+        onTimeout: () => lookupLatestIntentFailure(resourceIntentsPath(scope, IntentResourceType.Container, attachment.containerId)),
       });
       succeeded.push(attachment);
       patch({
@@ -392,22 +400,22 @@ async function submitShrink(
   ctx: ShrinkContext,
   succeeded: VolumeShrinkAttachmentRef[],
 ): Promise<boolean> {
-  const { patch, volume, sizeBytes } = ctx;
+  const { scope, patch, volume, sizeBytes } = ctx;
   const body: PatchVolumeRequest = { expectedRevision: volume.revision, sizeBytes };
   try {
-    await api.patch(`/volumes/${volume.id}`, body);
+    await api.patch(scopedPath(`/volumes/${volume.id}`, scope), body);
     await waitUntil(async () => {
-      const latest = await api.get<VolumeDto>(`/volumes/${volume.id}`);
+      const latest = await api.get<VolumeDto>(scopedPath(`/volumes/${volume.id}`, scope));
       if (latest.sizeBytes === sizeBytes) return true;
       if (latest.needsAttention) {
-        const failure = await lookupLatestIntentFailure(`/volumes/${volume.id}/intents`);
+        const failure = await lookupLatestIntentFailure(resourceIntentsPath(scope, IntentResourceType.Volume, volume.id));
         throw new Error(failure ?? latest.failureCode ?? '缩容失败');
       }
       return false;
     }, {
       label: '等待缩容',
       timeoutMs: 90_000,
-      onTimeout: () => lookupLatestIntentFailure(`/volumes/${volume.id}/intents`),
+      onTimeout: () => lookupLatestIntentFailure(resourceIntentsPath(scope, IntentResourceType.Volume, volume.id)),
     });
     return true;
   } catch (shrinkError) {
@@ -436,7 +444,7 @@ async function submitShrink(
 
 /** Mount the targets back one by one; returns whether all succeeded (state is set on failure). */
 async function remountAll(ctx: ShrinkContext, queue: VolumeShrinkAttachmentRef[]): Promise<boolean> {
-  const { patch, volume } = ctx;
+  const { scope, patch, volume } = ctx;
   const remounted: VolumeShrinkAttachmentRef[] = [];
   for (let index = 0; index < queue.length; index += 1) {
     const attachment = queue[index]!;
@@ -446,9 +454,9 @@ async function remountAll(ctx: ShrinkContext, queue: VolumeShrinkAttachmentRef[]
         containerPath: attachment.containerPath,
         readOnly: attachment.readOnly ?? false,
       };
-      await api.post<IntentAcceptedDto>(`/containers/${attachment.containerId}/volumes`, body);
+      await api.post<IntentAcceptedDto>(scopedPath(`/containers/${attachment.containerId}/volumes`, scope), body);
       await waitUntil(async () => {
-        const listed = await loadAttachmentsForVolume(volume.id);
+        const listed = await loadAttachmentsForVolume(scope, volume.id);
         return listed.some((item) =>
           item.containerId === attachment.containerId
           && item.containerPath === attachment.containerPath
@@ -456,7 +464,7 @@ async function remountAll(ctx: ShrinkContext, queue: VolumeShrinkAttachmentRef[]
       }, {
         label: '等待挂回',
         timeoutMs: 90_000,
-        onTimeout: () => lookupLatestIntentFailure(`/containers/${attachment.containerId}/intents`),
+        onTimeout: () => lookupLatestIntentFailure(resourceIntentsPath(scope, IntentResourceType.Container, attachment.containerId)),
       });
       remounted.push(attachment);
       patch({ progress: `已挂回 ${remounted.length}/${queue.length}` });

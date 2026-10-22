@@ -9,10 +9,10 @@ import { ConfirmDialog } from '../components/layout/confirm-dialog.js';
 import { Page, PageHeader } from '../components/layout/page-header.js';
 import { QueryView } from '../components/layout/query-view.js';
 import { toast } from '../hooks/use-toast.js';
-import { useAuthStore } from '../store/auth.js';
 import { queryKeys } from '../lib/query-keys.js';
 import { queryPollInterval } from '../lib/query-lifecycle.js';
-import { canManageHttpProxyPools, canViewHttpProxyStatus } from '../lib/proxy-access.js';
+import { ACCESS } from '../lib/route-access.js';
+import { useHasRole } from '../lib/use-role.js';
 import { emptyIfNotFound, httpProxyErrorMessage } from '../lib/http-proxy.js';
 import {
   AllBindingsCard,
@@ -28,9 +28,8 @@ import {
 
 export default function HttpProxyOpsPage() {
   const qc = useQueryClient();
-  const user = useAuthStore((state) => state.user);
-  const canViewStatus = canViewHttpProxyStatus(user?.capabilities ?? []);
-  const canManagePools = canManageHttpProxyPools(user?.capabilities ?? []);
+  const canViewStatus = useHasRole(ACCESS.httpProxyOps);
+  const canManagePools = canViewStatus;
   const [poolForm, setPoolForm] = useState<HttpDomainPoolDto | 'create' | null>(null);
   const [deletePool, setDeletePool] = useState<HttpDomainPoolDto | null>(null);
 

@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query';
 import { getRouteApi, useNavigate } from '@tanstack/react-router';
-import { Capability, type UserDto } from '@nyabase/common';
+import { Role, type UserDto } from '@nyabase/common';
 import { api } from '../lib/api.js';
 import { Page, PageHeader } from '../components/layout/page-header.js';
 import { QueryView } from '../components/layout/query-view.js';
@@ -10,6 +10,7 @@ import { UserDetailTabs } from './user-detail-page/user-detail-tabs.js';
 import { queryKeys } from '../lib/query-keys.js';
 import { refetchWhileInProgress } from '../lib/query-lifecycle.js';
 import { useAuthStore } from '../store/auth.js';
+import { useHasRole } from '../lib/use-role.js';
 
 const routeApi = getRouteApi('/users/$id');
 
@@ -18,9 +19,7 @@ export default function UserDetailPage() {
   const { tab } = routeApi.useSearch();
   const navigate = useNavigate({ from: '/users/$id' });
   const currentUserId = useAuthStore((state) => state.user?.id);
-  const canManageUsers = useAuthStore(
-    (state) => state.user?.capabilities.includes(Capability.ManageUsers) ?? false,
-  );
+  const canManageUsers = useHasRole(Role.Admin);
   const userQuery = useQuery({
     queryKey: queryKeys.users.detail(id),
     queryFn: () => api.get<UserDto>(`/users/${id}`),

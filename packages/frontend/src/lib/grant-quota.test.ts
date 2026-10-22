@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { ContainerPhase, ContainerPowerIntent } from '@nyabase/common';
 import { GIB } from './utils.js';
 import {
   formatConsumedQuotaParts,
@@ -7,16 +8,12 @@ import {
   formatGrantQuotaParts,
   formatQuotaDimension,
   formatRemainingBytes,
+  runningMemBytes,
 } from './grant-quota.js';
 
 describe('formatGrantQuotaParts', () => {
-  it('maps null and 0 grant ceilings to 不限', () => {
+  it('maps null grant ceilings to 不限', () => {
     expect(formatGrantQuotaParts({ cpuCores: null, memBytes: null, diskBytes: null })).toEqual([
-      '不限',
-      '不限',
-      '不限',
-    ]);
-    expect(formatGrantQuotaParts({ cpuCores: 0, memBytes: 0, diskBytes: 0 })).toEqual([
       '不限',
       '不限',
       '不限',
@@ -68,8 +65,7 @@ describe('formatConsumedQuotaParts', () => {
 });
 
 describe('formatGrantBytes', () => {
-  it('maps 0/null shared limits to 不限', () => {
-    expect(formatGrantBytes(0)).toBe('不限');
+  it('maps null shared limits to 不限', () => {
     expect(formatGrantBytes(null)).toBe('不限');
     expect(formatGrantBytes(100 * GIB)).toBe('100 GiB');
   });
@@ -78,7 +74,6 @@ describe('formatGrantBytes', () => {
 describe('formatRemainingBytes', () => {
   it('prints 不限 for unlimited grants and consumed zeros otherwise', () => {
     expect(formatRemainingBytes(null, 0)).toBe('不限');
-    expect(formatRemainingBytes(0, 0)).toBe('不限');
     expect(formatRemainingBytes(100 * GIB, 0)).toBe('100 GiB');
     expect(formatRemainingBytes(100 * GIB, 20 * GIB)).toBe('80 GiB');
     expect(formatRemainingBytes(100 * GIB, 200 * GIB)).toBe('0 GiB');
@@ -97,5 +92,19 @@ describe('formatQuotaDimension', () => {
       limit: '不限',
       remaining: '不限',
     });
+  });
+});
+
+describe('runningMemBytes', () => {
+  const row = (memBytes: number, powerIntent: ContainerPowerIntent, lifecyclePhase = ContainerPhase.Active) =>
+    ({ memBytes, powerIntent, lifecyclePhase });
+
+  it('counts only desired-running containers', () => {
+    expect(runningMemBytes([
+      row(2 * GIB, ContainerPowerIntent.Running),
+      row(4 * GIB, ContainerPowerIntent.Stopped),
+      row(GIB, ContainerPowerIntent.Running, ContainerPhase.Failed),
+      row(GIB, ContainerPowerIntent.Running, ContainerPhase.Deleting),
+    ])).toBe(2 * GIB);
   });
 });

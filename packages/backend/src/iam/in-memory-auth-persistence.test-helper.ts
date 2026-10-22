@@ -1,4 +1,4 @@
-import { UserStatus } from '@nyabase/common';
+import { UserStatus, Role } from '@nyabase/common';
 import type { Transaction } from 'kysely';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 import type {
@@ -37,6 +37,7 @@ export class InMemoryAuthPersistenceTestAdapter implements AuthPersistence {
       displayName: input.username,
       status: UserStatus.Active,
       authVersion: 0,
+      role: Role.User,
       createdAt: now,
       updatedAt: now,
       ...input,

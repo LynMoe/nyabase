@@ -3,11 +3,11 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link, useNavigate } from '@tanstack/react-router';
 import { Plus, RefreshCw, Server, Wifi, WifiOff } from 'lucide-react';
 import {
-  Capability,
+  Role,
   type PerformanceAdminUsageResponse,
   type ServerDto,
 } from '@nyabase/common';
-import { useAuthStore } from '../store/auth.js';
+import { useHasRole } from '../lib/use-role.js';
 import { hostOccupancy } from '../components/performance/host-occupancy.js';
 import { api } from '../lib/api.js';
 import { Button } from '../components/ui/button.js';
@@ -30,7 +30,7 @@ import { relativeTime } from '../lib/utils.js';
 export default function ServersPage() {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
-  const canViewMetrics = useAuthStore((state) => state.user?.capabilities.includes(Capability.ViewMetricsAll) ?? false);
+  const canViewMetrics = useHasRole(Role.Operator);
   const usageQuery = useQuery({
     queryKey: queryKeys.performance.servers('all'),
     queryFn: () => api.get<PerformanceAdminUsageResponse>('/performance/usage?scope=all'),

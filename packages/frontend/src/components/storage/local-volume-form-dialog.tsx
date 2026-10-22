@@ -24,6 +24,7 @@ import { errorMessage } from '../../lib/api-error.js';
 import { formatGrantBytes } from '../../lib/grant-quota.js';
 import { isIntentAccepted, resourceIntentsPath, waitForResourceIntent } from '../../lib/intent-visibility.js';
 import { queryKeys } from '../../lib/query-keys.js';
+import { scopedPath } from '../../lib/scoped-paths.js';
 import {
   deriveSizeChange,
   quotaIneffectiveCreateHint,
@@ -86,7 +87,7 @@ function useLocalVolumeSave(
   const patch = useMutation({
     mutationFn: async (body: PatchVolumeRequest) => {
       const volumeId = editing?.id ?? '';
-      const accepted = await api.patch<IntentAcceptedDto | VolumeDto>(`/volumes/${volumeId}`, body);
+      const accepted = await api.patch<IntentAcceptedDto | VolumeDto>(scopedPath(`/volumes/${volumeId}`, scope), body);
       if (isIntentAccepted(accepted)) {
         await waitForResourceIntent(resourceIntentsPath(scope, IntentResourceType.Volume, volumeId), accepted.intentId);
       }
@@ -231,6 +232,7 @@ function LocalVolumeFormBody({
       </Dialog>
       {editing && orchestrate && Number.isFinite(nextSize) && (
         <VolumeShrinkOrchestrationDialog
+          scope={scope}
           volume={{ ...editing, name: name.trim() || editing.name }}
           sizeBytes={nextSize}
           open={orchestrate}

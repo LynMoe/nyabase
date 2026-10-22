@@ -6,30 +6,31 @@ import {
   Patch,
   Query,
 } from '@nestjs/common';
-import { Capability, zListScope } from '@nyabase/common';
-import { CurrentActor, RequireCaps } from '../iam/decorators.js';
+import { zListScope, Role } from '@nyabase/common';
+import { CurrentActor, RequireRole } from '../iam/decorators.js';
 import type { Actor } from '../iam/actor.js';
 import { GpuService } from './gpu.service.js';
+import { requireUserId } from '../iam/actor.js';
 
-/** GPU of a server: enablement is `ManageServers`; device listing is `scope`d. */
+/** GPU of a server: enablement is operator-only; device listing is `scope`d. */
 @Controller('servers/:serverId')
 export class GpuController {
   constructor(private readonly gpu: GpuService) {}
 
   @Get('gpu')
-  @RequireCaps(Capability.ManageServers)
+  @RequireRole(Role.Operator)
   get(@Param('serverId') serverId: string) {
     return this.gpu.getServerGpu(serverId);
   }
 
   @Patch('gpu')
-  @RequireCaps(Capability.ManageServers)
+  @RequireRole(Role.Operator)
   patch(
     @Param('serverId') serverId: string,
     @CurrentActor() actor: Actor,
     @Body() body: unknown,
   ) {
-    return this.gpu.setEnabled(actor.userId, serverId, body);
+    return this.gpu.setEnabled(requireUserId(actor), serverId, body);
   }
 
   @Get('gpus')

@@ -9,14 +9,15 @@ import {
   Post,
   Query,
 } from '@nestjs/common';
-import { Capability, zListScope, zPatchStoragePoolRequest } from '@nyabase/common';
-import { RequireCaps, CurrentActor } from '../iam/decorators.js';
+import { zListScope, zPatchStoragePoolRequest, Role } from '@nyabase/common';
+import { RequireRole, CurrentActor } from '../iam/decorators.js';
 import type { Actor } from '../iam/actor.js';
 import { StoragePoolsService } from './storage-pools.service.js';
+import { requireUserId } from '../iam/actor.js';
 
 /**
  * Storage pools of a server. Listing is `scope=mine` (pools the caller may
- * use) or `scope=all` (`ManageServers`/`ManageGrants`); discovery and
+ * use) or `scope=all` (operator); discovery and
  * registration changes are administrator-only.
  */
 @Controller('servers/:serverId/storage-pools')
@@ -33,7 +34,7 @@ export class StoragePoolsController {
   }
 
   @Post('discover')
-  @RequireCaps(Capability.ManageServers)
+  @RequireRole(Role.Operator)
   @HttpCode(HttpStatus.OK)
   discover(@Param('serverId') serverId: string) {
     return this.service.discover(serverId);
@@ -45,11 +46,11 @@ export class StoragePoolsController {
     @Param('id') id: string,
     @CurrentActor() actor: Actor,
   ) {
-    return this.service.getVisible(id, actor.userId, serverId);
+    return this.service.getVisible(id, requireUserId(actor), serverId);
   }
 
   @Patch(':id')
-  @RequireCaps(Capability.ManageStoragePools)
+  @RequireRole(Role.Admin)
   patch(
     @Param('serverId') serverId: string,
     @Param('id') id: string,

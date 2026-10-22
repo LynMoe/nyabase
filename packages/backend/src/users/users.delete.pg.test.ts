@@ -1,4 +1,4 @@
-import { Capability, SystemGroupKey, UserStatus } from '@nyabase/common';
+import { Role, UserStatus } from '@nyabase/common';
 import { describe, expect, it } from 'vitest';
 import { testActor } from '../iam/actor.test-helper.js';
 import {
@@ -19,9 +19,7 @@ const describePg = process.env.NYABASE_TEST_DATABASE_URL ? describe : describe.s
 describePg('UsersService.deleteUserPermanently', () => {
   it('refuses while the user owns containers or volumes, and removes nothing', async () => {
     await withPostgresTestDatabase(async (fixture) => {
-      const context = await usersPgFixture(fixture, {
-        actorCapabilities: [Capability.ManageUsers],
-      });
+      const context = await usersPgFixture(fixture);
       const serverId = await seedServer(fixture.database);
       await seedContainer(fixture.database, {
         ownerId: context.userId,
@@ -29,7 +27,7 @@ describePg('UsersService.deleteUserPermanently', () => {
         poolId: await seedPool(fixture.database, serverId),
         imageId: await seedImage(fixture.database),
       });
-      const actor = testActor(context.actorId, Capability.ManageUsers);
+      const actor = testActor(context.actorId, Role.Admin);
 
       await expect(context.users.deleteUserPermanently(actor, context.userId)).rejects.toMatchObject({
         status: 409,
@@ -42,9 +40,7 @@ describePg('UsersService.deleteUserPermanently', () => {
 
   it('deletes credentials, memberships, grants and ledger rows, and marks the user deleted', async () => {
     await withPostgresTestDatabase(async (fixture) => {
-      const context = await usersPgFixture(fixture, {
-        actorCapabilities: [Capability.ManageUsers, Capability.ManageGrants],
-      });
+      const context = await usersPgFixture(fixture);
       const { database } = fixture;
       const serverId = await seedServer(database);
       await grantServer(database, { user: context.userId }, serverId);
@@ -52,7 +48,7 @@ describePg('UsersService.deleteUserPermanently', () => {
       await database.insertInto('control.access_lapses').values({
         user_id: context.userId, resource_kind: 'server', resource_id: serverId, lapsed_at: new Date(),
       }).execute();
-      const actor = testActor(context.actorId, Capability.ManageUsers, Capability.ManageGrants);
+      const actor = testActor(context.actorId, Role.Admin);
 
       await expect(context.users.deleteUserPermanently(actor, context.userId))
         .resolves.toEqual({ deleted: true });
@@ -68,35 +64,33 @@ describePg('UsersService.deleteUserPermanently', () => {
     });
   });
 
-  it('applies the administration hierarchy: a target with grants needs ManageGrants', async () => {
+  it('is admin-only, re-checked in the transaction', async () => {
     await withPostgresTestDatabase(async (fixture) => {
-      const context = await usersPgFixture(fixture, { actorCapabilities: [Capability.ManageUsers] });
-      await grantServer(fixture.database, { user: context.userId }, await seedServer(fixture.database));
+      const context = await usersPgFixture(fixture, { actorRole: Role.Operator });
 
       await expect(context.users.deleteUserPermanently(
-        testActor(context.actorId, Capability.ManageUsers),
+        testActor(context.actorId, Role.Operator),
         context.userId,
-      )).rejects.toMatchObject({ response: { missingCapabilities: [Capability.ManageGrants] } });
+      )).rejects.toMatchObject({ response: { code: 'ROLE_REQUIRED' } });
+      expect((await fixture.database.selectFrom('iam.users').select('status')
+        .where('id', '=', context.userId).executeTakeFirstOrThrow()).status).toBe(UserStatus.Active);
     });
   });
 
-  it('keeps the final active administrator', async () => {
+  it('keeps the final active administrator, and ignores disabled administrators', async () => {
     await withPostgresTestDatabase(async (fixture) => {
-      const context = await usersPgFixture(fixture, {
-        actorCapabilities: Object.values(Capability),
-      });
-      const admins = await seedGroup(fixture.database, {
-        name: 'Administrators',
-        system: SystemGroupKey.Administrators,
-        capabilities: Object.values(Capability),
-      });
-      const lastAdmin = await seedUser(fixture.database);
-      await addMember(fixture.database, admins, lastAdmin);
+      const context = await usersPgFixture(fixture);
+      await seedUser(fixture.database, undefined, UserStatus.Disabled, Role.Admin);
+      const actor = testActor(context.actorId, Role.Admin);
 
-      await expect(context.users.deleteUserPermanently(
-        testActor(context.actorId, ...Object.values(Capability)),
-        lastAdmin,
-      )).rejects.toMatchObject({ response: { code: 'LAST_ACTIVE_ADMINISTRATOR' } });
+      await expect(context.users.deleteUserPermanently(actor, context.actorId))
+        .rejects.toMatchObject({ response: { code: 'LAST_ACTIVE_ADMINISTRATOR' } });
+
+      const other = await seedUser(fixture.database, undefined, UserStatus.Active, Role.Admin);
+      await expect(context.users.deleteUserPermanently(actor, other))
+        .resolves.toEqual({ deleted: true });
+      await expect(context.users.deleteUserPermanently(actor, context.actorId))
+        .rejects.toMatchObject({ response: { code: 'LAST_ACTIVE_ADMINISTRATOR' } });
     });
   });
 });

@@ -1,13 +1,13 @@
 import { useQuery } from '@tanstack/react-query';
 import { getRouteApi, useNavigate } from '@tanstack/react-router';
 import { Gauge, ShieldCheck, Users } from 'lucide-react';
-import { Capability, type GroupDto } from '@nyabase/common';
+import { Role, type GroupDto } from '@nyabase/common';
 import { api } from '../lib/api.js';
 import { Page, PageHeader } from '../components/layout/page-header.js';
 import { QueryView } from '../components/layout/query-view.js';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '../components/ui/tabs.js';
 import { CanonicalGrantPanel } from '../components/grants/canonical-grant-panel.js';
-import { useAuthStore } from '../store/auth.js';
+import { useHasRole } from '../lib/use-role.js';
 import { queryKeys } from '../lib/query-keys.js';
 import { useGroupMembers } from '../lib/group-queries.js';
 import { type GroupDetailTab } from '../lib/detail-tabs.js';
@@ -26,9 +26,8 @@ export default function GroupDetailPage() {
   const { id } = routeApi.useParams();
   const { tab } = routeApi.useSearch();
   const navigate = useNavigate({ from: '/groups/$id' });
-  const capabilities = useAuthStore((state) => state.user?.capabilities ?? []);
-  const canManageGrants = capabilities.includes(Capability.ManageGrants);
-  const canManageGroups = capabilities.includes(Capability.ManageGroups);
+  const canManageGrants = useHasRole(Role.Operator);
+  const canManageGroups = useHasRole(Role.Admin);
   const groupQuery = useQuery({
     queryKey: queryKeys.groups.detail(id),
     queryFn: () => api.get<GroupDto>(`/admin/groups/${id}`),
@@ -42,14 +41,14 @@ export default function GroupDetailPage() {
         title={group?.name ?? '用户组'}
         description={
           group
-            ? `${group.isSystem ? '系统组' : '自定义组'} · ${membersQuery.data?.length ?? group.memberCount ?? group.members?.length ?? 0} 名成员`
+            ? `${membersQuery.data?.length ?? group.memberCount ?? group.members?.length ?? 0} 名成员`
             : undefined
         }
         crumbs={[
           { label: '用户组', to: '/groups' },
           { label: group?.name ?? '…' },
         ]}
-        actions={canManageGroups && group && !group.isSystem ? <DeleteGroupAction groupId={id} /> : undefined}
+        actions={canManageGroups && group ? <DeleteGroupAction groupId={id} /> : undefined}
       />
       <QueryView
         query={groupQuery}
@@ -82,7 +81,7 @@ export default function GroupDetailPage() {
               {canManageGrants ? (
                 <CanonicalGrantPanel subject={loaded} kind="groups" />
               ) : (
-                <p className="text-sm text-muted-foreground">查看与编辑授权需要「管理授权」权限。</p>
+                <p className="text-sm text-muted-foreground">查看与编辑授权需要运维及以上角色。</p>
               )}
             </TabsContent>
           </Tabs>

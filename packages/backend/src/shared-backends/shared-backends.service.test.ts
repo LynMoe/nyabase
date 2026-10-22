@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { ConflictException, ForbiddenException } from '@nestjs/common';
-import { Capability, FailureCode } from '@nyabase/common';
+import { FailureCode, Role } from '@nyabase/common';
 import { testActor } from '../iam/actor.test-helper.js';
 import { SharedBackendsService } from './shared-backends.service.js';
 
@@ -93,16 +93,16 @@ function createService(
   };
 }
 
-const manager = testActor('99999999-9999-4999-8999-999999999999', Capability.ManageSharedBackends);
+const manager = testActor('99999999-9999-4999-8999-999999999999', Role.Admin);
 
 describe('SharedBackendsService registration guards', () => {
-  it('refuses scope=all without a shared-backend capability and accepts ManageGrants for lists', async () => {
+  it('refuses scope=all below the operator role and accepts operators for lists', async () => {
     const { service } = createService();
     const user = testActor('44444444-4444-4444-8444-444444444444');
     await expect(service.list(user, 'all')).rejects.toBeInstanceOf(ForbiddenException);
     await expect(service.get(user, baseRow.id, 'all')).rejects.toBeInstanceOf(ForbiddenException);
-    await expect(service.list(testActor('g', Capability.ManageGrants), 'all')).resolves.toBeDefined();
-    await expect(service.get(testActor('g', Capability.ManageGrants), baseRow.id, 'all'))
+    await expect(service.list(testActor('g', Role.Operator), 'all')).resolves.toBeDefined();
+    await expect(service.get(testActor('g', Role.Operator), baseRow.id, 'all'))
       .rejects.toBeInstanceOf(ForbiddenException);
   });
 

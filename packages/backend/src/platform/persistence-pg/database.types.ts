@@ -1,4 +1,4 @@
-import type { ColumnType } from 'kysely';
+import type { ColumnType, Generated } from 'kysely';
 import type { AuditDatabase } from './audit-database.types.js';
 import type { IamAuthorizationDatabase } from './iam-authorization-database.types.js';
 import type { InfrastructureDatabase } from './infrastructure-database.types.js';
@@ -31,6 +31,7 @@ export interface IamUserTable {
   display_name: string;
   status: string;
   auth_version: number;
+  role: Generated<string>;
   created_at: GeneratedTimestamp;
   updated_at: GeneratedTimestamp;
 }
@@ -39,9 +40,6 @@ export interface IamGroupTable {
   id: string;
   name: string;
   description: string | null;
-  is_system: boolean;
-  system_key: string | null;
-  capabilities: string[];
   revision: BigIntColumn;
   created_at: GeneratedTimestamp;
   updated_at: GeneratedTimestamp;

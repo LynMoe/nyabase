@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { Capability } from '@nyabase/common';
+import { Role } from '@nyabase/common';
 import { SystemSettingsController } from './system-settings.controller.js';
 import { SystemSettingsRevisionConflictError } from './system-settings-authority.service.js';
 
@@ -45,9 +45,9 @@ function makeController() {
     }),
   };
   const accessResolver = {
-    runWithActorCapabilities: vi.fn(async (
+    runWithActorRole: vi.fn(async (
       _actorId: string,
-      _capabilities: unknown,
+      _minimum: unknown,
       work: (transaction: unknown) => Promise<unknown>,
     ) => work({ transaction: true })),
   };
@@ -66,9 +66,9 @@ describe('SystemSettingsController', () => {
       expectedRevision: 1,
       values: { 'branding.title': 'Lab Console' },
     });
-    expect(accessResolver.runWithActorCapabilities).toHaveBeenCalledWith(
+    expect(accessResolver.runWithActorRole).toHaveBeenCalledWith(
       'actor-a',
-      [Capability.ManageSystemSettings],
+      Role.Operator,
       expect.any(Function),
     );
     expect(authority.update).toHaveBeenCalledWith(
@@ -84,9 +84,9 @@ describe('SystemSettingsController', () => {
     });
   });
 
-  it('does not mutate or publish after capability revocation', async () => {
+  it('does not mutate or publish after role revocation', async () => {
     const { controller, authority, accessResolver } = makeController();
-    accessResolver.runWithActorCapabilities.mockRejectedValueOnce(
+    accessResolver.runWithActorRole.mockRejectedValueOnce(
       new Error('authority revoked'),
     );
     await expect(controller.patchSettings({ id: 'actor-a' } as never, {

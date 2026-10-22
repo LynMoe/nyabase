@@ -1,6 +1,6 @@
 import { Controller, Param, Post } from '@nestjs/common';
-import { Capability } from '@nyabase/common';
-import { RequireCaps, CurrentActor } from '../iam/decorators.js';
+import { Role } from '@nyabase/common';
+import { RequireRole, CurrentActor } from '../iam/decorators.js';
 import type { Actor } from '../iam/actor.js';
 import { GrantsService } from '../groups/grants.service.js';
 import { UserServerResourcePurgeService } from './user-server-resource-purge.service.js';
@@ -13,7 +13,7 @@ export class AdminUserServerPurgeController {
   ) {}
 
   @Post('servers/:serverId/purge-resources')
-  @RequireCaps(Capability.ManageGrants, Capability.ManageContainersAny)
+  @RequireRole(Role.Operator)
   async purgeUserServerResources(
     @Param('userId') userId: string,
     @Param('serverId') serverId: string,

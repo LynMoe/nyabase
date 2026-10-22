@@ -225,7 +225,7 @@ export class VolumeCapacityService {
       { kind: 'shared', ownerId, sharedBackendId },
       transaction,
     );
-    if (grant !== null && grant > 0 && userUsed + delta > grant) {
+    if (grant !== null && userUsed + delta > grant) {
       throw new ConflictException({
         code: FailureCode.SharedBackendQuotaExceeded,
         message: 'Shared backend grant quota exceeded',
@@ -393,7 +393,7 @@ export class VolumeCapacityService {
     };
   }
 
-  /** `scope=all`: the server-wide view for `ManageServers`. */
+  /** `scope=all`: the server-wide view for operators. */
   async serverWideCapacity(
     serverId: string,
   ): Promise<StorageCapacityDto> {

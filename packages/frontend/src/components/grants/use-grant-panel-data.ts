@@ -11,6 +11,7 @@ import {
   type StoragePoolGrantDto,
 } from '@nyabase/common';
 import { api } from '../../lib/api.js';
+import { graceServerAccess } from '../../lib/effective-access.js';
 import { grantSubjectPath } from '../../lib/scoped-paths.js';
 import { queryKeys } from '../../lib/query-keys.js';
 import { approxGibHint, GIB } from '../../lib/utils.js';
@@ -47,7 +48,7 @@ export function useLapsedServers(subject: GrantSubject) {
     queryFn: () => api.get<EffectiveAccessDto>(`${grantSubjectPath(subject.kind, subject.id)}/effective-access`),
     enabled: subject.kind === 'users',
   });
-  return (data?.servers ?? []).filter((access) => access.accessPhase === 'grace');
+  return graceServerAccess(data?.servers);
 }
 
 /** Every server an administrator could grant. */
@@ -106,16 +107,18 @@ export function parseCoreCount(value: string): number | null | undefined {
   return cores;
 }
 
-export function gibToBytes(value: string): number | null {
+/** GiB quota input: empty → null (不限); a positive amount → bytes; anything else (0, negative, NaN) → undefined (invalid). */
+export function parseGibQuota(value: string): number | null | undefined {
   if (!value.trim()) return null;
   const gib = Number(value);
-  if (!Number.isFinite(gib) || gib < 0) return null;
-  return Math.round(gib * GIB);
+  if (!Number.isFinite(gib)) return undefined;
+  const bytes = Math.round(gib * GIB);
+  return bytes > 0 ? bytes : undefined;
 }
 
 export function gibHint(value: string): string | undefined {
-  const bytes = gibToBytes(value);
-  if (bytes === null) return undefined;
+  const bytes = parseGibQuota(value);
+  if (bytes == null) return undefined;
   return approxGibHint(bytes);
 }
 

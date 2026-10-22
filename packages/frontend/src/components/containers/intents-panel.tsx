@@ -58,7 +58,7 @@ export function IntentRow({
 }) {
   const currentUser = useAuthStore((state) => state.user);
   const retry = useMutation({
-    mutationFn: (intentId: string) => retryIntent(intentId),
+    mutationFn: (intentId: string) => retryIntent(intentId, scope),
     onSuccess: () => {
       toast({ title: '已提交重试' });
       onRetried();

@@ -7,7 +7,7 @@ import { after, before, describe, it } from 'node:test';
 import {
   canonicalPciAddress,
   type EffectiveAccessDto,
-  type EffectiveServerAccessDto,
+  type LiveServerAccessDto,
   type GroupDto,
   type PutServerGrantRequest,
   type ServerGpuDto,
@@ -27,13 +27,15 @@ describe('authorization merge', () => {
     cpuCores: 1, memBytes: GIB, diskBytes: 10 * GIB, gpuPciAddresses: [], expiresAt: null, ...overrides,
   });
 
-  const effective = async (): Promise<EffectiveServerAccessDto | undefined> => {
+  const effective = async (): Promise<LiveServerAccessDto | undefined> => {
     const viaAdmin = await h.api.get<EffectiveAccessDto>(`/users/${user.id}/effective-access`);
-    // Group membership changes bump the user's auth version, so sign in afresh each time.
+    // Sign in afresh each time so the self view reflects the latest membership.
     const fresh = await login(h.state.baseUrl, user.username, user.password);
     const viaSelf = await fresh.api.get<EffectiveAccessDto>('/me/access');
     assert.deepEqual(viaSelf.servers, viaAdmin.servers, 'the user sees what the administrator sees');
-    return viaAdmin.servers.find((entry) => entry.serverId === server.id);
+    const entry = viaAdmin.servers.find((item) => item.serverId === server.id);
+    assert.notEqual(entry?.accessPhase, 'grace', 'a grace entry carries no quotas');
+    return entry as LiveServerAccessDto | undefined;
   };
 
   const newGroup = async (label: string): Promise<GroupDto> => {
@@ -80,15 +82,15 @@ describe('authorization merge', () => {
     // The merged memory cap, not the smaller group one, is what admission enforces.
     const denied = await (await login(h.state.baseUrl, user.username, user.password)).api.post('/containers', {
       serverId: server.id, imageId: h.state.image.id, name: h.name('cap'),
-      rootSizeBytes: h.state.rootSizeBytes, memBytes: GIB + 1, powerIntent: 'stopped',
+      rootSizeBytes: h.state.rootSizeBytes, memBytes: GIB + 1, powerIntent: 'running',
     }).then(() => undefined, (error: unknown) => error);
     assert.ok(denied instanceof ApiError);
     assert.equal(denied.status, 403);
-    assert.equal(denied.code, 'PERMISSION_DENIED');
+    assert.equal(denied.code, 'MEMORY_GRANT_EXCEEDED');
     assert.equal((denied.body as { details: { grantMemBytes: number } }).details.grantMemBytes, GIB);
   });
 
-  it('lets an unlimited grant win and treats a zero disk grant as unlimited', async () => {
+  it('lets an unlimited grant win and refuses zero as a quota spelling', async () => {
     const group = await newGroup('g2');
     await h.api.put(`/admin/groups/${group.id}/server-grants/${server.id}`, grant({
       cpuCores: null, memBytes: GIB / 4, diskBytes: 5 * GIB, expiresAt: null,
@@ -101,10 +103,13 @@ describe('authorization merge', () => {
     assert.equal(access.expiresAt, null, 'a grant that never expires wins');
 
     await h.api.put(`/admin/groups/${group.id}/server-grants/${server.id}`, grant({
-      cpuCores: null, memBytes: GIB / 4, diskBytes: 0, expiresAt: null,
+      cpuCores: null, memBytes: GIB / 4, diskBytes: null, expiresAt: null,
     }));
     access = (await effective())!;
-    assert.equal(access.diskBytes, null, 'zero disk means unlimited');
+    assert.equal(access.diskBytes, null, 'null disk is unlimited and wins');
+    assert.equal(await h.api.status('PUT', `/admin/groups/${group.id}/server-grants/${server.id}`, grant({
+      memBytes: 0, expiresAt: null,
+    })), 400, 'zero is not a way to spell unlimited');
 
     await h.api.delete(`/admin/groups/${group.id}/members/${user.id}`);
     access = (await effective())!;
@@ -140,7 +145,8 @@ describe('authorization merge', () => {
 
     const access = (await h.api.get<EffectiveAccessDto>(`/users/${user.id}/effective-access`))
       .servers.find((entry) => entry.serverId === gpuServer.id)!;
-    assert.deepEqual(access.gpuPciAddresses, [pci]);
+    assert.equal(access.accessPhase, 'live');
+    assert.deepEqual(access.accessPhase === 'live' ? access.gpuPciAddresses : [], [pci]);
     const devices = await (await login(h.state.baseUrl, user.username, user.password)).api
       .get<{ items: { pciAddress: string }[] }>(`/servers/${gpuServer.id}/gpus`);
     assert.deepEqual(devices.items.map((device) => device.pciAddress), [pci]);

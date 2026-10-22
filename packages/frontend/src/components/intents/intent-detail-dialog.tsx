@@ -1,7 +1,7 @@
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
 import {
-  Capability,
+  Role,
   IntentResourceType,
   type IntentDto,
   type SharedVolumeDto,
@@ -9,6 +9,7 @@ import {
 } from '@nyabase/common';
 import { api } from '../../lib/api.js';
 import { errorMessage } from '../../lib/api-error.js';
+import { scopedPath } from '../../lib/scoped-paths.js';
 import { toast } from '../../hooks/use-toast.js';
 import { intentPending } from '../../lib/in-progress.js';
 import { queryKeys } from '../../lib/query-keys.js';
@@ -25,7 +26,7 @@ import {
   intentResourceTypeLabel,
   intentStatusLabel,
 } from '../../lib/status-labels.js';
-import { useAuthStore } from '../../store/auth.js';
+import { useHasRole } from '../../lib/use-role.js';
 import { ResourceRef } from '../refs/resource-ref.js';
 import { StatusBadge } from '../layout/status-badge.js';
 import { Button } from '../ui/button.js';
@@ -47,9 +48,9 @@ function intentImageId(intent: IntentDto): string {
 }
 
 function VolumeIntentRef({ id }: { id: string }) {
-  const caps = useAuthStore((state) => state.user?.capabilities ?? []);
-  const hasLocal = caps.includes(Capability.ManageVolumes);
-  const hasShared = caps.includes(Capability.ManageSharedVolumes);
+  const isAdmin = useHasRole(Role.Admin);
+  const hasLocal = isAdmin;
+  const hasShared = isAdmin;
   const local = useQuery({
     queryKey: queryKeys.volumes.admin,
     queryFn: () => api.get<VolumeDto[]>('/volumes?scope=all'),
@@ -125,14 +126,12 @@ export function IntentDetailDialog({
   onOpenChange: (open: boolean) => void;
   onRetried: () => void;
 }) {
-  const canManageServers = useAuthStore(
-    (state) => state.user?.capabilities.includes(Capability.ManageServers) ?? false,
-  );
+  const canManageServers = useHasRole(Role.Operator);
   const detailQuery = useQuery({
     queryKey: queryKeys.adminIntent(intent?.id ?? ''),
     queryFn: () => {
       if (!intent) throw new Error('intent required');
-      return api.get<IntentDto>(`/intents/${intent.id}`);
+      return api.get<IntentDto>(scopedPath(`/intents/${intent.id}`, 'all'));
     },
     enabled: open && Boolean(intent?.id),
     refetchInterval: (query) => refetchWhileInProgress(query.state, {
@@ -142,7 +141,7 @@ export function IntentDetailDialog({
   });
   const view = detailQuery.data ?? intent;
   const retry = useMutation({
-    mutationFn: (intentId: string) => retryIntent(intentId),
+    mutationFn: (intentId: string) => retryIntent(intentId, 'all'),
     onSuccess: () => {
       toast({ title: '已提交重试' });
       onRetried();

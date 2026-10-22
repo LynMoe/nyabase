@@ -1,5 +1,4 @@
 import { Injectable, OnModuleInit } from '@nestjs/common';
-import { Capability } from '@nyabase/common';
 import { AuditService } from '../iam/audit.service.js';
 import { NyabaseConfigService } from '../platform/config/nyabase-config.service.js';
 import { IncusError, type IncusClientPort } from '../incus/index.js';
@@ -82,7 +81,6 @@ export class ImageAssignmentReconciler implements ManagedReconciler, OnModuleIni
   ): Promise<Map<string, ResourceAuthority>> {
     return new Map(assignmentIds.map((id) => [id, {
       ownerId: null,
-      adminCapability: Capability.ManageImages,
     }]));
   }
 

@@ -7,13 +7,13 @@ import {
   Put,
 } from '@nestjs/common';
 import {
-  Capability,
   zPutServerGrantRequest,
   zPutSharedBackendGrantRequest,
   zPutStoragePoolGrantRequest,
   type EffectiveAccessDto,
+  Role,
 } from '@nyabase/common';
-import { RequireCaps, CurrentActor } from '../iam/decorators.js';
+import { RequireRole, CurrentActor } from '../iam/decorators.js';
 import type { Actor } from '../iam/actor.js';
 import { AccessResolverService } from '../iam/access-resolver.service.js';
 import { GrantsService, type GrantSubject } from './grants.service.js';
@@ -28,13 +28,13 @@ export class UserGrantsController {
   ) {}
 
   @Get('server-grants')
-  @RequireCaps(Capability.ManageGrants)
+  @RequireRole(Role.Operator)
   listServerGrants(@Param('userId') userId: string) {
     return this.grants.listServerGrants(subject(userId));
   }
 
   @Put('server-grants/:serverId')
-  @RequireCaps(Capability.ManageGrants)
+  @RequireRole(Role.Operator)
   upsertServerGrant(
     @Param('userId') userId: string,
     @Param('serverId') serverId: string,
@@ -45,7 +45,7 @@ export class UserGrantsController {
   }
 
   @Delete('server-grants/:serverId')
-  @RequireCaps(Capability.ManageGrants)
+  @RequireRole(Role.Operator)
   deleteServerGrant(
     @Param('userId') userId: string,
     @Param('serverId') serverId: string,
@@ -55,13 +55,13 @@ export class UserGrantsController {
   }
 
   @Get('storage-pool-grants')
-  @RequireCaps(Capability.ManageGrants)
+  @RequireRole(Role.Operator)
   listStoragePoolGrants(@Param('userId') userId: string) {
     return this.grants.listStoragePoolGrants(subject(userId));
   }
 
   @Put('storage-pool-grants/:poolId')
-  @RequireCaps(Capability.ManageGrants)
+  @RequireRole(Role.Operator)
   upsertStoragePoolGrant(
     @Param('userId') userId: string,
     @Param('poolId') poolId: string,
@@ -77,7 +77,7 @@ export class UserGrantsController {
   }
 
   @Delete('storage-pool-grants/:poolId')
-  @RequireCaps(Capability.ManageGrants)
+  @RequireRole(Role.Operator)
   deleteStoragePoolGrant(
     @Param('userId') userId: string,
     @Param('poolId') poolId: string,
@@ -87,13 +87,13 @@ export class UserGrantsController {
   }
 
   @Get('shared-backend-grants')
-  @RequireCaps(Capability.ManageGrants)
+  @RequireRole(Role.Operator)
   listSharedBackendGrants(@Param('userId') userId: string) {
     return this.grants.listSharedBackendGrants(subject(userId));
   }
 
   @Put('shared-backend-grants/:backendId')
-  @RequireCaps(Capability.ManageGrants)
+  @RequireRole(Role.Operator)
   upsertSharedBackendGrant(
     @Param('userId') userId: string,
     @Param('backendId') backendId: string,
@@ -109,7 +109,7 @@ export class UserGrantsController {
   }
 
   @Delete('shared-backend-grants/:backendId')
-  @RequireCaps(Capability.ManageGrants)
+  @RequireRole(Role.Operator)
   deleteSharedBackendGrant(
     @Param('userId') userId: string,
     @Param('backendId') backendId: string,
@@ -119,7 +119,7 @@ export class UserGrantsController {
   }
 
   @Get('effective-access')
-  @RequireCaps(Capability.ManageGrants)
+  @RequireRole(Role.Operator)
   async effectiveAccess(@Param('userId') userId: string): Promise<EffectiveAccessDto> {
     await this.grants.assertSubjectExists(subject(userId));
     return {

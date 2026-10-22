@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
 import {
-  Capability,
+  Role,
   type ListScope,
   type PerformanceMultiSeriesResponse,
   type PerformanceRange,
@@ -12,7 +12,7 @@ import { api } from '../lib/api.js';
 import { queryKeys } from '../lib/query-keys.js';
 import { queryPollInterval } from '../lib/query-lifecycle.js';
 import { scopedPath } from '../lib/scoped-paths.js';
-import { useAuthStore } from '../store/auth.js';
+import { useHasRole } from '../lib/use-role.js';
 import { Page, PageHeader } from '../components/layout/page-header.js';
 import { Button } from '../components/ui/button.js';
 import { LinkedCharts } from '../components/performance/linked-charts.js';
@@ -34,7 +34,7 @@ export default function ContainerUsagePage({
   scope: ListScope;
 }) {
   const admin = scope === 'all';
-  const canView = useAuthStore((state) => state.user?.capabilities.includes(Capability.ViewMetricsAll) ?? false);
+  const canView = useHasRole(Role.Operator);
   const [range, setRange] = useState<PerformanceRange>('1h');
   const selfQuery = useQuery({
     queryKey: queryKeys.performance.self(scope, containerId),

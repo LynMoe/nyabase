@@ -6,12 +6,12 @@ import {
   Patch,
 } from '@nestjs/common';
 import {
-  Capability,
   zPatchSystemSettingsRequest,
   type PublicSettingsDto,
   type SystemSettingsDto,
+  Role,
 } from '@nyabase/common';
-import { Public, RequireCaps, CurrentUser } from '../iam/decorators.js';
+import { Public, RequireRole, CurrentUser } from '../iam/decorators.js';
 import { NyabaseConfigService } from '../platform/config/nyabase-config.service.js';
 import type { UserRecord } from '../iam/auth-persistence.js';
 import { AccessResolverService } from '../iam/access-resolver.service.js';
@@ -35,22 +35,22 @@ export class SystemSettingsController {
   }
 
   @Get('admin/system-settings')
-  @RequireCaps(Capability.ManageSystemSettings)
+  @RequireRole(Role.Operator)
   getSettings(): SystemSettingsDto {
     return this.systemSettingsDto();
   }
 
   @Patch('admin/system-settings')
-  @RequireCaps(Capability.ManageSystemSettings)
+  @RequireRole(Role.Operator)
   async patchSettings(
     @CurrentUser() actor: UserRecord,
     @Body() body: unknown,
   ): Promise<SystemSettingsDto> {
     const { values, expectedRevision } = zPatchSystemSettingsRequest.parse(body);
     try {
-      const committed = await this.accessResolver.runWithActorCapabilities(
+      const committed = await this.accessResolver.runWithActorRole(
         actor.id,
-        [Capability.ManageSystemSettings],
+        Role.Operator,
         (transaction) => this.authority.update(
           transaction,
           actor.id,

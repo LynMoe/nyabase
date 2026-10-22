@@ -1,3 +1,4 @@
+import { ContainerPhase, ContainerPowerIntent } from '@nyabase/common';
 import { GIB, formatBytesCompact } from './utils.js';
 
 export type CpuMemDisk = {
@@ -24,11 +25,11 @@ function formatCompactBytes(bytes: number): string {
 }
 
 function formatGrantNumber(value: number | null, fmt: (n: number) => string): string {
-  if (value === null || value === 0) return UNLIMITED;
+  if (value === null) return UNLIMITED;
   return fmt(value);
 }
 
-/** Grant ceilings only. null/0 → 不限. Never pass consumed sums here. */
+/** Grant ceilings only. null → 不限. Never pass consumed sums here. */
 export function formatGrantQuotaParts(grant: CpuMemDisk): string[] {
   return [
     formatGrantNumber(grant.cpuCores, formatCompactCpu),
@@ -53,14 +54,14 @@ export function formatConsumedQuotaParts(consumed: CpuMemDisk): string[] {
   return parts;
 }
 
-/** Grant ceiling for a byte quota (shared backend limit). 0/null → 不限. */
+/** Grant ceiling for a byte quota (shared backend limit). null → 不限. */
 export function formatGrantBytes(bytes: number | null): string {
   return formatGrantNumber(bytes, formatCompactBytes);
 }
 
 /** Remaining of a byte grant. Unlimited grant → 不限; else consumed formatter. */
 export function formatRemainingBytes(grantBytes: number | null, usedBytes: number): string {
-  if (grantBytes === null || grantBytes === 0) return UNLIMITED;
+  if (grantBytes === null) return UNLIMITED;
   return formatCompactBytes(Math.max(0, grantBytes - usedBytes));
 }
 
@@ -77,4 +78,18 @@ export function formatQuotaDimension(
     limit: formatGrantBytes(grant),
     remaining: formatRemainingBytes(grant, used),
   };
+}
+
+/** Memory counted against the server grant: containers whose desired state is running. */
+export function runningMemBytes(
+  containers: ReadonlyArray<{ memBytes: number; powerIntent: ContainerPowerIntent; lifecyclePhase: ContainerPhase }>,
+): number {
+  return containers.reduce(
+    (sum, item) => item.powerIntent === ContainerPowerIntent.Running
+      && item.lifecyclePhase !== ContainerPhase.Failed
+      && item.lifecyclePhase !== ContainerPhase.Deleting
+      ? sum + item.memBytes
+      : sum,
+    0,
+  );
 }

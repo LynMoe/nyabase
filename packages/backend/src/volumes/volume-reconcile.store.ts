@@ -1,5 +1,4 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
-import { Capability } from '@nyabase/common';
 import { sql, type Kysely } from 'kysely';
 import { IncusError } from '../incus/index.js';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
@@ -121,7 +120,7 @@ export class VolumeReconcileStore {
       ? []
       : await this.database
         .selectFrom('control.volumes')
-        .select(['id', 'owner_id', 'shared_backend_id'])
+        .select(['id', 'owner_id'])
         .where('id', 'in', volumeIds)
         .execute();
     const byId = new Map(rows.map((row) => [row.id, row]));
@@ -129,9 +128,6 @@ export class VolumeReconcileStore {
       const row = byId.get(id);
       return [id, {
         ownerId: row?.owner_id ?? null,
-        adminCapability: row?.shared_backend_id != null
-          ? Capability.ManageSharedVolumes
-          : Capability.ManageVolumes,
       }];
     }));
   }

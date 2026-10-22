@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { Loader2, Pencil, Plus } from 'lucide-react';
 import {
-  Capability,
+  Role,
   ContainerStatus,
   type AttachVolumeRequest,
   type ContainerDto,
@@ -36,7 +36,7 @@ import { bindInProgress } from '../../lib/in-progress.js';
 import { queryKeys } from '../../lib/query-keys.js';
 import { refetchWhileInProgress } from '../../lib/query-lifecycle.js';
 import { scopedPath } from '../../lib/scoped-paths.js';
-import { useAuthStore } from '../../store/auth.js';
+import { useHasRole } from '../../lib/use-role.js';
 import { useActionMutation } from '../../hooks/use-action-mutation.js';
 import { ConfirmDialog } from '../layout/confirm-dialog.js';
 import { QueryView } from '../layout/query-view.js';
@@ -84,8 +84,8 @@ export function StoragePanel({ container, scope }: { container: ContainerDto; sc
     queryKey: queryKeys.containers.attachments(scope, containerId),
     queryFn: async () => {
       const [local, shared] = await Promise.all([
-        api.get<VolumeAttachmentDto[]>(`/containers/${containerId}/volumes`),
-        api.get<VolumeAttachmentDto[]>(`/containers/${containerId}/shared-volumes`),
+        api.get<VolumeAttachmentDto[]>(scopedPath(`/containers/${containerId}/volumes`, scope)),
+        api.get<VolumeAttachmentDto[]>(scopedPath(`/containers/${containerId}/shared-volumes`, scope)),
       ]);
       return [...local, ...shared];
     },
@@ -197,9 +197,9 @@ export function StoragePanel({ container, scope }: { container: ContainerDto; sc
 
 function useVolumeCaps(scope: ListScope) {
   const admin = scope === 'all';
-  const capabilities = useAuthStore((state) => state.user?.capabilities ?? []);
-  const canManageVolumes = capabilities.includes(Capability.ManageVolumes);
-  const canManageSharedVolumes = capabilities.includes(Capability.ManageSharedVolumes);
+  const isAdmin = useHasRole(Role.Admin);
+  const canManageVolumes = isAdmin;
+  const canManageSharedVolumes = isAdmin;
   return {
     admin,
     canManageVolumes,
@@ -308,7 +308,7 @@ function MountDialog({
   const attach = useActionMutation({
     mutationFn: ({ kind, body }: { kind: MountDisk['kind']; body: AttachVolumeRequest }) =>
       api.post<IntentAcceptedDto>(
-        `/containers/${container.id}/${kind === 'shared' ? 'shared-volumes' : 'volumes'}`,
+        scopedPath(`/containers/${container.id}/${kind === 'shared' ? 'shared-volumes' : 'volumes'}`, scope),
         body,
       ),
     successTitle: '已提交挂载，正在生效',
@@ -519,7 +519,10 @@ function DetachVolumeDialog({
   const invalidate = useInvalidateContainer(scope, container.id);
   const detach = useActionMutation({
     mutationFn: (attachment: VolumeAttachmentDto) => api.delete<IntentAcceptedDto>(
-      `/containers/${container.id}/${attachment.kind === 'shared' ? 'shared-volumes' : 'volumes'}/${attachment.id}`,
+      scopedPath(
+        `/containers/${container.id}/${attachment.kind === 'shared' ? 'shared-volumes' : 'volumes'}/${attachment.id}`,
+        scope,
+      ),
     ),
     successTitle: '已提交卸载，正在生效',
     errorTitle: '卸载失败',

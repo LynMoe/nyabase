@@ -13,16 +13,17 @@ import {
   Query,
 } from '@nestjs/common';
 import {
-  Capability,
   zAddCatalogImageRequest,
   zListScope,
   zPatchImageRequest,
   zPutImageAssignmentRequest,
+  Role,
 } from '@nyabase/common';
-import { RequireCaps, CurrentActor } from '../iam/decorators.js';
+import { RequireRole, CurrentActor } from '../iam/decorators.js';
 import type { Actor } from '../iam/actor.js';
 import { acceptedIntent } from '../reconcile/accepted-intent.js';
 import { ImagesService } from './images.service.js';
+import { requireUserId } from '../iam/actor.js';
 
 /**
  * Images: every authenticated user lists the images they may use
@@ -43,22 +44,22 @@ export class ImagesController {
   }
 
   @Get('catalog')
-  @RequireCaps(Capability.ManageImages)
+  @RequireRole(Role.Operator)
   catalog() {
     return this.images.listCatalog();
   }
 
   @Post()
-  @RequireCaps(Capability.ManageImages)
+  @RequireRole(Role.Operator)
   create(@Body() body: unknown, @CurrentActor() actor: Actor) {
-    return this.images.addFromCatalog(actor.userId, zAddCatalogImageRequest.parse(body));
+    return this.images.addFromCatalog(requireUserId(actor), zAddCatalogImageRequest.parse(body));
   }
 
   @Post(':id/repull')
-  @RequireCaps(Capability.ManageImages)
+  @RequireRole(Role.Operator)
   @HttpCode(HttpStatus.ACCEPTED)
   async repull(@Param('id') id: string, @CurrentActor() actor: Actor) {
-    const result = await this.images.repull(actor.userId, id);
+    const result = await this.images.repull(requireUserId(actor), id);
     return {
       image: result.image,
       intents: result.intents.map(acceptedIntent),
@@ -75,13 +76,13 @@ export class ImagesController {
   }
 
   @Get(':id/status')
-  @RequireCaps(Capability.ManageImages)
+  @RequireRole(Role.Operator)
   async status(@Param('id') id: string) {
     return this.images.getServerStatuses(await this.images.findById(id));
   }
 
   @Get(':id/assignments')
-  @RequireCaps(Capability.ManageImages)
+  @RequireRole(Role.Operator)
   assignments(@Param('id') id: string) {
     return this.images.assignments(id).then((rows) =>
       rows.map((row) => ({
@@ -105,13 +106,13 @@ export class ImagesController {
   }
 
   @Get(':id/assignments/status')
-  @RequireCaps(Capability.ManageImages)
+  @RequireRole(Role.Operator)
   async statusAssignments(@Param('id') id: string) {
     return this.images.getServerStatuses(await this.images.findById(id));
   }
 
   @Put(':id/assignments/:serverId')
-  @RequireCaps(Capability.ManageImages)
+  @RequireRole(Role.Operator)
   @HttpCode(HttpStatus.ACCEPTED)
   async ensureAssignment(
     @Param('id') id: string,
@@ -121,7 +122,7 @@ export class ImagesController {
   ) {
     const input = zPutImageAssignmentRequest.parse(body);
     const result = await this.images.ensureAssignment(
-      actor.userId,
+      requireUserId(actor),
       id,
       serverId,
       input.expectedRevision,
@@ -133,7 +134,7 @@ export class ImagesController {
   }
 
   @Delete(':id/assignments/:serverId')
-  @RequireCaps(Capability.ManageImages)
+  @RequireRole(Role.Operator)
   @HttpCode(HttpStatus.ACCEPTED)
   async deleteAssignment(
     @Param('id') id: string,
@@ -151,7 +152,7 @@ export class ImagesController {
       throw new BadRequestException('expectedRevision must be a positive integer');
     }
     const result = await this.images.deleteAssignment(
-      actor.userId,
+      requireUserId(actor),
       id,
       serverId,
       revision,
@@ -163,18 +164,18 @@ export class ImagesController {
   }
 
   @Patch(':id')
-  @RequireCaps(Capability.ManageImages)
+  @RequireRole(Role.Operator)
   update(
     @Param('id') id: string,
     @Body() body: unknown,
     @CurrentActor() actor: Actor,
   ) {
-    return this.images.update(actor.userId, id, zPatchImageRequest.parse(body));
+    return this.images.update(requireUserId(actor), id, zPatchImageRequest.parse(body));
   }
 
   @Delete(':id')
-  @RequireCaps(Capability.ManageImages)
+  @RequireRole(Role.Operator)
   delete(@Param('id') id: string, @CurrentActor() actor: Actor) {
-    return this.images.delete(actor.userId, id);
+    return this.images.delete(requireUserId(actor), id);
   }
 }

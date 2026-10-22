@@ -116,7 +116,7 @@ describe('container lifecycle and SSH through the ssh-proxy', () => {
       (error: unknown) => error instanceof ApiError && error.status === 409,
     );
     assert.equal(await api.status('POST', '/containers', { ...base, name: h.name('x'), memBytes: 0 }), 400);
-    assert.equal(await api.status('POST', '/containers', { ...base, name: h.name('x'), memBytes: 64 * GIB }), 403);
+    assert.equal(await api.status('POST', '/containers', { ...base, name: h.name('x'), memBytes: 64 * GIB, powerIntent: 'running' }), 403);
   });
 
   it('deletes the container and withdraws its SSH route', async () => {

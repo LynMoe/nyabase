@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { getRouteApi, useNavigate } from '@tanstack/react-router';
 import { Gauge, HardDrive, Server } from 'lucide-react';
-import { Capability, type SharedBackendDto } from '@nyabase/common';
+import { Role, type SharedBackendDto } from '@nyabase/common';
 import { api } from '../lib/api.js';
 import { Page, PageHeader } from '../components/layout/page-header.js';
 import { QueryView } from '../components/layout/query-view.js';
@@ -11,7 +11,7 @@ import { FsidConflictAlert } from '../components/storage/fsid-conflict-alert.js'
 import { queryKeys } from '../lib/query-keys.js';
 import { type SharedBackendFsidConflict } from '../lib/storage-shrink.js';
 import { type SharedBackendDetailTab } from '../lib/detail-tabs.js';
-import { useAuthStore } from '../store/auth.js';
+import { useHasRole } from '../lib/use-role.js';
 import { DeleteBackendAction } from './shared-backend-detail-page/backend-tabs.js';
 import {
   BackendExecutorsTab,
@@ -31,9 +31,7 @@ export default function SharedBackendDetailPage() {
   const { id } = routeApi.useParams();
   const { tab } = routeApi.useSearch();
   const navigate = useNavigate({ from: '/shared-backends/$id' });
-  const canManageSharedBackends = useAuthStore(
-    (state) => state.user?.capabilities.includes(Capability.ManageSharedBackends) ?? false,
-  );
+  const canManageSharedBackends = useHasRole(Role.Admin);
   const [conflict, setConflict] = useState<SharedBackendFsidConflict | null>(null);
   const backendQuery = useQuery({
     queryKey: queryKeys.sharedBackends.detail(id),

@@ -9,15 +9,15 @@ import {
   Put,
 } from '@nestjs/common';
 import {
-  Capability,
   zAddGroupMemberRequest,
   zCreateGroupRequest,
   zPatchAdminGroupRequest,
   zPutServerGrantRequest,
   zPutSharedBackendGrantRequest,
   zPutStoragePoolGrantRequest,
+  Role,
 } from '@nyabase/common';
-import { RequireAnyCaps, RequireCaps, CurrentActor } from '../iam/decorators.js';
+import { RequireRole, CurrentActor } from '../iam/decorators.js';
 import type { Actor } from '../iam/actor.js';
 import { GrantsService, type GrantSubject } from './grants.service.js';
 import { GroupsService } from './groups.service.js';
@@ -32,52 +32,50 @@ export class GroupsController {
   ) {}
 
   @Get()
-  @RequireCaps()
-  @RequireAnyCaps(Capability.ManageGroups, Capability.ManageGrants)
+  @RequireRole(Role.Operator)
   list() {
     return this.groups.findAll();
   }
 
   @Post()
-  @RequireCaps(Capability.ManageGroups)
+  @RequireRole(Role.Admin)
   create(@Body() body: unknown, @CurrentActor() actor: Actor) {
     return this.groups.create(actor, zCreateGroupRequest.parse(body));
   }
 
   @Get(':id')
-  @RequireCaps()
-  @RequireAnyCaps(Capability.ManageGroups, Capability.ManageGrants)
+  @RequireRole(Role.Operator)
   get(@Param('id') id: string) {
     return this.groups.getDto(id);
   }
 
   @Patch(':id')
-  @RequireCaps(Capability.ManageGroups)
+  @RequireRole(Role.Admin)
   patch(@Param('id') id: string, @Body() body: unknown, @CurrentActor() actor: Actor) {
     const { expectedRevision, ...input } = zPatchAdminGroupRequest.parse(body);
     return this.groups.update(actor, id, input, expectedRevision);
   }
 
   @Delete(':id')
-  @RequireCaps(Capability.ManageGroups)
+  @RequireRole(Role.Admin)
   delete(@Param('id') id: string, @CurrentActor() actor: Actor) {
     return this.groups.delete(actor, id);
   }
 
   @Get(':id/members')
-  @RequireCaps(Capability.ManageGroups)
+  @RequireRole(Role.Admin)
   members(@Param('id') id: string) {
     return this.groups.listMembers(id);
   }
 
   @Post(':id/members')
-  @RequireCaps(Capability.ManageGroups)
+  @RequireRole(Role.Admin)
   addMember(@Param('id') id: string, @Body() body: unknown, @CurrentActor() actor: Actor) {
     return this.groups.addMember(actor, id, zAddGroupMemberRequest.parse(body).userId);
   }
 
   @Delete(':id/members/:userId')
-  @RequireCaps(Capability.ManageGroups)
+  @RequireRole(Role.Admin)
   removeMember(
     @Param('id') id: string,
     @Param('userId') userId: string,
@@ -87,13 +85,13 @@ export class GroupsController {
   }
 
   @Get(':id/server-grants')
-  @RequireCaps(Capability.ManageGrants)
+  @RequireRole(Role.Operator)
   serverGrants(@Param('id') id: string) {
     return this.grants.listServerGrants(subject(id));
   }
 
   @Put(':id/server-grants/:serverId')
-  @RequireCaps(Capability.ManageGrants)
+  @RequireRole(Role.Operator)
   serverGrant(
     @Param('id') id: string,
     @Param('serverId') serverId: string,
@@ -104,7 +102,7 @@ export class GroupsController {
   }
 
   @Delete(':id/server-grants/:serverId')
-  @RequireCaps(Capability.ManageGrants)
+  @RequireRole(Role.Operator)
   deleteServerGrant(
     @Param('id') id: string,
     @Param('serverId') serverId: string,
@@ -114,13 +112,13 @@ export class GroupsController {
   }
 
   @Get(':id/storage-pool-grants')
-  @RequireCaps(Capability.ManageGrants)
+  @RequireRole(Role.Operator)
   storagePoolGrants(@Param('id') id: string) {
     return this.grants.listStoragePoolGrants(subject(id));
   }
 
   @Put(':id/storage-pool-grants/:poolId')
-  @RequireCaps(Capability.ManageGrants)
+  @RequireRole(Role.Operator)
   storagePoolGrant(
     @Param('id') id: string,
     @Param('poolId') poolId: string,
@@ -132,7 +130,7 @@ export class GroupsController {
   }
 
   @Delete(':id/storage-pool-grants/:poolId')
-  @RequireCaps(Capability.ManageGrants)
+  @RequireRole(Role.Operator)
   deleteStoragePoolGrant(
     @Param('id') id: string,
     @Param('poolId') poolId: string,
@@ -142,13 +140,13 @@ export class GroupsController {
   }
 
   @Get(':id/shared-backend-grants')
-  @RequireCaps(Capability.ManageGrants)
+  @RequireRole(Role.Operator)
   sharedBackendGrants(@Param('id') id: string) {
     return this.grants.listSharedBackendGrants(subject(id));
   }
 
   @Put(':id/shared-backend-grants/:backendId')
-  @RequireCaps(Capability.ManageGrants)
+  @RequireRole(Role.Operator)
   sharedBackendGrant(
     @Param('id') id: string,
     @Param('backendId') backendId: string,
@@ -164,7 +162,7 @@ export class GroupsController {
   }
 
   @Delete(':id/shared-backend-grants/:backendId')
-  @RequireCaps(Capability.ManageGrants)
+  @RequireRole(Role.Operator)
   deleteSharedBackendGrant(
     @Param('id') id: string,
     @Param('backendId') backendId: string,

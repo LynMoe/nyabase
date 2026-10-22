@@ -1,17 +1,13 @@
-import { sql, type Kysely, type Transaction } from 'kysely';
+import type { Kysely, Transaction } from 'kysely';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 
 /**
  * Readers for `iam.effective_server_access`, `iam.effective_pool_access` and
- * `iam.effective_shared_backend_access`. Those views merge direct and
- * group-inherited grants per (user, resource); every authorization decision
- * reads them through one of the resolvers below, one per resource kind.
- *
- * A resolver returns the *current* coverage only: the merged row exists and
- * `expires_at IS NULL OR expires_at > now()`. A user whose coverage is absent
- * or expired gets `null`. Expired rows stay visible in the views (the lapse
- * processor needs their past `expires_at`); only the processor and the
- * effective-access page read them.
+ * `iam.effective_shared_backend_access`. Those views merge the *current* direct
+ * and group-inherited grants per (user, resource) for active users; an absent
+ * row means no coverage. Every authorization decision reads them through one of
+ * the resolvers below, one per resource kind. Expired grants are not in the
+ * views and are never merged by hand.
  */
 export type AccessExecutor = Kysely<NyabaseDatabase> | Transaction<NyabaseDatabase>;
 
@@ -46,8 +42,6 @@ function bytes(value: string | number | null): number | null {
   return result;
 }
 
-const notExpired = sql<boolean>`(expires_at IS NULL OR expires_at > now())`;
-
 function serverAccess(row: {
   cpu_cores: number | null;
   mem_bytes: string | null;
@@ -73,7 +67,6 @@ export async function resolveServerAccess(
     .select(['cpu_cores', 'mem_bytes', 'disk_bytes', 'gpu_pci_addresses', 'expires_at'])
     .where('user_id', '=', userId)
     .where('server_id', '=', serverId)
-    .where(notExpired)
     .executeTakeFirst();
   return row ? serverAccess(row) : null;
 }
@@ -87,7 +80,6 @@ export async function resolvePoolAccess(
     .select('expires_at')
     .where('user_id', '=', userId)
     .where('pool_id', '=', poolId)
-    .where(notExpired)
     .executeTakeFirst();
   return row ? { expiresAt: row.expires_at } : null;
 }
@@ -101,7 +93,6 @@ export async function resolveSharedBackendAccess(
     .select(['limit_bytes', 'expires_at'])
     .where('user_id', '=', userId)
     .where('shared_backend_id', '=', sharedBackendId)
-    .where(notExpired)
     .executeTakeFirst();
   return row ? { limitBytes: bytes(row.limit_bytes), expiresAt: row.expires_at } : null;
 }
@@ -116,7 +107,6 @@ export async function listServerAccess(
       'server_id', 'cpu_cores', 'mem_bytes', 'disk_bytes', 'gpu_pci_addresses', 'expires_at',
     ])
     .where('user_id', '=', userId)
-    .where(notExpired)
     .orderBy('server_id')
     .execute();
   return rows.map((row) => ({ serverId: row.server_id, ...serverAccess(row) }));
@@ -129,7 +119,6 @@ export async function listPoolAccess(
   const rows = await executor.selectFrom('iam.effective_pool_access')
     .select(['pool_id', 'expires_at'])
     .where('user_id', '=', userId)
-    .where(notExpired)
     .orderBy('pool_id')
     .execute();
   return rows.map((row) => ({ poolId: row.pool_id, expiresAt: row.expires_at }));
@@ -142,7 +131,6 @@ export async function listSharedBackendAccess(
   const rows = await executor.selectFrom('iam.effective_shared_backend_access')
     .select(['shared_backend_id', 'limit_bytes', 'expires_at'])
     .where('user_id', '=', userId)
-    .where(notExpired)
     .orderBy('shared_backend_id')
     .execute();
   return rows.map((row) => ({
@@ -159,30 +147,6 @@ export async function listSharedBackendAccess(
 export async function loadServerAccessKeys(executor: AccessExecutor): Promise<Set<string>> {
   const rows = await executor.selectFrom('iam.effective_server_access')
     .select(['user_id', 'server_id'])
-    .where(notExpired)
     .execute();
   return new Set(rows.map((row) => `${row.user_id}\0${row.server_id}`));
-}
-
-/**
- * Current coverage by grants alone (iam.merged_*), ignoring the user's status.
- * Only the access-lapse ledger uses it: a disabled user has no access, but
- * disabling never starts a lapse.
- */
-export async function hasGrantCoverage(
-  executor: AccessExecutor,
-  key: { userId: string; kind: 'server' | 'storage_pool' | 'shared_backend'; resourceId: string },
-): Promise<boolean> {
-  const row = key.kind === 'server'
-    ? await executor.selectFrom('iam.merged_server_access').select('user_id')
-      .where('user_id', '=', key.userId).where('server_id', '=', key.resourceId)
-      .where(notExpired).executeTakeFirst()
-    : key.kind === 'storage_pool'
-      ? await executor.selectFrom('iam.merged_pool_access').select('user_id')
-        .where('user_id', '=', key.userId).where('pool_id', '=', key.resourceId)
-        .where(notExpired).executeTakeFirst()
-      : await executor.selectFrom('iam.merged_shared_backend_access').select('user_id')
-        .where('user_id', '=', key.userId).where('shared_backend_id', '=', key.resourceId)
-        .where(notExpired).executeTakeFirst();
-  return row !== undefined;
 }

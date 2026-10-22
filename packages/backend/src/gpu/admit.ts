@@ -155,6 +155,26 @@ function pciListsEqual(left: readonly string[], right: readonly string[]): boole
   return left.every((value, index) => value === right[index]);
 }
 
+/** Start-time check: every claim the container holds must still be granted. */
+export function assertClaimsGranted(
+  grantPciAddresses: readonly string[],
+  claimed: readonly string[],
+): void {
+  const allowed = new Set(
+    grantPciAddresses.flatMap((address) => {
+      const canonical = canonicalPciAddress(address);
+      return canonical ? [canonical] : [];
+    }),
+  );
+  const ungranted = claimed.filter((address) => !allowed.has(address));
+  if (ungranted.length === 0) return;
+  throw gpuForbidden(
+    FailureCode.GpuNotGranted,
+    'The container holds GPUs that are no longer in the server grant',
+    { pciAddresses: ungranted },
+  );
+}
+
 export function assertGpuGrant(
   grantPciAddresses: readonly string[],
   addresses: readonly string[],

@@ -16,7 +16,7 @@ import {
   defaultExpiryLocal,
   expirySummary,
   gibHint,
-  gibToBytes,
+  parseGibQuota,
   grantablePools,
   type GrantSubject,
   initialExpiry,
@@ -169,13 +169,15 @@ export function ServerGrantDialog({
   const [expiresAt, setExpiresAt] = useState(() => initialExpiry(grant?.expiresAt));
   const idPrefix = grant ? `grant-${grant.serverId}` : 'grant';
   const parsedCores = parseCoreCount(cpuCores);
+  const parsedMem = parseGibQuota(memGib);
+  const parsedDisk = parseGibQuota(diskGib);
 
   return (
     <GrantDialog
       noun="服务器授权"
       idPrefix={idPrefix}
       wide
-      canSave={parsedCores !== undefined}
+      canSave={parsedCores !== undefined && parsedMem !== undefined && parsedDisk !== undefined}
       target={grant
         ? { mode: 'edit', id: grant.serverId, name: serverName(grant.serverId, allServers) }
         : {
@@ -191,8 +193,8 @@ export function ServerGrantDialog({
       onTargetChange={() => setGpuPciAddresses([])}
       save={(serverId) => api.put<ServerGrantDto>(`${grantSubjectPath(subject.kind, subject.id)}/server-grants/${serverId}`, {
         cpuCores: parsedCores ?? null,
-        memBytes: gibToBytes(memGib),
-        diskBytes: gibToBytes(diskGib),
+        memBytes: parsedMem ?? null,
+        diskBytes: parsedDisk ?? null,
         gpuPciAddresses,
         expiresAt: isoOrNull(expiresAt),
       })}
@@ -211,8 +213,8 @@ export function ServerGrantDialog({
               hint="按整核绑定，该用户的容器共享；不限 = 全部未保留 CPU"
               error={parsedCores === undefined ? '请输入不小于 1 的整数' : undefined}
             />
-            <NumberField id={`${idPrefix}-memory`} label="内存（GiB，留空为不限）" value={memGib} onChange={setMemGib} hint={gibHint(memGib)} />
-            <NumberField id={`${idPrefix}-disk`} label="磁盘（GiB，留空为不限，不含共享卷）" value={diskGib} onChange={setDiskGib} hint={gibHint(diskGib)} />
+            <NumberField id={`${idPrefix}-memory`} label="内存（GiB，留空为不限）" value={memGib} onChange={setMemGib} hint={gibHint(memGib)} error={parsedMem === undefined ? '请输入大于 0 的数值' : undefined} />
+            <NumberField id={`${idPrefix}-disk`} label="磁盘（GiB，留空为不限，不含共享卷）" value={diskGib} onChange={setDiskGib} hint={gibHint(diskGib)} error={parsedDisk === undefined ? '请输入大于 0 的数值' : undefined} />
           </div>
           {serverId ? (
             <ServerGrantGpu
@@ -299,14 +301,15 @@ export function BackendGrantDialog({
   const invalidate = useInvalidateGrants(subject);
   const allBackends = backendsQuery.data ?? [];
   const backends = grant ? allBackends : allBackends.filter((backend) => !grantedIds.has(backend.id));
-  const [sharedLimitGib, setSharedLimitGib] = useState(() => (grant ? formatGibInput(grant.limitBytes) : ''));
+  const [sharedLimitGib, setSharedLimitGib] = useState(() => (grant?.limitBytes == null ? '' : formatGibInput(grant.limitBytes)));
   const [expiresAt, setExpiresAt] = useState(() => initialExpiry(grant?.expiresAt));
   const idPrefix = grant ? `grant-backend-${grant.sharedBackendId}` : 'grant-backend';
+  const parsedLimit = parseGibQuota(sharedLimitGib);
   return (
     <GrantDialog
       noun="共享存储授权"
       idPrefix={idPrefix}
-      canSave={Boolean(sharedLimitGib)}
+      canSave={parsedLimit !== undefined}
       target={grant
         ? { mode: 'edit', id: grant.sharedBackendId, name: backendName(grant.sharedBackendId, allBackends) }
         : {
@@ -320,11 +323,10 @@ export function BackendGrantDialog({
           onRetry: () => { void backendsQuery.refetch(); },
         }}
       save={(backendId) => {
-        const limitBytes = gibToBytes(sharedLimitGib);
-        if (limitBytes === null) return Promise.reject(new Error('请填写额度'));
+        if (parsedLimit === undefined) return Promise.reject(new Error('额度必须大于 0，或留空表示不限'));
         return api.put<SharedBackendGrantDto>(
           `${grantSubjectPath(subject.kind, subject.id)}/shared-backend-grants/${backendId}`,
-          { limitBytes, expiresAt: isoOrNull(expiresAt) },
+          { limitBytes: parsedLimit, expiresAt: isoOrNull(expiresAt) },
         );
       }}
       onSaved={() => { onClose(); invalidate(); }}
@@ -332,7 +334,7 @@ export function BackendGrantDialog({
     >
       {() => (
         <>
-          <NumberField id={`${idPrefix}-limit`} label="额度（GiB）" value={sharedLimitGib} onChange={setSharedLimitGib} hint={gibHint(sharedLimitGib)} />
+          <NumberField id={`${idPrefix}-limit`} label="额度（GiB，留空为不限）" value={sharedLimitGib} onChange={setSharedLimitGib} hint={gibHint(sharedLimitGib)} error={parsedLimit === undefined ? '请输入大于 0 的数值' : undefined} />
           <GrantExpiryInput id={`${idPrefix}-expires-at`} value={expiresAt} onChange={setExpiresAt} />
         </>
       )}

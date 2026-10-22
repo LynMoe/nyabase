@@ -43,19 +43,16 @@ export class AuthController {
   }
 
   private async userToDto(
-    user: Pick<UserRecord, 'id' | 'username' | 'displayName' | 'status' | 'createdAt'>,
+    user: Pick<UserRecord, 'id' | 'username' | 'displayName' | 'status' | 'createdAt' | 'role'>,
   ): Promise<UserDto> {
-    const [capabilities, groups] = await Promise.all([
-      this.accessResolver.userCapabilities(user.id),
-      this.accessResolver.getUserGroupSummaries(user.id),
-    ]);
+    const groups = await this.accessResolver.getUserGroupSummaries(user.id);
     return {
       id: user.id,
       username: user.username,
       displayName: user.displayName,
       status: user.status,
       createdAt: user.createdAt.toISOString(),
-      capabilities: Array.from(capabilities),
+      role: user.role,
       groups,
     };
   }

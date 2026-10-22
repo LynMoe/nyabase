@@ -15,7 +15,6 @@ import {
   seedUser,
 } from './access.pg-test-helper.js';
 import {
-  hasGrantCoverage,
   listServerAccess,
   loadServerAccessKeys,
   resolvePoolAccess,
@@ -54,7 +53,7 @@ describePg('iam.effective_server_access', () => {
     });
   });
 
-  it('lets a NULL (unlimited) quota win per dimension and treats disk 0 as unlimited', async () => {
+  it('lets a NULL (unlimited) quota win per dimension', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const userId = await seedUser(database);
       const serverId = await seedServer(database);
@@ -64,7 +63,7 @@ describePg('iam.effective_server_access', () => {
         cpuCores: null, memBytes: 8, diskBytes: 100,
       });
       await grantServer(database, { group }, serverId, {
-        cpuCores: 4, memBytes: null, diskBytes: 0,
+        cpuCores: 4, memBytes: null, diskBytes: null,
       });
 
       await expect(resolveServerAccess(database, userId, serverId)).resolves.toMatchObject({
@@ -132,24 +131,19 @@ describePg('iam.effective_server_access', () => {
     });
   });
 
-  it('exposes no current coverage when every grant is expired but keeps the latest past expiry', async () => {
+  it('exposes no coverage at all in the views when every grant is expired', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const userId = await seedUser(database);
       const serverId = await seedServer(database);
       const group = await seedGroup(database);
       await addMember(database, group, userId);
-      const older = days(-10);
-      const newest = days(-3);
-      await grantServer(database, { user: userId }, serverId, { expiresAt: older });
-      await grantServer(database, { group }, serverId, { expiresAt: newest });
+      await grantServer(database, { user: userId }, serverId, { expiresAt: days(-10) });
+      await grantServer(database, { group }, serverId, { expiresAt: days(-3) });
 
       await expect(resolveServerAccess(database, userId, serverId)).resolves.toBeNull();
       await expect(listServerAccess(database, userId)).resolves.toEqual([]);
-      const row = await database.selectFrom('iam.effective_server_access')
-        .select('expires_at')
-        .where('user_id', '=', userId)
-        .executeTakeFirstOrThrow();
-      expect(row.expires_at?.getTime()).toBe(newest.getTime());
+      await expect(database.selectFrom('iam.effective_server_access').select('user_id').execute())
+        .resolves.toEqual([]);
     });
   });
 
@@ -175,10 +169,7 @@ describePg('iam.effective_server_access', () => {
         .execute();
       await expect(resolveServerAccess(database, active, serverId)).resolves.toBeNull();
 
-      // Grant coverage (the lapse ledger's view) ignores user status; access does not.
-      await expect(hasGrantCoverage(database, {
-        userId: disabled, kind: 'server', resourceId: serverId,
-      })).resolves.toBe(true);
+      await expect(resolveServerAccess(database, disabled, serverId)).resolves.toBeNull();
       await database.updateTable('iam.users')
         .set({ status: UserStatus.Active })
         .where('id', '=', disabled)
@@ -223,7 +214,7 @@ describePg('iam.effective_pool_access and iam.effective_shared_backend_access', 
     });
   });
 
-  it('merges shared-backend limits by maximum with 0 meaning unlimited', async () => {
+  it('merges shared-backend limits by maximum with NULL meaning unlimited', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const userId = await seedUser(database);
       const backendId = await seedBackend(database);
@@ -233,7 +224,7 @@ describePg('iam.effective_pool_access and iam.effective_shared_backend_access', 
       await grantBackend(database, { user: userId }, backendId, 100);
       await grantBackend(database, { group }, backendId, 300);
       await grantBackend(database, { user: userId }, unlimitedBackendId, 100);
-      await grantBackend(database, { group }, unlimitedBackendId, 0);
+      await grantBackend(database, { group }, unlimitedBackendId, null);
 
       await expect(resolveSharedBackendAccess(database, userId, backendId))
         .resolves.toMatchObject({ limitBytes: 300, expiresAt: null });
@@ -250,7 +241,7 @@ describePg('iam.effective_pool_access and iam.effective_shared_backend_access', 
       const group = await seedGroup(database);
       await addMember(database, group, userId);
       await grantBackend(database, { user: userId }, backendId, 900, days(-1));
-      await grantBackend(database, { group }, backendId, 0, days(-2));
+      await grantBackend(database, { group }, backendId, null, days(-2));
       await grantBackend(database, { user: disabled }, backendId, 5);
 
       await expect(resolveSharedBackendAccess(database, userId, backendId)).resolves.toBeNull();
@@ -258,7 +249,8 @@ describePg('iam.effective_pool_access and iam.effective_shared_backend_access', 
       const views = await sql<{ count: string }>`
         SELECT count(*)::text AS count FROM iam.effective_shared_backend_access
       `.execute(database);
-      expect(views.rows[0]?.count).toBe('1');
+      // The only current grant belongs to a disabled user, so the active-only view is empty.
+      expect(views.rows[0]?.count).toBe('0');
     });
   });
 });

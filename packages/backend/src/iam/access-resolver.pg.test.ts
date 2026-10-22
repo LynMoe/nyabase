@@ -97,7 +97,6 @@ describePg('AccessResolverService', () => {
         diskBytes: null,
         gpuPciAddresses: [],
         expiresAt: null,
-        purgeAt: null,
         accessPhase: 'live',
         allowedImageIds: [image],
       }]);
@@ -118,19 +117,18 @@ describePg('AccessResolverService', () => {
         user_id: userId, resource_kind: 'server', resource_id: serverId, lapsed_at: lapsedAt,
       }).execute();
 
-      const [entry] = await access.getEffectiveAccess(userId);
-      expect(entry).toMatchObject({ serverId, accessPhase: 'grace', cpuCores: 2 });
-      expect(entry!.expiresAt).toBe(lapsedAt.toISOString());
-      expect(entry!.purgeAt).toBe(
-        new Date(lapsedAt.getTime() + GRANT_EXPIRY_GRACE_DAYS * 86_400_000).toISOString(),
-      );
+      // A grace entry carries no quotas, whatever the expired grant held.
+      await expect(access.getEffectiveAccess(userId)).resolves.toEqual([{
+        accessPhase: 'grace',
+        serverId,
+        expiresAt: lapsedAt.toISOString(),
+        purgeAt: new Date(lapsedAt.getTime() + GRANT_EXPIRY_GRACE_DAYS * 86_400_000).toISOString(),
+      }]);
       await expect(access.listAccessibleServers(userId)).resolves.toEqual([]);
 
-      // A revoked grant leaves no quotas to show, only the ledger.
+      // A revoked grant looks the same: only the ledger.
       await database.deleteFrom('iam.server_grants').execute();
-      expect((await access.getEffectiveAccess(userId))[0]).toMatchObject({
-        accessPhase: 'grace', cpuCores: null,
-      });
+      expect((await access.getEffectiveAccess(userId))[0]).toMatchObject({ accessPhase: 'grace' });
 
       await database.updateTable('control.access_lapses').set({ purged_at: new Date() }).execute();
       await expect(access.getEffectiveAccess(userId)).resolves.toEqual([]);
@@ -145,7 +143,7 @@ describePg('AccessResolverService', () => {
       const unlimited = await seedBackend(database);
       const expired = await seedBackend(database);
       await grantBackend(database, { user: userId }, limited, 1_000);
-      await grantBackend(database, { user: userId }, unlimited, 0);
+      await grantBackend(database, { user: userId }, unlimited, null);
       await grantBackend(database, { user: userId }, expired, 5, days(-1));
       await seedVolume(database, {
         ownerId: userId, poolId: null, serverId: null, sharedBackendId: limited,
@@ -171,7 +169,7 @@ describePg('AccessResolverService', () => {
 
       const summaries = await access.getUserGroupSummaries(userId);
       expect(summaries.map((group) => group.name)).toEqual(['abc', 'zed']);
-      expect(Object.keys(summaries[0]!).sort()).toEqual(['id', 'isSystem', 'name']);
+      expect(Object.keys(summaries[0]!).sort()).toEqual(['id', 'name']);
       await database.updateTable('iam.users').set({ status: 'disabled' }).execute();
       await expect(access.getUserGroupSummaries(userId)).resolves.toEqual([]);
     });

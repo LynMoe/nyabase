@@ -1,7 +1,7 @@
 import { Inject, Injectable } from '@nestjs/common';
 import type { Kysely, Transaction } from 'kysely';
 import { sql } from 'kysely';
-import type { UserStatus } from '@nyabase/common';
+import type { Role, UserStatus } from '@nyabase/common';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
@@ -26,6 +26,7 @@ interface UserRow {
   display_name: string;
   status: string;
   auth_version: number;
+  role: string;
   created_at: Date;
   updated_at: Date;
 }
@@ -142,6 +143,7 @@ export class IamAuthRepository implements AuthPersistence {
           'user.display_name',
           'user.status',
           'user.auth_version',
+          'user.role',
           'user.created_at',
           'user.updated_at',
         ])
@@ -165,6 +167,7 @@ export class IamAuthRepository implements AuthPersistence {
             'user.display_name',
             'user.status',
             'user.auth_version',
+            'user.role',
             'user.created_at',
             'user.updated_at',
           ])
@@ -269,6 +272,7 @@ export class IamAuthRepository implements AuthPersistence {
           'user.display_name',
           'user.status',
           'user.auth_version',
+          'user.role',
           'user.created_at',
           'user.updated_at',
         ])
@@ -458,6 +462,7 @@ export class IamAuthRepository implements AuthPersistence {
       displayName: row.display_name,
       status: row.status as UserStatus,
       authVersion: row.auth_version,
+      role: row.role as Role,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     };

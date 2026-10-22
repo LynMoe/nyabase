@@ -15,12 +15,13 @@ import {
   MAX_SSH_PUBLIC_KEYS_PER_USER,
   MAX_SSH_PUBLIC_KEY_TEXT_LENGTH,
   normalizeOpenSshPublicKey,
+  Role,
   UserStatus,
 } from '@nyabase/common';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
-import { AccessResolverService } from '../iam/access-resolver.service.js';
+import { assertActorRole } from '../iam/administration.js';
 import { AuditService } from '../iam/audit.service.js';
 import { ContainerSshConvergenceService } from '../containers/container-ssh.js';
 import { ProxySnapshotNotifierService } from '../proxy-snapshots/proxy-snapshot-notifier.service.js';
@@ -44,7 +45,6 @@ export class UserSshKeysService {
     @Inject(PG_DATABASE)
     private readonly database: Kysely<NyabaseDatabase>,
     private readonly transactions: PgTransactionManager,
-    private readonly accessResolver: AccessResolverService,
     private readonly containerSshConvergence: ContainerSshConvergenceService,
     private readonly proxySnapshots: ProxySnapshotNotifierService,
     private readonly auditService: AuditService,
@@ -82,11 +82,7 @@ export class UserSshKeysService {
       ?? createHash('sha256').update(normalizedKeyText).digest('hex');
     const saved = await this.transactions.run(async (transaction) => {
       if (actorId !== userId) {
-        await this.accessResolver.assertActorMayAdministerUserInTransaction(
-          transaction,
-          actorId,
-          userId,
-        );
+        await assertActorRole(transaction, actorId, Role.Admin);
       }
       const user = await transaction.selectFrom('iam.users')
         .select('status').where('id', '=', userId).forUpdate().executeTakeFirst();
@@ -138,11 +134,7 @@ export class UserSshKeysService {
   async deleteSshKey(userId: string, keyId: string, actorId: string): Promise<void> {
     await this.transactions.run(async (transaction) => {
       if (actorId !== userId) {
-        await this.accessResolver.assertActorMayAdministerUserInTransaction(
-          transaction,
-          actorId,
-          userId,
-        );
+        await assertActorRole(transaction, actorId, Role.Admin);
       }
       const user = await transaction.selectFrom('iam.users')
         .select('status').where('id', '=', userId).executeTakeFirst();

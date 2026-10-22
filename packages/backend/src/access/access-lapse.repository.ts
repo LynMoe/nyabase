@@ -6,7 +6,11 @@ import type { AccessLapseResourceKind } from '../platform/persistence-pg/iam-aut
 import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
 import { lockIamPolicy } from '../iam/administration.js';
-import { hasGrantCoverage } from '../iam/effective-access.js';
+import {
+  resolvePoolAccess,
+  resolveServerAccess,
+  resolveSharedBackendAccess,
+} from '../iam/effective-access.js';
 
 export const ACCESS_LAPSE_GRACE_MS = GRANT_EXPIRY_GRACE_DAYS * 24 * 60 * 60 * 1000;
 
@@ -18,10 +22,10 @@ export interface LapseKey {
 
 /** A (user, resource) pair on which the user owns containers or volumes. */
 export interface LapseCandidate extends LapseKey {
-  /** The user currently holds merged coverage of the resource. */
+  /** The user currently holds grant coverage of the resource (effective_*: active user, current grant). */
   covered: boolean;
-  /** Latest past `expires_at` of the (expired) merged coverage, if there is one. */
-  expiredAt: Date | null;
+  /** The user has an active container with running power intent behind the resource (server: on it; pool/backend: attached to a volume there). */
+  hasRunning: boolean;
   /** The ledger row, when the pair is in grace. */
   lapse: { lapsedAt: Date; stoppedAt: Date | null; purgedAt: Date | null } | null;
   /** Database clock at the time of the scan. */
@@ -40,7 +44,9 @@ export function lapseWork(candidate: LapseCandidate): LapseWork {
   if (!candidate.lapse) return 'lapse';
   const due = candidate.now.getTime() >= purgeDeadline(candidate.lapse.lapsedAt).getTime();
   if (due) return candidate.lapse.purgedAt === null ? 'purge' : 'none';
-  return candidate.lapse.stoppedAt === null ? 'stop' : 'none';
+  // Stop again whenever something runs: a container started during the grace
+  // (an administrator override) must not survive until the purge.
+  return candidate.lapse.stoppedAt === null || candidate.hasRunning ? 'stop' : 'none';
 }
 
 /**
@@ -68,7 +74,7 @@ interface CandidateRow {
   kind: AccessLapseResourceKind;
   resource_id: string;
   covered: boolean;
-  expired_at: Date | null;
+  has_running: boolean;
   lapsed_at: Date | null;
   stopped_at: Date | null;
   purged_at: Date | null;
@@ -77,8 +83,8 @@ interface CandidateRow {
 
 /**
  * Reads and writes the grace ledger (`control.access_lapses`). The ledger row
- * is the only state: `lapsed_at` is fixed when the row is created and never
- * moves; the row disappears when coverage returns or nothing is owned any more.
+ * is the only state: `lapsed_at` is the detection time, fixed when the row is
+ * created and never moved; the row disappears when coverage returns or nothing is owned any more.
  */
 @Injectable()
 export class AccessLapseRepository {
@@ -119,35 +125,52 @@ export class AccessLapseRepository {
   private async candidates(filter: RawBuilder<unknown>): Promise<LapseCandidate[]> {
     const result = await sql<CandidateRow>`
       WITH coverage AS (
-        SELECT user_id, 'server' AS kind, server_id AS resource_id, expires_at
-        FROM iam.merged_server_access
+        -- Current coverage: a current grant held by an active user, so
+        -- disabling a user loses coverage like a revocation does.
+        SELECT user_id, 'server' AS kind, server_id AS resource_id
+        FROM iam.effective_server_access
         UNION ALL
-        SELECT user_id, 'storage_pool', pool_id, expires_at FROM iam.effective_pool_access
+        SELECT user_id, 'storage_pool', pool_id FROM iam.effective_pool_access
         UNION ALL
-        SELECT user_id, 'shared_backend', shared_backend_id, expires_at
-        FROM iam.merged_shared_backend_access
+        SELECT user_id, 'shared_backend', shared_backend_id
+        FROM iam.effective_shared_backend_access
+      ), running AS (
+        -- Pairs behind which an active container is meant to run.
+        SELECT owner_id AS user_id, 'server' AS kind, server_id AS resource_id
+        FROM control.containers
+        WHERE power_intent = 'running' AND lifecycle_phase = 'active'
+        UNION
+        SELECT volume.owner_id, CASE WHEN volume.shared_backend_id IS NULL THEN 'storage_pool' ELSE 'shared_backend' END,
+               coalesce(volume.shared_backend_id, volume.pool_id)
+        FROM control.volume_attachments AS attachment
+        JOIN control.volumes AS volume ON volume.id = attachment.volume_id
+        JOIN control.containers AS container ON container.id = attachment.container_id
+        WHERE container.power_intent = 'running' AND container.lifecycle_phase = 'active'
       ), candidate AS (
         SELECT owned.user_id, owned.kind, owned.resource_id,
-               (coverage.user_id IS NOT NULL
-                 AND (coverage.expires_at IS NULL OR coverage.expires_at > now())) AS covered,
-               CASE WHEN coverage.expires_at <= now() THEN coverage.expires_at END AS expired_at,
+               (coverage.user_id IS NOT NULL) AS covered,
+               (running.user_id IS NOT NULL) AS has_running,
                lapse.lapsed_at, lapse.stopped_at, lapse.purged_at
         FROM (${OWNED}) AS owned
         LEFT JOIN coverage
           ON coverage.user_id = owned.user_id
          AND coverage.kind = owned.kind
          AND coverage.resource_id = owned.resource_id
+        LEFT JOIN running
+          ON running.user_id = owned.user_id
+         AND running.kind = owned.kind
+         AND running.resource_id = owned.resource_id
         LEFT JOIN control.access_lapses AS lapse
           ON lapse.user_id = owned.user_id
          AND lapse.resource_kind = owned.kind
          AND lapse.resource_id = owned.resource_id
       )
       SELECT candidate.user_id::text AS user_id, candidate.kind, candidate.resource_id::text AS resource_id,
-             candidate.covered, candidate.expired_at, candidate.lapsed_at,
+             candidate.covered, candidate.has_running, candidate.lapsed_at,
              candidate.stopped_at, candidate.purged_at, clock_timestamp() AS now
       FROM candidate
       ${filter}
-      ORDER BY coalesce(candidate.lapsed_at, candidate.expired_at, clock_timestamp()), candidate.user_id,
+      ORDER BY coalesce(candidate.lapsed_at, clock_timestamp()), candidate.user_id,
                candidate.kind, candidate.resource_id
     `.execute(this.database);
     return result.rows.map((row) => ({
@@ -155,7 +178,7 @@ export class AccessLapseRepository {
       kind: row.kind,
       resourceId: row.resource_id,
       covered: row.covered,
-      expiredAt: row.expired_at,
+      hasRunning: row.has_running,
       lapse: row.lapsed_at
         ? { lapsedAt: row.lapsed_at, stoppedAt: row.stopped_at, purgedAt: row.purged_at }
         : null,
@@ -165,10 +188,10 @@ export class AccessLapseRepository {
 
   /**
    * Opens the grace for an uncovered pair. Coverage is re-read under the IAM
-   * lock, so a grant committed since the scan wins. `lapsed_at` is the past
-   * `expires_at` when the coverage expired, otherwise the detection time (a
-   * revocation); an existing row is never touched. Returns null when the pair
-   * is covered after all.
+   * lock, so a grant committed since the scan wins. `lapsed_at` is always the
+   * detection time (never inferred from old grant rows, which could backdate a
+   * revocation and purge at once); an existing row is never touched. Returns
+   * null when the pair is covered after all.
    */
   async openLapse(candidate: LapseCandidate): Promise<NonNullable<LapseCandidate['lapse']> | null> {
     return this.transactions.run(async (transaction) => {
@@ -178,7 +201,7 @@ export class AccessLapseRepository {
         INSERT INTO control.access_lapses (user_id, resource_kind, resource_id, lapsed_at)
         VALUES (
           ${candidate.userId}::uuid, ${candidate.kind}, ${candidate.resourceId}::uuid,
-          ${candidate.expiredAt ?? sql`clock_timestamp()`}
+          clock_timestamp()
         )
         ON CONFLICT (user_id, resource_kind, resource_id) DO NOTHING
       `.execute(transaction);
@@ -240,8 +263,13 @@ export class AccessLapseRepository {
     });
   }
 
-  /** Coverage by grants, whatever the user's status: disabling never opens a lapse. */
-  private isCovered(transaction: Transaction<NyabaseDatabase>, key: LapseKey): Promise<boolean> {
-    return hasGrantCoverage(transaction, key);
+  /** Current coverage of the pair (active user holding a current grant). */
+  private async isCovered(transaction: Transaction<NyabaseDatabase>, key: LapseKey): Promise<boolean> {
+    const access = key.kind === 'server'
+      ? await resolveServerAccess(transaction, key.userId, key.resourceId)
+      : key.kind === 'storage_pool'
+        ? await resolvePoolAccess(transaction, key.userId, key.resourceId)
+        : await resolveSharedBackendAccess(transaction, key.userId, key.resourceId);
+    return access !== null;
   }
 }

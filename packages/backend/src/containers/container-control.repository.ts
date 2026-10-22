@@ -1,7 +1,7 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import { sql, type Kysely, type Selectable, type Transaction } from 'kysely';
-import type { GpuContainerState } from '@nyabase/common';
+import { ContainerPhase, ContainerPowerIntent, type GpuContainerState } from '@nyabase/common';
 import type { ContainerControlTable } from '../platform/persistence-pg/container-control-database.types.js';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
@@ -110,11 +110,10 @@ export class ContainerControlRepository {
   }
 
   /**
-   * Root-disk bytes committed by containers that are neither failed nor being
-   * deleted; a pending quota change counts at its larger size.
+   * Memory of the owner's containers on the server whose power intent is
+   * running. Failed ones count too: an intent retry can bring them back.
    */
-  /** Memory of the owner's other containers on the server that still hold their reservation. */
-  async sumLiveMemBytes(
+  async sumRunningMemBytes(
     filter: { ownerId: string; serverId: string; excludeContainerId?: string },
     executor: ContainerExecutor = this.database,
   ): Promise<number> {
@@ -123,12 +122,17 @@ export class ContainerControlRepository {
       .select(sql<string>`coalesce(sum(mem_bytes), 0)`.as('bytes'))
       .where('owner_id', '=', filter.ownerId)
       .where('server_id', '=', filter.serverId)
-      .where('lifecycle_phase', 'not in', ['failed', 'deleting']);
+      .where('power_intent', '=', ContainerPowerIntent.Running)
+      .where('lifecycle_phase', '<>', ContainerPhase.Deleting);
     if (filter.excludeContainerId !== undefined) query = query.where('id', '<>', filter.excludeContainerId);
     const row = await query.executeTakeFirstOrThrow();
     return numberValue(row.bytes);
   }
 
+  /**
+   * Root-disk bytes committed by containers that are neither failed nor being
+   * deleted; a pending quota change counts at its larger size.
+   */
   async sumLiveRootBytes(
     filter: { ownerId?: string; serverId?: string; poolId?: string },
     executor: ContainerExecutor = this.database,

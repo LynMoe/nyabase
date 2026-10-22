@@ -12,8 +12,8 @@ const describeBootstrap = process.env.NYABASE_TEST_DATABASE_URL
   ? describe
   : describe.skip;
 
-describeBootstrap('AppModule capability guard bootstrap', () => {
-  it('instantiates the compiled AppModule and injects the real access resolver', async () => {
+describeBootstrap('AppModule role guard bootstrap', () => {
+  it('instantiates the compiled AppModule and enforces the role through the real guard', async () => {
     await withPostgresTestDatabase(async ({ connectionString }) => {
       const configDirectory = mkdtempSync(join(tmpdir(), 'nyabase-auth-bootstrap-'));
       const configPath = join(configDirectory, 'config.yaml');
@@ -63,7 +63,7 @@ describeBootstrap('AppModule capability guard bootstrap', () => {
         const output = `${result.stdout ?? ''}${result.stderr ?? ''}`;
         expect(result.error, output).toBeUndefined();
         expect(result.status, output).toBe(0);
-        expect(output).toContain('CAPABILITY_GUARD_RESOLVER_PASS');
+        expect(output).toContain('ROLE_GUARD_PASS');
       } finally {
         for (const [key, value] of previousEnvironment) {
           if (value === undefined) delete process.env[key];
@@ -79,42 +79,40 @@ const compiledBootstrapProbe = `
 import 'reflect-metadata';
 import { ForbiddenException } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
-import { Capability } from '@nyabase/common';
-import { AccessResolverService } from './dist/iam/access-resolver.service.js';
+import { Role } from '@nyabase/common';
 import { AppModule } from './dist/app.module.js';
-import { CAPS_KEY } from './dist/iam/decorators.js';
-import { CapabilitiesGuard } from './dist/iam/guards.js';
+import { ROLE_KEY } from './dist/iam/decorators.js';
+import { RolesGuard } from './dist/iam/guards.js';
 
 const app = await NestFactory.createApplicationContext(AppModule, {
   abortOnError: false,
   logger: false,
 });
 try {
-  const resolver = app.get(AccessResolverService);
-  const guard = app.get(CapabilitiesGuard);
-  if (guard.accessResolver !== resolver) {
-    throw new Error('CapabilitiesGuard did not receive the AccessResolverService instance');
-  }
+  const guard = app.get(RolesGuard);
 
   const handler = function handler() {};
-  Reflect.defineMetadata(CAPS_KEY, [Capability.ManageUsers], handler);
-  const context = {
+  Reflect.defineMetadata(ROLE_KEY, Role.Operator, handler);
+  const contextFor = (role) => ({
     getHandler: () => handler,
     getClass: () => class TestController {},
     switchToHttp: () => ({
       getRequest: () => ({
         originalUrl: '/api/admin/users',
-        user: { id: '00000000-0000-4000-8000-000000000099' },
+        user: { id: '00000000-0000-4000-8000-000000000099', role, authVersion: 0 },
       }),
     }),
-  };
+  });
   try {
-    await guard.canActivate(context);
-    throw new Error('CapabilitiesGuard unexpectedly allowed a user without capabilities');
+    guard.canActivate(contextFor(Role.User));
+    throw new Error('RolesGuard unexpectedly allowed a plain user');
   } catch (error) {
     if (!(error instanceof ForbiddenException)) throw error;
   }
-  console.log('CAPABILITY_GUARD_RESOLVER_PASS');
+  if (guard.canActivate(contextFor(Role.Admin)) !== true) {
+    throw new Error('RolesGuard refused an admin on an operator route');
+  }
+  console.log('ROLE_GUARD_PASS');
 } finally {
   await app.close();
 }

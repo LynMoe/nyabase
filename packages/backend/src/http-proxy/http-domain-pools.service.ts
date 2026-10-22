@@ -10,7 +10,6 @@ import type { Kysely } from 'kysely';
 import { assertListScope, type Actor } from '../iam/actor.js';
 import {
   AuditAction,
-  Capability,
   MAX_HTTP_PROXY_DOMAIN_POOLS,
   normalizeHttpProxyWildcardDomain,
   zCreateHttpDomainPoolRequest,
@@ -18,8 +17,8 @@ import {
   type HttpDomainPoolDto,
   type HttpDomainPoolPublicDto,
   type ListScope,
+  Role,
 } from '@nyabase/common';
-import { AccessResolverService } from '../iam/access-resolver.service.js';
 import { AuditService } from '../iam/audit.service.js';
 import { NyabaseConfigService } from '../platform/config/nyabase-config.service.js';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
@@ -34,6 +33,7 @@ import {
   type DomainPoolRow,
   type HttpExecutor,
 } from './http-proxy-state.js';
+import { assertActorRole } from '../iam/administration.js';
 
 function parseHttpProxyWildcardDomain(value: string): string {
   try {
@@ -61,16 +61,15 @@ export class HttpDomainPoolsService {
     private readonly database: Kysely<NyabaseDatabase>,
     private readonly transactions: PgTransactionManager,
     private readonly config: NyabaseConfigService,
-    private readonly accessResolver: AccessResolverService,
     private readonly audit: AuditService,
   ) {}
 
   /**
    * `scope=mine`: the enabled pools bindings may use (no certificate material).
-   * `scope=all`: every pool, including disabled ones (`ManageSystemSettings`).
+   * `scope=all`: every pool, including disabled ones (operator).
    */
   async listPools(actor: Actor, scope: ListScope): Promise<HttpDomainPoolDto[] | HttpDomainPoolPublicDto[]> {
-    assertListScope(actor, scope, Capability.ManageSystemSettings);
+    assertListScope(actor, scope, Role.Operator);
     return scope === 'all' ? this.listDomainPools() : this.listEnabledDomainPools();
   }
 
@@ -115,11 +114,7 @@ export class HttpDomainPoolsService {
     }
     try {
       const row = await runSerializable(this.transactions, async (transaction) => {
-        await this.accessResolver.assertActorCapabilitiesInTransaction(
-          transaction,
-          actorId,
-          [Capability.ManageSystemSettings],
-        );
+        await assertActorRole(transaction, actorId, Role.Operator);
         await lockHttpProxy(transaction, DOMAIN_POOL_MUTATION_LOCK);
         const existing = await transaction
           .selectFrom('interaction.http_domain_pools')
@@ -170,11 +165,7 @@ export class HttpDomainPoolsService {
     const dto = zPatchHttpDomainPoolRequest.parse(input);
     try {
       const row = await runSerializable(this.transactions, async (transaction) => {
-        await this.accessResolver.assertActorCapabilitiesInTransaction(
-          transaction,
-          actorId,
-          [Capability.ManageSystemSettings],
-        );
+        await assertActorRole(transaction, actorId, Role.Operator);
         await lockHttpProxy(transaction, DOMAIN_POOL_MUTATION_LOCK);
         const current = await transaction
           .selectFrom('interaction.http_domain_pools')
@@ -267,11 +258,7 @@ export class HttpDomainPoolsService {
 
   async deleteDomainPool(actorId: string, id: string): Promise<void> {
     await runSerializable(this.transactions, async (transaction) => {
-      await this.accessResolver.assertActorCapabilitiesInTransaction(
-        transaction,
-        actorId,
-        [Capability.ManageSystemSettings],
-      );
+      await assertActorRole(transaction, actorId, Role.Operator);
       await lockHttpProxy(transaction, DOMAIN_POOL_MUTATION_LOCK);
       const row = await transaction
         .selectFrom('interaction.http_domain_pools')

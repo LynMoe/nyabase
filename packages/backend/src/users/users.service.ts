@@ -12,9 +12,8 @@ import { sql } from 'kysely';
 import { v4 as uuidv4 } from 'uuid';
 import {
   AuditAction,
-  Capability,
   MAX_PLATFORM_ACTIVE_USERS,
-  SystemGroupKey,
+  Role,
   type UserDto,
   UserStatus,
 } from '@nyabase/common';
@@ -28,15 +27,17 @@ import { NyabaseConfigService } from '../platform/config/nyabase-config.service.
 import { ProxySnapshotNotifierService } from '../proxy-snapshots/proxy-snapshot-notifier.service.js';
 import { AuditService } from '../iam/audit.service.js';
 import {
+  assertActorRole,
   assertNotLastAdministrator,
-  groupHoldsResourceGrants,
+  hasActiveAdministrator,
   lockIamPolicy,
 } from '../iam/administration.js';
 import { afterCommit } from '../platform/post-commit.js';
+import { requireUserId } from '../iam/actor.js';
 
 export const MAX_LIFETIME_USERS = 4_096;
 
-/** Lowest free id in 1..=4096. max(numeric_id)+1 is wrong once nyabase-system occupies 4096. */
+/** Lowest free id in 1..=4096 (ids of deleted users stay occupied, so they are never reused). */
 export function pickNextUserNumericId(used: Iterable<number>): number | null {
   const occupied = new Set<number>();
   for (const id of used) occupied.add(Number(id));
@@ -47,7 +48,6 @@ export function pickNextUserNumericId(used: Iterable<number>): number | null {
 }
 
 interface CreateUserOptions {
-  systemGroupKey?: SystemGroupKey;
   actorId?: string | null;
 }
 
@@ -59,6 +59,7 @@ export interface IamUser {
   displayName: string;
   status: UserStatus;
   authVersion: number;
+  role: Role;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -80,7 +81,7 @@ export class UsersService {
   ) {}
 
   async createUser(
-    dto: { username: string; password: string; displayName: string },
+    dto: { username: string; password: string; displayName: string; role?: Role },
     options: CreateUserOptions = {},
   ): Promise<IamUser> {
     if (dto.username.length < 2 || dto.username.length > 64
@@ -107,11 +108,7 @@ export class UsersService {
         occupied.map((row) => row.numeric_id),
       );
       if (typeof options.actorId === 'string') {
-        await this.accessResolver.assertActorCapabilitiesInTransaction(
-          transaction,
-          options.actorId,
-          [Capability.ManageUsers],
-        );
+        await assertActorRole(transaction, options.actorId, Role.Admin);
       }
       if (await transaction.selectFrom('iam.users')
         .select('id')
@@ -147,38 +144,10 @@ export class UsersService {
         display_name: displayName,
         status: UserStatus.Active,
         auth_version: 0,
+        role: dto.role ?? Role.User,
         created_at: now,
         updated_at: now,
       }).returningAll().executeTakeFirstOrThrow();
-      if (options.systemGroupKey) {
-        const group = await transaction.selectFrom('iam.groups')
-          .select(['id', 'capabilities'])
-          .where('system_key', '=', options.systemGroupKey)
-          .where('is_system', '=', true)
-          .executeTakeFirst();
-        if (!group) {
-          throw new ConflictException({
-            code: 'SYSTEM_GROUP_MISSING',
-            message: `Required built-in group is unavailable: ${options.systemGroupKey}`,
-          });
-        }
-        const groupHoldsGrants = await groupHoldsResourceGrants(transaction, group.id);
-        if (typeof options.actorId === 'string') {
-          await this.accessResolver.assertActorCapabilitiesInTransaction(
-            transaction,
-            options.actorId,
-            [
-              ...(group.capabilities as Capability[]),
-              ...(groupHoldsGrants ? [Capability.ManageGrants] : []),
-            ],
-          );
-        }
-        await transaction.insertInto('iam.group_members').values({
-          id: uuidv4(),
-          group_id: group.id,
-          user_id: userId,
-        }).executeTakeFirstOrThrow();
-      }
       const user = this.toUser(inserted);
       if (options.actorId !== undefined) {
         await this.auditService.append(
@@ -190,7 +159,7 @@ export class UsersService {
           {
             username: user.username,
             displayName: user.displayName,
-            systemGroupKey: options.systemGroupKey ?? null,
+            role: user.role,
           },
         );
       }
@@ -225,20 +194,14 @@ export class UsersService {
   async listDtos(): Promise<UserDto[]> {
     const [users, memberships] = await Promise.all([
       this.database.selectFrom('iam.users')
-        .select(['id', 'username', 'display_name', 'status', 'created_at'])
+        .select(['id', 'username', 'display_name', 'status', 'role', 'created_at'])
         .where('status', '!=', UserStatus.Deleted)
         .orderBy('username')
         .orderBy('id')
         .execute(),
       this.database.selectFrom('iam.group_members as membership')
         .innerJoin('iam.groups as group', 'group.id', 'membership.group_id')
-        .select([
-          'membership.user_id',
-          'group.id',
-          'group.name',
-          'group.is_system',
-          'group.capabilities',
-        ])
+        .select(['membership.user_id', 'group.id', 'group.name'])
         .innerJoin('iam.users as user', 'user.id', 'membership.user_id')
         .where('user.status', '=', UserStatus.Active)
         .orderBy('membership.user_id')
@@ -247,20 +210,10 @@ export class UsersService {
         .execute(),
     ]);
     const groupsByUser = new Map<string, UserDto['groups']>();
-    const capabilitiesByUser = new Map<string, Set<Capability>>();
     for (const membership of memberships) {
       const groups = groupsByUser.get(membership.user_id) ?? [];
-      groups.push({
-        id: membership.id,
-        name: membership.name,
-        isSystem: membership.is_system,
-      });
+      groups.push({ id: membership.id, name: membership.name });
       groupsByUser.set(membership.user_id, groups);
-      const capabilities = capabilitiesByUser.get(membership.user_id) ?? new Set<Capability>();
-      for (const capability of membership.capabilities as Capability[]) {
-        capabilities.add(capability);
-      }
-      capabilitiesByUser.set(membership.user_id, capabilities);
     }
     return users.map((user) => ({
       id: user.id,
@@ -268,7 +221,7 @@ export class UsersService {
       displayName: user.display_name,
       status: user.status as UserStatus,
       createdAt: user.created_at.toISOString(),
-      capabilities: [...(capabilitiesByUser.get(user.id) ?? [])],
+      role: user.role as Role,
       groups: groupsByUser.get(user.id) ?? [],
     }));
   }
@@ -284,7 +237,7 @@ export class UsersService {
 
   async updateUser(
     id: string,
-    dto: { displayName?: string; password?: string; status?: UserStatus },
+    dto: { displayName?: string; password?: string; status?: UserStatus; role?: Role },
     actorId?: string,
   ): Promise<IamUser> {
     const displayName = dto.displayName === undefined
@@ -310,27 +263,19 @@ export class UsersService {
           userId: id,
         });
       }
-      if (actorId) {
-        await this.accessResolver.assertActorMayAdministerUserInTransaction(
-          transaction,
-          actorId,
-          id,
-        );
-      }
+      if (actorId) await assertActorRole(transaction, actorId, Role.Admin);
       if (dto.status === UserStatus.Deleted || dto.status === UserStatus.Deleting) {
         throw new BadRequestException({
           code: 'USER_DELETED_STATUS_RESERVED',
           message: 'Deleted is reserved for the DELETE endpoint',
         });
       }
-      if (user.status === UserStatus.Active
+      const disabling = user.status === UserStatus.Active
         && dto.status !== undefined
-        && dto.status !== UserStatus.Active) {
-        await this.accessResolver.assertNotFinalActiveAdministratorInTransaction(
-          transaction,
-          id,
-        );
-      }
+        && dto.status !== UserStatus.Active;
+      const demoting = dto.role !== undefined && dto.role !== user.role;
+      // A no-op unless the target is an active administrator.
+      if (disabling || demoting) await assertNotLastAdministrator(transaction, id);
       if (dto.status === UserStatus.Active && user.status !== UserStatus.Active) {
         await lockIamPolicy(transaction);
         const active = await transaction.selectFrom('iam.users')
@@ -353,6 +298,7 @@ export class UsersService {
         ...(displayName !== undefined ? { display_name: displayName } : {}),
         ...(passwordHash !== undefined ? { password_hash: passwordHash } : {}),
         ...(dto.status !== undefined ? { status: dto.status } : {}),
+        ...(dto.role !== undefined ? { role: dto.role } : {}),
         ...(securityChanged ? { auth_version: user.auth_version + 1 } : {}),
         updated_at: new Date(),
       }).where('id', '=', id).returningAll().executeTakeFirstOrThrow();
@@ -371,8 +317,19 @@ export class UsersService {
             displayNameChanged: dto.displayName !== undefined,
             passwordChanged: dto.password !== undefined,
             status: dto.status,
+            role: dto.role,
           },
         );
+        if (dto.role !== undefined && dto.role !== user.role) {
+          await this.auditService.append(
+            transaction,
+            actorId,
+            AuditAction.ChangeUserRole,
+            id,
+            'user',
+            { from: user.role, to: dto.role },
+          );
+        }
       }
       return saved;
     });
@@ -387,11 +344,7 @@ export class UsersService {
    */
   async deleteUserPermanently(actor: Actor, userId: string): Promise<{ deleted: boolean }> {
     await this.transactions.run(async (transaction) => {
-      await this.accessResolver.assertActorMayAdministerUserInTransaction(
-        transaction,
-        actor.userId,
-        userId,
-      );
+      await assertActorRole(transaction, requireUserId(actor), Role.Admin);
       const user = await transaction.selectFrom('iam.users')
         .select(['id', 'status'])
         .where('id', '=', userId)
@@ -506,24 +459,25 @@ export class UsersService {
     return saved;
   }
 
-  async ensureAdminExists(
-    ensureAdministratorMembership: (userId: string) => Promise<void>,
-  ): Promise<void> {
-    let admin = await this.database.selectFrom('iam.users')
+  /**
+   * Bootstrap: when no active administrator exists, create the reserved
+   * `admin` account or promote the existing active one. Otherwise do nothing:
+   * a demoted `admin` stays demoted.
+   */
+  async ensureAdminExists(): Promise<void> {
+    if (await hasActiveAdministrator(this.database)) return;
+    const admin = await this.database.selectFrom('iam.users')
       .selectAll()
       .where('username', '=', 'admin')
       .executeTakeFirst();
     if (admin) {
       if (admin.status !== UserStatus.Active) {
-        if (!await this.hasAlternativeAdministrator(admin.id)) {
-          throw new ConflictException({
-            code: 'ADMIN_BOOTSTRAP_UNAVAILABLE',
-            message: 'The reserved admin account is inactive and no alternative active administrator exists',
-          });
-        }
-        return;
+        throw new ConflictException({
+          code: 'ADMIN_BOOTSTRAP_UNAVAILABLE',
+          message: 'The reserved admin account is inactive and no active administrator exists',
+        });
       }
-      await ensureAdministratorMembership(admin.id);
+      await this.promoteBootstrapAdmin(admin.id);
       return;
     }
     const isProd = this.config.get<string>('runtime.nodeEnv') === 'production';
@@ -543,35 +497,57 @@ export class UsersService {
         username: 'admin',
         password: initPassword,
         displayName: 'Administrator',
-      }, {
-        systemGroupKey: SystemGroupKey.Administrators,
-        actorId: null,
-      });
+        role: Role.Admin,
+      }, { actorId: null });
       if (generatedInitPassword) {
         this.logger.warn(`Generated one-time admin password: ${initPassword}`);
       }
       return;
     } catch (error) {
       if (!this.isUniqueViolation(error) && !this.isUsernameConflict(error)) throw error;
-      admin = await this.database.selectFrom('iam.users')
+      const raced = await this.database.selectFrom('iam.users')
         .selectAll().where('username', '=', 'admin').executeTakeFirst();
-      if (!admin || admin.status !== UserStatus.Active) throw error;
-      await ensureAdministratorMembership(admin.id);
+      if (!raced || raced.status !== UserStatus.Active) throw error;
+      await this.promoteBootstrapAdmin(raced.id);
     }
   }
 
+  /** Recovery: no active administrator, so the active `admin` account becomes one (system attribution). */
+  private async promoteBootstrapAdmin(userId: string): Promise<void> {
+    await this.transactions.run(async (transaction) => {
+      await lockIamPolicy(transaction);
+      // A concurrent replica (or an admin) may have restored one meanwhile.
+      if (await hasActiveAdministrator(transaction)) return;
+      const before = await transaction.selectFrom('iam.users')
+        .select('role')
+        .where('id', '=', userId)
+        .where('status', '=', UserStatus.Active)
+        .executeTakeFirst();
+      if (!before || before.role === Role.Admin) return;
+      await transaction.updateTable('iam.users')
+        .set({ role: Role.Admin, updated_at: new Date() })
+        .where('id', '=', userId)
+        .execute();
+      await this.auditService.append(
+        transaction,
+        null,
+        AuditAction.ChangeUserRole,
+        userId,
+        'user',
+        { from: before.role, to: Role.Admin },
+      );
+    });
+  }
+
   async toDto(user: IamUser): Promise<UserDto> {
-    const [capabilities, groups] = await Promise.all([
-      this.accessResolver.userCapabilities(user.id),
-      this.accessResolver.getUserGroupSummaries(user.id),
-    ]);
+    const groups = await this.accessResolver.getUserGroupSummaries(user.id);
     return {
       id: user.id,
       username: user.username,
       displayName: user.displayName,
       status: user.status,
       createdAt: user.createdAt.toISOString(),
-      capabilities: [...capabilities],
+      role: user.role,
       groups,
     };
   }
@@ -598,20 +574,6 @@ export class UsersService {
     return normalized;
   }
 
-  private async hasAlternativeAdministrator(excludedUserId?: string): Promise<boolean> {
-    const query = this.database.selectFrom('iam.group_members as member')
-      .innerJoin('iam.groups as group', 'group.id', 'member.group_id')
-      .innerJoin('iam.users as user', 'user.id', 'member.user_id')
-      .select('user.id')
-      .where('group.system_key', '=', SystemGroupKey.Administrators)
-      .where('group.is_system', '=', true)
-      .where('user.status', '=', UserStatus.Active);
-    const row = excludedUserId
-      ? await query.where('user.id', '!=', excludedUserId).executeTakeFirst()
-      : await query.executeTakeFirst();
-    return row !== undefined;
-  }
-
   private toUser(row: {
     id: string;
     numeric_id: number;
@@ -620,6 +582,7 @@ export class UsersService {
     display_name: string;
     status: string;
     auth_version: number;
+    role: string;
     created_at: Date;
     updated_at: Date;
   }): IamUser {
@@ -631,6 +594,7 @@ export class UsersService {
       displayName: row.display_name,
       status: row.status as UserStatus,
       authVersion: row.auth_version,
+      role: row.role as Role,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     };

@@ -11,6 +11,7 @@ export enum ErrorCode {
   ValidationError = 'VALIDATION_ERROR',
   InvalidInput = 'INVALID_INPUT',
   StorageGrantExceeded = FailureCode.StorageGrantExceeded,
+  MemoryGrantExceeded = FailureCode.MemoryGrantExceeded,
   StoragePoolExhausted = FailureCode.StoragePoolExhausted,
   StoragePoolQuotaIneffective = FailureCode.StoragePoolQuotaIneffective,
   NetworkAddressExhausted = FailureCode.NetworkAddressExhausted,

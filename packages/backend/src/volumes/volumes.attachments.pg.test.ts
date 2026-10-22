@@ -2,7 +2,7 @@ import type { Kysely } from 'kysely';
 import { randomUUID } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
 import { testActor } from '../iam/actor.test-helper.js';
-import { Capability, FailureCode } from '@nyabase/common';
+import { FailureCode, Role } from '@nyabase/common';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 import { withPostgresTestDatabase } from '../platform/persistence-pg/postgres-test-harness.js';
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
@@ -271,7 +271,7 @@ describePg('volume attachment ownership, visibility, and drain guards', () => {
     });
   });
 
-  it('lets the container owner or the kind\'s volume administrator attach, and nobody else', async () => {
+  it('lets the container owner or an admin attach, and nobody else', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const userId = randomUUID();
       const otherId = randomUUID();
@@ -303,18 +303,17 @@ describePg('volume attachment ownership, visibility, and drain guards', () => {
 
       await expect(service.attach(testActor(otherId), container, input, 'local'))
         .rejects.toMatchObject({ status: 404 });
-      // ManageSharedVolumes does not grant local attachments
+      // The admin role alone does not reach another user's container; scope=all does.
+      await expect(service.attach(testActor(adminId, Role.Admin), container, input, 'local'))
+        .rejects.toMatchObject({ status: 404 });
+      await expect(service.attach(testActor(otherId), container, input, 'local', 'all'))
+        .rejects.toMatchObject({ status: 403 });
       await expect(service.attach(
-        testActor(randomUUID(), Capability.ManageSharedVolumes),
+        testActor(adminId, Role.Admin),
         container,
         input,
         'local',
-      )).rejects.toMatchObject({ status: 404 });
-      await expect(service.attach(
-        testActor(adminId, Capability.ManageVolumes),
-        container,
-        input,
-        'local',
+        'all',
       )).resolves.toMatchObject({ intentId: expect.any(String) });
       const attachment = await database.selectFrom('control.volume_attachments')
         .selectAll()
@@ -403,7 +402,7 @@ describePg('volume attachment ownership, visibility, and drain guards', () => {
         user_id: userId,
         group_id: null,
         shared_backend_id: backendId,
-        limit_bytes: 0,
+        limit_bytes: null,
         expires_at: null,
       }).execute();
       const service = makeService(database);
@@ -544,7 +543,7 @@ describePg('volume attachment ownership, visibility, and drain guards', () => {
         user_id: userId,
         group_id: null,
         shared_backend_id: backendId,
-        limit_bytes: 0,
+        limit_bytes: null,
         expires_at: null,
       }).execute();
       const service = makeService(database);
@@ -670,7 +669,7 @@ describePg('volume attachment ownership, visibility, and drain guards', () => {
         user_id: userId,
         group_id: null,
         shared_backend_id: backendId,
-        limit_bytes: 0,
+        limit_bytes: null,
         expires_at: null,
       }).execute();
       const service = makeService(database);

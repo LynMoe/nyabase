@@ -1,3 +1,4 @@
+import type { Role } from '@nyabase/common';
 import {
   Activity,
   Box,
@@ -83,11 +84,11 @@ export const NAV_SECTIONS: NavSection[] = [
   },
 ];
 
-export function visibleNavSections(capabilities: readonly string[] | undefined): NavSection[] {
+export function visibleNavSections(role: Role | undefined): NavSection[] {
   return NAV_SECTIONS
     .map((section) => ({
       ...section,
-      items: section.items.filter((item) => !item.access || canAccess(capabilities, item.access)),
+      items: section.items.filter((item) => !item.access || canAccess(role, item.access)),
     }))
     .filter((section) => section.items.length > 0);
 }

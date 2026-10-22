@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { Capability, UserStatus } from '@nyabase/common';
+import { Role, UserStatus } from '@nyabase/common';
 import { vi, type Mock } from 'vitest';
 import { AccessChangeNotifier, AccessResolverService } from '../iam/access-resolver.service.js';
 import type { PostgresTestDatabase } from '../platform/persistence-pg/postgres-test-harness.js';
@@ -19,13 +19,12 @@ export interface UsersPgFixture {
   convergence: Record<string, Mock>;
   actorId: string;
   userId: string;
-  actorGroupId: string;
 }
 
 export async function usersPgFixture(
   fixture: PostgresTestDatabase,
   options: {
-    actorCapabilities?: Capability[];
+    actorRole?: Role;
     targetStatus?: UserStatus;
     seedActor?: boolean;
     seedTarget?: boolean;
@@ -36,7 +35,6 @@ export async function usersPgFixture(
   const changes = new AccessChangeNotifier();
   const actorId = randomUUID();
   const userId = randomUUID();
-  const actorGroupId = randomUUID();
   const auth = {
     hashPassword: vi.fn(async (password: string) => `hash:${password}`),
     verifyPassword: vi.fn().mockResolvedValue(true),
@@ -61,7 +59,6 @@ export async function usersPgFixture(
   const sshKeys = new UserSshKeysService(
     fixture.database,
     transactions,
-    access,
     convergence as never,
     proxySnapshots as never,
     audit as never,
@@ -69,29 +66,13 @@ export async function usersPgFixture(
 
   const userRows = [];
   if (options.seedActor !== false) {
-    userRows.push(userRow(actorId, 1001, 'actor', UserStatus.Active));
+    userRows.push(userRow(actorId, 1001, 'actor', UserStatus.Active, options.actorRole ?? Role.Admin));
   }
   if (options.seedTarget !== false) {
     userRows.push(userRow(userId, 1002, 'target', options.targetStatus ?? UserStatus.Active));
   }
   if (userRows.length > 0) {
     await fixture.database.insertInto('iam.users').values(userRows).execute();
-  }
-  if (options.seedActor !== false) {
-    await fixture.database.insertInto('iam.groups').values({
-      id: actorGroupId,
-      name: `Managers ${actorGroupId.slice(0, 8)}`,
-      description: null,
-      is_system: false,
-      system_key: null,
-      capabilities: options.actorCapabilities ?? [Capability.ManageUsers],
-      revision: 1,
-    }).execute();
-    await fixture.database.insertInto('iam.group_members').values({
-      id: randomUUID(),
-      group_id: actorGroupId,
-      user_id: actorId,
-    }).execute();
   }
   return {
     users,
@@ -105,7 +86,6 @@ export async function usersPgFixture(
     sshKeys,
     actorId,
     userId,
-    actorGroupId,
   };
 }
 
@@ -114,6 +94,7 @@ export function userRow(
   numericId: number,
   username: string,
   status: UserStatus,
+  role: Role = Role.User,
 ) {
   return {
     id,
@@ -122,6 +103,7 @@ export function userRow(
     password_hash: 'hash',
     display_name: username,
     status,
+    role,
     auth_version: 0,
   };
 }

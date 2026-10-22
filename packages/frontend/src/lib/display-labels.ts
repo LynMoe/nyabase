@@ -1,4 +1,4 @@
-import { Capability, UserStatus } from '@nyabase/common';
+import { Role, UserStatus } from '@nyabase/common';
 
 export function userStatusLabel(status: string): string {
   switch (status) {
@@ -20,40 +20,16 @@ export function userStatusLabel(status: string): string {
 }
 
 
-export function capabilityLabel(capability: string): string {
-  switch (capability) {
-    case Capability.ManageUsers:
-      return '管理用户';
-    case Capability.ManageGroups:
-      return '管理用户组';
-    case Capability.ManageServers:
-      return '管理服务器';
-    case Capability.ManageImages:
-      return '管理镜像';
-    case Capability.ManageStoragePools:
-      return '管理存储池';
-    case Capability.ManageIpPools:
-      return '管理 IP 池';
-    case Capability.ManageSharedBackends:
-      return '管理共享存储';
-    case Capability.ManageVolumes:
-      return '管理本地数据卷';
-    case Capability.ManageSharedVolumes:
-      return '管理共享卷';
-    case Capability.ManageGrants:
-      return '管理授权';
-    case Capability.ManageContainersAny:
-      return '管理全部容器';
-    case Capability.ManagePreflight:
-      return '管理前置检查';
-    case Capability.ViewAudit:
-      return '查看审计';
-    case Capability.ViewMetricsAll:
-      return '查看全部指标';
-    case Capability.ManageSystemSettings:
-      return '管理系统设置';
+export function roleLabel(role: string): string {
+  switch (role) {
+    case Role.User:
+      return '用户';
+    case Role.Operator:
+      return '运维';
+    case Role.Admin:
+      return '管理员';
     default:
-      return capability;
+      return role;
   }
 }
 
@@ -141,3 +117,9 @@ export function storageOvercommitLabel(ratio: number | string): string {
 
 // One vocabulary for lifecycle and server status across the app.
 export { lifecyclePhaseLabel, serverStatusLabel } from './status-labels.js';
+
+export const ROLE_OPTIONS: Array<[string, string]> = [
+  [Role.User, roleLabel(Role.User)],
+  [Role.Operator, roleLabel(Role.Operator)],
+  [Role.Admin, roleLabel(Role.Admin)],
+];

@@ -1,5 +1,5 @@
 // What the platform enforces on every instance: per-user CPU sets, reserved
-// CPUs, aggregate memory, uniform process/network/disk limits, uid-isolated
+// CPUs, aggregate running memory, uniform process/network/disk limits, uid-isolated
 // maps, guest IPv6 off, and the full scan reverting changes made behind its back.
 import assert from 'node:assert/strict';
 import { after, before, describe, it } from 'node:test';
@@ -90,16 +90,16 @@ describe('runtime constraints on managed instances', () => {
     }
   });
 
-  it('counts memory across all of a user\'s containers', async () => {
+  it('counts memory across a user\'s running containers', async () => {
     const status = await alice.session.api.status('POST', '/containers', {
       serverId: h.server.id,
       imageId: h.state.image.id,
       name: h.name('mem'),
       rootSizeBytes: h.state.rootSizeBytes,
       memBytes: 2 * GIB,
-      powerIntent: 'stopped',
+      powerIntent: 'running',
     });
-    assert.equal(status, 403, '1 GiB + 1 GiB + 2 GiB exceeds the 3 GiB grant');
+    assert.equal(status, 403, '1 GiB + 1 GiB running + 2 GiB exceeds the 3 GiB grant');
   });
 
   it('applies the uniform limits, an isolated uid map and the IPv6 guard', async () => {

@@ -1,5 +1,5 @@
 import type { Transaction } from 'kysely';
-import type { UserStatus } from '@nyabase/common';
+import type { Role, UserStatus } from '@nyabase/common';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 
 export interface AuthUser {
@@ -10,6 +10,7 @@ export interface AuthUser {
   displayName: string;
   status: UserStatus;
   authVersion: number;
+  role: Role;
   createdAt: Date;
   updatedAt: Date;
 }

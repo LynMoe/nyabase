@@ -1,9 +1,7 @@
-import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readSource, readSourceDir } from './read-source.test-helper.js';
-import { ADMIN_INTENT_CAPABILITIES, Capability } from '@nyabase/common';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '..');
@@ -144,7 +142,7 @@ describe('lane D product UI copy', () => {
       read('pages/shared-backend-detail-page.tsx'),
     ].join('\n');
     expect(page).toMatch(/\/shared-volumes\?scope=all/);
-    expect(page).toMatch(/ManageSharedVolumes/);
+    expect(page).toMatch(/useHasRole\(Role\.Admin\)/);
     expect(page).toMatch(/enabled: canManageVolumes,/);
   });
 
@@ -232,7 +230,7 @@ describe('lane D product UI copy', () => {
     expect(backends).toMatch(/执行端/);
     expect(backends).not.toMatch(/查看 catalog/);
     expect(backends).not.toMatch(/\/manage\/shared-volumes/);
-    expect(backends).toMatch(/ManageSharedVolumes/);
+    expect(backends).toMatch(/useHasRole\(Role\.Admin\)/);
     expect(backends).toMatch(/\/shared-volumes\?scope=all/);
     expect(backends).toMatch(/enabled: canManageVolumes,/);
     expect(backends).not.toMatch(/api\.get<SharedVolumeDto\[\]>\('\/shared-volumes'\)/);
@@ -254,13 +252,12 @@ describe('lane D product UI copy', () => {
     expect(read('pages/user-detail-page.tsx')).toMatch(/user-detail-tabs/);
     expect(read('pages/user-detail-page.tsx')).toMatch(/kind="users"/);
     expect(read('pages/user-detail-page.tsx')).toMatch(/title="用户组"/);
-    expect(read('pages/user-detail-page.tsx')).toMatch(/title="能力"/);
+    expect(read('pages/user-detail-page.tsx')).not.toMatch(/title="能力"/);
     expect(read('pages/groups-page.tsx')).toMatch(/to="\/groups\/\$id"/);
     expect(read('pages/groups-page.tsx')).not.toMatch(/CanonicalGrantPanel/);
     expect(read('pages/groups-page.tsx')).not.toMatch(/setGrantGroup/);
     expect(read('pages/group-detail-page.tsx')).toMatch(/group-detail-tabs/);
     expect(read('pages/group-detail-page.tsx')).toMatch(/kind="groups"/);
-    expect(read('pages/group-detail-page.tsx')).toMatch(/title="能力"/);
     expect(read('pages/group-detail-page.tsx')).toMatch(/title="成员"/);
     expect(read('pages/group-detail-page.tsx')).not.toMatch(/\btoolbar=/);
     expect(read('pages/group-detail-page.tsx')).toMatch(/添加成员/);
@@ -333,20 +330,12 @@ describe('lane D product UI copy', () => {
     expect(coreGrant).not.toMatch(/GpuGrantMode/);
   });
 
-  it('gates /ops with the five admin intent capabilities and does not expand Operators', () => {
-    expect([...ADMIN_INTENT_CAPABILITIES]).toEqual([
-      Capability.ManageContainersAny,
-      Capability.ManageVolumes,
-      Capability.ManageSharedVolumes,
-      Capability.ManageServers,
-      Capability.ManageImages,
-    ]);
-    expect(ADMIN_INTENT_CAPABILITIES).toHaveLength(5);
+  it('gates /ops with the operator role', () => {
     const nav = read('lib/navigation.ts');
     expect(nav).toMatch(/to: '\/ops'/);
     expect(nav).toMatch(/操作记录/);
     expect(nav).toMatch(/access: ACCESS\.ops/);
-    expect(read('lib/route-access.ts')).toMatch(/ops: ADMIN_INTENT_CAPABILITIES/);
+    expect(read('lib/route-access.ts')).toMatch(/ops: Role\.Operator/);
     const route = read('routes/ops/index.tsx');
     expect(route).toMatch(/RequireAccess rule=\{ACCESS\.ops\}/);
     const ops = read('pages/ops-page.tsx');
@@ -359,16 +348,10 @@ describe('lane D product UI copy', () => {
     expect(ops).not.toMatch(/enabled: segment != null/);
     expect(ops).not.toMatch(/选择『全部』『进行中』或『失败』加载意图/);
     expect(ops).not.toMatch(/默认不加载/);
-    expect(ops).toMatch(/ManageServers/);
+    expect(ops).toMatch(/Role\.Operator/);
     expect(ops).not.toMatch(/WebSocket|useWebSocket/);
     const dialog = read('components/intents/intent-detail-dialog.tsx');
     expect(dialog).toMatch(/sm:max-w-3xl/);
-    const groups = readFileSync(join(root, '../../backend/src/groups/system-groups.service.ts'), 'utf8');
-    const operatorsBlock = groups.match(/OPERATOR_CAPABILITIES = \[[\s\S]*?\];/)?.[0] ?? '';
-    expect(operatorsBlock).toMatch(/Capability\.ManageServers/);
-    expect(operatorsBlock).toMatch(/Capability\.ManageContainersAny/);
-    expect(operatorsBlock).not.toMatch(/ManageVolumes/);
-    expect(operatorsBlock).not.toMatch(/ManageSharedVolumes/);
   });
 
   it('shows grant ceilings and remaining on user surfaces', () => {

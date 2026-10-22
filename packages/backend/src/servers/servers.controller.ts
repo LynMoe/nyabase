@@ -12,23 +12,24 @@ import {
   Query,
 } from '@nestjs/common';
 import {
-  Capability,
   zCreateServerRequest,
   zListScope,
   zPatchServerRequest,
   zRotateServerEnrollmentRequest,
   zRunPreflightRequest,
+  Role,
 } from '@nyabase/common';
-import { RequireCaps, CurrentActor } from '../iam/decorators.js';
+import { RequireRole, CurrentActor } from '../iam/decorators.js';
 import type { Actor } from '../iam/actor.js';
 import { ServersService } from './servers.service.js';
 import { ServerPreflightIntentService } from './server-intents.service.js';
 import { AgentEnrollmentService } from './agent-enrollment.service.js';
 import { acceptedIntent } from '../reconcile/accepted-intent.js';
+import { requireUserId } from '../iam/actor.js';
 
 /**
  * Servers: `scope=mine` (default) is the user view of granted servers;
- * `scope=all` and every lifecycle operation need `ManageServers`.
+ * `scope=all` and every lifecycle operation need the operator role.
  */
 @Controller('servers')
 export class ServersController {
@@ -44,9 +45,9 @@ export class ServersController {
   }
 
   @Post()
-  @RequireCaps(Capability.ManageServers)
+  @RequireRole(Role.Operator)
   create(@CurrentActor() actor: Actor, @Body() body: unknown) {
-    return this.servers.create(actor.userId, zCreateServerRequest.parse(body));
+    return this.servers.create(requireUserId(actor), zCreateServerRequest.parse(body));
   }
 
   @Get(':id')
@@ -60,18 +61,18 @@ export class ServersController {
 
   /** Issue a fresh one-time agent enrollment token (shown once). */
   @Post(':id/agent-enrollment')
-  @RequireCaps(Capability.ManageServers)
+  @RequireRole(Role.Operator)
   rotateEnrollment(
     @Param('id') id: string,
     @CurrentActor() actor: Actor,
     @Body() body: unknown,
   ) {
     const input = zRotateServerEnrollmentRequest.parse(body);
-    return this.enrollment.rotate(actor.userId, id, input.expectedRevision);
+    return this.enrollment.rotate(requireUserId(actor), id, input.expectedRevision);
   }
 
   @Get(':id/preflight')
-  @RequireCaps(Capability.ManageServers)
+  @RequireRole(Role.Operator)
   preflight(@Param('id') id: string) {
     return this.servers.findDtoById(id).then((server) => ({
       status: server.preflightStatus,
@@ -81,7 +82,7 @@ export class ServersController {
   }
 
   @Post(':id/preflight')
-  @RequireCaps(Capability.ManageServers)
+  @RequireRole(Role.Operator)
   @HttpCode(HttpStatus.ACCEPTED)
   async preflightRun(
     @Param('id') id: string,
@@ -91,7 +92,7 @@ export class ServersController {
     const input = zRunPreflightRequest.parse(body);
     const intent = await this.serverPreflight.create(
       id,
-      actor.userId,
+      requireUserId(actor),
       input.expectedServerRevision,
       input.poolId,
       input.probeAddress,
@@ -100,27 +101,27 @@ export class ServersController {
   }
 
   @Patch(':id')
-  @RequireCaps(Capability.ManageServers)
+  @RequireRole(Role.Operator)
   update(
     @Param('id') id: string,
     @CurrentActor() actor: Actor,
     @Body() body: unknown,
   ) {
-    return this.servers.update(actor.userId, id, zPatchServerRequest.parse(body));
+    return this.servers.update(requireUserId(actor), id, zPatchServerRequest.parse(body));
   }
 
   @Delete(':id')
-  @RequireCaps(Capability.ManageServers)
+  @RequireRole(Role.Operator)
   delete(
     @Param('id') id: string,
     @CurrentActor() actor: Actor,
     @Query('expectedRevision') expectedRevision?: string,
   ) {
-    if (expectedRevision === undefined) return this.servers.delete(actor.userId, id);
+    if (expectedRevision === undefined) return this.servers.delete(requireUserId(actor), id);
     const revision = Number(expectedRevision);
     if (!Number.isSafeInteger(revision) || revision < 1) {
       throw new BadRequestException('expectedRevision must be a positive integer');
     }
-    return this.servers.delete(actor.userId, id, revision);
+    return this.servers.delete(requireUserId(actor), id, revision);
   }
 }

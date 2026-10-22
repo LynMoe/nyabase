@@ -1,4 +1,4 @@
-import { HttpStatus, UnauthorizedException } from '@nestjs/common';
+import { HttpStatus } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
 import { UserStatus } from '@nyabase/common';
@@ -8,7 +8,6 @@ import {
   MAX_LOGIN_ATTEMPTS_PER_PRINCIPAL,
 } from './auth.service.js';
 import { InMemoryAuthPersistenceTestAdapter } from './in-memory-auth-persistence.test-helper.js';
-import { SYSTEM_ACTOR_USERNAME } from './actor.js';
 
 describe('AuthService login limiter', () => {
   it('returns 429 once a principal exhausts its fixed window', () => {
@@ -63,26 +62,6 @@ describe('AuthService login limiter', () => {
         accessToken: expect.any(String),
       });
     }
-  });
-});
-
-describe('AuthService nyabase-system login', () => {
-  it('rejects login for the durable system actor', async () => {
-    const persistence = new InMemoryAuthPersistenceTestAdapter();
-    persistence.seedUser({
-      id: randomUUID(),
-      username: SYSTEM_ACTOR_USERNAME,
-      displayName: 'Nyabase System',
-      status: UserStatus.Disabled,
-      passwordHash: 'unused',
-    });
-    const service = createAuth({ persistence });
-
-    await expect(service.authenticateAndLogin(
-      SYSTEM_ACTOR_USERNAME,
-      'any-password',
-      '127.0.0.1',
-    )).rejects.toBeInstanceOf(UnauthorizedException);
   });
 });
 

@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import {
-  Capability,
+  Role,
   ContainerPowerIntent,
   FailureCode,
   IntentKind,
@@ -41,7 +41,7 @@ const NETWORK_INTERFACE_RE = /^[A-Za-z0-9_.:-]+$/;
 const LOGIN_USER_RE = /^[a-z_][a-z0-9_-]{0,31}$/;
 const SHA256_RE = /^[0-9a-f]{64}$/;
 
-export const zCapability = z.nativeEnum(Capability);
+export const zRole = z.nativeEnum(Role);
 export const zExpectedRevision = z.number().int().positive().safe();
 export const zResourceIdentity = z.string()
   .min(1)
@@ -49,7 +49,6 @@ export const zResourceIdentity = z.string()
   .regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/);
 export const zUuid = z.string().uuid();
 export const zPositiveBytes = z.number().int().positive().safe().max(MAX_RESOURCE_BYTES);
-export const zNonNegativeBytes = z.number().int().nonnegative().safe().max(MAX_RESOURCE_BYTES);
 export const zIsoDateTime = z.string().datetime({ offset: true });
 
 export const zIpv4Address = z.string().superRefine((value, context) => {
@@ -194,6 +193,7 @@ export const zCreateUserRequest = z.object({
   username: z.string().min(2).max(64).regex(USERNAME_RE),
   password: z.string().min(8).max(256),
   displayName: z.string().trim().min(1).max(128),
+  role: zRole.optional(),
 }).strict();
 
 export const zUpdateUserRequest = z.object({
@@ -201,10 +201,12 @@ export const zUpdateUserRequest = z.object({
   password: z.string().min(8).max(256).optional(),
   currentPassword: z.string().max(1024).optional(),
   status: z.enum([UserStatus.Active, UserStatus.Disabled]).optional(),
+  role: zRole.optional(),
 }).strict().refine(
   (value) => value.displayName !== undefined
     || value.password !== undefined
-    || value.status !== undefined,
+    || value.status !== undefined
+    || value.role !== undefined,
   'At least one mutable user field is required',
 );
 
@@ -481,7 +483,8 @@ export const zPutImageAssignmentRequest = z.object({
 }).strict();
 
 // Grant mutations use complete canonical bodies and PCI identity.
-const zNullableBytes = zNonNegativeBytes.nullable();
+// Quotas: null = unlimited; a number is a positive limit (0 is not a sentinel).
+const zNullableBytes = zPositiveBytes.nullable();
 
 export const zPutServerGrantRequest = z.object({
   /** Whole logical CPUs pinned for the user on this server; null = every unreserved CPU. */
@@ -497,7 +500,7 @@ export const zPutStoragePoolGrantRequest = z.object({
 }).strict();
 
 export const zPutSharedBackendGrantRequest = z.object({
-  limitBytes: zNonNegativeBytes,
+  limitBytes: zNullableBytes,
   expiresAt: zIsoDateTime.nullable(),
 }).strict();
 
@@ -585,29 +588,17 @@ export const zErrorResponse = z.object({
 export const zCreateGroupRequest = z.object({
   name: zName,
   description: z.string().max(4_096).optional(),
-  capabilities: z.array(zCapability)
-    .max(Object.values(Capability).length)
-    .refine((values) => new Set(values).size === values.length, 'Capabilities must be unique')
-    .optional(),
 }).strict();
 
 export const zUpdateGroupRequest = z.object({
   name: zName.optional(),
   description: z.string().max(4_096).nullable().optional(),
-  capabilities: z.array(zCapability)
-    .max(Object.values(Capability).length)
-    .refine((values) => new Set(values).size === values.length, 'Capabilities must be unique')
-    .optional(),
 }).strict().refine((value) => Object.keys(value).length > 0, 'At least one group field is required');
 
 export const zPatchAdminGroupRequest = z.object({
   expectedRevision: zExpectedRevision,
   name: zName.optional(),
   description: z.string().max(4_096).nullable().optional(),
-  capabilities: z.array(zCapability)
-    .max(Object.values(Capability).length)
-    .refine((values) => new Set(values).size === values.length, 'Capabilities must be unique')
-    .optional(),
 }).strict().refine(
   (value) => Object.keys(value).some((key) => key !== 'expectedRevision'),
   'At least one group field is required',

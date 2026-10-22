@@ -1,7 +1,8 @@
 import { useState, type ReactNode } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Capability, type VolumeDto } from '@nyabase/common';
+import { Role, type VolumeDto } from '@nyabase/common';
 import { api } from '../../lib/api.js';
+import { scopedPath } from '../../lib/scoped-paths.js';
 import { errorMessage } from '../../lib/api-error.js';
 import { ConfirmDialog } from '../layout/confirm-dialog.js';
 import { SectionCard } from '../layout/section-card.js';
@@ -12,7 +13,7 @@ import { volumeInProgress } from '../../lib/in-progress.js';
 import { queryKeys } from '../../lib/query-keys.js';
 import { refetchWhileInProgress } from '../../lib/query-lifecycle.js';
 import { toast } from '../../hooks/use-toast.js';
-import { useAuthStore } from '../../store/auth.js';
+import { useHasRole } from '../../lib/use-role.js';
 
 export function ServerStorageTab({
   serverId,
@@ -22,9 +23,8 @@ export function ServerStorageTab({
   children: ReactNode;
 }) {
   const queryClient = useQueryClient();
-  const capabilities = useAuthStore((state) => state.user?.capabilities ?? []);
-  const canManageVolumes = capabilities.includes(Capability.ManageVolumes);
-  const canManageContainersAny = capabilities.includes(Capability.ManageContainersAny);
+  const canManageVolumes = useHasRole(Role.Admin);
+  const canManageContainersAny = useHasRole(Role.Operator);
   const [formOpen, setFormOpen] = useState(false);
   const [formVolume, setFormVolume] = useState<VolumeDto | undefined>(undefined);
   const [deleteTarget, setDeleteTarget] = useState<VolumeDto | null>(null);
@@ -40,7 +40,7 @@ export function ServerStorageTab({
   });
 
   const deleteVolume = useMutation({
-    mutationFn: (volumeId: string) => api.delete<unknown>(`/volumes/${volumeId}`),
+    mutationFn: (volumeId: string) => api.delete<unknown>(scopedPath(`/volumes/${volumeId}`, 'all')),
     onSuccess: () => {
       toast({ title: '删除已提交' });
       setDeleteTarget(null);

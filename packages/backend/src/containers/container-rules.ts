@@ -1,6 +1,5 @@
 import { BadRequestException, ConflictException, ForbiddenException, NotFoundException } from '@nestjs/common';
 import {
-  Capability,
   ContainerPhase,
   ContainerPowerIntent,
   ContainerStatus,
@@ -10,8 +9,10 @@ import {
   type ActionAvailability,
   type ContainerAction,
   type CreateContainerRequest,
+  type ListScope,
+  Role,
 } from '@nyabase/common';
-import { isSystemActor, type Actor } from '../iam/actor.js';
+import { assertListScope, isSystemActor, type Actor } from '../iam/actor.js';
 import type {
   CreatePendingIntentInput,
   IntentExecutor,
@@ -140,9 +141,12 @@ export function stringArray(value: string[] | string | null | undefined): string
 }
 
 /**
- * Memory is granted per server, not per container: every container the user
- * keeps there (stopped ones included) counts against the grant. CPU needs no
- * check here; all of the user's containers share the user's pinned CPU set.
+ * Memory is granted per server and every container whose desired intent is
+ * running counts against it, failed ones included (an intent retry can bring
+ * them back); only deleting ones do not. Callers check it on transitions that increase
+ * running memory (start, running create, running limit increase), under the
+ * owner/server quota lock. CPU needs no check here; all of the user's
+ * containers share the user's pinned CPU set.
  */
 export function assertMemoryGrant(
   grant: { memBytes: number | null },
@@ -152,11 +156,11 @@ export function assertMemoryGrant(
   if (grant.memBytes === null) return;
   if (otherContainersMemBytes + requestedMemBytes > grant.memBytes) {
     throw new ForbiddenException({
-      code: FailureCode.PermissionDenied,
-      message: 'The requested memory exceeds what remains of the server grant',
+      code: FailureCode.MemoryGrantExceeded,
+      message: 'Running memory would exceed the server grant',
       details: {
         requestedMemBytes,
-        usedMemBytes: otherContainersMemBytes,
+        runningMemBytes: otherContainersMemBytes,
         grantMemBytes: grant.memBytes,
         availableMemBytes: Math.max(0, grant.memBytes - otherContainersMemBytes),
       },
@@ -169,23 +173,22 @@ export function assertMemoryGrant(
 export type ContainerAccess = 'owner' | 'admin' | 'system';
 
 /**
- * The one container authorisation rule: a holder of `ManageContainersAny`
- * (administrator rules: no server-grant limits), else the owner (owner rules:
- * live server grant and its limits), or the system. Everyone else is refused
- * with the status the owner-only route always used (403 for reads and power
- * actions, 404 where the row is hidden). A holder who also owns the row keeps
- * the administrator rules, as the old /admin route gave them.
+ * The one container authorisation rule: the owner gets the owner rules (live
+ * server grant and its limits) whatever their role; `scope=all` (operator
+ * role required, else 403) is the explicit override that gets the
+ * administrator rules (no server-grant limits), also on the operator's own
+ * containers; the system always passes. Anyone else's container is a 404.
  */
 export function assertCanAccess(
   actor: Actor,
   row: { owner_id: string },
-  denied: 'forbidden' | 'not-found' = 'forbidden',
+  scope: ListScope,
 ): ContainerAccess {
+  assertListScope(actor, scope, Role.Operator);
   if (isSystemActor(actor)) return 'system';
-  if (actor.capabilities.has(Capability.ManageContainersAny)) return 'admin';
+  if (scope === 'all') return 'admin';
   if (row.owner_id === actor.userId) return 'owner';
-  if (denied === 'not-found') throw new NotFoundException('Container not found');
-  throw new ForbiddenException('Container is not owned by current user');
+  throw new NotFoundException('Container not found');
 }
 
 

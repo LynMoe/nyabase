@@ -1,5 +1,5 @@
 import { createFileRoute, lazyRouteComponent } from '@tanstack/react-router';
-import { RequireAccess } from '../../components/require-capability.js';
+import { RequireAccess } from '../../components/require-access.js';
 import { ACCESS } from '../../lib/route-access.js';
 
 const PAGE_SIZES = [25, 50, 100] as const;

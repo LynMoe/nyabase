@@ -9,7 +9,6 @@ import type { Transaction } from 'kysely';
 import { randomUUID } from 'node:crypto';
 import {
   AuditAction,
-  Capability,
   ContainerPhase,
   ContainerPowerIntent,
   ContainerStatus,
@@ -24,14 +23,15 @@ import {
   type PatchContainerLimitsRequest,
   type PatchContainerRootSizeRequest,
   type VolumeAttachmentDto,
+  Role,
 } from '@nyabase/common';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 import { nullableNumber, numberValue } from '../platform/domain-utils.js';
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
 import { lockOwnerServerQuota } from '../platform/persistence-pg/advisory-locks.js';
 import { AccessResolverService } from '../iam/access-resolver.service.js';
-import type { ServerAccess } from '../iam/effective-access.js';
-import { assertListScope, isSystemActor, type Actor } from '../iam/actor.js';
+import { resolveServerAccess, type ServerAccess } from '../iam/effective-access.js';
+import { assertListScope, isSystemActor, type Actor, requireUserId } from '../iam/actor.js';
 import { AuditService } from '../iam/audit.service.js';
 import { acceptedIntent } from '../reconcile/accepted-intent.js';
 import { IntentRepository } from '../reconcile/intent.repository.js';
@@ -42,7 +42,7 @@ import {
   type ContainerRow,
 } from './container-control.repository.js';
 import { VolumeAttachmentsService } from '../volumes/volume-attachments.service.js';
-import { mutateGpuContainer } from '../gpu/admit.js';
+import { assertClaimsGranted, mutateGpuContainer } from '../gpu/admit.js';
 import { GpuClaimsRepository } from '../gpu/gpu-claims.repository.js';
 import { assertRootCapacity, ContainerCreateService } from './container-create.service.js';
 import { ContainerDtoAssembler } from './container-dtos.js';
@@ -58,6 +58,7 @@ import {
   isUniqueViolation,
   type ContainerAccess,
 } from './container-rules.js';
+import { assertActorRole } from '../iam/administration.js';
 
 type ContainerAction = 'start' | 'stop' | 'restart' | 'delete';
 
@@ -96,17 +97,17 @@ export class ContainerControlService {
     filters: { scope?: ListScope; serverId?: string } = {},
   ): Promise<ContainerDto[]> {
     const scope = filters.scope ?? 'mine';
-    assertListScope(actor, scope, Capability.ManageContainersAny);
+    assertListScope(actor, scope, Role.Operator);
     const rows = await this.repository.list({
-      ownerId: scope === 'mine' ? actor.userId : undefined,
+      ownerId: scope === 'mine' ? requireUserId(actor) : undefined,
       serverId: filters.serverId,
     });
     return this.dtos.toContainerDtos(rows);
   }
 
-  async get(actor: Actor, containerId: string): Promise<ContainerDto> {
+  async get(actor: Actor, containerId: string, scope: ListScope = 'mine'): Promise<ContainerDto> {
     const row = await this.requireContainer(containerId);
-    assertCanAccess(actor, row);
+    assertCanAccess(actor, row, scope);
     return (await this.dtos.toContainerDtos([row]))[0]!;
   }
 
@@ -124,9 +125,13 @@ export class ContainerControlService {
     return acceptedIntent(result.intent);
   }
 
-  async repairSsh(actor: Actor, containerId: string): Promise<{ woken: boolean }> {
+  async repairSsh(
+    actor: Actor,
+    containerId: string,
+    scope: ListScope = 'mine',
+  ): Promise<{ woken: boolean }> {
     const row = await this.requireContainer(containerId);
-    assertCanAccess(actor, row);
+    assertCanAccess(actor, row, scope);
     if (row.lifecycle_phase !== 'active') {
       throw new ConflictException({
         code: FailureCode.InvalidInput,
@@ -140,6 +145,7 @@ export class ContainerControlService {
     actor: Actor,
     containerId: string,
     input: PatchContainerLimitsRequest,
+    scope: ListScope = 'mine',
   ): Promise<IntentAcceptedDto> {
     if (!Number.isSafeInteger(input.memBytes) || input.memBytes <= 0) {
       throw new BadRequestException({
@@ -147,12 +153,15 @@ export class ContainerControlService {
         message: 'Container memory must be a positive safe integer',
       });
     }
-    return this.updateDesired(actor, containerId, {
+    return this.updateDesired(actor, scope, containerId, {
       mem_bytes: input.memBytes,
     }, { operation: 'limits' }, AuditAction.UpdateContainerLimits, async (transaction, current, grant) => {
-      if (!grant) return;
+      // Only a running container's increase can push running memory over the
+      // grant; a stopped one is checked when it starts.
+      if (!grant || current.power_intent !== ContainerPowerIntent.Running
+        || input.memBytes <= numberValue(current.mem_bytes)) return;
       await lockOwnerServerQuota(transaction, current.owner_id, current.server_id);
-      assertMemoryGrant(grant, input.memBytes, await this.repository.sumLiveMemBytes({
+      assertMemoryGrant(grant, input.memBytes, await this.repository.sumRunningMemBytes({
         ownerId: current.owner_id,
         serverId: current.server_id,
         excludeContainerId: current.id,
@@ -164,6 +173,7 @@ export class ContainerControlService {
     actor: Actor,
     containerId: string,
     input: PatchContainerRootSizeRequest,
+    scope: ListScope = 'mine',
   ): Promise<IntentAcceptedDto> {
     const size = input.sizeBytes;
     if (!Number.isSafeInteger(size) || size <= 0) {
@@ -174,6 +184,7 @@ export class ContainerControlService {
     }
     return this.updateDesired(
       actor,
+      scope,
       containerId,
       { root_size_bytes: size, root_size_pending_bytes: null },
       { operation: 'root_resize', sizeBytes: size },
@@ -186,11 +197,12 @@ export class ContainerControlService {
     actor: Actor,
     containerId: string,
     payload: unknown,
+    scope: ListScope = 'mine',
   ): Promise<IntentAcceptedDto> {
     return this.transactions.run(async (transaction) => {
       const current = await this.repository.lock(containerId, transaction);
       if (!current) throw new NotFoundException('Container not found');
-      const access = assertCanAccess(actor, current, 'not-found');
+      const access = assertCanAccess(actor, current, scope);
       if (current.lifecycle_phase === ContainerPhase.Deleting) {
         throw new ConflictException({
           code: FailureCode.InstanceBusy,
@@ -219,7 +231,7 @@ export class ContainerControlService {
       try {
         mutated = await mutateGpuContainer({
           serverId: current.server_id,
-          actor: { userId: actor.userId, admin: access !== 'owner' },
+          actor: { userId: requireUserId(actor), admin: access !== 'owner' },
           grantPciAddresses,
           claims: this.gpuClaims.forContainer(current.server_id, containerId, transaction),
           health: this.gpuClaims.health(current.server_id, transaction),
@@ -262,19 +274,27 @@ export class ContainerControlService {
   }
 
   /** Attachments of a container the caller was already authorised to see. */
-  async listVolumes(actor: Actor, containerId: string): Promise<VolumeAttachmentDto[]> {
-    assertCanAccess(actor, await this.requireContainer(containerId));
+  async listVolumes(
+    actor: Actor,
+    containerId: string,
+    scope: ListScope = 'mine',
+  ): Promise<VolumeAttachmentDto[]> {
+    assertCanAccess(actor, await this.requireContainer(containerId), scope);
     return this.volumes.listForContainer(containerId, 'local');
   }
 
-  async listSharedVolumes(actor: Actor, containerId: string): Promise<VolumeAttachmentDto[]> {
-    assertCanAccess(actor, await this.requireContainer(containerId));
+  async listSharedVolumes(
+    actor: Actor,
+    containerId: string,
+    scope: ListScope = 'mine',
+  ): Promise<VolumeAttachmentDto[]> {
+    assertCanAccess(actor, await this.requireContainer(containerId), scope);
     return this.volumes.listForContainer(containerId, 'shared');
   }
 
-  async getStats(actor: Actor, containerId: string) {
+  async getStats(actor: Actor, containerId: string, scope: ListScope = 'mine') {
     const row = await this.requireContainer(containerId);
-    assertCanAccess(actor, row);
+    assertCanAccess(actor, row, scope);
     return this.stats(row);
   }
 
@@ -282,17 +302,18 @@ export class ContainerControlService {
     actor: Actor,
     containerId: string,
     request: CreateExecSessionRequest,
+    scope: ListScope = 'mine',
   ): Promise<{ sessionId: string; consoleUrl: string; expiresAt: string }> {
     if (actor.authKind !== 'jwt') {
       throw new ForbiddenException('Container console admission requires a browser JWT');
     }
     const row = await this.requireContainer(containerId);
-    assertCanAccess(actor, row);
+    assertCanAccess(actor, row, scope);
     let access: ContainerAccess = 'owner';
     await this.transactions.run(async (transaction) => {
       const current = await this.repository.lock(containerId, transaction);
       if (!current) throw new NotFoundException('Container not found');
-      access = assertCanAccess(actor, current, 'not-found');
+      access = assertCanAccess(actor, current, scope);
       await this.enforceInTransaction(transaction, actor, current, access);
       const currentRoute = await this.repository.currentRoute(containerId, transaction);
       if (
@@ -329,12 +350,16 @@ export class ContainerControlService {
     actor: Actor,
     containerId: string,
     action: ContainerAction,
+    scope: ListScope = 'mine',
   ): Promise<IntentAcceptedDto> {
     const result = await this.transactions.run(async (transaction) => {
       const current = await this.repository.lock(containerId, transaction);
       if (!current) throw new NotFoundException('Container not found');
-      const access = assertCanAccess(actor, current);
-      await this.enforceInTransaction(transaction, actor, current, access);
+      const access = assertCanAccess(actor, current, scope);
+      const grant = await this.enforceInTransaction(transaction, actor, current, access);
+      if (grant && action === 'start' && current.power_intent !== ContainerPowerIntent.Running) {
+        await this.admitStart(transaction, current, grant);
+      }
       if (access === 'owner' && (action === 'start' || action === 'restart')) {
         await this.access.assertAttachedStorageCoveredInTransaction(
           transaction,
@@ -418,6 +443,7 @@ export class ContainerControlService {
 
   private async updateDesired(
     actor: Actor,
+    scope: ListScope,
     containerId: string,
     values: Parameters<ContainerControlRepository['updateDesired']>[2],
     request: Record<string, unknown>,
@@ -432,7 +458,7 @@ export class ContainerControlService {
     const result = await this.transactions.run(async (transaction) => {
       const current = await this.repository.lock(containerId, transaction);
       if (!current) throw new NotFoundException('Container not found');
-      const access = assertCanAccess(actor, current, 'not-found');
+      const access = assertCanAccess(actor, current, scope);
       if (current.lifecycle_phase === ContainerPhase.Deleting) {
         throw new ConflictException({
           code: FailureCode.InstanceBusy,
@@ -468,16 +494,33 @@ export class ContainerControlService {
   }
 
 
-  /** Re-checks `ManageContainersAny` against the database inside the transaction. */
+  /**
+   * A stopped -> running transition raises the owner's running memory and
+   * revives the container's GPU claims; both must fit the current grant.
+   */
+  private async admitStart(
+    transaction: Transaction<NyabaseDatabase>,
+    current: ContainerRow,
+    grant: ServerAccess,
+  ): Promise<void> {
+    await lockOwnerServerQuota(transaction, current.owner_id, current.server_id);
+    assertMemoryGrant(grant, numberValue(current.mem_bytes), await this.repository.sumRunningMemBytes({
+      ownerId: current.owner_id,
+      serverId: current.server_id,
+      excludeContainerId: current.id,
+    }, transaction));
+    assertClaimsGranted(
+      grant.gpuPciAddresses,
+      await this.gpuClaims.listForContainer(current.id, transaction),
+    );
+  }
+
+  /** Re-checks the operator role against the database inside the transaction. */
   private async assertAdminInTransaction(
     transaction: Transaction<NyabaseDatabase>,
     actor: Actor,
   ): Promise<void> {
-    await this.access.assertActorCapabilitiesInTransaction(
-      transaction,
-      actor.userId,
-      [Capability.ManageContainersAny],
-    );
+    await assertActorRole(transaction, requireUserId(actor), Role.Operator);
   }
 
   /** The owner must hold current coverage of the container's server. */
@@ -486,18 +529,14 @@ export class ContainerControlService {
     actor: Actor,
     container: { server_id: string },
   ): Promise<ServerAccess> {
-    const grant = await this.access.resolveServerInTransaction(
-      transaction,
-      actor.userId,
-      container.server_id,
-    );
+    const grant = await resolveServerAccess(transaction, requireUserId(actor), container.server_id);
     if (!grant) throw new ForbiddenException('Server access was revoked');
     return grant;
   }
 
   /**
    * Owners must still hold a live server grant, administrators must still hold
-   * the capability; the system needs neither. Returns the owner's grant.
+   * the role; the system needs neither. Returns the owner's grant.
    */
   private async enforceInTransaction(
     transaction: Transaction<NyabaseDatabase>,

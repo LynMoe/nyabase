@@ -1,9 +1,9 @@
 import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { Capability, type ContainerDto, type ListScope, type PerformanceSelfResponse } from '@nyabase/common';
+import { Role, type ContainerDto, type ListScope, type PerformanceSelfResponse } from '@nyabase/common';
 import { Link } from '@tanstack/react-router';
 import { ChartLine, Pencil } from 'lucide-react';
-import { useAuthStore } from '../../store/auth.js';
+import { useHasRole } from '../../lib/use-role.js';
 import { LimitsDialog } from './spec-panel.js';
 import { SshLoginCard } from './ssh-login.js';
 import { Button } from '../ui/button.js';
@@ -87,7 +87,7 @@ function SpecCard({
 
 function UsageCard({ containerId, scope }: { containerId: string; scope: ListScope }) {
   const admin = scope === 'all';
-  const canViewMetrics = useAuthStore((state) => state.user?.capabilities.includes(Capability.ViewMetricsAll) ?? false);
+  const canViewMetrics = useHasRole(Role.Operator);
   const occupancyDenied = admin && !canViewMetrics;
   const { data: occupancy } = useQuery({
     queryKey: queryKeys.performance.self(scope, containerId),

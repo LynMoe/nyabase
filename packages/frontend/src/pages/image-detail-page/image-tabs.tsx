@@ -235,6 +235,7 @@ export function ImageAssignmentsTab({ image }: { image: AdminImageDto }) {
         <CardContent>
           <ResourceIntentFailures
             listPath={assignmentIntentsPath}
+            scope="all"
             enabled={image.assignments.length > 0}
           />
           <ResourceIntentHistory

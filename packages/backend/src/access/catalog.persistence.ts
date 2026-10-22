@@ -24,7 +24,7 @@ export class CatalogPersistence {
   listGroups() {
     return this.database
       .selectFrom('iam.groups')
-      .select(['id', 'name', 'is_system'])
+      .select(['id', 'name'])
       .orderBy('name')
       .orderBy('id')
       .execute();

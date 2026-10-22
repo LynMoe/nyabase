@@ -42,6 +42,7 @@ const SERVER_STATUS_ZH: Record<string, string> = {
 const FAILURE_CODE_ZH: Partial<Record<string, string>> = {
   [FailureCode.RevisionConflict]: '版本冲突，请刷新后重试',
   [FailureCode.StorageGrantExceeded]: '存储授权不足',
+  [FailureCode.MemoryGrantExceeded]: '内存授权不足',
   [FailureCode.StoragePoolExhausted]: '存储池容量不足',
   [FailureCode.StoragePoolQuotaIneffective]: '存储池配额无效',
   [FailureCode.StoragePoolInUse]: '存储池仍在使用中',
@@ -70,6 +71,7 @@ const FAILURE_CODE_ZH: Partial<Record<string, string>> = {
   [FailureCode.GpuInvalidPci]: 'PCI 地址无效',
   [FailureCode.GpuWildcardForbidden]: '禁止使用通配符 PCI 选择器',
   [FailureCode.GpuDuplicatePci]: 'PCI 地址重复',
+  [FailureCode.GpuNotGranted]: '容器占用的 GPU 已不在授权内',
   [FailureCode.VolumeCatalogAdoptFailed]: '共享卷未能登记到本机 Incus',
   [FailureCode.VolumePlacementFailed]: '卷尚未在目标服务器就绪',
   [FailureCode.ImageManagesOwnNetwork]: '镜像自行管理网络',

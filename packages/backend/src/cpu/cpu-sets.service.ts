@@ -78,9 +78,10 @@ export class CpuSetService {
         reason: topology.length === 0 ? 'cpu_topology_unknown' : 'no_unreserved_cpus',
       });
     }
-    // The merged view keeps an expired grant visible through the lapse grace period.
+    // The effective view holds current grants of active users only: an expired
+    // or revoked grant, or a disabled user, has no row.
     const grant = await executor
-      .selectFrom('iam.merged_server_access')
+      .selectFrom('iam.effective_server_access')
       .select('cpu_cores')
       .where('user_id', '=', ownerId)
       .where('server_id', '=', serverId)
@@ -93,7 +94,7 @@ export class CpuSetService {
       .executeTakeFirst();
     const unlimited = grant ? grant.cpu_cores === null : !existing;
     if (unlimited) return { cpus: allocatable, write: existing ? 'delete' : 'none' };
-    // A revoked grant leaves no row; keep the user pinned to what they had.
+    // No current grant (revoked, expired or user disabled): keep the user pinned to what they had.
     const cores = grant?.cpu_cores ?? existing!.cpus.length;
     if (existing && cpuSetStillFits(existing.cpus, cores, topology, reserved)) {
       return { cpus: [...existing.cpus].sort((left, right) => left - right), write: 'none' };

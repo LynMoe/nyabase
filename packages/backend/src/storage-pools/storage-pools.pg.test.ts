@@ -340,7 +340,7 @@ describePg('storage pool registration and shared mapping', () => {
         server_id: serverId,
         cpu_cores: null,
         mem_bytes: null,
-        disk_bytes: 0,
+        disk_bytes: null,
         expires_at: null,
       }).execute();
       await database.insertInto('iam.storage_pool_grants').values({

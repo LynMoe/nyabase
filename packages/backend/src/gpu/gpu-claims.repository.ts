@@ -101,6 +101,19 @@ export class GpuClaimsRepository {
     return row?.gpu_enabled === true;
   }
 
+  /** PCI addresses currently claimed by one container. */
+  async listForContainer(
+    containerId: string,
+    executor: GpuExecutor = this.database,
+  ): Promise<string[]> {
+    const rows = await executor
+      .selectFrom('control.container_gpu_claims')
+      .select('pci_address')
+      .where('container_id', '=', containerId)
+      .execute();
+    return rows.map((row) => row.pci_address);
+  }
+
   async releaseContainerClaims(
     containerId: string,
     executor: GpuExecutor = this.database,

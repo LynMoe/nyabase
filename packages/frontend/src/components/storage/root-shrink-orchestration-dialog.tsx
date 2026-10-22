@@ -8,6 +8,7 @@ import {
   type PatchContainerRootSizeRequest,
 } from '@nyabase/common';
 import { api } from '../../lib/api.js';
+import { scopedPath } from '../../lib/scoped-paths.js';
 import { waitUntil } from '../../lib/storage-shrink.js';
 import { lookupLatestIntentFailure, resourceIntentsPath } from '../../lib/intent-visibility.js';
 import { formatBytes } from '../../lib/utils.js';
@@ -37,20 +38,21 @@ export function RootShrinkOrchestrationDialog({
   const [progress, setProgress] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const base = `/containers/${container.id}`;
+  // Every call acts on the container; the administrator view says so with scope=all.
+  const at = (suffix = '') => scopedPath(`/containers/${container.id}${suffix}`, scope);
 
   const run = async () => {
     setBusy(true);
     setError(null);
     setFailureStage(null);
     try {
-      const current = await api.get<ContainerDto>(base);
+      const current = await api.get<ContainerDto>(at());
       if (current.actual.status !== ContainerStatus.Stopped) {
         setPhase('stopping');
         setProgress('正在停止容器…');
-        await api.post<IntentAcceptedDto>(`${base}/actions/stop`);
+        await api.post<IntentAcceptedDto>(at('/actions/stop'));
         await waitUntil(async () => {
-          const latest = await api.get<ContainerDto>(base);
+          const latest = await api.get<ContainerDto>(at());
           return latest.actual.status === ContainerStatus.Stopped;
         }, {
           label: '等待容器停止',
@@ -63,9 +65,9 @@ export function RootShrinkOrchestrationDialog({
       setPhase('shrinking');
       setProgress('正在提交系统盘缩容…');
       const body: PatchContainerRootSizeRequest = { sizeBytes };
-      await api.patch<IntentAcceptedDto>(`${base}/root-size`, body);
+      await api.patch<IntentAcceptedDto>(at('/root-size'), body);
       await waitUntil(async () => {
-        const latest = await api.get<ContainerDto>(base);
+        const latest = await api.get<ContainerDto>(at());
         if (latest.rootSizeBytes === sizeBytes || latest.rootSizePendingBytes === sizeBytes) return true;
         if (latest.needsAttention) {
           const failure = await lookupLatestIntentFailure(resourceIntentsPath(scope, IntentResourceType.Container, container.id));
@@ -95,7 +97,7 @@ export function RootShrinkOrchestrationDialog({
     setFailureStage(null);
     try {
       setProgress('正在启动容器…');
-      await api.post<IntentAcceptedDto>(`${base}/actions/start`);
+      await api.post<IntentAcceptedDto>(at('/actions/start'));
       setPhase('done');
       setProgress(null);
       onComplete();

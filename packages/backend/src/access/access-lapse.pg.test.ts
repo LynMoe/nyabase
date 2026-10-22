@@ -21,7 +21,6 @@ import {
   seedUser,
   seedVolume,
 } from '../iam/access.pg-test-helper.js';
-import { SYSTEM_ACTOR_USERNAME } from '../iam/actor.js';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 import { withPostgresTestDatabase } from '../platform/persistence-pg/postgres-test-harness.js';
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
@@ -46,6 +45,11 @@ async function fixture(database: Kysely<NyabaseDatabase>) {
   const containers = {
     action: vi.fn(async (actor: { authKind: string }, id: string, action: string) => {
       actions.push({ id, action, actorIsSystem: actor.authKind === 'system' });
+      // The real endpoint records the desired power state.
+      if (action === 'stop') {
+        await database.updateTable('control.containers').set({ power_intent: 'stopped' })
+          .where('id', '=', id).execute();
+      }
       return { intentId: randomUUID() };
     }),
   };
@@ -61,7 +65,6 @@ async function fixture(database: Kysely<NyabaseDatabase>) {
     audit as never,
   );
   const processor = new AccessLapseProcessor(
-    database,
     new AccessLapseRepository(database, transactions),
     claims,
     purge,
@@ -69,7 +72,6 @@ async function fixture(database: Kysely<NyabaseDatabase>) {
     changes,
     proxySnapshots as never,
   );
-  await seedUser(database, SYSTEM_ACTOR_USERNAME, UserStatus.Disabled);
   return { processor, claims, changes, actions, audit, transactions, proxySnapshots };
 }
 
@@ -88,29 +90,31 @@ async function world(database: Kysely<NyabaseDatabase>) {
 }
 
 describePg('access lapse processor', () => {
-  it('opens the grace at the past expiry, stops containers once, and never moves lapsed_at', async () => {
+  it('opens the grace at detection time, stops containers once, and never moves lapsed_at', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const { processor, actions, audit, proxySnapshots } = await fixture(database);
       const { userId, serverId, poolId, imageId } = await world(database);
-      const expiredAt = days(-2);
-      await grantServer(database, { user: userId }, serverId, { expiresAt: expiredAt });
+      await grantServer(database, { user: userId }, serverId, { expiresAt: days(-2) });
       const running = await seedContainer(database, {
         ownerId: userId, serverId, poolId, imageId, running: true,
       });
       const stopped = await seedContainer(database, { ownerId: userId, serverId, poolId, imageId });
 
+      const before = Date.now();
       await expect(processor.process()).resolves.toBe(1);
 
       const rows = await ledger(database, userId);
       expect(rows).toHaveLength(1);
       expect(rows[0]).toMatchObject({ resource_kind: 'server', resource_id: serverId, purged_at: null });
-      expect(rows[0]!.lapsed_at.getTime()).toBe(expiredAt.getTime());
+      // The old expiry is not the lapse time: the grace starts at detection.
+      expect(rows[0]!.lapsed_at.getTime()).toBeGreaterThanOrEqual(before - 1_000);
+      expect(rows[0]!.lapsed_at.getTime()).toBeLessThanOrEqual(Date.now() + 1_000);
       expect(rows[0]!.stopped_at).not.toBeNull();
       expect(actions).toEqual([{ id: running, action: 'stop', actorIsSystem: true }]);
       expect(proxySnapshots.notify).toHaveBeenCalledTimes(1);
       expect(actions.some((entry) => entry.id === stopped)).toBe(false);
       expect(audit.append).toHaveBeenCalledWith(
-        expect.anything(), expect.any(String), AuditAction.GrantExpired, userId, 'user',
+        expect.anything(), null, AuditAction.GrantExpired, userId, 'user',
         expect.objectContaining({ resourceKind: 'server', resourceId: serverId }),
       );
 
@@ -128,9 +132,14 @@ describePg('access lapse processor', () => {
       const { userId, serverId, poolId, imageId } = await world(database);
       const otherServer = await seedServer(database);
       const otherPool = await seedPool(database, otherServer);
-      await grantServer(database, { user: userId }, serverId, {
-        expiresAt: new Date(Date.now() - (GRANT_EXPIRY_GRACE_DAYS + 1) * DAY_MS),
-      });
+      await grantServer(database, { user: userId }, serverId, { expiresAt: days(-20) });
+      // The grace opened more than 14 days ago.
+      await database.insertInto('control.access_lapses').values({
+        user_id: userId,
+        resource_kind: 'server',
+        resource_id: serverId,
+        lapsed_at: new Date(Date.now() - (GRANT_EXPIRY_GRACE_DAYS + 1) * DAY_MS),
+      }).execute();
       await grantServer(database, { user: userId }, otherServer);
       await grantPool(database, { user: userId }, poolId);
       await grantPool(database, { user: userId }, otherPool);
@@ -233,52 +242,186 @@ describePg('access lapse processor', () => {
     });
   });
 
-  it('stops a disabled user\'s running containers but opens no lapse and never purges', async () => {
+  it('opens a lapse for a disabled user on every resource kind and stops running containers there', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const { processor, actions } = await fixture(database);
       const { userId, serverId, poolId, imageId } = await world(database);
+      const backendId = await seedBackend(database);
       await grantServer(database, { user: userId }, serverId);
       await grantPool(database, { user: userId }, poolId);
+      await grantBackend(database, { user: userId }, backendId, null);
+      await seedBackendPool(database, serverId, backendId);
       const running = await seedContainer(database, {
         ownerId: userId, serverId, poolId, imageId, running: true,
       });
-      const volume = await seedVolume(database, { ownerId: userId, poolId, serverId });
+      await seedVolume(database, { ownerId: userId, poolId, serverId });
+      await seedVolume(database, { ownerId: userId, poolId: null, serverId: null, sharedBackendId: backendId });
 
       await database.updateTable('iam.users').set({ status: UserStatus.Disabled })
         .where('id', '=', userId).execute();
-      await expect(processor.process()).resolves.toBe(1);
+      const before = Date.now();
+      await processor.process();
 
-      expect(actions).toEqual([{ id: running, action: 'stop', actorIsSystem: true }]);
-      expect(await ledger(database)).toEqual([]);
-      // Idempotent once the container is no longer wanted running.
-      await database.updateTable('control.containers').set({ power_intent: 'stopped' }).execute();
-      await expect(processor.process()).resolves.toBe(0);
-      expect(actions).toHaveLength(1);
-      expect(await ledger(database)).toEqual([]);
-      expect((await database.selectFrom('control.volumes').select('id').execute()).map((r) => r.id))
-        .toEqual([volume]);
-      expect(await database.selectFrom('control.containers').select('id').execute()).toHaveLength(1);
+      const rows = await ledger(database, userId);
+      expect(rows.map((row) => row.resource_kind).sort())
+        .toEqual(['server', 'shared_backend', 'storage_pool']);
+      for (const row of rows) {
+        // Detection time, as for a revocation; stopped at once, not purged.
+        expect(row.lapsed_at.getTime()).toBeGreaterThanOrEqual(before - 1000);
+        expect(row.stopped_at).not.toBeNull();
+        expect(row.purged_at).toBeNull();
+      }
+      expect(actions.filter((entry) => entry.id === running && entry.action === 'stop').length)
+        .toBeGreaterThanOrEqual(1);
+      expect(actions.every((entry) => entry.action === 'stop' && entry.actorIsSystem)).toBe(true);
+      expect(await database.selectFrom('control.volumes').select('id').execute()).toHaveLength(2);
     });
   });
 
-  it('keeps a disabled user\'s resources past 14 days: no lapse row, no purge', async () => {
+  it('opens nothing when a disabled user owns no resources', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const { processor, actions } = await fixture(database);
+      const { userId, serverId, poolId } = await world(database);
+      await grantServer(database, { user: userId }, serverId);
+      await grantPool(database, { user: userId }, poolId);
+      await database.updateTable('iam.users').set({ status: UserStatus.Disabled })
+        .where('id', '=', userId).execute();
+
+      await expect(processor.process()).resolves.toBe(0);
+      expect(await ledger(database)).toEqual([]);
+      expect(actions).toEqual([]);
+    });
+  });
+
+  it('scans a disabled user as uncovered on every resource kind', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const { userId, serverId, poolId } = await world(database);
+      const backendId = await seedBackend(database);
+      await grantServer(database, { user: userId }, serverId, { expiresAt: days(30) });
+      await grantPool(database, { user: userId }, poolId);
+      await grantBackend(database, { user: userId }, backendId, null);
+      await seedBackendPool(database, serverId, backendId);
+      await seedVolume(database, { ownerId: userId, poolId, serverId });
+      await seedVolume(database, { ownerId: userId, poolId: null, serverId: null, sharedBackendId: backendId });
+      await database.updateTable('iam.users').set({ status: UserStatus.Disabled })
+        .where('id', '=', userId).execute();
+      const repository = new AccessLapseRepository(database, new PgTransactionManager(database));
+
+      for (const [kind, resourceId] of [
+        ['server', serverId], ['storage_pool', poolId], ['shared_backend', backendId],
+      ] as const) {
+        await expect(repository.inspect({ userId, kind, resourceId }))
+          .resolves.toMatchObject({ covered: false, lapse: null });
+      }
+    });
+  });
+
+  it('opens every kind at detection time and ignores old expired grants, direct or via a group', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const { processor } = await fixture(database);
+      const { userId, serverId, poolId } = await world(database);
+      const backendId = await seedBackend(database);
+      const group = await seedGroup(database);
+      await addMember(database, group, userId);
+      await grantServer(database, { user: userId }, serverId, { expiresAt: days(-9) });
+      await grantServer(database, { group }, serverId, { expiresAt: days(-4) });
+      await grantPool(database, { group }, poolId, days(-9));
+      await grantPool(database, { user: userId }, poolId, days(-4));
+      await grantBackend(database, { user: userId }, backendId, null, days(-4));
+      await grantBackend(database, { group }, backendId, 5, days(-9));
+      await seedBackendPool(database, serverId, backendId);
+      await seedVolume(database, { ownerId: userId, poolId, serverId });
+      await seedVolume(database, { ownerId: userId, poolId: null, serverId: null, sharedBackendId: backendId });
+
+      const before = Date.now();
+      await processor.process();
+
+      const rows = await ledger(database, userId);
+      expect(rows.map((row) => row.resource_kind).sort())
+        .toEqual(['server', 'shared_backend', 'storage_pool']);
+      for (const row of rows) {
+        expect(row.lapsed_at.getTime()).toBeGreaterThanOrEqual(before - 1_000);
+        expect(row.lapsed_at.getTime()).toBeLessThanOrEqual(Date.now() + 1_000);
+      }
+    });
+  });
+
+  it('does not backdate a group removal to an old unrelated expired direct grant', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const { processor, actions } = await fixture(database);
+      const { userId, serverId, poolId, imageId } = await world(database);
+      const group = await groupOf(database, userId);
+      // A direct grant that expired long ago, plus a current grant via the group.
+      await grantServer(database, { user: userId }, serverId, {
+        expiresAt: new Date(Date.now() - (GRANT_EXPIRY_GRACE_DAYS + 5) * DAY_MS),
+      });
+      await grantServer(database, { group }, serverId);
+      await seedContainer(database, { ownerId: userId, serverId, poolId, imageId });
+      await expect(processor.process()).resolves.toBe(0);
+
+      await database.deleteFrom('iam.group_members').where('group_id', '=', group).execute();
+      const before = Date.now();
+      await processor.process();
+
+      const row = (await ledger(database, userId))[0]!;
+      expect(row.lapsed_at.getTime()).toBeGreaterThanOrEqual(before - 1_000);
+      expect(row.purged_at).toBeNull();
+      expect(actions.filter((entry) => entry.action === 'delete')).toEqual([]);
+    });
+  });
+
+  it('stops a container again when it runs during the grace, keeping the first stopped_at', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const { processor, actions } = await fixture(database);
+      const { userId, serverId, poolId, imageId } = await world(database);
+      await grantServer(database, { user: userId }, serverId, { expiresAt: days(-1) });
+      const container = await seedContainer(database, {
+        ownerId: userId, serverId, poolId, imageId, running: true,
+      });
+      await processor.process();
+      const firstStop = (await ledger(database, userId))[0]!.stopped_at!.getTime();
+      expect(actions).toEqual([{ id: container, action: 'stop', actorIsSystem: true }]);
+
+      // Nothing runs: later passes do nothing.
+      await expect(processor.process()).resolves.toBe(0);
+
+      // An administrator starts it again during the grace.
+      await database.updateTable('control.containers').set({ power_intent: 'running' })
+        .where('id', '=', container).execute();
+      await processor.process();
+
+      expect(actions).toEqual([
+        { id: container, action: 'stop', actorIsSystem: true },
+        { id: container, action: 'stop', actorIsSystem: true },
+      ]);
+      expect((await ledger(database, userId))[0]!.stopped_at!.getTime()).toBe(firstStop);
+    });
+  });
+
+  it('purges a disabled user\'s containers and volumes once the 14 days are over', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const { processor, actions } = await fixture(database);
       const { userId, serverId, poolId, imageId } = await world(database);
       await grantServer(database, { user: userId }, serverId);
-      await seedContainer(database, { ownerId: userId, serverId, poolId, imageId });
+      const container = await seedContainer(database, { ownerId: userId, serverId, poolId, imageId });
+      await seedVolume(database, { ownerId: userId, poolId, serverId });
       await database.updateTable('iam.users').set({ status: UserStatus.Disabled })
         .where('id', '=', userId).execute();
 
-      for (let pass = 0; pass < 3; pass += 1) await processor.process();
-      expect(await ledger(database)).toEqual([]);
-      expect(actions).toEqual([]);
-      // Even a ledger-less "old" disabled user is never purged for being disabled.
-      await database.updateTable('iam.users')
-        .set({ updated_at: new Date(Date.now() - 30 * DAY_MS) }).execute();
       await processor.process();
-      expect(await ledger(database)).toEqual([]);
       expect(actions).toEqual([]);
+      expect((await ledger(database, userId)).every((row) => row.purged_at === null)).toBe(true);
+
+      await database.updateTable('control.access_lapses')
+        .set({ lapsed_at: new Date(Date.now() - (GRANT_EXPIRY_GRACE_DAYS + 1) * DAY_MS) })
+        .execute();
+      await processor.process();
+
+      expect(actions).toEqual([{ id: container, action: 'delete', actorIsSystem: true }]);
+      const server = (await ledger(database, userId)).find((row) => row.resource_kind === 'server');
+      expect(server?.purged_at).not.toBeNull();
+      // The volume has no placement and no attachment: its row is removed outright.
+      expect(await database.selectFrom('control.volumes').select('id').execute()).toEqual([]);
     });
   });
 
@@ -286,10 +429,12 @@ describePg('access lapse processor', () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const { processor, actions } = await fixture(database);
       const { userId, serverId, poolId, imageId } = await world(database);
-      await grantServer(database, { user: userId }, serverId, {
-        expiresAt: new Date(Date.now() - (GRANT_EXPIRY_GRACE_DAYS + 1) * DAY_MS),
-      });
+      await grantServer(database, { user: userId }, serverId, { expiresAt: days(-1) });
       const container = await seedContainer(database, { ownerId: userId, serverId, poolId, imageId });
+      await processor.process();
+      await database.updateTable('control.access_lapses')
+        .set({ lapsed_at: new Date(Date.now() - (GRANT_EXPIRY_GRACE_DAYS + 1) * DAY_MS) })
+        .where('user_id', '=', userId).execute();
       await database.updateTable('iam.users').set({ status: UserStatus.Disabled })
         .where('id', '=', userId).execute();
 
@@ -300,7 +445,7 @@ describePg('access lapse processor', () => {
     });
   });
 
-  it('does not restart anything when a disabled user is enabled again', async () => {
+  it('deletes the row and restarts nothing when a disabled user is enabled again within the grace', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const { processor, actions } = await fixture(database);
       const { userId, serverId, poolId, imageId } = await world(database);
@@ -311,6 +456,7 @@ describePg('access lapse processor', () => {
       await database.updateTable('iam.users').set({ status: UserStatus.Disabled })
         .where('id', '=', userId).execute();
       await processor.process();
+      expect(await ledger(database, userId)).toHaveLength(1);
       // The stop intent lands: the container is stopped.
       await database.updateTable('control.containers').set({ power_intent: 'stopped' })
         .where('id', '=', container).execute();
@@ -378,8 +524,8 @@ describePg('access lapse processor', () => {
       await seedBackendPool(database, serverId, backendId);
       await seedBackendPool(database, serverId, otherBackendId);
       await grantServer(database, { user: userId }, serverId);
-      await grantBackend(database, { user: userId }, backendId, 0, days(-1));
-      await grantBackend(database, { user: userId }, otherBackendId, 0);
+      await grantBackend(database, { user: userId }, backendId, null, days(-1));
+      await grantBackend(database, { user: userId }, otherBackendId, null);
       const mounted = await seedContainer(database, {
         ownerId: userId, serverId, poolId, imageId, running: true,
       });
@@ -509,7 +655,6 @@ describePg('access lapse processor', () => {
 
       const [candidate] = await repository.scan();
       expect(candidate).toMatchObject({ covered: false, userId, kind: 'server', lapse: null });
-      expect(candidate!.expiredAt!.getTime()).toBeLessThan(Date.now() - 19 * DAY_MS);
     });
   });
 });

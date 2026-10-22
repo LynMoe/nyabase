@@ -1,7 +1,7 @@
 // Login, refresh rotation, logout, API tokens and account lifecycle.
 import assert from 'node:assert/strict';
 import { after, before, describe, it } from 'node:test';
-import { UserStatus, type UserDto } from '@nyabase/common';
+import { Role, UserStatus, type UserDto } from '@nyabase/common';
 import { Api, ApiError, login, refresh } from '../client/api.js';
 import { Harness, type TestUser } from '../client/harness.js';
 
@@ -43,7 +43,7 @@ describe('auth and sessions', () => {
     const me = await h.api.get<UserDto>('/auth/me');
     assert.equal(me.username, h.state.admin.username);
     assert.equal(me.status, UserStatus.Active);
-    assert.ok(me.capabilities.length > 0, 'admin holds capabilities');
+    assert.equal(me.role, Role.Admin);
   });
 
   it('rotates the refresh cookie and invalidates it on logout', async () => {
@@ -81,6 +81,31 @@ describe('auth and sessions', () => {
     }), 403);
     assert.equal(await api.status('GET', '/admin/groups'), 403);
     assert.equal(await api.status('GET', '/servers?scope=all'), 403);
+  });
+
+  it('keeps role changes and the last active admin guarded', async () => {
+    const operator = await h.newUser('operator', Role.Operator);
+    assert.equal((await h.api.get<UserDto>(`/users/${operator.id}`)).role, Role.Operator);
+    assert.equal(await operator.session.api.status('GET', '/users'), 200, 'operators may list users');
+    assert.equal(await operator.session.api.status('GET', '/admin/groups'), 200, 'operators may view groups');
+    assert.equal(await operator.session.api.status('POST', '/users', {
+      username: 'nope-nope', password: 'password-123', displayName: 'x',
+    }), 403, 'only admins create users');
+    assert.equal(await operator.session.api.status('PATCH', `/users/${user.id}`, { role: Role.Admin }), 403);
+    assert.equal(await user.session.api.status('PATCH', `/users/${user.id}`, { role: Role.Admin }), 403,
+      'nobody promotes themselves');
+
+    await h.api.patch(`/users/${operator.id}`, { role: Role.User });
+    assert.equal(await operator.session.api.status('GET', '/users'), 403, 'a demotion applies to the next request');
+
+    const me = await h.api.get<UserDto>('/auth/me');
+    const admins = (await h.api.get<UserDto[]>('/users'))
+      .filter((entry) => entry.role === Role.Admin && entry.status === UserStatus.Active);
+    if (admins.length === 1) {
+      assert.equal(await h.api.status('PATCH', `/users/${me.id}`, { role: Role.User }), 403,
+        'the last active admin cannot be demoted');
+      assert.equal(await h.api.status('DELETE', `/users/${me.id}`), 403, 'nor deleted');
+    }
   });
 
   it('changes a password with the current one and locks out a disabled user', async () => {

@@ -2,7 +2,7 @@ import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { Capability } from '@nyabase/common';
+import { Role } from '@nyabase/common';
 import { activeNavPath, NAV_SECTIONS, visibleNavSections } from './navigation.js';
 import { ACCESS } from './route-access.js';
 
@@ -16,18 +16,28 @@ function routeFiles(dir: string): string[] {
 }
 
 describe('sidebar navigation', () => {
-  it('shows only the personal workspace to a user without admin capabilities', () => {
-    const sections = visibleNavSections([]);
+  it('shows only the personal workspace to a plain user', () => {
+    const sections = visibleNavSections(Role.User);
     expect(sections).toHaveLength(1);
     expect(sections[0]?.items.map((item) => item.to)).toEqual([
       '/', '/containers', '/volumes', '/shared-volumes', '/http-proxy', '/usage',
     ]);
   });
 
-  it('lists 全平台用量 for metrics viewers even without ManageServers', () => {
-    const items = visibleNavSections([Capability.ViewMetricsAll]).flatMap((section) => section.items);
-    expect(items.map((item) => item.to)).toContain('/servers/usage');
-    expect(items.map((item) => item.to)).not.toContain('/servers');
+  it('offers operators the operations pages but not admin-only resources', () => {
+    const items = visibleNavSections(Role.Operator).flatMap((section) => section.items).map((item) => item.to);
+    expect(items).toContain('/servers');
+    expect(items).toContain('/servers/usage');
+    expect(items).toContain('/users');
+    expect(items).not.toContain('/ip-pools');
+    expect(items).not.toContain('/shared-backends');
+  });
+
+  it('offers admins every page', () => {
+    const items = visibleNavSections(Role.Admin).flatMap((section) => section.items).map((item) => item.to);
+    expect(items).toContain('/ip-pools');
+    expect(items).toContain('/shared-backends');
+    expect(items).toContain('/groups');
   });
 
   it('never repeats a label or an icon', () => {
@@ -50,10 +60,12 @@ describe('sidebar navigation', () => {
       const match = readFileSync(file, 'utf8').match(/RequireAccess rule=\{ACCESS\.(\w+)\}/);
       if (match?.[1]) guarded.set(relative(routesRoot, file), match[1]);
     }
+    const navSource = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'navigation.ts'), 'utf8');
     for (const item of NAV_SECTIONS.flatMap((section) => section.items)) {
       if (!item.access) continue;
-      const key = Object.entries(ACCESS).find(([, rule]) => rule === item.access)?.[0];
+      const key = navSource.match(new RegExp(`to: '${item.to}'[^\\n]*access: ACCESS\\.(\\w+)`))?.[1];
       expect(key, item.to).toBeDefined();
+      expect(ACCESS[key as keyof typeof ACCESS], item.to).toBe(item.access);
       const routeFile = `${item.to.slice(1)}${item.to === '/servers/usage' ? '.tsx' : '/index.tsx'}`;
       expect(guarded.get(routeFile), item.to).toBe(key);
     }

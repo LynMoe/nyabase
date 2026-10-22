@@ -4,6 +4,7 @@ import {
   type ContainerDto,
   type EffectiveAccessDto,
   type EffectiveServerAccessDto,
+  type LiveServerAccessDto,
   type EffectiveSharedBackendAccessDto,
   type SharedBackendDto,
   type StorageCapacityDto,
@@ -21,8 +22,9 @@ import {
   TableRow,
 } from '../ui/table.js';
 import { cn } from '../../lib/utils.js';
-import { formatQuotaDimension } from '../../lib/grant-quota.js';
+import { formatQuotaDimension, runningMemBytes } from '../../lib/grant-quota.js';
 import { cpuCoresLabel, formatCpuList } from '../../lib/cpu-set.js';
+import { graceServerAccess, liveServerAccess } from '../../lib/effective-access.js';
 import { queryKeys } from '../../lib/query-keys.js';
 import { queryPollInterval } from '../../lib/query-lifecycle.js';
 
@@ -85,14 +87,14 @@ function QuotaBody({
   sharedBackends: EffectiveSharedBackendAccessDto[];
   backends: SharedBackendDto[];
 }) {
-  const grants = effective.filter((grant) => grant.accessPhase === 'live');
-  const lapsed = effective.filter((grant) => grant.accessPhase === 'grace');
+  const grants = liveServerAccess(effective);
+  const lapsed = graceServerAccess(effective);
   const empty = grants.length === 0 && sharedBackends.length === 0 && lapsed.length === 0;
   const serverName = new Map(servers.map((server) => [server.id, server.name]));
   return (
     <SectionCard
       title="我的额度"
-      description={empty ? undefined : '已分配 = 容器与数据卷占用的规格，不是实时用量。CPU 按核绑定，同一服务器上你的所有容器共享这组 CPU。'}
+      description={empty ? undefined : '已分配 = 容器与数据卷占用的规格，不是实时用量；内存只统计运行中的容器。CPU 按核绑定，同一服务器上你的所有容器共享这组 CPU。'}
       flush={!empty}
     >
       {empty ? (
@@ -104,8 +106,8 @@ function QuotaBody({
         <div data-testid="quota-grace" className="space-y-1 border-b px-4 py-3 text-sm">
           {lapsed.map((grant) => (
             <p key={grant.serverId} className="text-muted-foreground">
-              {serverName.get(grant.serverId) ?? grant.serverId} 的访问授权已失效，容器已停止；
-              {grant.purgeAt ? new Date(grant.purgeAt).toLocaleString('zh-CN') : '宽限期满'} 起将清除该服务器上的容器与数据卷。
+              {serverName.get(grant.serverId) ?? grant.serverId} 宽限中 · 将于 {new Date(grant.purgeAt).toLocaleString('zh-CN')} 清除
+              该服务器上的容器与数据卷（访问授权已失效，容器已停止）。
             </p>
           ))}
         </div>
@@ -117,7 +119,7 @@ function QuotaBody({
               <TableRow>
                 <TableHead>服务器</TableHead>
                 <TableHead>CPU</TableHead>
-                <TableHead>内存</TableHead>
+                <TableHead>内存（运行中占用）</TableHead>
                 <TableHead>磁盘</TableHead>
                 <TableHead>GPU</TableHead>
               </TableRow>
@@ -177,7 +179,7 @@ function ServerQuotaRow({
   name,
   containers,
 }: {
-  grant: EffectiveServerAccessDto;
+  grant: LiveServerAccessDto;
   name: string;
   containers: ContainerDto[];
 }) {
@@ -186,7 +188,7 @@ function ServerQuotaRow({
     queryFn: () => api.get<StorageCapacityDto>(`/servers/${grant.serverId}/storage-capacity`),
     refetchInterval: (query) => queryPollInterval(query.state, { activeIntervalMs: 30_000 }),
   });
-  const memUsed = containers.reduce((sum, item) => sum + item.memBytes, 0);
+  const memUsed = runningMemBytes(containers);
   const diskUsed = capacityQuery.data
     ? capacityQuery.data.usedByRootDisksBytes + capacityQuery.data.usedByLocalVolumesBytes
     : 0;
@@ -235,8 +237,8 @@ function QuotaCell({
   grant: number | null;
   consumed: number;
 }) {
-  const unlimited = grant === null || grant === 0;
-  const pct = unlimited || grant <= 0 ? 0 : Math.min(100, Math.round((consumed / grant) * 100));
+  const unlimited = grant === null;
+  const pct = unlimited ? 0 : Math.min(100, Math.round((consumed / grant) * 100));
   return (
     <div className="min-w-[7rem]">
       <p className="text-sm">{used} / {limit}</p>

@@ -1,6 +1,5 @@
 import {
   ConflictException,
-  ForbiddenException,
   Inject,
   Injectable,
   NotFoundException,
@@ -9,8 +8,7 @@ import type { Kysely, Transaction } from 'kysely';
 import { randomUUID } from 'node:crypto';
 import {
   AuditAction,
-  Capability,
-  SystemGroupKey,
+  Role,
   UserStatus,
   type GroupDto,
   type GroupMemberDto,
@@ -19,10 +17,11 @@ import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.
 import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
 import { afterCommit } from '../platform/post-commit.js';
-import { AccessChangeNotifier, AccessResolverService } from '../iam/access-resolver.service.js';
-import { groupHoldsResourceGrants } from '../iam/administration.js';
+import { AccessChangeNotifier } from '../iam/access-resolver.service.js';
 import type { Actor } from '../iam/actor.js';
 import { AuditService } from '../iam/audit.service.js';
+import { assertActorRole } from '../iam/administration.js';
+import { requireUserId } from '../iam/actor.js';
 
 type GroupTransaction = Transaction<NyabaseDatabase>;
 
@@ -30,9 +29,6 @@ export interface IamGroup {
   id: string;
   name: string;
   description: string | null;
-  isSystem: boolean;
-  systemKey: SystemGroupKey | null;
-  capabilities: Capability[];
   revision: number;
   createdAt: Date;
   updatedAt: Date;
@@ -42,9 +38,6 @@ export function toIamGroup(row: {
   id: string;
   name: string;
   description: string | null;
-  is_system: boolean;
-  system_key: string | null;
-  capabilities: string[];
   revision: string | number;
   created_at: Date;
   updated_at: Date;
@@ -53,9 +46,6 @@ export function toIamGroup(row: {
     id: row.id,
     name: row.name,
     description: row.description,
-    isSystem: row.is_system,
-    systemKey: row.system_key as SystemGroupKey | null,
-    capabilities: row.capabilities as Capability[],
     revision: Number(row.revision),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -63,8 +53,8 @@ export function toIamGroup(row: {
 }
 
 /**
- * Groups and their members. Capabilities come only from group membership.
- * Removing a member or deleting a group never refuses because the user owns
+ * Groups and their members; a group only batches resource grants. Managing
+ * groups is admin-only. Removing a member or deleting a group never refuses because the user owns
  * resources: coverage simply lapses and the access-lapse processor stops and
  * later purges the resources (14-day grace).
  */
@@ -73,7 +63,6 @@ export class GroupsService {
   constructor(
     @Inject(PG_DATABASE) private readonly database: Kysely<NyabaseDatabase>,
     private readonly transactions: PgTransactionManager,
-    private readonly access: AccessResolverService,
     private readonly audit: AuditService,
     private readonly changes: AccessChangeNotifier,
   ) {}
@@ -126,14 +115,10 @@ export class GroupsService {
 
   async create(
     actor: Actor,
-    input: { name: string; description?: string; capabilities?: Capability[] },
+    input: { name: string; description?: string },
   ): Promise<GroupDto> {
     const group = await this.transactions.run(async (transaction) => {
-      await this.access.assertActorCapabilitiesInTransaction(
-        transaction,
-        actor.userId,
-        [Capability.ManageGroups, ...(input.capabilities ?? [])],
-      );
+      await assertActorRole(transaction, requireUserId(actor), Role.Admin);
       const duplicate = await transaction.selectFrom('iam.groups')
         .select('id')
         .where('name', '=', input.name)
@@ -144,9 +129,6 @@ export class GroupsService {
           id: randomUUID(),
           name: input.name,
           description: input.description ?? null,
-          is_system: false,
-          system_key: null,
-          capabilities: input.capabilities ?? [],
           revision: 1,
         })
         .returningAll()
@@ -167,7 +149,7 @@ export class GroupsService {
   async update(
     actor: Actor,
     id: string,
-    input: { name?: string; description?: string | null; capabilities?: Capability[] },
+    input: { name?: string; description?: string | null },
     expectedRevision: number,
   ): Promise<GroupDto> {
     const group = await this.transactions.run(async (transaction) => {
@@ -178,24 +160,7 @@ export class GroupsService {
         .executeTakeFirst();
       if (!current) throw new NotFoundException('Group not found');
       const group = toIamGroup(current);
-      if (group.isSystem && (input.name !== undefined || input.capabilities !== undefined)) {
-        throw new ForbiddenException({
-          code: 'SYSTEM_GROUP_METADATA_IMMUTABLE',
-          message: 'System group metadata is immutable',
-        });
-      }
-      await this.access.assertActorCapabilitiesInTransaction(
-        transaction,
-        actor.userId,
-        [Capability.ManageGroups, ...group.capabilities, ...(input.capabilities ?? [])],
-      );
-      if (input.capabilities !== undefined && await groupHoldsResourceGrants(transaction, id)) {
-        await this.access.assertActorCapabilitiesInTransaction(
-          transaction,
-          actor.userId,
-          [Capability.ManageGrants],
-        );
-      }
+      await assertActorRole(transaction, requireUserId(actor), Role.Admin);
       if (group.revision !== expectedRevision) {
         throw new ConflictException({ code: 'REVISION_CONFLICT', current: this.toDto(group) });
       }
@@ -203,7 +168,6 @@ export class GroupsService {
         .set({
           ...(input.name === undefined ? {} : { name: input.name }),
           ...(input.description === undefined ? {} : { description: input.description }),
-          ...(input.capabilities === undefined ? {} : { capabilities: input.capabilities }),
           revision: String(expectedRevision + 1),
         })
         .where('id', '=', id)
@@ -227,13 +191,8 @@ export class GroupsService {
   /** Members and the group's grants go with it (foreign keys cascade); coverage lapses. */
   async delete(actor: Actor, id: string): Promise<{ deleted: boolean }> {
     await this.transactions.run(async (transaction) => {
-      const group = await this.requireGroup(transaction, id);
-      if (group.isSystem) throw new ForbiddenException('Cannot delete a system group');
-      await this.access.assertActorCapabilitiesInTransaction(
-        transaction,
-        actor.userId,
-        [Capability.ManageGroups, Capability.ManageGrants, ...group.capabilities],
-      );
+      await assertActorRole(transaction, requireUserId(actor), Role.Admin);
+      await this.requireGroup(transaction, id);
       await transaction.deleteFrom('iam.groups').where('id', '=', id).execute();
       await this.audit.append(
         transaction,
@@ -262,8 +221,8 @@ export class GroupsService {
 
   async addMember(actor: Actor, groupId: string, userId: string): Promise<{ changed: boolean }> {
     const changed = await this.transactions.run(async (transaction) => {
-      const group = await this.requireGroup(transaction, groupId);
-      await this.assertMayChangeMembers(transaction, actor, group);
+      await assertActorRole(transaction, requireUserId(actor), Role.Admin);
+      await this.requireGroup(transaction, groupId);
       const user = await transaction.selectFrom('iam.users')
         .select('status')
         .where('id', '=', userId)
@@ -291,11 +250,8 @@ export class GroupsService {
 
   async removeMember(actor: Actor, groupId: string, userId: string): Promise<{ changed: boolean }> {
     const changed = await this.transactions.run(async (transaction) => {
-      const group = await this.requireGroup(transaction, groupId);
-      await this.assertMayChangeMembers(transaction, actor, group);
-      if (group.systemKey === SystemGroupKey.Administrators) {
-        await this.access.assertNotFinalActiveAdministratorInTransaction(transaction, userId);
-      }
+      await assertActorRole(transaction, requireUserId(actor), Role.Admin);
+      await this.requireGroup(transaction, groupId);
       const deleted = await transaction.deleteFrom('iam.group_members')
         .where('group_id', '=', groupId)
         .where('user_id', '=', userId)
@@ -321,32 +277,10 @@ export class GroupsService {
       id: group.id,
       name: group.name,
       description: group.description,
-      isSystem: group.isSystem,
-      capabilities: group.capabilities,
       revision: group.revision,
       createdAt: group.createdAt.toISOString(),
       updatedAt: group.updatedAt.toISOString(),
     };
-  }
-
-  /** Membership changes hand out (or take away) the group's capabilities and grants. */
-  private async assertMayChangeMembers(
-    transaction: GroupTransaction,
-    actor: Actor,
-    group: IamGroup,
-  ): Promise<void> {
-    await this.access.assertActorCapabilitiesInTransaction(
-      transaction,
-      actor.userId,
-      [Capability.ManageGroups, ...group.capabilities],
-    );
-    if (await groupHoldsResourceGrants(transaction, group.id)) {
-      await this.access.assertActorCapabilitiesInTransaction(
-        transaction,
-        actor.userId,
-        [Capability.ManageGrants],
-      );
-    }
   }
 
   private async requireGroup(transaction: GroupTransaction, id: string): Promise<IamGroup> {

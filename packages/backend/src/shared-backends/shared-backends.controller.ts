@@ -10,20 +10,20 @@ import {
   Query,
 } from '@nestjs/common';
 import {
-  Capability,
   zCreateSharedBackendRequest,
   zDiscoverSharedExecutorsRequest,
   zListScope,
   zPatchSharedBackendExecutorRequest,
   zPatchSharedBackendRequest,
+  Role,
 } from '@nyabase/common';
-import { RequireCaps, CurrentActor } from '../iam/decorators.js';
+import { RequireRole, CurrentActor } from '../iam/decorators.js';
 import type { Actor } from '../iam/actor.js';
 import { SharedBackendsService } from './shared-backends.service.js';
 
 /**
  * Shared backends: `scope=mine` (default) lists the granted ones;
- * `scope=all`, executors and every mutation are `ManageSharedBackends`.
+ * `scope=all`, executors and every mutation are admin-only.
  */
 @Controller('shared-backends')
 export class SharedBackendsController {
@@ -35,13 +35,13 @@ export class SharedBackendsController {
   }
 
   @Get(':id/executors')
-  @RequireCaps(Capability.ManageSharedBackends)
+  @RequireRole(Role.Admin)
   listExecutors(@Param('id') id: string) {
     return this.service.listExecutors(id);
   }
 
   @Post(':id/executors/discover')
-  @RequireCaps(Capability.ManageSharedBackends)
+  @RequireRole(Role.Admin)
   @HttpCode(200)
   discoverExecutors(@Param('id') id: string, @Body() body: unknown) {
     const input = zDiscoverSharedExecutorsRequest.parse(body ?? {});
@@ -49,7 +49,7 @@ export class SharedBackendsController {
   }
 
   @Patch(':id/executors/:executorId')
-  @RequireCaps(Capability.ManageSharedBackends)
+  @RequireRole(Role.Admin)
   patchExecutor(
     @Param('id') id: string,
     @Param('executorId') executorId: string,
@@ -72,19 +72,19 @@ export class SharedBackendsController {
   }
 
   @Post()
-  @RequireCaps(Capability.ManageSharedBackends)
+  @RequireRole(Role.Admin)
   create(@Body() body: unknown) {
     return this.service.create(zCreateSharedBackendRequest.parse(body));
   }
 
   @Patch(':id')
-  @RequireCaps(Capability.ManageSharedBackends)
+  @RequireRole(Role.Admin)
   patch(@Param('id') id: string, @Body() body: unknown) {
     return this.service.patch(id, zPatchSharedBackendRequest.parse(body));
   }
 
   @Delete(':id')
-  @RequireCaps(Capability.ManageSharedBackends)
+  @RequireRole(Role.Admin)
   @HttpCode(204)
   async delete(@Param('id') id: string) {
     await this.service.delete(id);

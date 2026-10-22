@@ -40,8 +40,7 @@ export class UserServerResourcePurgeService {
 
   /**
    * Deletes a user's containers and local volumes on one server. An operator
-   * (`ManageGrants` + `ManageContainersAny`) purges as themselves; grant expiry
-   * purges as the system.
+   * purges as themselves; grant expiry purges as the system.
    */
   async purge(
     actor: Actor,
@@ -165,7 +164,7 @@ export class UserServerResourcePurgeService {
     actor: Actor,
     userId: string,
     poolId: string,
-    workerId = actor.userId,
+    workerId = actor.userId ?? 'access-lapse',
   ): Promise<{ intentIds: string[] }> {
     return this.stopRunningContainersForResource(
       userId,
@@ -180,7 +179,7 @@ export class UserServerResourcePurgeService {
     actor: Actor,
     userId: string,
     sharedBackendId: string,
-    workerId = actor.userId,
+    workerId = actor.userId ?? 'access-lapse',
   ): Promise<{ intentIds: string[] }> {
     return this.stopRunningContainersForResource(
       userId,

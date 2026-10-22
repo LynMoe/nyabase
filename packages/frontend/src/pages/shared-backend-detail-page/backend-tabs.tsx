@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Pencil, RefreshCw, Trash2 } from 'lucide-react';
 import {
-  Capability,
+  Role,
   FailureCode,
   type SharedBackendDto,
   type SharedBackendExecutorDiscoverResult,
@@ -31,7 +31,7 @@ import {
   parseSharedBackendFsidConflict,
   type SharedBackendFsidConflict,
 } from '../../lib/storage-shrink.js';
-import { useAuthStore } from '../../store/auth.js';
+import { useHasRole } from '../../lib/use-role.js';
 import { formatGib, formatPercent, relativeTime, sharedBackendAvailableBytes } from '../../lib/utils.js';
 import {
   Dialog,
@@ -51,9 +51,7 @@ export function BackendOverviewTab({
   backend: SharedBackendDto;
   onConflict: (conflict: SharedBackendFsidConflict) => void;
 }) {
-  const canManage = useAuthStore(
-    (state) => state.user?.capabilities.includes(Capability.ManageSharedBackends) ?? false,
-  );
+  const canManage = useHasRole(Role.Admin);
   const [editOpen, setEditOpen] = useState(false);
   const available = sharedBackendAvailableBytes(backend);
   return (
@@ -103,9 +101,7 @@ export function BackendExecutorsTab({
 }) {
   const id = backend.id;
   const executors = backend.executors ?? [];
-  const canManage = useAuthStore(
-    (state) => state.user?.capabilities.includes(Capability.ManageSharedBackends) ?? false,
-  );
+  const canManage = useHasRole(Role.Admin);
   const invalidate = useInvalidateBackend(id);
   const patchExecutor = useMutation({
     mutationFn: ({ executor, registered }: { executor: SharedBackendExecutorDto; registered: boolean }) =>
@@ -216,9 +212,7 @@ export function BackendExecutorsTab({
 }
 
 export function BackendVolumesTab({ backendId }: { backendId: string }) {
-  const canManageVolumes = useAuthStore(
-    (state) => state.user?.capabilities.includes(Capability.ManageSharedVolumes) ?? false,
-  );
+  const canManageVolumes = useHasRole(Role.Admin);
   const [inspectTarget, setInspectTarget] = useState<SharedVolumeDto | null>(null);
   const volumesQuery = useQuery({
     queryKey: queryKeys.sharedVolumes.admin,

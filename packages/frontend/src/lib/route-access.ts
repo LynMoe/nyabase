@@ -1,37 +1,30 @@
-import { ADMIN_INTENT_CAPABILITIES, Capability } from '@nyabase/common';
-import { HTTP_PROXY_STATUS_CAPABILITIES, SSH_PROXY_STATUS_CAPABILITIES } from './proxy-access.js';
+import { Role, roleAtLeast } from '@nyabase/common';
 
 /**
- * Who may open each admin surface: any one of the listed capabilities.
+ * Who may open each admin surface: the lowest role that may (roles are nested,
+ * so every higher role may too).
  *
  * This is the single source for both the sidebar and the route guards, so a
  * page is never reachable but hidden (or listed but denied).
  */
-export type AccessRule = readonly Capability[];
+export type AccessRule = Role;
 
 export const ACCESS = {
-  servers: [Capability.ManageServers],
-  ipPools: [Capability.ManageIpPools],
-  sharedBackends: [Capability.ManageSharedBackends],
-  images: [Capability.ManageImages],
-  manageContainers: [Capability.ManageContainersAny],
-  ops: ADMIN_INTENT_CAPABILITIES,
-  sshProxy: SSH_PROXY_STATUS_CAPABILITIES,
-  httpProxyOps: HTTP_PROXY_STATUS_CAPABILITIES,
-  adminUsage: [Capability.ViewMetricsAll],
-  users: [Capability.ManageUsers, Capability.ManageGrants],
-  groups: [Capability.ManageGroups, Capability.ManageGrants],
-  audit: [Capability.ViewAudit],
-  systemSettings: [Capability.ManageSystemSettings],
+  servers: Role.Operator,
+  ipPools: Role.Admin,
+  sharedBackends: Role.Admin,
+  images: Role.Operator,
+  manageContainers: Role.Operator,
+  ops: Role.Operator,
+  sshProxy: Role.Operator,
+  httpProxyOps: Role.Operator,
+  adminUsage: Role.Operator,
+  users: Role.Operator,
+  groups: Role.Operator,
+  audit: Role.Operator,
+  systemSettings: Role.Operator,
 } as const satisfies Record<string, AccessRule>;
 
-export function canAccess(
-  capabilities: readonly string[] | ReadonlySet<string> | undefined,
-  rule: AccessRule,
-): boolean {
-  if (!capabilities) return false;
-  const has = (capability: Capability) => (
-    'has' in capabilities ? capabilities.has(capability) : capabilities.includes(capability)
-  );
-  return rule.some(has);
+export function canAccess(role: Role | undefined, rule: AccessRule): boolean {
+  return role !== undefined && roleAtLeast(role, rule);
 }
