@@ -3,6 +3,7 @@ import { Loader2, RotateCw, Terminal as TerminalIcon } from 'lucide-react';
 import type { IDisposable } from '@xterm/xterm';
 import { zConsoleToBrowser, type ContainerDto, type ExecSessionResponse, type ListScope } from '@nyabase/common';
 import { api } from '../../lib/api.js';
+import { consoleCloseMessage, consoleErrorMessage } from '../../lib/console-errors.js';
 import { scopedPath } from '../../lib/scoped-paths.js';
 import { useAuthStore } from '../../store/auth.js';
 import { Button } from '../ui/button.js';
@@ -94,7 +95,7 @@ export function ContainerConsole({ container, scope }: { container: ContainerDto
             }
             if (message.type === 'error') {
               setStatus('error');
-              setError(message.message || '控制台错误。');
+              setError(consoleErrorMessage(message.code, message.message));
               return;
             }
             if (message.type === 'data' && message.data) terminal.write(message.data);
@@ -106,8 +107,11 @@ export function ContainerConsole({ container, scope }: { container: ContainerDto
             terminal.write(String(event.data));
           }
         });
-        socket.addEventListener('close', () => {
-          if (!cancelled) setStatus((current) => (current === 'error' ? current : 'closed'));
+        socket.addEventListener('close', (event) => {
+          if (cancelled) return;
+          const closeMessage = consoleCloseMessage(event.code);
+          if (closeMessage) setError(closeMessage);
+          setStatus((current) => (closeMessage || current === 'error' ? 'error' : 'closed'));
         });
         socket.addEventListener('error', () => { if (!cancelled) { setStatus('error'); setError('控制台连接失败。'); } });
         disposablesRef.current.push(
