@@ -311,7 +311,7 @@ enforced at start-up):
 | `NYABASE_HTTP_MAX_CONNECTIONS_PER_IPV6_48` | HTTP | `256` (1–65536), all `/64`s of one IPv6 `/48` together |
 | `NYABASE_HTTP_MAX_PENDING_CONNECTIONS` | HTTP | `1024` (1–`NYABASE_HTTP_MAX_CONNECTIONS`), in TLS handshake or before a full request head |
 | `NYABASE_HTTP_MAX_CONNECTIONS_PER_CONTAINER` | HTTP | `512` (1–`NYABASE_HTTP_MAX_CONNECTIONS`), per upstream container, all its hostnames together, WebSockets included; over it the client gets a 503 |
-| `NYABASE_HTTP_MAX_CONNECTIONS_PER_IP_PER_CONTAINER` | HTTP | `32` (1–the smaller of the per-IP and per-container caps), one IPv4 address / IPv6 `/64` to one container; over it that client gets a 503 |
+| `NYABASE_HTTP_MAX_CONNECTIONS_PER_IP_PER_CONTAINER` | HTTP | the smaller of the per-IP and per-container caps (`64`), also its maximum (1–that value); one IPv4 address / IPv6 `/64` to one container; over it that client gets a 503. Lower it only to keep a few clients from filling one site |
 | `NYABASE_HTTP_MAX_CONNECTIONS_PER_OWNER` | HTTP | `1024` (the per-container cap–`NYABASE_HTTP_MAX_CONNECTIONS`), all of one user's containers together; over it the client gets a 503 |
 | `NYABASE_HTTP_BODY_DEADLINE_MS` | HTTP | `30000` (1000–3600000), whole request body |
 | `NYABASE_HTTP_IDLE_TIMEOUT_MS` | HTTP | `120000` (1000–86400000), ordinary request with no bytes either way |
@@ -462,9 +462,11 @@ only `NYABASE_HTTP_UPGRADED_IDLE_MS`. Each upstream container may hold at most
 `NYABASE_HTTP_MAX_CONNECTIONS_PER_CONTAINER` connections at once across all its
 hostnames, so one container cannot take the whole connection pool; one client
 (IPv4 address / IPv6 `/64`) may hold at most
-`NYABASE_HTTP_MAX_CONNECTIONS_PER_IP_PER_CONTAINER` of them, so a few clients
-dripping request bodies or holding WebSockets cannot lock a site's other
-visitors out; and all of one user's containers together may hold at most
+`NYABASE_HTTP_MAX_CONNECTIONS_PER_IP_PER_CONTAINER` of them, by default its
+whole per-IP total, so a team behind one NAT using a WebSocket-heavy app
+(code-server, Jupyter, Grafana) is limited by nothing tighter than the per-IP
+cap (lower it to keep a few clients dripping request bodies or holding
+WebSockets from locking a site's other visitors out); and all of one user's containers together may hold at most
 `NYABASE_HTTP_MAX_CONNECTIONS_PER_OWNER`, so one tenant with many containers
 cannot take the pool either. Unlike the listener limits, which close
 silently, going over any of these is answered with a 503. A full container or

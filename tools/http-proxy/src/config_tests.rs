@@ -22,12 +22,9 @@ fn http_limits_and_status_interval_are_hard_bounded() {
         assert!(DEFAULT_CONTROL_HOLD_MS <= MAX_CONTROL_HOLD_MS);
         // One container must not be able to take the whole pool.
         assert!(DEFAULT_MAX_CONNECTIONS_PER_CONTAINER < DEFAULT_MAX_CONNECTIONS);
-        // Nor a few clients one container, nor one owner the pool.
-        assert!(
-            DEFAULT_MAX_CONNECTIONS_PER_IP_PER_CONTAINER * 16
-                <= DEFAULT_MAX_CONNECTIONS_PER_CONTAINER
-        );
-        assert!(DEFAULT_MAX_CONNECTIONS_PER_IP_PER_CONTAINER <= DEFAULT_MAX_CONNECTIONS_PER_IP);
+        // Nor one client one container (the per-client-per-container cap
+        // defaults to the per-IP total), nor one owner the pool.
+        assert!(DEFAULT_MAX_CONNECTIONS_PER_IP * 8 <= DEFAULT_MAX_CONNECTIONS_PER_CONTAINER);
         assert!(DEFAULT_MAX_CONNECTIONS_PER_OWNER >= DEFAULT_MAX_CONNECTIONS_PER_CONTAINER);
         assert!(DEFAULT_MAX_CONNECTIONS_PER_OWNER * 4 <= DEFAULT_MAX_CONNECTIONS);
         assert!(DEFAULT_RESPONSE_LIFETIME_MS >= MIN_RESPONSE_LIFETIME_MS);

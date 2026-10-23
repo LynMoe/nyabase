@@ -54,13 +54,6 @@ pub(crate) const DEFAULT_MAX_CONNECTIONS_PER_IPV6_48: usize = 256;
 /// every slot with long-lived tunnels or slow responses.
 pub(crate) const DEFAULT_MAX_CONNECTIONS_PER_CONTAINER: usize = 512;
 
-/// Concurrent connections from one client (IPv4 address / IPv6 /64) to one
-/// container: a sixteenth of the per-container cap, so a few clients
-/// dripping bodies or holding WebSocket upgrades cannot fill a container and
-/// lock its other visitors out. Ample for one browser (each connection
-/// carries one request).
-pub(crate) const DEFAULT_MAX_CONNECTIONS_PER_IP_PER_CONTAINER: usize = 32;
-
 /// Concurrent connections to all of one owner's containers together, a
 /// quarter of the default pool, so one tenant with many containers cannot
 /// hold every slot.
@@ -206,12 +199,17 @@ impl Config {
             1,
             max_connections,
         )?;
+        // One client (IPv4 address / IPv6 /64) to one container. By default
+        // no tighter than the per-IP total, so a team behind one NAT keeps
+        // its whole per-IP budget for one WebSocket-heavy app (code-server,
+        // Jupyter, Grafana) and only the per-container and per-owner caps
+        // share a site between clients; lowering it is an operator's choice.
         let per_ip_per_container_cap = max_connections_per_ip.min(max_connections_per_container);
         let max_connections_per_ip_per_container = validate_limit(
             "NYABASE_HTTP_MAX_CONNECTIONS_PER_IP_PER_CONTAINER",
             env_usize(
                 "NYABASE_HTTP_MAX_CONNECTIONS_PER_IP_PER_CONTAINER",
-                DEFAULT_MAX_CONNECTIONS_PER_IP_PER_CONTAINER.min(per_ip_per_container_cap),
+                per_ip_per_container_cap,
             )?,
             1,
             per_ip_per_container_cap,

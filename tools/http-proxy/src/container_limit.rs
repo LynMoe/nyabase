@@ -10,9 +10,10 @@
 //! - per container, so one site cannot take the whole pool; keying on the
 //!   container rather than the hostname means extra hostnames bound to one
 //!   container share its cap;
-//! - per client (IPv4 address / IPv6 /64) per container, so a handful of
-//!   clients dripping request bodies or holding WebSocket upgrades cannot
-//!   fill a victim container's slots and lock every other visitor out;
+//! - per client (IPv4 address / IPv6 /64) per container, for operators who
+//!   want a handful of clients unable to fill a victim container's slots
+//!   with dripped request bodies or WebSocket upgrades; it defaults to the
+//!   per-IP total, so out of the box it is no tighter than that;
 //! - per owner, all of one user's containers together, so one tenant with
 //!   many containers cannot take the whole pool either.
 
