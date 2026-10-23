@@ -202,6 +202,7 @@ function createBootstrapContext(
     config as never,
     audit as never,
     new MonotonicClock(),
+    new SessionRevocationService(),
   );
   const users = new UsersService(
     database,

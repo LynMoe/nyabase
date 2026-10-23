@@ -88,6 +88,12 @@ Vite 通过 alias 将 `@nyabase/common` 指向 `src/index.ts`，但 `index.ts` �
   （超出 429 `AUTH_RATE_LIMITED` + `Retry-After`，保留 cookie；前端在锁外按 Retry-After 退避、最多 3 次，之后只让该请求失败 / 冷加载显示「会话刷新繁忙」，
   不自动登出、不进入「无法验证会话」，但该页与「无法验证会话」一样提供「退出登录」按钮），所以访问令牌有效期 ≤ 60 分钟时，一个有效期（+2 分钟）内退役的 token 必然能被识别为重放；
   更长的有效期窗口仍封顶 62 分钟（否则 24h 有效期下日常使用就会被限流数小时），超出部分的重放识别只是尽力而为；更老的只是无效。登出接受当前或任一保留的退役 token。
+- access JWT 带 `sid`（签发它的 refresh 会话 id，`iam.refresh_tokens.id`），没有 `sid` 的 token 一律 401。容器控制台（`/ws/console`）绑定到授权它的浏览器会话：
+  登出 / refresh 重放删掉该会话后 `SessionRevocationService.endSession` 立即关闭它（4401，禁用 / 改角色 / 改密等 `revoke(userId)` 关闭该用户全部控制台）；
+  控制台的授权只到 min(当前 access token 到期, 会话空闲到期, 登录 + 绝对上限)（`AuthService.browserSessionDeadline`，复核会话行），
+  到期前后端发 `reauthenticate`，前端用**同一会话**的新 access token 再发 `auth`（`freshAccessToken`，必要时强制轮换），复核通过才顺延；
+  没有新 token 到期即关（4408），换了用户 / 会话或会话已不存在立即关（4401）。其他方式结束的会话（超过 16 个被挤掉、过期）最迟在当前 access token 到期时关闭。
+  控制台先按会话登记再读会话行，所以与并发登出不会互相错过。
 
 ## 后端结构规则（`packages/backend/src`）
 

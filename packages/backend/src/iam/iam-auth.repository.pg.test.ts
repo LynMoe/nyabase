@@ -251,9 +251,30 @@ describePg('IamAuthRepository bounded ancestors', () => {
         .resolves.toBeNull();
       const onDeleted = vi.fn(async () => undefined);
       await expect(repository.deleteRefreshSessionByCurrentOrRetiredHash(hex('1'), onDeleted))
-        .resolves.toBe(userId);
+        .resolves.toEqual({ userId, sessionId });
       expect(onDeleted).toHaveBeenCalledWith(expect.anything(), userId);
       expect(await sessionRows(database, sessionId)).toEqual({ token: undefined, ancestors: [] });
+    });
+  });
+
+  it('finds a live session only for its owner and until it idles out or is deleted', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const { repository, userId, sessionId } = await sessionWithToken(database, hex('1'));
+      const live = await repository.findLiveRefreshSession(userId, sessionId);
+      expect(live?.expiresAt.getTime()).toBeGreaterThan(Date.now() + 6 * DAY);
+      expect(live?.createdAt).toBeInstanceOf(Date);
+      await expect(repository.findLiveRefreshSession(randomUUID(), sessionId)).resolves.toBeNull();
+      await expect(repository.findLiveRefreshSession(userId, randomUUID())).resolves.toBeNull();
+
+      await database.updateTable('iam.refresh_tokens')
+        .set({ expires_at: new Date(Date.now() - 1_000) })
+        .where('id', '=', sessionId)
+        .execute();
+      await expect(repository.findLiveRefreshSession(userId, sessionId)).resolves.toBeNull();
+
+      const other = await sessionWithToken(database, hex('2'));
+      await repository.deleteRefreshSessionByCurrentOrRetiredHash(hex('2'));
+      await expect(repository.findLiveRefreshSession(other.userId, other.sessionId)).resolves.toBeNull();
     });
   });
 });

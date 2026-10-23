@@ -1,4 +1,5 @@
 import { HttpStatus, UnauthorizedException } from '@nestjs/common';
+import { JwtService } from '@nestjs/jwt';
 import { randomUUID } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
 import { AuditAction, UserStatus } from '@nyabase/common';
@@ -16,6 +17,7 @@ import {
   RefreshThrottledException,
 } from './auth.service.js';
 import { InMemoryAuthPersistenceTestAdapter } from './in-memory-auth-persistence.test-helper.js';
+import { SessionRevocationService } from './session-revocation.service.js';
 import {
   clientAddressBucket,
   LOGIN_ATTEMPT_WINDOW_MS,
@@ -393,6 +395,85 @@ describe('AuthService refresh sessions', () => {
   });
 });
 
+describe('AuthService browser-session binding', () => {
+  const secret = 'test-jwt-secret-test-jwt-secret-32ch';
+
+  async function boundSession() {
+    const persistence = new InMemoryAuthPersistenceTestAdapter();
+    const revocations = new SessionRevocationService();
+    const ended: Array<[string, string | undefined]> = [];
+    revocations.subscribe((userId, sessionId) => ended.push([userId, sessionId]));
+    const service = createAuth({
+      persistence,
+      revocations,
+      jwtService: new JwtService({ secret, signOptions: { expiresIn: '15m' } }),
+    });
+    const user = persistence.seedUser({ id: randomUUID(), username: 'alice' });
+    const login = await service.login(user);
+    const sessionId = persistence.refreshRows()[0]!.id;
+    return { service, persistence, revocations, ended, user, login, sessionId };
+  }
+
+  it('names the refresh session in every access token it issues', async () => {
+    const { service, login, sessionId, user } = await boundSession();
+    const first = await service.validateAccessToken(login.accessToken);
+    expect(first).toMatchObject({ user: { id: user.id }, sessionId });
+    expect(first.expiresAt.getTime()).toBeGreaterThan(Date.now() + 14 * 60_000);
+    const rotated = await service.refreshTokens(login.refreshToken, requestId('a'));
+    await expect(service.validateAccessToken(rotated.accessToken))
+      .resolves.toMatchObject({ sessionId });
+  });
+
+  it('rejects an access token that names no browser session', async () => {
+    const { service, user } = await boundSession();
+    await expect(service.validateJwtPayload({ sub: user.id, username: 'alice', ver: 0 } as never))
+      .rejects.toBeInstanceOf(UnauthorizedException);
+    const unbound = new JwtService({ secret }).sign({ sub: user.id, username: 'alice', ver: 0 });
+    await expect(service.validateAccessToken(unbound)).rejects.toBeInstanceOf(UnauthorizedException);
+  });
+
+  it('bounds a long-lived connection by the token and the session, and ends it on logout', async () => {
+    const { service, persistence, ended, user, login, sessionId } = await boundSession();
+    const credential = await service.validateAccessToken(login.accessToken);
+    await expect(service.browserSessionDeadline(credential)).resolves.toEqual(credential.expiresAt);
+
+    // An idle expiry before the token's own expiry wins.
+    const idleEnd = new Date(Date.now() + 60_000);
+    persistence.updateRefreshByHash(persistence.refreshRows()[0]!.hash, { expiresAt: idleEnd });
+    await expect(service.browserSessionDeadline(credential)).resolves.toEqual(idleEnd);
+    // So does the absolute end (login + 30 days).
+    persistence.updateRefreshByHash(persistence.refreshRows()[0]!.hash, {
+      expiresAt: new Date(Date.now() + DAY),
+      createdAt: new Date(Date.now() - 30 * DAY + 30_000),
+    });
+    const absolute = await service.browserSessionDeadline(credential);
+    expect(absolute!.getTime()).toBeLessThanOrEqual(Date.now() + 30_000);
+
+    await expect(service.logout(login.refreshToken)).resolves.toBe(user.id);
+    expect(ended).toEqual([[user.id, sessionId]]);
+    await expect(service.browserSessionDeadline(credential)).resolves.toBeNull();
+  });
+
+  it('refuses a token of another session of the same user', async () => {
+    const { service, user, login } = await boundSession();
+    const other = await service.login(user);
+    const credential = await service.validateAccessToken(other.accessToken);
+    await service.logout(login.refreshToken);
+    await expect(service.browserSessionDeadline(credential)).resolves.not.toBeNull();
+    await expect(service.browserSessionDeadline({ ...credential, sessionId: randomUUID() }))
+      .resolves.toBeNull();
+  });
+
+  it('ends the session for long-lived connections when a refresh token is reused', async () => {
+    const { service, ended, user, login, sessionId } = await boundSession();
+    const rotated = await service.refreshTokens(login.refreshToken, requestId('a'));
+    await service.refreshTokens(rotated.refreshToken, requestId('b'));
+    await expect(service.refreshTokens(login.refreshToken, requestId('c')))
+      .rejects.toBeInstanceOf(UnauthorizedException);
+    expect(ended).toEqual([[user.id, sessionId]]);
+  });
+});
+
 function consume(service: AuthService, ip: string, username: string) {
   return (service as unknown as {
     consumeLoginAttempt: (bucket: string, username: string) => unknown;
@@ -416,13 +497,16 @@ function createAuth(options: {
   monotonicNow?: () => number;
   audit?: ReturnType<typeof audit>;
   jwtExpiresIn?: string;
+  revocations?: SessionRevocationService;
+  jwtService?: JwtService;
 } = {}) {
   return new AuthService(
     (options.persistence ?? new InMemoryAuthPersistenceTestAdapter()) as never,
-    jwt(),
+    options.jwtService ?? jwt(),
     config(options.jwtExpiresIn),
     (options.audit ?? audit()) as never,
     { now: options.monotonicNow ?? (() => performance.now()) } as never,
+    options.revocations ?? new SessionRevocationService(),
   );
 }
 

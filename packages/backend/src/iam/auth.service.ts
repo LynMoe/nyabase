@@ -23,6 +23,7 @@ import { type AuthUser, isPgIamTransaction } from './auth-persistence.js';
 import { IamAuthRepository } from './iam-auth.repository.js';
 import { MonotonicClock } from '../platform/monotonic-clock.js';
 import { AuditService } from './audit.service.js';
+import { SessionRevocationService } from './session-revocation.service.js';
 import {
   clientAddressBucket,
   LoginAttemptLimiter,
@@ -36,9 +37,23 @@ export interface JwtPayload {
   username: string;
   /** Monotonic browser-session generation. */
   ver: number;
+  /** The refresh session (`iam.refresh_tokens.id`) this token was issued from. */
+  sid: string;
   /** Added by JwtService; direct WebSocket consumers must enforce it too. */
   exp?: number;
 }
+
+/**
+ * A verified access token: the user (re-read now), the browser session it was
+ * issued from and when the token itself expires.
+ */
+export interface AccessCredential {
+  user: AuthUser;
+  sessionId: string;
+  expiresAt: Date;
+}
+
+const SESSION_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export const MAX_REFRESH_SESSIONS_PER_USER = 16;
 /**
@@ -162,6 +177,7 @@ export class AuthService {
     private config: NyabaseConfigService,
     private readonly audit: AuditService,
     private readonly clock: MonotonicClock,
+    private readonly sessionRevocations: SessionRevocationService,
   ) {
     this.loginAttempts = new LoginAttemptLimiter(() => this.clock.now());
   }
@@ -212,7 +228,7 @@ export class AuthService {
     if (!issued) throw new UnauthorizedException('Invalid credentials');
     const result = {
       user: issued.user,
-      accessToken: this.signAccessToken(issued.user),
+      accessToken: this.signAccessToken(issued.user, issued.sessionId),
       refreshToken: issued.refreshToken,
     };
     // The limiter reserves before the expensive credential path. A complete
@@ -228,7 +244,7 @@ export class AuthService {
     const issued = await this.issueRefreshSession(user.id);
     if (!issued) throw new UnauthorizedException('User not found or disabled');
     return {
-      accessToken: this.signAccessToken(issued.user),
+      accessToken: this.signAccessToken(issued.user, issued.sessionId),
       refreshToken: issued.refreshToken,
     };
   }
@@ -269,6 +285,7 @@ export class AuthService {
     // Not a 401: the session is intact and the cookie must be kept.
     if (result.kind === 'throttled') throw new RefreshThrottledException(result.retryAfterMs);
     if (result.kind === 'reused') {
+      this.sessionRevocations.endSession(result.userId, result.sessionId);
       this.logger.warn(
         `Refresh token reuse: revoked session ${result.sessionId} of user ${result.userId}`,
       );
@@ -279,7 +296,7 @@ export class AuthService {
       successor = this.deriveRotatedRefreshToken(result.sessionId, hash, requestId);
     }
     return {
-      accessToken: this.signAccessToken(result.user),
+      accessToken: this.signAccessToken(result.user, result.sessionId),
       refreshToken: successor,
       user: result.user,
       // What is left of this session; never past its absolute lifetime.
@@ -297,10 +314,11 @@ export class AuthService {
    * Possession of a refresh secret is the authority to terminate that session.
    * A retained ancestor resolves the same row, so a logout from a tab whose
    * cookie read predates later rotations still deletes the current token.
+   * Connections authorized by the session (consoles) close once it committed.
    */
   async logout(rawRefreshToken: string): Promise<string | null> {
     const hash = this.tokenHash(rawRefreshToken);
-    return this.persistence.deleteRefreshSessionByCurrentOrRetiredHash(
+    const ended = await this.persistence.deleteRefreshSessionByCurrentOrRetiredHash(
       hash,
       (transaction, userId) => this.audit.append(
         transaction,
@@ -310,6 +328,9 @@ export class AuthService {
         'user',
       ),
     );
+    if (!ended) return null;
+    this.sessionRevocations.endSession(ended.userId, ended.sessionId);
+    return ended.userId;
   }
 
   async validateJwtPayload(payload: JwtPayload): Promise<AuthUser> {
@@ -318,6 +339,8 @@ export class AuthService {
       || payload.sub.length === 0
       || !Number.isInteger(payload.ver)
       || payload.ver < 0
+      || typeof payload.sid !== 'string'
+      || !SESSION_ID_PATTERN.test(payload.sid)
     ) {
       throw new UnauthorizedException();
     }
@@ -332,7 +355,8 @@ export class AuthService {
     return user;
   }
 
-  async validateAccessToken(token: string): Promise<AuthUser> {
+  /** For connections that authenticate outside the HTTP guard (the console). */
+  async validateAccessToken(token: string): Promise<AccessCredential> {
     if (!/^[A-Za-z0-9._-]{20,4096}$/.test(token)) {
       throw new UnauthorizedException('Invalid access token');
     }
@@ -342,7 +366,30 @@ export class AuthService {
     } catch {
       throw new UnauthorizedException('Invalid access token');
     }
-    return this.validateJwtPayload(payload);
+    if (!Number.isSafeInteger(payload.exp)) throw new UnauthorizedException('Invalid access token');
+    const user = await this.validateJwtPayload(payload);
+    return { user, sessionId: payload.sid, expiresAt: new Date(payload.exp! * 1_000) };
+  }
+
+  /**
+   * Until when `credential` may keep authorizing a long-lived connection: the
+   * first of the token's own expiry, the browser session's idle expiry and its
+   * absolute end. Null when the session is gone (logged out, reused, evicted,
+   * expired) or belongs to someone else. A connection must present a fresh
+   * access token, re-checked here, before this moment to keep going.
+   */
+  async browserSessionDeadline(credential: AccessCredential): Promise<Date | null> {
+    const session = await this.persistence.findLiveRefreshSession(
+      credential.user.id,
+      credential.sessionId,
+    );
+    if (!session) return null;
+    const deadline = Math.min(
+      credential.expiresAt.getTime(),
+      session.expiresAt.getTime(),
+      session.createdAt.getTime() + this.sessionLifetimeMs().absoluteMs,
+    );
+    return deadline > Date.now() ? new Date(deadline) : null;
   }
 
   async hashPassword(password: string): Promise<string> {
@@ -388,10 +435,11 @@ export class AuthService {
       passwordHash: string;
       authVersion: number;
     },
-  ): Promise<{ user: AuthUser; refreshToken: string } | null> {
+  ): Promise<{ user: AuthUser; refreshToken: string; sessionId: string } | null> {
     const rawRefresh = randomBytes(48).toString('hex');
+    const sessionId = uuidv4();
     const user = await this.persistence.issueRefreshSession(userId, {
-      id: uuidv4(),
+      id: sessionId,
       hash: this.tokenHash(rawRefresh),
       expiresInMs: this.refreshCookieMaxAgeMs(),
     }, MAX_REFRESH_SESSIONS_PER_USER, credentialSnapshot, (transaction, issuedUser) =>
@@ -402,14 +450,15 @@ export class AuthService {
         issuedUser.id,
         'user',
       ));
-    return user ? { user, refreshToken: rawRefresh } : null;
+    return user ? { user, refreshToken: rawRefresh, sessionId } : null;
   }
 
-  private signAccessToken(user: AuthUser): string {
+  private signAccessToken(user: AuthUser, sessionId: string): string {
     const payload: JwtPayload = {
       sub: user.id,
       username: user.username,
       ver: user.authVersion,
+      sid: sessionId,
     };
     return this.jwtService.sign(payload);
   }

@@ -4,10 +4,12 @@ import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.
 import type {
   AuthPersistence,
   AuthUser,
+  LiveRefreshSession,
   LoginCredentialSnapshot,
   NewRefreshSession,
   RefreshRotationInput,
   RefreshRotationResult,
+  RefreshSessionRef,
 } from './auth-persistence.js';
 
 interface RefreshSession {
@@ -187,15 +189,21 @@ export class InMemoryAuthPersistenceTestAdapter implements AuthPersistence {
     return { kind: 'reused', ...reuse };
   }
 
-  deleteRefreshSessionByCurrentOrRetiredHash(hash: string): Promise<string | null> {
+  deleteRefreshSessionByCurrentOrRetiredHash(hash: string): Promise<RefreshSessionRef | null> {
     return this.serialized(async () => {
       const row = [...this.refresh.values()].find(
         (item) => item.hash === hash || item.ancestors.has(hash),
       );
       if (!row) return null;
       this.refresh.delete(row.id);
-      return row.userId;
+      return { userId: row.userId, sessionId: row.id };
     });
+  }
+
+  async findLiveRefreshSession(userId: string, sessionId: string): Promise<LiveRefreshSession | null> {
+    const row = this.refresh.get(sessionId);
+    if (!row || row.userId !== userId || row.revoked || row.expiresAt <= this.now()) return null;
+    return { expiresAt: row.expiresAt, createdAt: row.createdAt };
   }
 
   async revokeBrowserSessions(

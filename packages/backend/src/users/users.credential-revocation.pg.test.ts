@@ -96,14 +96,15 @@ async function setup(database: Kysely<NyabaseDatabase>) {
       return values[key] as T;
     },
   };
+  const sessions = new SessionRevocationService();
   const auth = new AuthService(
     new IamAuthRepository(database, transactions),
     new JwtService({ secret: config.get<string>('auth.jwtSecret'), signOptions: { expiresIn: '15m' } }),
     config as never,
     audit as never,
     new MonotonicClock(),
+    sessions,
   );
-  const sessions = new SessionRevocationService();
   const revoked: string[] = [];
   sessions.subscribe((userId) => revoked.push(userId));
   const convergence = { reconcileUser: vi.fn().mockResolvedValue(undefined) };

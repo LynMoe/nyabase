@@ -107,6 +107,12 @@ describe('lane D product UI copy', () => {
     expect(src).not.toMatch(/setError\(message\.message/);
   });
 
+  it('console answers reauthenticate with a fresh access token of the same session', () => {
+    const src = read('components/containers/container-console.tsx');
+    expect(src).toMatch(/message\.type === 'reauthenticate'/);
+    expect(src).toMatch(/freshAccessToken\(sentToken\)/);
+  });
+
   it('profile page offers no API tokens: the browser session is the only credential', () => {
     const src = read('pages/profile-page.tsx');
     expect(src).not.toMatch(/API 令牌|ApiToken|\/auth\/tokens/);

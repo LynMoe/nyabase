@@ -66,6 +66,18 @@ export interface RefreshTokenReuse {
   sessionId: string;
 }
 
+/** A browser (refresh) session, identified by its stable row id. */
+export interface RefreshSessionRef {
+  userId: string;
+  sessionId: string;
+}
+
+/** A live browser session: `expiresAt` is the idle expiry, `createdAt` the login time. */
+export interface LiveRefreshSession {
+  expiresAt: Date;
+  createdAt: Date;
+}
+
 export type RefreshRotationResult =
   | { kind: 'invalid' }
   /** The just-retired token lost a concurrent rotation; the session is intact. */
@@ -94,7 +106,9 @@ export interface AuthPersistence {
   deleteRefreshSessionByCurrentOrRetiredHash(
     hash: string,
     onDeleted?: AuthTransactionHook<string>,
-  ): Promise<string | null>;
+  ): Promise<RefreshSessionRef | null>;
+  /** The user's session `sessionId` if it exists, is not revoked and has not idled out. */
+  findLiveRefreshSession(userId: string, sessionId: string): Promise<LiveRefreshSession | null>;
   revokeBrowserSessions(
     transaction: Transaction<NyabaseDatabase>,
     userId: string,

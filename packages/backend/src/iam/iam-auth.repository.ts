@@ -9,10 +9,12 @@ import type {
   AuthPersistence,
   AuthTransactionHook,
   AuthUser,
+  LiveRefreshSession,
   LoginCredentialSnapshot,
   NewRefreshSession,
   RefreshRotationInput,
   RefreshRotationResult,
+  RefreshSessionRef,
 } from './auth-persistence.js';
 
 type IamTransaction = Transaction<NyabaseDatabase>;
@@ -204,7 +206,7 @@ export class IamAuthRepository implements AuthPersistence {
   deleteRefreshSessionByCurrentOrRetiredHash(
     hash: string,
     onDeleted?: AuthTransactionHook<string>,
-  ): Promise<string | null> {
+  ): Promise<RefreshSessionRef | null> {
     return this.transactions.run(async (transaction) => {
       const selected = await transaction
         .selectFrom('iam.refresh_tokens')
@@ -225,8 +227,23 @@ export class IamAuthRepository implements AuthPersistence {
         .executeTakeFirst();
       if (Number(deleted.numDeletedRows) !== 1) return null;
       await onDeleted?.(transaction, selected.user_id);
-      return selected.user_id;
+      return { userId: selected.user_id, sessionId: selected.id };
     });
+  }
+
+  async findLiveRefreshSession(
+    userId: string,
+    sessionId: string,
+  ): Promise<LiveRefreshSession | null> {
+    const row = await this.database
+      .selectFrom('iam.refresh_tokens')
+      .select(['expires_at', 'created_at'])
+      .where('id', '=', sessionId)
+      .where('user_id', '=', userId)
+      .where('revoked', '=', false)
+      .where('expires_at', '>', sql<Date>`clock_timestamp()`)
+      .executeTakeFirst();
+    return row ? { expiresAt: row.expires_at, createdAt: row.created_at } : null;
   }
 
   /**

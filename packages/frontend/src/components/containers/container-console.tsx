@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { Loader2, RotateCw, Terminal as TerminalIcon } from 'lucide-react';
 import type { IDisposable } from '@xterm/xterm';
 import { zConsoleToBrowser, type ContainerDto, type ExecSessionResponse, type ListScope } from '@nyabase/common';
-import { api } from '../../lib/api.js';
+import { api, freshAccessToken } from '../../lib/api.js';
 import { consoleCloseMessage, consoleErrorMessage } from '../../lib/console-errors.js';
 import { scopedPath } from '../../lib/scoped-paths.js';
 import { useAuthStore } from '../../store/auth.js';
@@ -10,6 +10,33 @@ import { Button } from '../ui/button.js';
 import { Badge } from '../ui/badge.js';
 
 type ConsoleStatus = 'idle' | 'connecting' | 'connected' | 'closed' | 'error';
+
+/** xterm is loaded on demand; `open` mounts a fitted terminal. */
+async function loadTerminal() {
+  const [{ Terminal }, { FitAddon }, { WebLinksAddon }] = await Promise.all([
+    import('@xterm/xterm'),
+    import('@xterm/addon-fit'),
+    import('@xterm/addon-web-links'),
+    import('@xterm/xterm/css/xterm.css'),
+  ]);
+  return {
+    open(mount: HTMLElement) {
+      const terminal = new Terminal({
+        cursorBlink: true,
+        convertEol: true,
+        fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
+        fontSize: 13,
+        theme: { background: '#09090b', foreground: '#f4f4f5', cursor: '#f4f4f5' },
+      });
+      const fit = new FitAddon();
+      terminal.loadAddon(fit);
+      terminal.loadAddon(new WebLinksAddon());
+      terminal.open(mount);
+      fit.fit();
+      return { terminal, fit };
+    },
+  };
+}
 
 export function ContainerConsole({ container, scope }: { container: ContainerDto; scope: ListScope }) {
   const mountRef = useRef<HTMLDivElement | null>(null);
@@ -47,25 +74,9 @@ export function ContainerConsole({ container, scope }: { container: ContainerDto
         return;
       }
       try {
-        const [{ Terminal }, { FitAddon }, { WebLinksAddon }] = await Promise.all([
-          import('@xterm/xterm'),
-          import('@xterm/addon-fit'),
-          import('@xterm/addon-web-links'),
-          import('@xterm/xterm/css/xterm.css'),
-        ]);
+        const loaded = await loadTerminal();
         if (cancelled || !mountRef.current) return;
-        const terminal = new Terminal({
-          cursorBlink: true,
-          convertEol: true,
-          fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
-          fontSize: 13,
-          theme: { background: '#09090b', foreground: '#f4f4f5', cursor: '#f4f4f5' },
-        });
-        const fit = new FitAddon();
-        terminal.loadAddon(fit);
-        terminal.loadAddon(new WebLinksAddon());
-        terminal.open(mountRef.current);
-        fit.fit();
+        const { terminal, fit } = loaded.open(mountRef.current);
         terminalRef.current = terminal;
         fitRef.current = fit;
         terminal.writeln('\x1b[90m正在连接控制台...\x1b[0m');
@@ -77,8 +88,18 @@ export function ContainerConsole({ container, scope }: { container: ContainerDto
         if (resolved.protocol !== 'ws:' && resolved.protocol !== 'wss:') throw new Error('控制台地址无效。');
         const socket = new WebSocket(resolved.toString());
         socketRef.current = socket;
+        // The console is bound to this browser session and must be re-authenticated
+        // with a fresh access token before the last one expires.
+        let sentToken: string | null = null;
+        const reauthenticate = async () => {
+          const token = await freshAccessToken(sentToken);
+          if (!token || cancelled || socket.readyState !== WebSocket.OPEN) return;
+          sentToken = token;
+          socket.send(JSON.stringify({ type: 'auth', token }));
+        };
         socket.addEventListener('open', () => {
-          socket.send(JSON.stringify({ type: 'auth', token: useAuthStore.getState().accessToken }));
+          sentToken = useAuthStore.getState().accessToken;
+          socket.send(JSON.stringify({ type: 'auth', token: sentToken }));
         });
         socket.addEventListener('message', (event) => {
           try {
@@ -94,6 +115,10 @@ export function ContainerConsole({ container, scope }: { container: ContainerDto
               }
               setStatus('connected');
               terminal.writeln('\x1b[90m已连接。\x1b[0m');
+              return;
+            }
+            if (message.type === 'reauthenticate') {
+              void reauthenticate();
               return;
             }
             if (message.type === 'error') {

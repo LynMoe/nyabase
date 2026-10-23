@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
 import { SessionRevocationService } from '../iam/session-revocation.service.js';
 import {
+  CONSOLE_CLOSE_AUTH_EXPIRED,
   CONSOLE_CLOSE_BACKPRESSURE,
   CONSOLE_CLOSE_SESSION_REVOKED,
   ConsoleBridgeGateway,
@@ -32,7 +33,10 @@ function harness() {
     sockets: {},
     close: vi.fn(),
   };
-  const users = new Map<string, { id: string; authVersion: number }>();
+  /** Access tokens by value: the user, the browser session and the token expiry. */
+  const tokens = new Map<string, { userId: string; sessionId: string; expiresAt: Date }>();
+  /** Live browser sessions and their idle expiry; absent = logged out. */
+  const browserSessions = new Map<string, Date>();
   const sessions = {
     claim: vi.fn(async (sessionId: string, actorId: string): Promise<ConsoleSession> => ({
       sessionId,
@@ -56,7 +60,18 @@ function harness() {
     openExec: vi.fn(async () => physical),
   };
   const generationAtCreate = new Map<string, number>();
-  const auth = { validateAccessToken: vi.fn(async (token: string) => users.get(token)) };
+  const auth = {
+    validateAccessToken: vi.fn(async (token: string) => {
+      const found = tokens.get(token);
+      if (!found) throw new Error('Invalid access token');
+      return { user: { id: found.userId, authVersion: 0 }, sessionId: found.sessionId, expiresAt: found.expiresAt };
+    }),
+    browserSessionDeadline: vi.fn(async (credential: { sessionId: string; expiresAt: Date }) => {
+      const sessionEnd = browserSessions.get(credential.sessionId);
+      if (!sessionEnd) return null;
+      return new Date(Math.min(sessionEnd.getTime(), credential.expiresAt.getTime()));
+    }),
+  };
   const gateway = new ConsoleBridgeGateway(
     auth as never,
     sessions as never,
@@ -65,17 +80,27 @@ function harness() {
   );
   gateway.onModuleInit();
 
-  async function connect(userId: string) {
-    users.set(`token-${userId}`, { id: userId, authVersion: 0 });
+  function issue(userId: string, sessionId: string, lifetimeMs = 15 * 60_000): string {
+    const token = `token-${randomUUID()}`;
+    tokens.set(token, { userId, sessionId, expiresAt: new Date(Date.now() + lifetimeMs) });
+    if (!browserSessions.has(sessionId)) browserSessions.set(sessionId, new Date(Date.now() + 86_400_000));
+    return token;
+  }
+
+  async function connect(userId: string, options: { sessionId?: string; lifetimeMs?: number } = {}) {
+    const sessionId = options.sessionId ?? `${userId}-session`;
+    const token = issue(userId, sessionId, options.lifetimeMs);
     const socket = new FakeSocket();
     const handled = (gateway as unknown as {
       handle(socket: FakeSocket, request: { url: string }): Promise<void>;
     }).handle(socket, { url: `/ws/console?sessionId=${randomUUID()}` });
-    socket.emit('message', Buffer.from(JSON.stringify({ type: 'auth', token: `token-${userId}` })));
-    return { socket, handled };
+    socket.emit('message', Buffer.from(JSON.stringify({ type: 'auth', token })));
+    return { socket, handled, sessionId };
   }
 
-  return { gateway, revocations, physical, sessions, generationAtCreate, connect };
+  return {
+    gateway, revocations, physical, sessions, generationAtCreate, browserSessions, connect, issue,
+  };
 }
 
 function sentTypes(socket: FakeSocket): string[] {
@@ -112,6 +137,32 @@ describe('console bridge session revocation', () => {
     expect(sessions.release).toHaveBeenCalled();
   });
 
+  it('closes the consoles of a browser session that logged out, and only those', async () => {
+    const { revocations, physical, connect } = harness();
+    const laptop = await connect('alice', { sessionId: 'alice-laptop' });
+    const phone = await connect('alice', { sessionId: 'alice-phone' });
+    await vi.waitFor(() => expect(sentTypes(laptop.socket)).toContain('ready'));
+    await vi.waitFor(() => expect(sentTypes(phone.socket)).toContain('ready'));
+
+    revocations.endSession('alice', 'alice-laptop');
+
+    expect(laptop.socket.close).toHaveBeenCalledWith(CONSOLE_CLOSE_SESSION_REVOKED, 'session revoked');
+    await laptop.handled;
+    expect(physical.close).toHaveBeenCalledTimes(1);
+    expect(phone.socket.close).not.toHaveBeenCalled();
+    phone.socket.close(1000);
+    await phone.handled;
+  });
+
+  it('refuses a console whose browser session already ended', async () => {
+    const { sessions, browserSessions, connect } = harness();
+    const alice = await connect('alice');
+    browserSessions.delete(alice.sessionId);
+    await alice.handled;
+    expect(alice.socket.close).toHaveBeenCalledWith(CONSOLE_CLOSE_SESSION_REVOKED, 'session revoked');
+    expect(sessions.openExec).not.toHaveBeenCalled();
+  });
+
   it('stops listening after module destroy', async () => {
     const { gateway, revocations, connect } = harness();
     const alice = await connect('alice');
@@ -120,6 +171,58 @@ describe('console bridge session revocation', () => {
     revocations.revoke('alice');
     expect(alice.socket.close).not.toHaveBeenCalled();
     alice.socket.close(1000);
+    await alice.handled;
+  });
+});
+
+describe('console bridge re-authentication', () => {
+  it('asks for a fresh token before the credential expires and closes when none arrives', async () => {
+    const { physical, connect } = harness();
+    const alice = await connect('alice', { lifetimeMs: 40 });
+    await vi.waitFor(() => expect(sentTypes(alice.socket)).toContain('reauthenticate'));
+    await vi.waitFor(() => expect(alice.socket.close)
+      .toHaveBeenCalledWith(CONSOLE_CLOSE_AUTH_EXPIRED, 'console credential expired'));
+    await alice.handled;
+    expect(physical.close).toHaveBeenCalled();
+  });
+
+  it('keeps the console open on a fresh token of the same browser session', async () => {
+    const { connect, issue } = harness();
+    const alice = await connect('alice', { lifetimeMs: 60 });
+    await vi.waitFor(() => expect(sentTypes(alice.socket)).toContain('ready'));
+    const fresh = issue('alice', alice.sessionId);
+    alice.socket.emit('message', Buffer.from(JSON.stringify({ type: 'auth', token: fresh })));
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    expect(alice.socket.close).not.toHaveBeenCalled();
+    alice.socket.close(1000);
+    await alice.handled;
+  });
+
+  it('closes on a token of another browser session, another user or an invalid token', async () => {
+    const { connect, issue } = harness();
+    for (const token of [
+      () => issue('alice', 'alice-other-session'),
+      () => issue('bob', 'alice-session'),
+      () => 'token-forged',
+    ]) {
+      const alice = await connect('alice');
+      await vi.waitFor(() => expect(sentTypes(alice.socket)).toContain('ready'));
+      alice.socket.emit('message', Buffer.from(JSON.stringify({ type: 'auth', token: token() })));
+      await vi.waitFor(() => expect(alice.socket.close)
+        .toHaveBeenCalledWith(CONSOLE_CLOSE_SESSION_REVOKED, 'session revoked'));
+      await alice.handled;
+    }
+  });
+
+  it('closes on a fresh token once the browser session is gone', async () => {
+    const { browserSessions, connect, issue } = harness();
+    const alice = await connect('alice');
+    await vi.waitFor(() => expect(sentTypes(alice.socket)).toContain('ready'));
+    const fresh = issue('alice', alice.sessionId);
+    browserSessions.delete(alice.sessionId);
+    alice.socket.emit('message', Buffer.from(JSON.stringify({ type: 'auth', token: fresh })));
+    await vi.waitFor(() => expect(alice.socket.close)
+      .toHaveBeenCalledWith(CONSOLE_CLOSE_SESSION_REVOKED, 'session revoked'));
     await alice.handled;
   });
 });

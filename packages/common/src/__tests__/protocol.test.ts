@@ -12,6 +12,7 @@ import {
   ResourceLifecyclePhase,
   ServerStatus,
   zBrowserToConsole,
+  zConsoleToBrowser,
   zCreateContainerRequest,
   zAttachVolumeRequest,
   isForbiddenContainerMountPath,
@@ -444,6 +445,8 @@ describe('preflight and console contracts', () => {
       token: 'browser-token',
       serverId,
     }).success).toBe(false);
+    expect(zConsoleToBrowser.parse({ type: 'reauthenticate' })).toEqual({ type: 'reauthenticate' });
+    expect(zConsoleToBrowser.safeParse({ type: 'reauthenticate', token: 'x' }).success).toBe(false);
   });
 });
 

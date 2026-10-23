@@ -1,6 +1,8 @@
 import { FailureCode } from '@nyabase/common';
 import { describe, expect, it } from 'vitest';
 import {
+  CONSOLE_AUTH_EXPIRED_MESSAGE,
+  CONSOLE_CLOSE_AUTH_EXPIRED,
   CONSOLE_CLOSE_SESSION_REVOKED,
   CONSOLE_SESSION_REVOKED_MESSAGE,
   consoleCloseMessage,
@@ -28,5 +30,11 @@ describe('console error copy', () => {
     expect(consoleCloseMessage(4401)).toBe(CONSOLE_SESSION_REVOKED_MESSAGE);
     expect(consoleCloseMessage(1000)).toBeNull();
     expect(consoleCloseMessage(1011)).toBeNull();
+  });
+
+  it('treats close code 4408 as an expired console credential', () => {
+    expect(CONSOLE_CLOSE_AUTH_EXPIRED).toBe(4408);
+    expect(consoleCloseMessage(4408)).toBe(CONSOLE_AUTH_EXPIRED_MESSAGE);
+    expect(consoleErrorMessage('CONSOLE_AUTH_EXPIRED', 'expired')).toBe(CONSOLE_AUTH_EXPIRED_MESSAGE);
   });
 });

@@ -8,7 +8,8 @@ import {
 import * as http from 'node:http';
 import { URL } from 'node:url';
 import { WebSocket, WebSocketServer, type RawData } from 'ws';
-import { AuthService } from '../iam/auth.service.js';
+import type { ConsoleToBrowser } from '@nyabase/common';
+import { type AccessCredential, AuthService } from '../iam/auth.service.js';
 import { SessionRevocationService } from '../iam/session-revocation.service.js';
 import { INCUS_CLIENT_FACTORY, type IncusClientFactory } from '../incus/incus-client.factory.js';
 import type { IncusExecWebSocketSession } from '../incus/index.js';
@@ -25,28 +26,54 @@ export const MAX_CONSOLE_BUFFERED_BYTES = 4 * 1024 * 1024;
 /** Close code sent when the browser fell too far behind the console output. */
 export const CONSOLE_CLOSE_BACKPRESSURE = 4413;
 const CLOSE_GRACE_MS = 1_000;
+/**
+ * The browser is asked for a fresh access token this long before the console's
+ * authority runs out (a quarter of what is left, within these bounds).
+ */
+const REAUTH_LEAD_MIN_MS = 5_000;
+const REAUTH_LEAD_MAX_MS = 60_000;
 
 /** Browser-facing text per error code; internal error messages never leave the backend. */
 const CONSOLE_ERROR_MESSAGES: Readonly<Record<string, string>> = {
   CONSOLE_BRIDGE_FAILED: 'The console connection failed',
   CONSOLE_SESSION_INVALID: 'Console session is invalid',
   CONSOLE_SESSION_REVOKED: 'The session was revoked',
+  CONSOLE_AUTH_EXPIRED: 'The console was not re-authenticated before its credential expired',
   CONSOLE_FRAME_INVALID: 'Invalid console frame',
   CONSOLE_OUTPUT_OVERFLOW: 'The console output was not read fast enough; reconnect to continue',
 };
 /**
- * Close code sent when the user's sessions were revoked (disabled, deleted,
- * role changed, password changed or reset) while the console was open.
+ * Close code sent when the browser session that authorized the console ended
+ * (logout, refresh-token reuse) or all of the user's sessions were revoked
+ * (disabled, deleted, role changed, password changed or reset), or a
+ * re-authentication was refused.
  */
 export const CONSOLE_CLOSE_SESSION_REVOKED = 4401;
+/** Close code sent when no fresh access token arrived before the current one expired. */
+export const CONSOLE_CLOSE_AUTH_EXPIRED = 4408;
+
+/**
+ * An open console and the browser session it is bound to. Its authority lasts
+ * until `deadline` (token expiry, session expiry); every fresh access token of
+ * the same session moves it after re-checking the session row.
+ */
+interface ConsoleConnection {
+  readonly socket: WebSocket;
+  readonly userId: string;
+  readonly browserSessionId: string;
+  deadlineTimer: NodeJS.Timeout | null;
+  promptTimer: NodeJS.Timeout | null;
+  /** Re-authentications run one at a time, in arrival order. */
+  reauth: Promise<void>;
+}
 
 @Injectable()
 export class ConsoleBridgeGateway implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(ConsoleBridgeGateway.name);
   private wss: WebSocketServer | null = null;
   private destroyed = false;
-  /** Open (claimed) console sockets by user, closed on revocation. */
-  private readonly openByUser = new Map<string, Set<WebSocket>>();
+  /** Open (claimed) consoles by user, closed on revocation or when their session ends. */
+  private readonly openByUser = new Map<string, Set<ConsoleConnection>>();
   private unsubscribe: (() => void) | null = null;
 
   constructor(
@@ -57,7 +84,9 @@ export class ConsoleBridgeGateway implements OnModuleInit, OnModuleDestroy {
   ) {}
 
   onModuleInit(): void {
-    this.unsubscribe = this.revocations.subscribe((userId) => this.closeForUser(userId));
+    this.unsubscribe = this.revocations.subscribe(
+      (userId, sessionId) => this.closeForSession(userId, sessionId),
+    );
   }
 
   attachToHttpServer(server: http.Server): void {
@@ -98,7 +127,8 @@ export class ConsoleBridgeGateway implements OnModuleInit, OnModuleDestroy {
       return;
     }
     const auth = await this.firstAuthFrame(socket);
-    const user = await this.auth.validateAccessToken(auth);
+    const credential = await this.auth.validateAccessToken(auth);
+    const { user } = credential;
     const session = await this.sessions.claim(sessionId, user.id, user.authVersion);
     if (!session) {
       this.sendError(socket, 'CONSOLE_SESSION_INVALID');
@@ -115,12 +145,14 @@ export class ConsoleBridgeGateway implements OnModuleInit, OnModuleDestroy {
       if (socket.readyState === WebSocket.CLOSED) resolve();
       else socket.once('close', () => resolve());
     });
-    this.register(user.id, socket);
+    // Registered before the session row is read: a logout committing after
+    // that read reaches this console through the listener.
+    const connection = this.register(socket, credential);
     let physical: IncusExecWebSocketSession | undefined;
     try {
       // A revocation between session creation and registration was missed by
       // the listener; the generation recorded at creation catches it.
-      if (this.sessions.isRevoked(session)) {
+      if (this.sessions.isRevoked(session) || !(await this.authorize(connection, credential))) {
         this.closeRevoked(socket);
         return;
       }
@@ -133,30 +165,114 @@ export class ConsoleBridgeGateway implements OnModuleInit, OnModuleDestroy {
       if (socket.readyState !== WebSocket.OPEN) return;
       socket.send(JSON.stringify({ type: 'ready' }));
       this.pipePhysical(socket, physical, session);
-      socket.on('message', (raw) => this.handleBrowserFrame(socket, physical!, raw));
+      socket.on('message', (raw) => this.handleBrowserFrame(connection, physical!, raw));
       await closed;
     } finally {
       physical?.close();
-      this.unregister(user.id, socket);
+      this.unregister(connection);
       this.sessions.release(sessionId);
     }
   }
 
-  private register(userId: string, socket: WebSocket): void {
-    const sockets = this.openByUser.get(userId) ?? new Set<WebSocket>();
-    sockets.add(socket);
-    this.openByUser.set(userId, sockets);
+  private register(socket: WebSocket, credential: AccessCredential): ConsoleConnection {
+    const connection: ConsoleConnection = {
+      socket,
+      userId: credential.user.id,
+      browserSessionId: credential.sessionId,
+      deadlineTimer: null,
+      promptTimer: null,
+      reauth: Promise.resolve(),
+    };
+    const connections = this.openByUser.get(connection.userId) ?? new Set<ConsoleConnection>();
+    connections.add(connection);
+    this.openByUser.set(connection.userId, connections);
+    return connection;
   }
 
-  private unregister(userId: string, socket: WebSocket): void {
-    const sockets = this.openByUser.get(userId);
-    if (!sockets) return;
-    sockets.delete(socket);
-    if (sockets.size === 0) this.openByUser.delete(userId);
+  private unregister(connection: ConsoleConnection): void {
+    this.clearTimers(connection);
+    const connections = this.openByUser.get(connection.userId);
+    if (!connections) return;
+    connections.delete(connection);
+    if (connections.size === 0) this.openByUser.delete(connection.userId);
   }
 
-  private closeForUser(userId: string): void {
-    for (const socket of this.openByUser.get(userId) ?? []) this.closeRevoked(socket);
+  /** `sessionId` undefined: every session of the user was revoked. */
+  private closeForSession(userId: string, sessionId?: string): void {
+    for (const connection of this.openByUser.get(userId) ?? []) {
+      if (sessionId === undefined || connection.browserSessionId === sessionId) {
+        this.closeRevoked(connection.socket);
+      }
+    }
+  }
+
+  /**
+   * Check that `credential`'s browser session is still live and arm the
+   * console's deadline from it. False: the session is gone.
+   */
+  private async authorize(connection: ConsoleConnection, credential: AccessCredential): Promise<boolean> {
+    if (
+      credential.user.id !== connection.userId
+      || credential.sessionId !== connection.browserSessionId
+    ) return false;
+    const deadline = await this.auth.browserSessionDeadline(credential);
+    // Closed meanwhile: arm nothing for a console that is already gone.
+    if (!deadline || connection.socket.readyState !== WebSocket.OPEN) return false;
+    this.clearTimers(connection);
+    const remainingMs = deadline.getTime() - Date.now();
+    const leadMs = Math.min(REAUTH_LEAD_MAX_MS, Math.max(REAUTH_LEAD_MIN_MS, remainingMs / 4));
+    connection.promptTimer = this.timerAt(deadline.getTime() - leadMs, () => {
+      connection.promptTimer = null;
+      this.send(connection.socket, { type: 'reauthenticate' });
+    });
+    connection.deadlineTimer = this.timerAt(deadline.getTime(), () => {
+      connection.deadlineTimer = null;
+      this.closeExpired(connection.socket);
+    });
+    return true;
+  }
+
+  /**
+   * A fresh access token from the browser. It must name the same user and
+   * browser session, and that session must still be live; otherwise the
+   * console closes now instead of at the old deadline.
+   */
+  private reauthenticate(connection: ConsoleConnection, token: string): void {
+    connection.reauth = connection.reauth.then(async () => {
+      if (connection.socket.readyState !== WebSocket.OPEN) return;
+      let accepted = false;
+      try {
+        const credential = await this.auth.validateAccessToken(token);
+        accepted = await this.authorize(connection, credential);
+      } catch {
+        accepted = false;
+      }
+      if (!accepted) this.closeRevoked(connection.socket);
+    }).catch((error: unknown) => {
+      this.logger.warn(`Console re-authentication failed: ${error instanceof Error ? error.message : String(error)}`);
+      this.closeRevoked(connection.socket);
+    });
+  }
+
+  /** Deadlines are bounded by the access-token lifetime (at most 24 h), well within setTimeout's range. */
+  private timerAt(at: number, fire: () => void): NodeJS.Timeout {
+    const timer = setTimeout(fire, Math.max(0, at - Date.now()));
+    timer.unref?.();
+    return timer;
+  }
+
+  private clearTimers(connection: ConsoleConnection): void {
+    if (connection.promptTimer) clearTimeout(connection.promptTimer);
+    if (connection.deadlineTimer) clearTimeout(connection.deadlineTimer);
+    connection.promptTimer = null;
+    connection.deadlineTimer = null;
+  }
+
+  private closeExpired(socket: WebSocket): void {
+    this.sendError(socket, 'CONSOLE_AUTH_EXPIRED');
+    if (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING) {
+      socket.close(CONSOLE_CLOSE_AUTH_EXPIRED, 'console credential expired');
+    }
   }
 
   private closeRevoked(socket: WebSocket): void {
@@ -222,10 +338,11 @@ export class ConsoleBridgeGateway implements OnModuleInit, OnModuleDestroy {
   }
 
   private handleBrowserFrame(
-    browser: WebSocket,
+    connection: ConsoleConnection,
     physical: IncusExecWebSocketSession,
     raw: RawData,
   ): void {
+    const browser = connection.socket;
     let message: unknown;
     try {
       message = JSON.parse(raw.toString());
@@ -235,6 +352,10 @@ export class ConsoleBridgeGateway implements OnModuleInit, OnModuleDestroy {
     }
     if (!message || typeof message !== 'object' || Array.isArray(message)) return;
     const frame = message as Record<string, unknown>;
+    if (frame.type === 'auth' && typeof frame.token === 'string') {
+      this.reauthenticate(connection, frame.token);
+      return;
+    }
     if (frame.type === 'input' && typeof frame.data === 'string') {
       // Incus interactive exec websockets accept binary frames for stdin/stdout.
       // Text frames are ignored, which presents as a connected console that
@@ -283,12 +404,17 @@ export class ConsoleBridgeGateway implements OnModuleInit, OnModuleDestroy {
   }
 
   private sendError(socket: WebSocket, code: keyof typeof CONSOLE_ERROR_MESSAGES): void {
-    if (socket.readyState !== WebSocket.OPEN) return;
-    if (socket.bufferedAmount > MAX_CONSOLE_BUFFERED_BYTES) return;
-    socket.send(JSON.stringify({
+    this.send(socket, {
       type: 'error',
       code,
       message: CONSOLE_ERROR_MESSAGES[code] ?? 'Console error',
-    }));
+    });
+  }
+
+  /** Control frames; a browser this far behind is about to be closed for backpressure anyway. */
+  private send(socket: WebSocket, frame: ConsoleToBrowser): void {
+    if (socket.readyState !== WebSocket.OPEN) return;
+    if (socket.bufferedAmount > MAX_CONSOLE_BUFFERED_BYTES) return;
+    socket.send(JSON.stringify(frame));
   }
 }

@@ -243,6 +243,22 @@ async function tryRefresh(hadSession = true): Promise<string | null> {
   return promise;
 }
 
+/**
+ * An access token newer than `previous`, for a connection that must present a
+ * fresh one before `previous` expires (the container console): the store's if
+ * another request already refreshed it, otherwise a forced rotation. Null when
+ * the session cannot be refreshed; the caller lets its connection lapse.
+ */
+export async function freshAccessToken(previous: string | null): Promise<string | null> {
+  const current = useAuthStore.getState().accessToken;
+  if (current && current !== previous) return current;
+  try {
+    return await tryRefresh();
+  } catch {
+    return null;
+  }
+}
+
 async function request<T>(
   path: string,
   options: RequestInit = {},
