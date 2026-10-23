@@ -144,6 +144,7 @@ async fn auth_deadline_only_fires_for_unauthenticated_sessions() {
         std::future::pending::<Result<()>>(),
         &pending_connection,
         Duration::from_millis(20),
+        None,
     )
     .await
     .unwrap_err();
@@ -159,6 +160,7 @@ async fn auth_deadline_only_fires_for_unauthenticated_sessions() {
             std::future::pending::<Result<()>>(),
             &authenticated,
             Duration::from_millis(20),
+            None,
         ),
     )
     .await;
@@ -296,6 +298,38 @@ async fn pre_auth_sockets_cannot_fill_the_whole_pool() {
     listener.task.abort();
 }
 
+#[tokio::test]
+async fn a_full_pre_auth_pool_evicts_the_heaviest_source_for_a_fresh_one() {
+    let mut config = test_config();
+    config.max_connections = 8;
+    config.max_preauth_connections = 2;
+    let listener = start_public_listener(config).await;
+
+    let mut oldest = connect_from("127.0.0.1", listener.address).await;
+    let mut newer = connect_from("127.0.0.1", listener.address).await;
+    assert!(read_banner(&mut oldest).await.is_some());
+    assert!(read_banner(&mut newer).await.is_some());
+    // The pool is full of one source; a fresh source still gets in and the
+    // heavy source's oldest unauthenticated connection is closed for it.
+    let mut fresh = connect_from("127.0.0.2", listener.address).await;
+    assert!(read_banner(&mut fresh).await.is_some());
+    let mut buffer = [0_u8; 256];
+    let closed = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            match oldest.read(&mut buffer).await {
+                Ok(0) | Err(_) => break,
+                Ok(_) => continue,
+            }
+        }
+    })
+    .await;
+    assert!(
+        closed.is_ok(),
+        "the evicted pre-auth connection stayed open"
+    );
+    listener.task.abort();
+}
+
 #[test]
 fn authentication_releases_the_pre_auth_slot_but_not_the_connection_slot() {
     use proxy_common::conn_limit::{ConnectionLimiter, LimitSettings};
@@ -304,6 +338,8 @@ fn authentication_releases_the_pre_auth_slot_but_not_the_connection_slot() {
         per_client: 4,
         per_site: 4,
         pending: 1,
+        pending_per_client: 8,
+        pending_per_site: 8,
     });
     let peer: std::net::SocketAddr = "127.0.0.1:2700".parse().unwrap();
     let mut permit = limiter.try_acquire(peer.ip()).unwrap();

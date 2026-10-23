@@ -12,14 +12,28 @@
 //! Every new connection also holds a *pending* slot until the listener marks
 //! it established (SSH: public-key authentication succeeded; HTTP: the
 //! request head was read). The pending pool is smaller than the global pool,
-//! so unauthenticated sockets cannot crowd out authenticated sessions.
+//! so unauthenticated sockets cannot crowd out authenticated sessions, and it
+//! is shared fairly between sources rather than first come, first served:
+//!
+//! - each IPv4 address / IPv6 /64 and each IPv6 /48 may hold only a small
+//!   number of pending slots (`pending_per_client`, `pending_per_site`);
+//! - when the pool is full, a newcomer whose source (IPv4 address or IPv6
+//!   /48) holds at least two fewer pending slots than the heaviest source
+//!   evicts that source's oldest pending connection instead of being
+//!   refused. The evicted connection is told through its
+//!   [`PendingEviction`] and closes itself.
+//!
+//! A few sources therefore cannot keep the pool to themselves: filling it
+//! against fresh clients takes as many distinct sources as there are pending
+//! slots, each holding one.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use anyhow::Result;
-use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum ClientBucket {
@@ -45,10 +59,25 @@ impl ClientBucket {
             Self::V6Prefix64(prefix64) => Some(prefix64 >> 16),
         }
     }
+
+    /// The unit pending slots are shared fairly between: an IPv4 address or
+    /// a whole IPv6 /48, so one site cannot look like many light sources.
+    fn pending_source(self) -> PendingSource {
+        match self {
+            Self::V4(v4) => PendingSource::V4(v4),
+            Self::V6Prefix64(prefix64) => PendingSource::V6Site(prefix64 >> 16),
+        }
+    }
 }
 
 fn v6_prefix64(ip: Ipv6Addr) -> u64 {
     (u128::from(ip) >> 64) as u64
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+enum PendingSource {
+    V4(Ipv4Addr),
+    V6Site(u64),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -57,6 +86,8 @@ pub enum LimitRejection {
     PerClient,
     PerSite,
     Pending,
+    PendingPerClient,
+    PendingPerSite,
 }
 
 impl LimitRejection {
@@ -66,6 +97,8 @@ impl LimitRejection {
             Self::PerClient => "per_client",
             Self::PerSite => "per_site",
             Self::Pending => "pending",
+            Self::PendingPerClient => "pending_per_client",
+            Self::PendingPerSite => "pending_per_site",
         }
     }
 }
@@ -81,16 +114,22 @@ pub struct LimitSettings {
     pub per_site: usize,
     /// Connections not yet marked established (pre-auth / pre-header).
     pub pending: usize,
+    /// Pending connections per IPv4 address / IPv6 /64.
+    pub pending_per_client: usize,
+    /// Pending connections per IPv6 /48 (sum over its /64s).
+    pub pending_per_site: usize,
 }
 
 impl LimitSettings {
-    /// Only global and per-client limits; the other two equal `global`.
+    /// Only global and per-client limits; the others impose nothing extra.
     pub fn basic(global: usize, per_client: usize) -> Self {
         Self {
             global,
             per_client,
             per_site: global,
             pending: global,
+            pending_per_client: per_client,
+            pending_per_site: global,
         }
     }
 }
@@ -99,14 +138,19 @@ impl LimitSettings {
 struct Counts {
     clients: HashMap<ClientBucket, usize>,
     sites: HashMap<u64, usize>,
+    pending_total: usize,
+    pending_clients: HashMap<ClientBucket, usize>,
+    /// Pending slots per fairness source, oldest first.
+    pending_sources: HashMap<PendingSource, VecDeque<Arc<PendingSlot>>>,
 }
 
 #[derive(Debug)]
 pub struct ConnectionLimiter {
     global: Arc<Semaphore>,
-    pending: Arc<Semaphore>,
     settings: LimitSettings,
     counts: Mutex<Counts>,
+    next_pending_id: AtomicU64,
+    evicted_total: AtomicU64,
 }
 
 /// Releases the global slot and the per-client/per-site counts on drop.
@@ -118,9 +162,61 @@ pub struct ConnectionPermit {
     _global: OwnedSemaphorePermit,
 }
 
+#[derive(Debug)]
+struct PendingSlot {
+    id: u64,
+    bucket: ClientBucket,
+    evicted: AtomicBool,
+    notify: Notify,
+}
+
 /// A pre-establishment slot; dropping it marks the connection established.
 #[derive(Debug)]
-pub struct PendingPermit(#[allow(dead_code)] OwnedSemaphorePermit);
+pub struct PendingPermit {
+    limiter: Arc<ConnectionLimiter>,
+    slot: Arc<PendingSlot>,
+}
+
+/// Resolves once the pending slot it came from was evicted under pressure.
+/// It never resolves after the slot was released normally (the connection
+/// became established), so a connection may keep waiting on it for its whole
+/// life.
+#[derive(Clone, Debug)]
+pub struct PendingEviction(Arc<PendingSlot>);
+
+impl PendingEviction {
+    pub async fn wait(&self) {
+        // One waiter per slot: `notify_one` stores a permit when nobody is
+        // waiting yet, so the flag check cannot miss an eviction.
+        while !self.0.evicted.load(Ordering::Acquire) {
+            self.0.notify.notified().await;
+        }
+    }
+
+    pub fn is_evicted(&self) -> bool {
+        self.0.evicted.load(Ordering::Acquire)
+    }
+}
+
+/// Waits for `eviction`, or forever when there is none.
+pub async fn wait_evicted(eviction: Option<&PendingEviction>) {
+    match eviction {
+        Some(eviction) => eviction.wait().await,
+        None => std::future::pending().await,
+    }
+}
+
+impl PendingPermit {
+    pub fn eviction(&self) -> PendingEviction {
+        PendingEviction(self.slot.clone())
+    }
+}
+
+impl Drop for PendingPermit {
+    fn drop(&mut self) {
+        self.limiter.release_pending(&self.slot);
+    }
+}
 
 impl ConnectionPermit {
     /// Moves the pending slot out so whoever learns that the connection is
@@ -139,9 +235,10 @@ impl ConnectionLimiter {
     pub fn new(settings: LimitSettings) -> Arc<Self> {
         Arc::new(Self {
             global: Arc::new(Semaphore::new(settings.global)),
-            pending: Arc::new(Semaphore::new(settings.pending)),
             settings,
             counts: Mutex::new(Counts::default()),
+            next_pending_id: AtomicU64::new(1),
+            evicted_total: AtomicU64::new(0),
         })
     }
 
@@ -151,6 +248,7 @@ impl ConnectionLimiter {
     ) -> std::result::Result<ConnectionPermit, LimitRejection> {
         let bucket = ClientBucket::of(ip);
         let site = bucket.site();
+        let source = bucket.pending_source();
         let mut counts = self.lock();
         let client_count = counts.clients.get(&bucket).copied().unwrap_or(0);
         if client_count >= self.settings.per_client {
@@ -161,16 +259,41 @@ impl ConnectionLimiter {
                 return Err(LimitRejection::PerSite);
             }
         }
+        if counts.pending_clients.get(&bucket).copied().unwrap_or(0)
+            >= self.settings.pending_per_client
+        {
+            return Err(LimitRejection::PendingPerClient);
+        }
+        let source_pending = counts.pending_sources.get(&source).map_or(0, VecDeque::len);
+        if site.is_some() && source_pending >= self.settings.pending_per_site {
+            return Err(LimitRejection::PendingPerSite);
+        }
         let global = self
             .global
             .clone()
             .try_acquire_owned()
             .map_err(|_| LimitRejection::Global)?;
-        let pending = self
-            .pending
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| LimitRejection::Pending)?;
+        if counts.pending_total >= self.settings.pending {
+            let victim =
+                heaviest_victim(&mut counts, source_pending).ok_or(LimitRejection::Pending)?;
+            forget_pending(&mut counts, &victim.bucket);
+            victim.evicted.store(true, Ordering::Release);
+            victim.notify.notify_one();
+            self.evicted_total.fetch_add(1, Ordering::Relaxed);
+        }
+        let slot = Arc::new(PendingSlot {
+            id: self.next_pending_id.fetch_add(1, Ordering::Relaxed),
+            bucket,
+            evicted: AtomicBool::new(false),
+            notify: Notify::new(),
+        });
+        counts.pending_total += 1;
+        *counts.pending_clients.entry(bucket).or_insert(0) += 1;
+        counts
+            .pending_sources
+            .entry(source)
+            .or_default()
+            .push_back(slot.clone());
         counts.clients.insert(bucket, client_count + 1);
         if let Some(site) = site {
             *counts.sites.entry(site).or_insert(0) += 1;
@@ -178,7 +301,10 @@ impl ConnectionLimiter {
         Ok(ConnectionPermit {
             limiter: self.clone(),
             bucket,
-            pending: Some(PendingPermit(pending)),
+            pending: Some(PendingPermit {
+                limiter: self.clone(),
+                slot,
+            }),
             _global: global,
         })
     }
@@ -191,8 +317,23 @@ impl ConnectionLimiter {
             .unwrap_or(0)
     }
 
+    pub fn pending_for(&self, ip: IpAddr) -> usize {
+        self.lock()
+            .pending_clients
+            .get(&ClientBucket::of(ip))
+            .copied()
+            .unwrap_or(0)
+    }
+
     pub fn pending_available(&self) -> usize {
-        self.pending.available_permits()
+        self.settings
+            .pending
+            .saturating_sub(self.lock().pending_total)
+    }
+
+    /// Pending connections evicted to make room for lighter sources.
+    pub fn evicted_total(&self) -> u64 {
+        self.evicted_total.load(Ordering::Relaxed)
     }
 
     pub fn tracked_clients(&self) -> usize {
@@ -207,11 +348,56 @@ impl ConnectionLimiter {
         }
     }
 
+    /// Releases a pending slot unless an eviction already did.
+    fn release_pending(&self, slot: &Arc<PendingSlot>) {
+        let mut counts = self.lock();
+        let source = slot.bucket.pending_source();
+        let Some(queue) = counts.pending_sources.get_mut(&source) else {
+            return;
+        };
+        let Some(index) = queue.iter().position(|queued| queued.id == slot.id) else {
+            return;
+        };
+        queue.remove(index);
+        if queue.is_empty() {
+            counts.pending_sources.remove(&source);
+        }
+        forget_pending(&mut counts, &slot.bucket);
+    }
+
     fn lock(&self) -> MutexGuard<'_, Counts> {
         self.counts
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
+}
+
+/// Removes and returns the oldest pending slot of the source holding the
+/// most pending slots, if that source holds at least two more than the
+/// newcomer's (`newcomer_pending`), so an eviction never leaves the victim's
+/// source with fewer slots than the newcomer's.
+fn heaviest_victim(counts: &mut Counts, newcomer_pending: usize) -> Option<Arc<PendingSlot>> {
+    let (source, held) = counts
+        .pending_sources
+        .iter()
+        .map(|(source, queue)| (*source, queue.len()))
+        .max_by_key(|(_, held)| *held)?;
+    if held <= newcomer_pending + 1 {
+        return None;
+    }
+    let queue = counts.pending_sources.get_mut(&source)?;
+    let victim = queue.pop_front();
+    if queue.is_empty() {
+        counts.pending_sources.remove(&source);
+    }
+    victim
+}
+
+/// Drops the total and per-client pending counts of one slot already taken
+/// out of its source queue.
+fn forget_pending(counts: &mut Counts, bucket: &ClientBucket) {
+    counts.pending_total = counts.pending_total.saturating_sub(1);
+    decrement(&mut counts.pending_clients, *bucket);
 }
 
 fn decrement<K: std::hash::Hash + Eq>(map: &mut HashMap<K, usize>, key: K) {
@@ -225,6 +411,8 @@ fn decrement<K: std::hash::Hash + Eq>(map: &mut HashMap<K, usize>, key: K) {
 
 impl Drop for ConnectionPermit {
     fn drop(&mut self) {
+        // The pending slot (if still held here) is released by its own drop.
+        self.pending = None;
         self.limiter.release(self.bucket);
     }
 }
@@ -238,133 +426,5 @@ pub fn validate_limit(name: &str, value: usize, min: usize, max: usize) -> Resul
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn ip(value: &str) -> IpAddr {
-        value.parse().unwrap()
-    }
-
-    #[test]
-    fn per_client_limit_rejects_only_the_noisy_client() {
-        let limiter = ConnectionLimiter::new(LimitSettings::basic(10, 2));
-        let first = limiter.try_acquire(ip("192.0.2.1")).unwrap();
-        let _second = limiter.try_acquire(ip("192.0.2.1")).unwrap();
-        assert_eq!(
-            limiter.try_acquire(ip("192.0.2.1")).unwrap_err(),
-            LimitRejection::PerClient
-        );
-        let _other = limiter.try_acquire(ip("192.0.2.2")).unwrap();
-        drop(first);
-        assert!(limiter.try_acquire(ip("192.0.2.1")).is_ok());
-    }
-
-    #[test]
-    fn global_limit_applies_across_clients_and_frees_on_drop() {
-        let limiter = ConnectionLimiter::new(LimitSettings::basic(2, 10));
-        let a = limiter.try_acquire(ip("192.0.2.1")).unwrap();
-        let _b = limiter.try_acquire(ip("192.0.2.2")).unwrap();
-        assert_eq!(
-            limiter.try_acquire(ip("192.0.2.3")).unwrap_err(),
-            LimitRejection::Global
-        );
-        // A rejected attempt must not leak a per-client count.
-        assert_eq!(limiter.active_for(ip("192.0.2.3")), 0);
-        drop(a);
-        assert!(limiter.try_acquire(ip("192.0.2.3")).is_ok());
-    }
-
-    #[test]
-    fn ipv6_clients_are_bucketed_by_slash_64_and_mapped_v4_by_address() {
-        let limiter = ConnectionLimiter::new(LimitSettings::basic(10, 2));
-        let _a = limiter.try_acquire(ip("2001:db8:1:2::1")).unwrap();
-        let _b = limiter.try_acquire(ip("2001:db8:1:2:ffff::9")).unwrap();
-        assert_eq!(
-            limiter.try_acquire(ip("2001:db8:1:2:abcd::1")).unwrap_err(),
-            LimitRejection::PerClient
-        );
-        assert!(limiter.try_acquire(ip("2001:db8:1:3::1")).is_ok());
-
-        let _v4 = limiter.try_acquire(ip("198.51.100.7")).unwrap();
-        let _mapped = limiter.try_acquire(ip("::ffff:198.51.100.7")).unwrap();
-        assert_eq!(
-            limiter.try_acquire(ip("198.51.100.7")).unwrap_err(),
-            LimitRejection::PerClient
-        );
-    }
-
-    #[test]
-    fn idle_buckets_are_forgotten() {
-        let limiter = ConnectionLimiter::new(LimitSettings::basic(10, 2));
-        let permit = limiter.try_acquire(ip("192.0.2.1")).unwrap();
-        assert_eq!(limiter.tracked_clients(), 1);
-        drop(permit);
-        assert_eq!(limiter.tracked_clients(), 0);
-    }
-
-    #[test]
-    fn ipv6_sites_are_also_capped_per_slash_48() {
-        let limiter = ConnectionLimiter::new(LimitSettings {
-            global: 100,
-            per_client: 2,
-            per_site: 3,
-            pending: 100,
-        });
-        let _a = limiter.try_acquire(ip("2001:db8:1:1::1")).unwrap();
-        let _b = limiter.try_acquire(ip("2001:db8:1:2::1")).unwrap();
-        let c = limiter.try_acquire(ip("2001:db8:1:3::1")).unwrap();
-        // A fourth /64 in the same /48 is refused even though its own
-        // bucket is empty; another /48 and IPv4 are unaffected.
-        assert_eq!(
-            limiter.try_acquire(ip("2001:db8:1:4::1")).unwrap_err(),
-            LimitRejection::PerSite
-        );
-        assert!(limiter.try_acquire(ip("2001:db8:2:1::1")).is_ok());
-        assert!(limiter.try_acquire(ip("192.0.2.1")).is_ok());
-        drop(c);
-        assert!(limiter.try_acquire(ip("2001:db8:1:4::1")).is_ok());
-    }
-
-    #[test]
-    fn pending_slots_are_smaller_than_the_pool_and_freed_on_establishment() {
-        let limiter = ConnectionLimiter::new(LimitSettings {
-            global: 4,
-            per_client: 4,
-            per_site: 4,
-            pending: 2,
-        });
-        let mut a = limiter.try_acquire(ip("192.0.2.1")).unwrap();
-        let b = limiter.try_acquire(ip("192.0.2.2")).unwrap();
-        assert_eq!(
-            limiter.try_acquire(ip("192.0.2.3")).unwrap_err(),
-            LimitRejection::Pending
-        );
-        // A rejected attempt does not leak a per-client count.
-        assert_eq!(limiter.active_for(ip("192.0.2.3")), 0);
-        a.mark_established();
-        let mut c = limiter.try_acquire(ip("192.0.2.3")).unwrap();
-        let pending = c.take_pending().expect("pending slot");
-        assert_eq!(limiter.pending_available(), 0);
-        drop(pending);
-        assert_eq!(limiter.pending_available(), 1);
-        drop(b);
-        let mut d = limiter.try_acquire(ip("192.0.2.4")).unwrap();
-        d.mark_established();
-        // Established connections still count against the global pool.
-        let _e = limiter.try_acquire(ip("192.0.2.5")).unwrap();
-        assert_eq!(
-            limiter.try_acquire(ip("192.0.2.6")).unwrap_err(),
-            LimitRejection::Global
-        );
-        drop(c);
-    }
-
-    #[test]
-    fn limits_are_bounded_and_name_the_variable() {
-        assert_eq!(validate_limit("X", 1, 1, 4).unwrap(), 1);
-        assert_eq!(validate_limit("X", 4, 1, 4).unwrap(), 4);
-        assert!(validate_limit("X", 0, 1, 4).is_err());
-        let error = validate_limit("NYABASE_X_PER_IP", 5, 1, 4).unwrap_err();
-        assert!(error.to_string().contains("NYABASE_X_PER_IP"));
-    }
-}
+#[path = "conn_limit_tests.rs"]
+mod tests;

@@ -347,6 +347,8 @@ async fn connections_without_a_request_head_cannot_fill_the_pool() {
             per_client: 8,
             per_site: 8,
             pending: 1,
+            pending_per_client: 8,
+            pending_per_site: 8,
         });
     let server = tokio::spawn(serve_http(
         listener,
@@ -371,6 +373,52 @@ async fn connections_without_a_request_head_cannot_fill_the_pool() {
 }
 
 #[tokio::test]
+async fn a_full_pending_pool_evicts_the_heaviest_source_for_a_fresh_one() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let limiter =
+        proxy_common::conn_limit::ConnectionLimiter::new(proxy_common::conn_limit::LimitSettings {
+            global: 8,
+            per_client: 8,
+            per_site: 8,
+            pending: 2,
+            pending_per_client: 8,
+            pending_per_site: 8,
+        });
+    let server = tokio::spawn(serve_http(
+        listener,
+        Arc::new(SnapshotStore::default()),
+        test_runtime(),
+        limiter.clone(),
+        false,
+    ));
+
+    let mut oldest = connect_from("127.0.0.1", address).await;
+    let _newer = connect_from("127.0.0.1", address).await;
+    time::timeout(Duration::from_secs(1), async {
+        while limiter.pending_available() > 0 {
+            time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    // A fresh source is served; the silent source's oldest socket is closed.
+    let mut fresh = connect_from("127.0.0.2", address).await;
+    fresh
+        .write_all(b"GET / HTTP/1.1\r\nHost: unknown.example.test\r\n\r\n")
+        .await
+        .unwrap();
+    let mut response = Vec::new();
+    fresh.read_to_end(&mut response).await.unwrap();
+    assert!(String::from_utf8(response)
+        .unwrap()
+        .starts_with("HTTP/1.1 404 Not Found"));
+    assert!(closed_without_reply(&mut oldest).await);
+    assert_eq!(limiter.evicted_total(), 1);
+    server.abort();
+}
+
+#[tokio::test]
 async fn reading_the_request_head_releases_the_pending_slot() {
     let store = Arc::new(SnapshotStore::default());
     let limiter =
@@ -379,6 +427,8 @@ async fn reading_the_request_head_releases_the_pending_slot() {
             per_client: 8,
             per_site: 8,
             pending: 1,
+            pending_per_client: 8,
+            pending_per_site: 8,
         });
     let mut permit = limiter.try_acquire("192.0.2.1".parse().unwrap()).unwrap();
     let accepted = Accepted {

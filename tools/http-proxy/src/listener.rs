@@ -8,7 +8,8 @@ use crate::snapshot::{RouteAuthorization, SnapshotCertResolver, SnapshotStore};
 use crate::upstream::proxy_request;
 use anyhow::{anyhow, Context, Result};
 use proxy_common::accept::accept_retrying;
-use proxy_common::conn_limit::{ConnectionLimiter, PendingPermit};
+use proxy_common::conn_limit::{wait_evicted, ConnectionLimiter, PendingEviction, PendingPermit};
+use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -77,6 +78,7 @@ pub(crate) async fn serve_http(
         tokio::spawn(async move {
             // The pending slot covers the TLS handshake and the request head.
             let pending = permit.take_pending();
+            let eviction = pending.as_ref().map(PendingPermit::eviction);
             let _active = ActiveConnectionGuard::new(runtime.clone(), permit);
             let accepted = Accepted {
                 peer,
@@ -84,7 +86,8 @@ pub(crate) async fn serve_http(
                 pending,
             };
             let result = if let Some(acceptor) = acceptor {
-                match accept_tls_with_deadline(&acceptor, stream, TLS_HANDSHAKE_DEADLINE).await {
+                let handshake = accept_tls_with_deadline(&acceptor, stream, TLS_HANDSHAKE_DEADLINE);
+                match unless_evicted(eviction.as_ref(), handshake).await {
                     Ok(mut tls_stream) => {
                         let result =
                             handle_accepted(&mut tls_stream, accepted, store, runtime.clone())
@@ -131,6 +134,21 @@ where
     }
 }
 
+/// Runs `work` (the TLS handshake, reading the request head) unless the
+/// connection's pending slot is evicted for a lighter client first.
+pub(crate) async fn unless_evicted<T>(
+    eviction: Option<&PendingEviction>,
+    work: impl Future<Output = Result<T>>,
+) -> Result<T> {
+    tokio::select! {
+        biased;
+        _ = wait_evicted(eviction) => {
+            Err(anyhow!("pending connection evicted to admit a lighter client"))
+        }
+        result = work => result,
+    }
+}
+
 /// One accepted client connection.
 pub(crate) struct Accepted {
     pub(crate) peer: SocketAddr,
@@ -167,12 +185,14 @@ where
     S: AsyncRead + AsyncWrite + Unpin,
 {
     runtime.total_requests.fetch_add(1, Ordering::Relaxed);
-    let head = match time::timeout(REQUEST_HEADER_DEADLINE, read_request_head(&mut *inbound)).await
-    {
-        Ok(Ok(head)) => head,
-        Ok(Err(error)) => return Err(error),
-        Err(_) => return Err(anyhow!("request header deadline exceeded")),
+    let eviction = accepted.pending.as_ref().map(PendingPermit::eviction);
+    let read_head = async {
+        match time::timeout(REQUEST_HEADER_DEADLINE, read_request_head(&mut *inbound)).await {
+            Ok(result) => result,
+            Err(_) => Err(anyhow!("request header deadline exceeded")),
+        }
     };
+    let head = unless_evicted(eviction.as_ref(), read_head).await?;
     drop(accepted.pending);
     let Some(header_end) = find_header_end(&head) else {
         return Err(anyhow!("request header terminator is missing"));
