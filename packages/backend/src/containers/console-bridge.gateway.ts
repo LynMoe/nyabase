@@ -50,6 +50,7 @@ const CONSOLE_ERROR_MESSAGES: Readonly<Record<string, string>> = {
   CONSOLE_AUTH_EXPIRED: 'The console was not re-authenticated before its credential expired',
   CONSOLE_FRAME_INVALID: 'Invalid console frame',
   CONSOLE_OUTPUT_OVERFLOW: 'The console output was not read fast enough; reconnect to continue',
+  CONSOLE_INPUT_OVERFLOW: 'More console input arrived than the console holds; reconnect to continue',
 };
 /**
  * Close code sent when the browser session that authorized the console ended
@@ -281,7 +282,10 @@ export class ConsoleBridgeGateway implements OnModuleInit, OnModuleDestroy {
     // The socket's only message listener, from now until it closes.
     const frames = new ConsoleFrameDispatcher(socket, {
       invalid: () => this.sendError(socket, 'CONSOLE_FRAME_INVALID'),
-      overflow: () => socket.close(CONSOLE_CLOSE_INPUT_OVERFLOW, 'console input overflow'),
+      overflow: () => {
+        this.sendError(socket, 'CONSOLE_INPUT_OVERFLOW');
+        socket.close(CONSOLE_CLOSE_INPUT_OVERFLOW, 'console input overflow');
+      },
     }, AUTH_TIMEOUT_MS);
     const auth = await frames.firstAuth;
     const credential = await this.auth.validateAccessToken(auth);

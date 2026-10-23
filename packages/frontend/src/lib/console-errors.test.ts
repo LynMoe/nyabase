@@ -3,7 +3,9 @@ import { describe, expect, it } from 'vitest';
 import {
   CONSOLE_AUTH_EXPIRED_MESSAGE,
   CONSOLE_CLOSE_AUTH_EXPIRED,
+  CONSOLE_CLOSE_INPUT_OVERFLOW,
   CONSOLE_CLOSE_SESSION_REVOKED,
+  CONSOLE_INPUT_OVERFLOW_MESSAGE,
   CONSOLE_SESSION_REVOKED_MESSAGE,
   consoleCloseMessage,
   consoleErrorMessage,
@@ -36,5 +38,11 @@ describe('console error copy', () => {
     expect(CONSOLE_CLOSE_AUTH_EXPIRED).toBe(4408);
     expect(consoleCloseMessage(4408)).toBe(CONSOLE_AUTH_EXPIRED_MESSAGE);
     expect(consoleErrorMessage('CONSOLE_AUTH_EXPIRED', 'expired')).toBe(CONSOLE_AUTH_EXPIRED_MESSAGE);
+  });
+
+  it('explains an input overflow by its error frame and by close code 1009', () => {
+    expect(CONSOLE_CLOSE_INPUT_OVERFLOW).toBe(1009);
+    expect(consoleCloseMessage(1009)).toBe(CONSOLE_INPUT_OVERFLOW_MESSAGE);
+    expect(consoleErrorMessage('CONSOLE_INPUT_OVERFLOW', 'More console input')).toBe(CONSOLE_INPUT_OVERFLOW_MESSAGE);
   });
 });

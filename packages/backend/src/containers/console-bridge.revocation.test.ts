@@ -287,6 +287,11 @@ describe('console bridge frame dispatch and re-authentication edges', () => {
     const data = 'x'.repeat(MAX_CONSOLE_PENDING_INPUT_BYTES);
     alice.socket.emit('message', Buffer.from(JSON.stringify({ type: 'input', data })));
     expect(alice.socket.close).toHaveBeenCalledWith(CONSOLE_CLOSE_INPUT_OVERFLOW, 'console input overflow');
+    // The reason reaches the browser before the close, like every other console error.
+    const frames = alice.socket.send.mock.calls.map(([raw]) => JSON.parse(String(raw)) as { type: string; code?: string });
+    expect(frames).toContainEqual(expect.objectContaining({ type: 'error', code: 'CONSOLE_INPUT_OVERFLOW' }));
+    expect(alice.socket.send.mock.invocationCallOrder.at(-1)!)
+      .toBeLessThan(alice.socket.close.mock.invocationCallOrder[0]!);
   });
 
   it('keeps the console through a transient failure checking a fresh token', async () => {
