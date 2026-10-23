@@ -20,12 +20,14 @@ import {
   MAX_SSH_PROXY_SNAPSHOT_BYTES,
   MAX_SSH_PROXY_STATUS_CONNECTIONS,
   type SshProxyBackendMessage,
+  type SshProxySnapshot,
   type SshProxySnapshotSummaryDto,
   type SshProxyStatusReport,
 } from '@nyabase/common';
 import { SshProxySnapshotService } from './ssh-proxy-snapshot.service.js';
 import { NyabaseConfigService } from '../platform/config/nyabase-config.service.js';
 import { ProxySnapshotNotifierService } from '../proxy-snapshots/proxy-snapshot-notifier.service.js';
+import { snapshotBuildFailureMessage } from '../proxy-snapshots/snapshot-build-failure.js';
 import {
   configuredProxyTokenDigest,
   hasValidBearerToken,
@@ -74,6 +76,8 @@ export class SshProxyGateway implements OnModuleInit, OnModuleDestroy {
   /** Slots are reserved synchronously before authentication or snapshot I/O. */
   private initializingClients = new Set<WebSocket>();
   private latestStatus = new Map<WebSocket, SshProxyStatusReport>();
+  /** `validUntil` of the last snapshot sent to each admitted proxy. */
+  private sentLeaseEnds = new Map<WebSocket, number>();
   private snapshotBroadcastPromise: Promise<void> | null = null;
   private snapshotDirty = false;
   /**
@@ -174,6 +178,7 @@ export class SshProxyGateway implements OnModuleInit, OnModuleDestroy {
       this.initializingClients.clear();
       this.clients.clear();
       this.latestStatus.clear();
+      this.sentLeaseEnds.clear();
       this.snapshotDirty = false;
       for (const [requestId, pending] of this.pendingDisconnectAll) {
         clearTimeout(pending.timeout);
@@ -350,7 +355,9 @@ export class SshProxyGateway implements OnModuleInit, OnModuleDestroy {
         kind: 'snapshot',
         payload: initialSnapshot,
       });
-      this.sendOrTerminate(ws, initialEncoded, 'initial snapshot');
+      if (this.sendOrTerminate(ws, initialEncoded, 'initial snapshot')) {
+        this.sentLeaseEnds.set(ws, initialSnapshot.validUntil);
+      }
     } finally {
       this.initializingClients.delete(ws);
     }
@@ -368,11 +375,14 @@ export class SshProxyGateway implements OnModuleInit, OnModuleDestroy {
           this.snapshotDirty = true;
           continue;
         }
-        this.broadcast({ kind: 'update', payload: snapshot });
+        this.broadcastUpdate(snapshot);
       } catch (error) {
-        // Preserve one dirty bit so the next domain event retries. Do not spin
-        // forever on a deterministic snapshot defect.
+        // Preserve one dirty bit so the next domain event or renewal tick
+        // retries. Do not spin forever on a deterministic snapshot defect
+        // (e.g. over the size cap), and never re-send the old routes with a
+        // fresh lease: the proxies fail closed when their lease ends.
         this.snapshotDirty = true;
+        this.logger.error(snapshotBuildFailureMessage('SSH', error, this.sentLeaseEnds.values()));
         throw error;
       }
     }
@@ -397,11 +407,9 @@ export class SshProxyGateway implements OnModuleInit, OnModuleDestroy {
         this.scheduleSnapshotRenewal();
         return;
       }
-      void this.renewSnapshotLease().catch((error: unknown) => {
-        this.logger.warn(
-          `SSH proxy snapshot renewal failed: ${error instanceof Error ? error.message : String(error)}`,
-        );
-      });
+      // A failed build is logged (at error level, with the time the
+      // proxies fail closed) where it happens; the next tick retries.
+      void this.renewSnapshotLease().catch(() => undefined);
     }, renewalMs);
     this.snapshotRenewalTimer.unref();
   }
@@ -451,10 +459,13 @@ export class SshProxyGateway implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  private broadcast(message: SshProxyBackendMessage): void {
+  private broadcastUpdate(snapshot: SshProxySnapshot): void {
+    const message: SshProxyBackendMessage = { kind: 'update', payload: snapshot };
     const encoded = JSON.stringify({ ts: Date.now(), ...message });
     for (const client of this.clients) {
-      this.sendOrTerminate(client, encoded, 'snapshot');
+      if (this.sendOrTerminate(client, encoded, 'snapshot')) {
+        this.sentLeaseEnds.set(client, snapshot.validUntil);
+      }
     }
   }
 
@@ -554,6 +565,7 @@ export class SshProxyGateway implements OnModuleInit, OnModuleDestroy {
   private removeAdmittedClient(client: WebSocket): void {
     this.clients.delete(client);
     this.latestStatus.delete(client);
+    this.sentLeaseEnds.delete(client);
     this.resolveClosedProxy(client);
   }
 

@@ -97,3 +97,31 @@ describe('SshProxyGateway shutdown', () => {
     expect(client.sent).toHaveLength(0);
   });
 });
+
+describe('SshProxyGateway snapshot build failure', () => {
+  it('sends nothing and logs at error level when the proxies will fail closed', async () => {
+    const gateway = new SshProxyGateway(
+      { buildSnapshot: () => Promise.reject(new Error('over the cap')) } as never,
+      {
+        get: (key: string) => (key === 'ssh.proxySnapshotStaleMs' ? 120_000 : 'a'.repeat(32)),
+      } as never,
+      { register: () => () => undefined } as never,
+    );
+    const internals = gateway as unknown as {
+      sentLeaseEnds: Map<FakeSocket, number>;
+      logger: { error: (message: string) => void };
+    };
+    const client = new FakeSocket();
+    clientsOf(gateway).add(client);
+    internals.sentLeaseEnds.set(client, Date.now() + 60_000);
+    const logged = vi.spyOn(internals.logger, 'error').mockImplementation(() => undefined);
+
+    await expect(gateway.broadcastSnapshot()).rejects.toThrow('over the cap');
+
+    expect(client.sent).toHaveLength(0);
+    expect(logged).toHaveBeenCalledWith(expect.stringMatching(
+      /^SSH proxy snapshot build failed: over the cap; proxies keep their last snapshot until .* and then fail closed/,
+    ));
+    await gateway.onModuleDestroy();
+  });
+});

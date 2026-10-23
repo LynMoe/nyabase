@@ -355,11 +355,17 @@ the owner's current keys and is removed when they have none.
 
 **Snapshot size.** The proxy snapshot carries only users, containers, servers
 and images behind at least one routable SSH route, and has a hard cap of
-4 MiB. A build over the cap fails and the proxies keep the previous snapshot
-(new containers and keys stop taking effect); the admin SSH proxy page shows
-the last build's size against the cap, warns from 75%, and shows the error of a
-failed build, a missing public address, and proxies behind the latest
-generation. Because users without a reachable container are left out, their
+4 MiB. A build that fails (over the cap, or a database error) sends nothing:
+the proxies keep the previous snapshot (new containers and keys stop taking
+effect) only until its lease (`ssh.proxySnapshotStaleMs`, 120–300 s) runs
+out, and then fail closed: every Jump session ends and every login is
+refused until a build succeeds. The Backend never re-sends the old snapshot
+with a fresh lease, because that would let a revocation outlive the lease.
+It retries on every change and every renewal tick (a third of the lease, at
+most 60 s) and logs each failure at error level with the time the proxies
+will fail closed. The admin SSH proxy page shows the last build's size
+against the cap, warns from 75%, and shows the error of a failed build, a
+missing public address, and proxies behind the latest generation. Because users without a reachable container are left out, their
 login attempts are audited as `public_key_rejected`, the same as an unknown key.
 
 **SSH logins.** The SSH login must be 1–256 printable ASCII bytes; anything
@@ -437,7 +443,11 @@ replaces the held one at once. HTTP routes are gated on the platform's IP
 claims, not on how recently an agent reported, so sites stay up while a
 server's agent is disconnected; stopping or deleting the container, releasing
 its address, or removing the binding still removes the route on the next
-snapshot.
+snapshot. A snapshot build that fails (over its size cap, or a database
+error) likewise sends nothing: the HTTP proxies keep their last snapshot
+until its 300 s lease runs out and then drop every route (404 on HTTP; on
+HTTPS the certificates go too) until a build succeeds; the Backend retries on every change and every renewal and
+logs each failure at error level with the time the proxies will fail closed.
 
 Recreating only the Compose `backend` service
 (`docker compose --env-file .env up -d backend`) does not drop
