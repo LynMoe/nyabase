@@ -165,6 +165,8 @@ fn loop_config(backend: std::net::SocketAddr, control_hold: Duration) -> Config 
         max_pending_connections_per_ip: 8,
         max_pending_connections_per_ipv6_48: 8,
         max_connections_per_container: 8,
+        max_connections_per_ip_per_container: 8,
+        max_connections_per_owner: 8,
         limits: Default::default(),
         reconnect_delay: Duration::from_millis(20),
         status_interval: Duration::from_secs(60),

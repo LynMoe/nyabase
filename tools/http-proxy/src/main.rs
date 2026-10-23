@@ -47,7 +47,7 @@ async fn main() -> Result<()> {
         https_listen: config.https_listen.clone(),
         started_at: Instant::now(),
         limits: config.limits,
-        container_slots: ContainerLimiter::new(config.max_connections_per_container),
+        container_slots: ContainerLimiter::new(config.upstream_caps()),
         connected_at: AtomicU64::new(0),
         last_snapshot_generation: AtomicU64::new(0),
         last_snapshot_at: AtomicU64::new(0),

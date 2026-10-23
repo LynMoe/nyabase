@@ -468,10 +468,19 @@ async fn exchange(
     runtime: &Arc<crate::runtime::Runtime>,
     host: &str,
 ) -> String {
+    exchange_from(store, runtime, host, "127.0.0.1:12345").await
+}
+
+async fn exchange_from(
+    store: &Arc<SnapshotStore>,
+    runtime: &Arc<crate::runtime::Runtime>,
+    host: &str,
+    peer: &str,
+) -> String {
     let (mut client, proxy_side) = tokio::io::duplex(4096);
     let handler = tokio::spawn(handle_connection(
         proxy_side,
-        "127.0.0.1:12345".parse().unwrap(),
+        peer.parse().unwrap(),
         store.clone(),
         runtime.clone(),
     ));
@@ -524,7 +533,9 @@ async fn one_container_cannot_take_more_than_its_share_of_connections() {
         .unwrap();
     let runtime = runtime_with(|runtime| {
         runtime.limits.idle = Duration::from_millis(300);
-        runtime.container_slots = crate::container_limit::ContainerLimiter::new(1);
+        runtime.container_slots = crate::container_limit::ContainerLimiter::new(
+            crate::container_limit::UpstreamCaps::per_container(1),
+        );
     });
 
     let (mut client, proxy_side) = tokio::io::duplex(4096);
@@ -567,6 +578,64 @@ async fn one_container_cannot_take_more_than_its_share_of_connections() {
     assert_eq!(runtime.container_slots.active_for("container-a"), 0);
     let served = exchange(&store, &runtime, "app.example.test").await;
     assert!(served.starts_with("HTTP/1.1 204"), "{served}");
+    upstream.abort();
+}
+
+#[tokio::test]
+async fn one_client_cannot_take_a_container_from_its_other_visitors() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream_port = listener.local_addr().unwrap().port();
+    let (stalled_tx, stalled_rx) = tokio::sync::oneshot::channel();
+    let upstream = tokio::spawn(async move {
+        let (mut stalled, _) = listener.accept().await.unwrap();
+        let _ = read_request_head(&mut stalled).await.unwrap();
+        stalled_tx.send(()).unwrap();
+        loop {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let _ = read_request_head(&mut socket).await.unwrap();
+            socket
+                .write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n")
+                .await
+                .unwrap();
+            socket.shutdown().await.unwrap();
+        }
+    });
+    let store = Arc::new(SnapshotStore::default());
+    store
+        .store(test_snapshot(1, 30_000, vec![test_route(upstream_port)]))
+        .unwrap();
+    let runtime = runtime_with(|runtime| {
+        runtime.container_slots =
+            crate::container_limit::ContainerLimiter::new(crate::container_limit::UpstreamCaps {
+                per_container: 8,
+                per_client_per_container: 1,
+                per_owner: 8,
+            });
+    });
+    let (mut client, proxy_side) = tokio::io::duplex(4096);
+    let held = tokio::spawn(handle_connection(
+        proxy_side,
+        "192.0.2.7:4000".parse().unwrap(),
+        store.clone(),
+        runtime.clone(),
+    ));
+    client
+        .write_all(b"GET /slow HTTP/1.1\r\nHost: app.example.test\r\n\r\n")
+        .await
+        .unwrap();
+    time::timeout(Duration::from_secs(1), stalled_rx)
+        .await
+        .unwrap()
+        .unwrap();
+
+    let refused = exchange_from(&store, &runtime, "app.example.test", "192.0.2.7:4001").await;
+    assert!(
+        refused.starts_with("HTTP/1.1 503 Service Unavailable"),
+        "{refused}"
+    );
+    let served = exchange_from(&store, &runtime, "app.example.test", "192.0.2.8:4000").await;
+    assert!(served.starts_with("HTTP/1.1 204"), "{served}");
+    held.abort();
     upstream.abort();
 }
 

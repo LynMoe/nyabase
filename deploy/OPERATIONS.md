@@ -281,6 +281,8 @@ enforced at start-up):
 | `NYABASE_HTTP_MAX_PENDING_CONNECTIONS_PER_IP` | HTTP | `16` (1–the smaller of the per-IP and pending caps), per IPv4 address / IPv6 `/64` |
 | `NYABASE_HTTP_MAX_PENDING_CONNECTIONS_PER_IPV6_48` | HTTP | `64` (1–the smaller of the per-`/48` and pending caps) |
 | `NYABASE_HTTP_MAX_CONNECTIONS_PER_CONTAINER` | HTTP | `512` (1–`NYABASE_HTTP_MAX_CONNECTIONS`), per upstream container, all its hostnames together, WebSockets included; over it the client gets a 503 |
+| `NYABASE_HTTP_MAX_CONNECTIONS_PER_IP_PER_CONTAINER` | HTTP | `32` (1–the smaller of the per-IP and per-container caps), one IPv4 address / IPv6 `/64` to one container; over it that client gets a 503 |
+| `NYABASE_HTTP_MAX_CONNECTIONS_PER_OWNER` | HTTP | `1024` (the per-container cap–`NYABASE_HTTP_MAX_CONNECTIONS`), all of one user's containers together; over it the client gets a 503 |
 | `NYABASE_HTTP_BODY_DEADLINE_MS` | HTTP | `30000` (1000–3600000), whole request body |
 | `NYABASE_HTTP_IDLE_TIMEOUT_MS` | HTTP | `120000` (1000–86400000), ordinary request with no bytes either way |
 | `NYABASE_HTTP_RESPONSE_LIFETIME_MS` | HTTP | `1800000` (1000–86400000), whole ordinary response, counted from the end of the request body |
@@ -405,12 +407,20 @@ bytes flow at least that often and finish within that ceiling (EventSource
 reconnects on its own). Upgraded tunnels (WebSocket) have no total lifetime,
 only `NYABASE_HTTP_UPGRADED_IDLE_MS`. Each upstream container may hold at most
 `NYABASE_HTTP_MAX_CONNECTIONS_PER_CONTAINER` connections at once across all its
-hostnames, so one container cannot take the whole connection pool; unlike the
-listener limits, which close silently, going over it is answered with a 503,
-and the proxy logs `HTTP proxy per-container connection limit reached;
-refusing with 503` at warn level at most once a minute per container
-(`container_id`, `binding_id`, `hostname`, `limit`, and `refused` = 503s since
-the previous line). Everything the proxy writes to the client itself (error
+hostnames, so one container cannot take the whole connection pool; one client
+(IPv4 address / IPv6 `/64`) may hold at most
+`NYABASE_HTTP_MAX_CONNECTIONS_PER_IP_PER_CONTAINER` of them, so a few clients
+dripping request bodies or holding WebSockets cannot lock a site's other
+visitors out; and all of one user's containers together may hold at most
+`NYABASE_HTTP_MAX_CONNECTIONS_PER_OWNER`, so one tenant with many containers
+cannot take the pool either. Unlike the listener limits, which close
+silently, going over any of these is answered with a 503. A full container or
+owner is logged as `HTTP proxy upstream connection limit reached; refusing
+with 503` at warn level at most once a minute per container or owner
+(`container_id`, `owner_id`, `binding_id`, `hostname`, `cap` =
+`per_container` or `per_owner`, `limit`, and `refused` = 503s since the
+previous line); one client over its per-container share is logged only at
+debug level. Everything the proxy writes to the client itself (error
 responses, `100 Continue`, the WebSocket 101, the closing shutdown and TLS
 `close_notify`) must finish within a fixed 10 s, or the connection is reset.
 When a response is cut short (idle timeout, response lifetime, route

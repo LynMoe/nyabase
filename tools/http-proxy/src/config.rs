@@ -1,3 +1,4 @@
+use crate::container_limit::UpstreamCaps;
 use anyhow::{anyhow, Result};
 use proxy_common::backend_tls::{backend_tls_config_from_env, validate_backend_ws_url};
 use proxy_common::conn_limit::{validate_limit, LimitSettings};
@@ -51,6 +52,18 @@ pub(crate) const DEFAULT_MAX_CONNECTIONS_PER_IPV6_48: usize = 256;
 /// together), an eighth of the default pool, so a single site cannot hold
 /// every slot with long-lived tunnels or slow responses.
 pub(crate) const DEFAULT_MAX_CONNECTIONS_PER_CONTAINER: usize = 512;
+
+/// Concurrent connections from one client (IPv4 address / IPv6 /64) to one
+/// container: a sixteenth of the per-container cap, so a few clients
+/// dripping bodies or holding WebSocket upgrades cannot fill a container and
+/// lock its other visitors out. Ample for one browser (each connection
+/// carries one request).
+pub(crate) const DEFAULT_MAX_CONNECTIONS_PER_IP_PER_CONTAINER: usize = 32;
+
+/// Concurrent connections to all of one owner's containers together, a
+/// quarter of the default pool, so one tenant with many containers cannot
+/// hold every slot.
+pub(crate) const DEFAULT_MAX_CONNECTIONS_PER_OWNER: usize = 1_024;
 
 /// Connections still in the TLS handshake or sending their request head; a
 /// quarter of the default pool.
@@ -138,6 +151,8 @@ pub(crate) struct Config {
     pub(crate) max_pending_connections_per_ip: usize,
     pub(crate) max_pending_connections_per_ipv6_48: usize,
     pub(crate) max_connections_per_container: usize,
+    pub(crate) max_connections_per_ip_per_container: usize,
+    pub(crate) max_connections_per_owner: usize,
     pub(crate) limits: ConnectionLimits,
     pub(crate) reconnect_delay: Duration,
     pub(crate) status_interval: Duration,
@@ -218,6 +233,27 @@ impl Config {
             1,
             max_connections,
         )?;
+        let per_ip_per_container_cap = max_connections_per_ip.min(max_connections_per_container);
+        let max_connections_per_ip_per_container = validate_limit(
+            "NYABASE_HTTP_MAX_CONNECTIONS_PER_IP_PER_CONTAINER",
+            env_usize(
+                "NYABASE_HTTP_MAX_CONNECTIONS_PER_IP_PER_CONTAINER",
+                DEFAULT_MAX_CONNECTIONS_PER_IP_PER_CONTAINER.min(per_ip_per_container_cap),
+            )?,
+            1,
+            per_ip_per_container_cap,
+        )?;
+        let max_connections_per_owner = validate_limit(
+            "NYABASE_HTTP_MAX_CONNECTIONS_PER_OWNER",
+            env_usize(
+                "NYABASE_HTTP_MAX_CONNECTIONS_PER_OWNER",
+                DEFAULT_MAX_CONNECTIONS_PER_OWNER
+                    .max(max_connections_per_container)
+                    .min(max_connections),
+            )?,
+            max_connections_per_container,
+            max_connections,
+        )?;
         let limits = ConnectionLimits {
             body_deadline: Duration::from_millis(validate_ms(
                 "NYABASE_HTTP_BODY_DEADLINE_MS",
@@ -273,6 +309,8 @@ impl Config {
             max_pending_connections_per_ip,
             max_pending_connections_per_ipv6_48,
             max_connections_per_container,
+            max_connections_per_ip_per_container,
+            max_connections_per_owner,
             limits,
             reconnect_delay,
             status_interval,
@@ -282,6 +320,14 @@ impl Config {
 }
 
 impl Config {
+    pub(crate) fn upstream_caps(&self) -> UpstreamCaps {
+        UpstreamCaps {
+            per_container: self.max_connections_per_container,
+            per_client_per_container: self.max_connections_per_ip_per_container,
+            per_owner: self.max_connections_per_owner,
+        }
+    }
+
     pub(crate) fn connection_limits(&self) -> LimitSettings {
         LimitSettings {
             global: self.max_connections,

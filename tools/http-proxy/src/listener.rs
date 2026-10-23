@@ -1,10 +1,11 @@
 use crate::config::{REQUEST_HEADER_DEADLINE, TLS_HANDSHAKE_DEADLINE};
+use crate::container_limit::UpstreamRefusal;
 use crate::relay::{client_abort, is_client_abort, write_client_with_deadline};
 use crate::request::{
     find_header_end, read_request_head, request_plan, ClientContext, RequestMode,
 };
 use crate::runtime::{ActiveConnectionGuard, Runtime};
-use crate::snapshot::{RouteAuthorization, SnapshotCertResolver, SnapshotStore};
+use crate::snapshot::{Route, RouteAuthorization, SnapshotCertResolver, SnapshotStore};
 use crate::upstream::proxy_request;
 use anyhow::{anyhow, Context, Result};
 use proxy_common::accept::accept_retrying;
@@ -218,36 +219,20 @@ where
         reject(inbound, &runtime, "404 Not Found").await?;
         return Ok(());
     }
-    // Held until this function returns, whichever way, so the slot covers
+    // Held until this function returns, whichever way, so the slots cover
     // the whole exchange or upgraded tunnel.
-    let Some(_container_slot) = runtime
-        .container_slots
-        .try_acquire(&authorization.route.container_id)
-    else {
-        let route = &authorization.route;
-        // Operators need to see which container is saturated, but a flood of
-        // refusals must not flood the log: one warning per container per
-        // interval, carrying the count it stands for.
-        match runtime
-            .container_slots
-            .note_refusal(&route.container_id, Instant::now())
-        {
-            Some(refused) => warn!(
-                container_id = %route.container_id,
-                binding_id = %route.binding_id,
-                hostname = %host,
-                limit = runtime.container_slots.per_container(),
-                refused,
-                "HTTP proxy per-container connection limit reached; refusing with 503"
-            ),
-            None => debug!(
-                container_id = %route.container_id,
-                hostname = %host,
-                "HTTP proxy per-container connection limit reached"
-            ),
+    let route = &authorization.route;
+    let _container_slot = match runtime.container_slots.try_acquire(
+        accepted.peer.ip(),
+        &route.container_id,
+        &route.owner_id,
+    ) {
+        Ok(permit) => permit,
+        Err(refusal) => {
+            note_upstream_refusal(&runtime, route, &host, refusal);
+            reject(inbound, &runtime, "503 Service Unavailable").await?;
+            return Ok(());
         }
-        reject(inbound, &runtime, "503 Service Unavailable").await?;
-        return Ok(());
     };
 
     let is_websocket = matches!(&plan.mode, RequestMode::WebSocket { .. });
@@ -278,6 +263,40 @@ where
         "proxied request"
     );
     Ok(())
+}
+
+/// Operators need to see which container or owner is saturated, but a flood
+/// of refusals must not flood the log: one warning per container (or owner)
+/// per interval, carrying the count it stands for. One client over its share
+/// of a container is only a debug line.
+fn note_upstream_refusal(runtime: &Runtime, route: &Route, host: &str, refusal: UpstreamRefusal) {
+    let caps = runtime.container_slots.caps();
+    let (id, limit) = match refusal {
+        UpstreamRefusal::Container => (&route.container_id, caps.per_container),
+        UpstreamRefusal::ClientPerContainer => (&route.container_id, caps.per_client_per_container),
+        UpstreamRefusal::Owner => (&route.owner_id, caps.per_owner),
+    };
+    match runtime
+        .container_slots
+        .note_refusal(refusal, id, Instant::now())
+    {
+        Some(refused) => warn!(
+            container_id = %route.container_id,
+            owner_id = %route.owner_id,
+            binding_id = %route.binding_id,
+            hostname = %host,
+            cap = refusal.as_str(),
+            limit,
+            refused,
+            "HTTP proxy upstream connection limit reached; refusing with 503"
+        ),
+        None => debug!(
+            container_id = %route.container_id,
+            hostname = %host,
+            cap = refusal.as_str(),
+            "HTTP proxy upstream connection limit reached"
+        ),
+    }
 }
 
 pub(crate) async fn wait_until_route_revoked(
