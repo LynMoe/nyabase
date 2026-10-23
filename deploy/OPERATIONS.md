@@ -358,10 +358,11 @@ still ends the whole connection when revoked.
 
 **HTTP request handling.** The HTTP proxy is the public edge, so it never
 trusts client forwarding headers: incoming `Forwarded`, `X-Real-IP` and every
-`X-Forwarded-*` header are removed, with `_` treated as `-` (so
-`X_Forwarded_For` and `X-Real_IP` are removed too, as are underscore spellings
-of `Content-Length`, `Transfer-Encoding`, `Keep-Alive`, `Proxy-Connection` and
-`Sec-WebSocket-*`; other underscore headers pass unchanged), and the upstream receives
+`X-Forwarded-*` header are removed, with `_` and `.` treated as `-` (so
+`X_Forwarded_For`, `X.Forwarded.For` and `X-Real_IP` are removed too, as are
+such spellings of `Content-Length`, `Transfer-Encoding`, `Keep-Alive`,
+`Proxy-Connection` and `Sec-WebSocket-*`; other names with `_` or `.` pass
+unchanged), and the upstream receives
 `X-Forwarded-For` and `X-Real-IP` (the client socket address; IPv4-mapped
 IPv6 shown as IPv4), `X-Forwarded-Proto` (`http` or `https` by listener) and
 `X-Forwarded-Host` (the client's `Host`). Do not put another proxy in front of
@@ -388,7 +389,13 @@ reconnects on its own). Upgraded tunnels (WebSocket) have no total lifetime,
 only `NYABASE_HTTP_UPGRADED_IDLE_MS`. Each upstream container may hold at most
 `NYABASE_HTTP_MAX_CONNECTIONS_PER_CONTAINER` connections at once across all its
 hostnames, so one container cannot take the whole connection pool; unlike the
-listener limits, which close silently, going over it is answered with a 503.
+listener limits, which close silently, going over it is answered with a 503,
+and the proxy logs `HTTP proxy per-container connection limit reached;
+refusing with 503` at warn level at most once a minute per container
+(`container_id`, `binding_id`, `hostname`, `limit`, and `refused` = 503s since
+the previous line). Everything the proxy writes to the client itself (error
+responses, `100 Continue`, the WebSocket 101, the closing shutdown and TLS
+`close_notify`) must finish within a fixed 10 s, or the connection is reset.
 When a response is cut short (idle timeout, response lifetime, route
 revocation, upstream error) the proxy resets the client connection (TCP RST)
 instead of closing it, so a close-delimited body cannot look complete.
