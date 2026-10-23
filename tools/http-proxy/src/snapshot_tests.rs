@@ -223,3 +223,107 @@ fn runtime_identity_change_revokes_even_when_the_network_target_is_reused() {
 
     assert!(!store.authorization_is_current(&authorization));
 }
+
+fn other_route() -> Route {
+    Route {
+        binding_id: "binding-b".into(),
+        hostname: "other.example.test".into(),
+        owner_id: "user-b".into(),
+        container_id: "container-b".into(),
+        instance_name: "instance-b".into(),
+        ..test_route(9090)
+    }
+}
+
+#[test]
+fn removing_or_changing_another_route_leaves_an_existing_authorization_current() {
+    let store = SnapshotStore::default();
+    let route = test_route(8080);
+    store
+        .store(test_snapshot(1, 30_000, vec![route.clone(), other_route()]))
+        .unwrap();
+    let authorization = store.authorize_route(&route.hostname).unwrap();
+    let other_authorization = store.authorize_route("other.example.test").unwrap();
+
+    // The other tenant flips its target port: only its own exchanges end.
+    let mut changed = other_route();
+    changed.target_port = 9091;
+    store
+        .store(test_snapshot(2, 30_000, vec![route.clone(), changed]))
+        .unwrap();
+    assert!(store.authorization_is_current(&authorization));
+    assert!(!store.authorization_is_current(&other_authorization));
+
+    // The other route disappears altogether (container stopped, binding
+    // deleted, owner disabled).
+    store
+        .store(test_snapshot(3, 30_000, vec![route.clone()]))
+        .unwrap();
+    assert!(store.authorization_is_current(&authorization));
+
+    // A new unrelated route appears.
+    store
+        .store(test_snapshot(4, 30_000, vec![route, other_route()]))
+        .unwrap();
+    assert!(store.authorization_is_current(&authorization));
+}
+
+#[test]
+fn a_new_control_epoch_keeps_unchanged_routes_and_revokes_changed_ones() {
+    let store = SnapshotStore::default();
+    let route = test_route(8080);
+    store
+        .store(test_snapshot(7, 30_000, vec![route.clone(), other_route()]))
+        .unwrap();
+    let authorization = store.authorize_route(&route.hostname).unwrap();
+    let other_authorization = store.authorize_route("other.example.test").unwrap();
+
+    // A restarted Backend starts again from generation 1.
+    store.begin_control_epoch();
+    let mut moved = other_route();
+    moved.routed_ip = "10.0.0.9".into();
+    store
+        .store(test_snapshot(1, 30_000, vec![route, moved]))
+        .unwrap();
+
+    assert!(store.authorization_is_current(&authorization));
+    assert!(!store.authorization_is_current(&other_authorization));
+}
+
+#[test]
+fn a_target_port_change_revokes_the_route_itself() {
+    let store = SnapshotStore::default();
+    let route = test_route(8080);
+    store
+        .store(test_snapshot(1, 30_000, vec![route.clone()]))
+        .unwrap();
+    let authorization = store.authorize_route(&route.hostname).unwrap();
+
+    store
+        .store(test_snapshot(2, 30_000, vec![test_route(8081)]))
+        .unwrap();
+    assert!(!store.authorization_is_current(&authorization));
+
+    // Going back to the old port is a new incarnation, not the old one.
+    store.store(test_snapshot(3, 30_000, vec![route])).unwrap();
+    assert!(!store.authorization_is_current(&authorization));
+}
+
+#[tokio::test]
+async fn an_expired_lease_ends_every_route_and_a_reinstalled_route_is_new() {
+    let store = SnapshotStore::default();
+    let route = test_route(8080);
+    store
+        .store(test_snapshot(1, 20, vec![route.clone(), other_route()]))
+        .unwrap();
+    let authorization = store.authorize_route(&route.hostname).unwrap();
+    let other_authorization = store.authorize_route("other.example.test").unwrap();
+
+    time::sleep(Duration::from_millis(50)).await;
+    store
+        .store(test_snapshot(2, 30_000, vec![route, other_route()]))
+        .unwrap();
+
+    assert!(!store.authorization_is_current(&authorization));
+    assert!(!store.authorization_is_current(&other_authorization));
+}

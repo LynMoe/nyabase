@@ -201,6 +201,63 @@ async fn snapshot_expiry_interrupts_an_established_slow_request() {
     upstream.abort();
 }
 
+#[tokio::test]
+async fn churn_on_another_route_does_not_interrupt_an_established_exchange() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream_port = listener.local_addr().unwrap().port();
+    let (accepted_tx, accepted_rx) = tokio::sync::oneshot::channel();
+    let upstream = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let _ = read_request_head(&mut socket).await.unwrap();
+        accepted_tx.send(()).unwrap();
+        std::future::pending::<()>().await;
+    });
+    let route = test_route(upstream_port);
+    let other = crate::snapshot::Route {
+        binding_id: "binding-b".into(),
+        hostname: "other.example.test".into(),
+        owner_id: "user-b".into(),
+        container_id: "container-b".into(),
+        ..test_route(upstream_port)
+    };
+    let store = Arc::new(SnapshotStore::default());
+    install_snapshot(&store, test_snapshot(1, 30_000, vec![route.clone(), other])).unwrap();
+    let (mut client, proxy_side) = tokio::io::duplex(4096);
+    let handler = tokio::spawn(handle_connection(
+        proxy_side,
+        "127.0.0.1:12345".parse().unwrap(),
+        store.clone(),
+        test_runtime(),
+    ));
+    client
+        .write_all(b"GET /events HTTP/1.1\r\nHost: app.example.test\r\n\r\n")
+        .await
+        .unwrap();
+    time::timeout(Duration::from_secs(1), accepted_rx)
+        .await
+        .unwrap()
+        .unwrap();
+
+    // Another site's binding is deleted: this exchange keeps running.
+    install_snapshot(&store, test_snapshot(2, 30_000, vec![route.clone()])).unwrap();
+    time::sleep(Duration::from_millis(50)).await;
+    assert!(!handler.is_finished());
+
+    // Its own route changes authority: now it ends.
+    let mut moved = route;
+    moved.target_port = moved.target_port.wrapping_add(1);
+    install_snapshot(&store, test_snapshot(3, 30_000, vec![moved])).unwrap();
+    let result = time::timeout(Duration::from_secs(2), handler)
+        .await
+        .expect("exchange outlived its own route change")
+        .unwrap();
+    assert!(result
+        .unwrap_err()
+        .to_string()
+        .contains("authorization was revoked"));
+    upstream.abort();
+}
+
 async fn connect_from(source: &str, target: std::net::SocketAddr) -> tokio::net::TcpStream {
     let socket = tokio::net::TcpSocket::new_v4().unwrap();
     socket.bind(format!("{source}:0").parse().unwrap()).unwrap();

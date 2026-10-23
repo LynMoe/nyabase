@@ -379,8 +379,11 @@ final chunk get a 400 and the upstream never receives a complete body. Other
 transfer codings, a coding list, duplicate `Transfer-Encoding` or
 `Content-Length` headers and folded header lines are rejected. The request
 head must arrive within 10 s, the body within `NYABASE_HTTP_BODY_DEADLINE_MS`,
-and after that the exchange runs until it finishes, the route is revoked,
-nothing moves for `NYABASE_HTTP_IDLE_TIMEOUT_MS` (waiting for the upstream's
+and after that the exchange runs until it finishes, its own route is revoked
+(the hostname leaves the snapshot or its binding, owner, container, instance,
+address or target port changes; changes to other hostnames never interrupt
+it, and a route that leaves and comes back is a new route), the snapshot
+lease lapses, nothing moves for `NYABASE_HTTP_IDLE_TIMEOUT_MS` (waiting for the upstream's
 first byte counts as idle), or the response has run for
 `NYABASE_HTTP_RESPONSE_LIFETIME_MS` (default 30 min) since the end of the
 request body. Long downloads, SSE and long-polling therefore work as long as
