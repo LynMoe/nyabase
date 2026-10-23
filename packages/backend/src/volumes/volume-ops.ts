@@ -90,6 +90,22 @@ export function destroyRetry(
   };
 }
 
+/**
+ * The pass found the catalog missing, but a container pass marked it present
+ * meanwhile: look again at once instead of recording it missing.
+ */
+export function catalogChangedRetry(volumeId: string, serverId: string): ReconcileOutcome {
+  return {
+    outcome: 'retry',
+    retryAfterMs: 0,
+    failure: intentFailure(
+      'VOLUME_CATALOG_CHANGED',
+      'The catalog appeared while the volume pass was running',
+      { volumeId, serverId },
+    ),
+  };
+}
+
 export function destroyRetryFromError(error: unknown, serverId: string): ReconcileOutcome {
   if (error instanceof IncusError) {
     return destroyRetry(error.code, error.message, { serverId });

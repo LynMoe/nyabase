@@ -468,6 +468,50 @@ describePg('volume reconciler shrink reservation release', () => {
     });
   });
 
+  type Db = Parameters<Parameters<typeof withPostgresTestDatabase>[0]>[0]['database'];
+
+  function placementB(database: Db, fixture: { volumeId: string; serverB: string }) {
+    return database.selectFrom('control.volume_placements')
+      .select(['catalog_state', 'observed_revision'])
+      .where('volume_id', '=', fixture.volumeId)
+      .where('server_id', '=', fixture.serverB)
+      .executeTakeFirstOrThrow();
+  }
+
+  function resizePass(reconciler: VolumeReconciler, fixture: { volumeId: string; serverB: string }, client: unknown) {
+    return reconciler.reconcile({
+      intent: sizeIntent('volume.resize', fixture.volumeId, fixture.serverB) as never,
+      claim: {} as never,
+      lease: { assertOwned: vi.fn() } as never,
+      client: client as never,
+      signal: new AbortController().signal,
+    });
+  }
+
+  it('does not record a catalog missing that a container pass marked present meanwhile', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const fixture = await shrunkSharedVolume(database, 'ensuring');
+      const { store, reconciler } = reconcilerFor(database);
+      await store.recordVerified((await store.readVolume(fixture.volumeId, fixture.serverA))!, 10n);
+      const client = catalogClient(fixture.serverB, new Set(), fixture.incusName);
+      client.getStorageVolume.mockImplementationOnce(async () => {
+        // The pass read the placement as `ensuring`; a container pass creates
+        // the catalog before the 404 is recorded.
+        await new ContainerReconcileStore(database, new IntentRepository(database, noopWake()))
+          .markCatalogPresent(fixture.volumeId, fixture.serverB);
+        throw new IncusError('INCUS_NOT_FOUND', 'managed_failure');
+      });
+
+      await expect(resizePass(reconciler, fixture, client)).resolves.toMatchObject({
+        outcome: 'retry',
+        retryAfterMs: 0,
+        failure: { code: 'VOLUME_CATALOG_CHANGED' },
+      });
+      expect(await placementB(database, fixture)).toEqual({ catalog_state: 'present', observed_revision: null });
+      expect(await reservationOf(database, fixture.volumeId)).toBe('100');
+    });
+  });
+
   it('scan queues a resize for a dangling placement that keeps a shrink reserved', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const fixture = await shrunkSharedVolume(database);

@@ -20,6 +20,7 @@ import {
 import {
   asBytes,
   blockedResizeFailure,
+  catalogChangedRetry,
   classifyCatalogGet,
   createCustomVolume,
   deleteCatalog,
@@ -160,13 +161,14 @@ export class VolumeReconciler implements ManagedReconciler, OnModuleInit {
 
     if (!actual) {
       // A catalog that does not exist holds no size (`recordCatalogMissing`).
-      if (context.intent.kind === 'volume.resize' && row.shared_backend_id) {
-        await this.store.recordCatalogMissing(row);
-        return { outcome: 'succeeded', observedRevision: row.revision };
+      const resizeShared = context.intent.kind === 'volume.resize' && row.shared_backend_id !== null;
+      if (!resizeShared) actual = await this.adoptOrCreate(context, context.client, row);
+      // A container pass marked the catalog present meanwhile: look again now.
+      if (!actual && !(await this.store.recordCatalogMissing(row))) {
+        return catalogChangedRetry(row.id, row.target_server_id);
       }
-      actual = await this.adoptOrCreate(context, context.client, row);
+      if (!actual && resizeShared) return { outcome: 'succeeded', observedRevision: row.revision };
       if (!actual) {
-        await this.store.recordCatalogMissing(row);
         const failure = intentFailure(
           context.intent.attemptCount >= VOLUME_ADOPT_FAIL_AFTER_ATTEMPTS
             ? 'VOLUME_CATALOG_ADOPT_FAILED'

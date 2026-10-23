@@ -449,16 +449,22 @@ export class VolumeReconcileStore {
    * so it no longer counts as `present` and has caught up with the pass's
    * revision as far as the shrink reservation goes
    * (`releaseSettledShrinkReservations`). Whoever creates the catalog later
-   * marks it present again without an observed revision.
+   * marks it present again without an observed revision. Only if the
+   * placement is still in the catalog state the pass read: false when a
+   * container pass marked it present meanwhile, whose catalog this pass did
+   * not see and must not count as missing.
    */
-  async recordCatalogMissing(row: VolumeRow): Promise<void> {
-    await this.database
+  async recordCatalogMissing(row: VolumeRow): Promise<boolean> {
+    const updated = await this.database
       .updateTable('control.volume_placements')
       .set({ catalog_state: 'ensuring', observed_revision: row.revision })
       .where('volume_id', '=', row.id)
       .where('server_id', '=', row.target_server_id)
-      .execute();
+      .where('catalog_state', '=', row.catalog_state)
+      .executeTakeFirst();
+    if (Number(updated.numUpdatedRows) === 0) return false;
     await releaseSettledShrinkReservations(this.database, [row.id]);
+    return true;
   }
 
   // --- destroy -----------------------------------------------------------------
