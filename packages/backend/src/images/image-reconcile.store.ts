@@ -104,16 +104,22 @@ export class ImageReconcileStore {
   listImagesPendingCleanup() {
     return this.database
       .selectFrom('infra.images')
-      .select(['id', 'cleanup_generation'])
+      .select(['id', 'fingerprint', 'cleanup_generation'])
       .where('is_active', '=', false)
       .where('deleting', '=', true)
       .execute();
   }
 
-  async listAssignedImageIds(): Promise<Set<string>> {
+  /**
+   * Images something in the database still holds: a server assignment (being
+   * removed by its own intent), or a container row of any phase (a failed one,
+   * or a delete that is stuck or parked).
+   */
+  async listHeldImageIds(): Promise<Set<string>> {
     const rows = await this.database
       .selectFrom('infra.image_server_assignments')
       .select('image_id')
+      .union(this.database.selectFrom('control.containers').select('image_id'))
       .execute();
     return new Set(rows.map((row) => row.image_id));
   }

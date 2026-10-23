@@ -28,8 +28,6 @@ import {
   type ImageAssignmentSource,
 } from './image-assignment-ops.js';
 
-const CLEANUP_RETRY_MS = 5_000;
-
 /**
  * Keeps each server's copy of a catalog image in line with the desired
  * fingerprint: pull, alias, supersede the previous copy, and remove copies
@@ -126,16 +124,28 @@ export class ImageAssignmentReconciler implements ManagedReconciler, OnModuleIni
         },
       });
     }
-    await this.scanImageCleanup(serverId);
+    await this.scanImageCleanup(serverId, images);
   }
 
-  /** Queue cleanup of inactive images no server holds; only one server (the lowest id) does it. */
-  private async scanImageCleanup(serverId: string): Promise<void> {
-    const imageRows = await this.store.listImagesPendingCleanup();
-    const assignedImageIds = await this.store.listAssignedImageIds();
+  /**
+   * Queue cleanup of inactive images nothing holds any more; only one server
+   * (the lowest id) does it, from the image list this scan already read.
+   * An image still held (an assignment, a container row, an Incus resource
+   * using the owner's copy) is not queued: the blocker goes away on its own
+   * schedule, so the next full scan looks again instead of an intent polling
+   * the database and the agent tunnel meanwhile.
+   */
+  private async scanImageCleanup(serverId: string, images: readonly Image[] | undefined): Promise<void> {
     if (await this.store.cleanupOwnerServerId() !== serverId) return;
+    const imageRows = await this.store.listImagesPendingCleanup();
+    if (imageRows.length === 0) return;
+    const held = await this.store.listHeldImageIds();
     for (const image of imageRows) {
-      if (assignedImageIds.has(image.id)) continue;
+      if (held.has(image.id)) continue;
+      const physical = image.fingerprint
+        ? images?.find((candidate) => sameFingerprint(imageFingerprint(candidate), image.fingerprint))
+        : undefined;
+      if (physical && imageUsedBy(physical).length > 0) continue;
       const revision = Math.max(1, image.cleanup_generation);
       await this.intents.ensurePending({
         kind: 'image_assignment.delete',
@@ -402,8 +412,10 @@ export class ImageAssignmentReconciler implements ManagedReconciler, OnModuleIni
   }
 
   /**
-   * Remove an inactive image no server holds any more: refuse while assignments
-   * or containers remain, delete the physical copy on the cleanup owner, then drop the row.
+   * Remove an inactive image no server holds any more: delete the physical
+   * copy on the cleanup owner, then drop the row. The scan queues it only once
+   * nothing holds the image; one that is held again by the time it runs fails
+   * (no polling retry) and the next full scan queues a new one when it is free.
    */
   private async reconcileImageCleanup(
     context: ReconcileRunContext,
@@ -431,8 +443,7 @@ export class ImageAssignmentReconciler implements ManagedReconciler, OnModuleIni
     const assignments = await this.store.listAssignmentIdsOfImage(image.id);
     if (assignments.length > 0) {
       return {
-        outcome: 'retry',
-        retryAfterMs: CLEANUP_RETRY_MS,
+        outcome: 'failed',
         failure: intentFailure(
           'IMAGE_CLEANUP_ASSIGNMENTS_PRESENT',
           'The image still has server assignments to clean up',
@@ -443,8 +454,7 @@ export class ImageAssignmentReconciler implements ManagedReconciler, OnModuleIni
     const retainedContainer = await this.store.findContainerOfImage(image.id);
     if (retainedContainer) {
       return {
-        outcome: 'retry',
-        retryAfterMs: CLEANUP_RETRY_MS,
+        outcome: 'failed',
         failure: intentFailure(
           'IMAGE_CLEANUP_CONTAINER_PRESENT',
           'The inactive image is still referenced by a container',
@@ -466,7 +476,7 @@ export class ImageAssignmentReconciler implements ManagedReconciler, OnModuleIni
     };
   }
 
-  /** Delete the server's copy of an inactive image; returns a retry outcome while Incus still uses it. */
+  /** Delete the server's copy of an inactive image; returns a failed outcome while Incus still uses it. */
   private async deletePhysicalCopy(
     context: ReconcileRunContext,
     client: IncusClientPort,
@@ -479,8 +489,7 @@ export class ImageAssignmentReconciler implements ManagedReconciler, OnModuleIni
     const usedBy = imageUsedBy(physical);
     if (usedBy.length > 0) {
       return {
-        outcome: 'retry',
-        retryAfterMs: CLEANUP_RETRY_MS,
+        outcome: 'failed',
         failure: intentFailure(
           'IMAGE_CLEANUP_BLOCKED',
           'The inactive image is still used by an Incus resource',
