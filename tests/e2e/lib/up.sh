@@ -16,7 +16,7 @@ bundle_agent() {
 # The one-time enrollment tokens come from the first bootstrap phase (enroll.env).
 # `down` stops the unit, removes the directory and the tunnel (lib/lab-sweep.sh).
 start_agents() {
-  local idx var target name port url token parent i
+  local idx var target name port url token i
   port="${E2E_AGENT_TUNNEL_PORT:-13901}"
   bundle_agent
   # shellcheck disable=SC1091
@@ -38,10 +38,8 @@ start_agents() {
         || die "the reverse tunnel to $target did not come up (see $RUN_DIR/tunnel-s$idx.log)"
       url="http://127.0.0.1:$port"
     fi
-    var="E2E_SERVER_${idx}_PARENT"; parent="${!var:-}"
-    [[ -n "$parent" ]] || die "$var is required in lab.env"
-    printf 'NYABASE_BACKEND_URL=%s\nNYABASE_AGENT_ENROLLMENT_TOKEN=%s\nNYABASE_AGENT_STATE_DIR=/var/tmp/%s/state\nNYABASE_AGENT_GUEST_BRIDGES=%s\n' \
-      "$url" "$token" "$name" "$parent" >"$RUN_DIR/agent-s$idx.env"
+    printf 'NYABASE_BACKEND_URL=%s\nNYABASE_AGENT_ENROLLMENT_TOKEN=%s\nNYABASE_AGENT_STATE_DIR=/var/tmp/%s/state\n' \
+      "$url" "$token" "$name" >"$RUN_DIR/agent-s$idx.env"
     chmod 600 "$RUN_DIR/agent-s$idx.env"
     log "starting the agent on $target (backend $url)"
     tar -C "$RUN_DIR" -cz agent "agent-s$idx.env" \

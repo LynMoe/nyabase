@@ -8,18 +8,13 @@ import { copyOneTimeSecret } from '../../lib/one-time-secret.js';
 export const AGENT_ENV_FILE = '/etc/nyabase/agent.env';
 export const AGENT_STATE_DIR = '/var/lib/nyabase-agent';
 
-/**
- * Shell snippet that writes the agent env file and starts the host agent. The
- * agent lets guest NICs attach only to the bridges listed here: the server's
- * LAN bridge.
- */
-export function agentInstallSnippet(backendUrl: string, enrollmentToken: string, parentInterface: string): string {
+/** Shell snippet that writes the agent env file and starts the host agent. */
+export function agentInstallSnippet(backendUrl: string, enrollmentToken: string): string {
   return [
     'sudo install -d -m 0700 /etc/nyabase',
     `sudo tee ${AGENT_ENV_FILE} >/dev/null <<'EOF'`,
     `NYABASE_BACKEND_URL=${backendUrl}`,
     `NYABASE_AGENT_ENROLLMENT_TOKEN=${enrollmentToken}`,
-    `NYABASE_AGENT_GUEST_BRIDGES=${parentInterface}`,
     'EOF',
     `sudo chmod 0600 ${AGENT_ENV_FILE}`,
     'sudo systemctl enable --now nyabase-agent',
@@ -43,10 +38,8 @@ async function copyWithToast(value: string, what: string) {
  * The one-time agent enrollment token and how to install it on the host.
  * Only the token's digest is stored, so this is the single chance to copy it.
  */
-export function EnrollmentInstructions(
-  { enrollment, parentInterface }: { enrollment: ServerEnrollmentDto; parentInterface: string },
-) {
-  const snippet = agentInstallSnippet(backendOrigin(), enrollment.enrollmentToken, parentInterface);
+export function EnrollmentInstructions({ enrollment }: { enrollment: ServerEnrollmentDto }) {
+  const snippet = agentInstallSnippet(backendOrigin(), enrollment.enrollmentToken);
   return (
     <div className="space-y-3" data-testid="server-enrollment">
       <Alert variant="warning">

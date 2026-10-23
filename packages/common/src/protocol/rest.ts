@@ -278,9 +278,8 @@ export interface ServerAgentDto {
   connectedAt: string | null;
   /** Expiry of the outstanding enrollment token, if one was issued and not yet used. */
   enrollmentExpiresAt: string | null;
-  /** Live from the connected agent (null while disconnected): its IPv6 guard and allowed guest bridges. */
+  /** Live from the connected agent (null while disconnected); without it guests are not started. */
   ipv6Guard: { present: boolean; error: string | null } | null;
-  guestBridges: string[] | null;
 }
 
 export interface ServerCpuDto {

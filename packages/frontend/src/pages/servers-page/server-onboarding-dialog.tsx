@@ -126,7 +126,7 @@ export function ServerOnboardingDialog({
                 「{created.name}」已登记。在这台服务器上安装 nyabase-agent 并写入下面的接入令牌，Agent 会主动连接控制面。
               </DialogDescription>
             </DialogHeader>
-            <EnrollmentInstructions enrollment={created.enrollment} parentInterface={created.parentInterface} />
+            <EnrollmentInstructions enrollment={created.enrollment} />
             <DialogFooter>
               <Button onClick={finish}>我已保存，前往服务器</Button>
             </DialogFooter>
