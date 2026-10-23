@@ -12,6 +12,7 @@ import {
   FailureCode,
   IntentKind,
   IntentResourceType,
+  IntentStatus,
   type AttachVolumeRequest,
   type IntentAcceptedDto,
   type ListScope,
@@ -311,15 +312,26 @@ export class VolumeAttachmentsService {
    * Detaches whatever the container's power state: the owner lost access to
    * the volume's pool or shared backend. The reconciler unplugs the disk from
    * a running container live; the container itself is left alone. Returns
-   * null when the attachment is already going or its container is.
+   * null when the attachment is already going or its container is. A
+   * detaching attachment whose container has no pending intent is detached
+   * again: its intent ended without removing the device (the reconciler
+   * deletes the row once the device is gone).
    */
   async forceDetach(actor: Actor, attachmentId: string): Promise<IntentRecord | null> {
     return this.transactions.run(async (transaction) => {
       const attachment = await this.repository.findAttachmentForUpdate(attachmentId, transaction);
-      if (!attachment || attachment.bind_state === 'detaching') return null;
+      if (!attachment) return null;
       const container = await transaction.selectFrom('control.containers').selectAll()
         .where('id', '=', attachment.container_id).forUpdate().executeTakeFirst();
       if (!container || container.lifecycle_phase === 'deleting') return null;
+      if (attachment.bind_state === 'detaching') {
+        const inFlight = await transaction.selectFrom('control.intents').select('id')
+          .where('resource_type', '=', IntentResourceType.Container)
+          .where('resource_id', '=', container.id)
+          .where('status', '=', IntentStatus.Pending)
+          .executeTakeFirst();
+        if (inFlight) return null;
+      }
       return this.beginDetach(transaction, actor.userId, attachment, container, { reason: 'access_lapse' });
     }, VOLUME_TX);
   }

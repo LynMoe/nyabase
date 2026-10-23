@@ -376,6 +376,40 @@ export async function putManagedFields(
   }
 }
 
+/**
+ * Unplug the named devices (detaching volumes) and change nothing else, live
+ * on a running instance too.
+ */
+export async function removeDevices(
+  client: IncusClientPort,
+  name: string,
+  deviceNames: readonly string[],
+): Promise<void> {
+  const present = (devices: Record<string, unknown> | undefined) => deviceNames
+    .some((device) => Object.prototype.hasOwnProperty.call(devices ?? {}, device));
+  await readAfterTimeout(
+    () => requestAndWait(
+      client,
+      (options) => client.readModifyWriteInstance(
+        name,
+        (document) => {
+          const devices = { ...(document.devices ?? {}) };
+          for (const device of deviceNames) delete devices[device];
+          document.devices = devices;
+          return document;
+        },
+        options,
+      ),
+    ),
+    async () => {
+      if (present((await readRequired(client, name)).document.devices)) {
+        throw new Error('INSTANCE_UPDATE_NOT_CONFIRMED');
+      }
+      return undefined;
+    },
+  );
+}
+
 /** Start or stop the instance and wait until the state is confirmed. */
 export async function setPowerState(
   client: IncusClientPort,

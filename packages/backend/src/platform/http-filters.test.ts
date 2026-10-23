@@ -1,16 +1,20 @@
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { Controller, Get, Module, NotFoundException } from '@nestjs/common';
+import { Controller, Get, Module, NotFoundException, Param } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import type { NestExpressApplication } from '@nestjs/platform-express';
+import { DatabaseError } from 'pg';
+import { FailureCode } from '@nyabase/common';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
   IMMUTABLE_ASSET_CACHE_CONTROL,
   isStaticFilePath,
+  PgTransactionConflictFilter,
   REVALIDATE_CACHE_CONTROL,
   RouteIdPipe,
   serveBundledFrontend,
+  ZodExceptionFilter,
 } from './http-filters.js';
 import { securityHeaders } from './http-security.js';
 
@@ -117,5 +121,56 @@ describe('serveBundledFrontend', () => {
     const post = await fetch(`${baseUrl}/containers`, { method: 'POST' });
     expect(post.status).toBe(404);
     expect(await post.text()).not.toContain('<title>nyabase</title>');
+  });
+});
+
+function databaseError(code: string): DatabaseError {
+  const error = new DatabaseError('could not serialize access', 0, 'error');
+  error.code = code;
+  return error;
+}
+
+@Controller('db')
+class DatabaseFailureController {
+  @Get(':code')
+  fail(@Param('code') code: string) {
+    if (code === 'missing') throw new NotFoundException('gone');
+    throw databaseError(code);
+  }
+}
+
+@Module({ controllers: [DatabaseFailureController] })
+class DatabaseFailureModule {}
+
+describe('PgTransactionConflictFilter', () => {
+  let app: NestExpressApplication;
+  let baseUrl: string;
+
+  beforeAll(async () => {
+    app = await NestFactory.create<NestExpressApplication>(DatabaseFailureModule, { logger: false });
+    app.setGlobalPrefix('api');
+    app.useGlobalFilters(new ZodExceptionFilter(), new PgTransactionConflictFilter(app.getHttpAdapter()));
+    await app.listen(0, '127.0.0.1');
+    baseUrl = await app.getUrl();
+  });
+
+  afterAll(async () => {
+    await app?.close();
+  });
+
+  it('answers a serialization failure or deadlock that outlasted the retries with a retryable 409', async () => {
+    for (const code of ['40001', '40P01']) {
+      const response = await fetch(`${baseUrl}/api/db/${code}`);
+      expect(response.status, code).toBe(409);
+      expect(await response.json(), code).toMatchObject({ code: FailureCode.TransactionConflict });
+    }
+  });
+
+  it('leaves every other error to the default handling', async () => {
+    const unique = await fetch(`${baseUrl}/api/db/23505`);
+    expect(unique.status).toBe(500);
+    expect(await unique.json()).toEqual({ statusCode: 500, message: 'Internal server error' });
+    const missing = await fetch(`${baseUrl}/api/db/missing`);
+    expect(missing.status).toBe(404);
   });
 });

@@ -7,7 +7,12 @@ import { join } from 'path';
 import { AGENT_CONTROL_PATH, AGENT_STREAM_PATH } from '@nyabase/common';
 import { AppModule } from './app.module.js';
 import { NyabaseConfigService } from './platform/config/nyabase-config.service.js';
-import { RouteIdPipe, serveBundledFrontend, ZodExceptionFilter } from './platform/http-filters.js';
+import {
+  PgTransactionConflictFilter,
+  RouteIdPipe,
+  serveBundledFrontend,
+  ZodExceptionFilter,
+} from './platform/http-filters.js';
 import { securityHeaders, trustProxySetting, warnOnUntrustedForwarding } from './platform/http-security.js';
 import { RuntimeLifecycleService } from './health/runtime-lifecycle.service.js';
 import { ConsoleBridgeGateway } from './containers/console-bridge.gateway.js';
@@ -39,7 +44,7 @@ async function bootstrap() {
   app.set('trust proxy', trustedProxies);
   app.use(warnOnUntrustedForwarding(trustedProxies, (message) => logger.warn(message)));
   app.use(securityHeaders());
-  app.useGlobalFilters(new ZodExceptionFilter());
+  app.useGlobalFilters(new ZodExceptionFilter(), new PgTransactionConflictFilter(app.getHttpAdapter()));
   // forbidNonWhitelisted: throw 400 on extra properties so clients learn
   // about typos / dropped fields instead of silently having them ignored.
   // Note: most request DTOs are validated via zod (see Body() handlers); the

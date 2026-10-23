@@ -145,13 +145,20 @@ export class AccessLapseRepository {
         FROM control.containers
         WHERE power_intent = 'running' AND lifecycle_phase IN ('active', 'provisioning')
         UNION
-        -- Pools and backends: a volume is attached to a container, running or not.
+        -- Pools and backends: a volume is attached to a container, running or
+        -- not, or is still detaching from one with no intent left to unplug it
+        -- (its detach failed: the reconciler deletes the row once it is gone).
         SELECT volume.owner_id, CASE WHEN volume.shared_backend_id IS NULL THEN 'storage_pool' ELSE 'shared_backend' END,
                coalesce(volume.shared_backend_id, volume.pool_id)
         FROM control.volume_attachments AS attachment
         JOIN control.volumes AS volume ON volume.id = attachment.volume_id
         JOIN control.containers AS container ON container.id = attachment.container_id
-        WHERE attachment.bind_state <> 'detaching' AND container.lifecycle_phase <> 'deleting'
+        WHERE container.lifecycle_phase <> 'deleting'
+          AND (attachment.bind_state <> 'detaching' OR NOT EXISTS (
+            SELECT 1 FROM control.intents AS intent
+            WHERE intent.resource_type = 'container' AND intent.resource_id = container.id
+              AND intent.status = 'pending'
+          ))
       ), candidate AS (
         SELECT owned.user_id, owned.kind, owned.resource_id,
                (coverage.user_id IS NOT NULL) AS covered,
@@ -286,8 +293,21 @@ export class AccessLapseRepository {
     return Number(result.numUpdatedRows) > 0;
   }
 
+  /**
+   * Coverage right now, read without the IAM lock: a cheap last look before a
+   * reversible enforcement (a stop, a detach), so a grant committed since the
+   * scan does not hit the user's containers. Irreversible steps re-check under
+   * the lock instead (`purgeIfUncovered`).
+   */
+  isCoveredNow(key: LapseKey): Promise<boolean> {
+    return this.isCovered(this.database, key);
+  }
+
   /** Current coverage of the pair (active user holding a current grant). */
-  private async isCovered(transaction: Transaction<NyabaseDatabase>, key: LapseKey): Promise<boolean> {
+  private async isCovered(
+    transaction: Kysely<NyabaseDatabase> | Transaction<NyabaseDatabase>,
+    key: LapseKey,
+  ): Promise<boolean> {
     const access = key.kind === 'server'
       ? await resolveServerAccess(transaction, key.userId, key.resourceId)
       : key.kind === 'storage_pool'

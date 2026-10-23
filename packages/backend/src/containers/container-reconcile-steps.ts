@@ -264,16 +264,58 @@ async function scanNeedsUpdate(
 
 // --- attachments ------------------------------------------------------------------
 
+/**
+ * Consecutive passes of each intent that found an attached volume not ready
+ * (placement pending, catalog adopt pending). The intent's attempt count also
+ * grows on unreachable-server and busy retries, so a create held through an
+ * agent restart would fail at its first not-ready pass after the reconnect.
+ * Kept in memory: the backend is one process and runs an intent on one chain
+ * at a time; a restart only starts the count over (the failure comes later).
+ */
+export class NotReadyPasses {
+  private readonly passes = new Map<string, number>();
+
+  constructor(private readonly capacity = 4_096) {}
+
+  /** Counts one not-ready pass of the intent and returns its consecutive passes. */
+  record(intentId: string): number {
+    const count = (this.passes.get(intentId) ?? 0) + 1;
+    this.passes.delete(intentId);
+    this.passes.set(intentId, count);
+    // Intents settled elsewhere (superseded, deleted) leave entries behind: drop the oldest.
+    while (this.passes.size > this.capacity) {
+      this.passes.delete(this.passes.keys().next().value!);
+    }
+    return count;
+  }
+
+  clear(intentId: string): void {
+    this.passes.delete(intentId);
+  }
+}
+
+const NOT_READY_FAILURES: Readonly<Record<string, { code: string; message: string }>> = {
+  VOLUME_PLACEMENT_PENDING: {
+    code: FailureCode.VolumePlacementFailed,
+    message: 'An attached volume is still not present on the container\'s server',
+  },
+  VOLUME_CATALOG_ADOPT_PENDING: {
+    code: FailureCode.VolumeCatalogAdoptFailed,
+    message: 'Incus did not adopt the existing CephFS directory into this daemon catalog',
+  },
+};
+
 export interface AttachmentDeps {
   readonly store: Pick<ContainerReconcileStore, 'rereadDesired' | 'markCatalogPresent'>;
   readonly logger: Pick<Logger, 'log'>;
+  readonly notReady: NotReadyPasses;
 }
 
 /**
  * The attachments the instance must carry, with their catalogs present on the
  * server. An outcome means the intent became stale or must end here: a
- * volume still not ready after as many attempts as a catalog adopt gets
- * fails the intent visibly instead of retrying it forever.
+ * volume still not ready after as many consecutive passes as a catalog adopt
+ * gets fails the intent visibly instead of retrying it forever.
  */
 export async function prepareAttachments(
   deps: AttachmentDeps,
@@ -281,24 +323,23 @@ export async function prepareAttachments(
   client: IncusClientPort,
   row: ContainerRow,
 ): Promise<{ outcome: ReconcileOutcome } | { attachments: ContainerAttachment[] }> {
+  const intentId = context.intent.id;
+  let prepared: Awaited<ReturnType<typeof readyAttachments>>;
   try {
-    return await readyAttachments(deps, context, client, row);
+    prepared = await readyAttachments(deps, context, client, row);
   } catch (error) {
-    if (
-      error instanceof IncusError
-      && error.code === 'VOLUME_PLACEMENT_PENDING'
-      && context.intent.attemptCount >= VOLUME_ADOPT_FAIL_AFTER_ATTEMPTS
-    ) {
-      return {
-        outcome: failedOutcome(
-            FailureCode.VolumePlacementFailed,
-            'An attached volume is still not present on the container\'s server',
-            { ...error.details, serverId: row.server_id },
-          ),
-      };
-    }
-    throw error;
+    const failure = error instanceof IncusError ? NOT_READY_FAILURES[error.code] : undefined;
+    if (!failure || deps.notReady.record(intentId) <= VOLUME_ADOPT_FAIL_AFTER_ATTEMPTS) throw error;
+    deps.notReady.clear(intentId);
+    return {
+      outcome: failedOutcome(failure.code, failure.message, {
+        ...(error as IncusError).details,
+        serverId: row.server_id,
+      }),
+    };
   }
+  deps.notReady.clear(intentId);
+  return prepared;
 }
 
 async function readyAttachments(
@@ -317,14 +358,7 @@ async function readyAttachments(
       outcome: { outcome: 'succeeded', observedRevision: context.intent.targetRevision, stale: true },
     };
   }
-  const catalogOutcome = await ensureDesiredCatalogs(
-    deps,
-    context,
-    client,
-    beforeMkdir.desired,
-    row.server_id,
-  );
-  if (catalogOutcome) return { outcome: catalogOutcome };
+  await ensureDesiredCatalogs(deps, context, client, beforeMkdir.desired, row.server_id);
   const beforePut = await deps.store.rereadDesired(
     row.id,
     row.server_id,
@@ -343,7 +377,7 @@ async function ensureDesiredCatalogs(
   client: IncusClientPort,
   attachments: readonly ContainerAttachment[],
   serverId: string,
-): Promise<ReconcileOutcome | undefined> {
+): Promise<void> {
   for (const attachment of attachments) {
     if (!attachment.pool_name) {
       throw new IncusError(
@@ -360,13 +394,6 @@ async function ensureDesiredCatalogs(
         ownerScope: attachment.shared_backend_id ?? null,
       });
       if (result === 'missing') {
-        if (context.intent.attemptCount >= VOLUME_ADOPT_FAIL_AFTER_ATTEMPTS) {
-          return failedOutcome(
-              'VOLUME_CATALOG_ADOPT_FAILED',
-              'Incus did not adopt the existing CephFS directory into this daemon catalog',
-              { volumeId: attachment.volume_id, serverId },
-            );
-        }
         throw new IncusError('VOLUME_CATALOG_ADOPT_PENDING', 'retry', {
           volumeId: attachment.volume_id,
           serverId,
@@ -398,5 +425,4 @@ async function ensureDesiredCatalogs(
       throw error;
     }
   }
-  return undefined;
 }

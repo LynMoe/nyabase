@@ -198,12 +198,16 @@ export class AccessLapseProcessor implements OnModuleInit, OnModuleDestroy {
     return true;
   }
 
-  /** Server: stop the containers. Pool or backend: detach the volumes. */
+  /**
+   * Server: stop the containers. Pool or backend: detach the volumes. A grant
+   * committed since the scan cancels the grace instead.
+   */
   private async enforce(
     candidate: LapseCandidate,
     actor: Actor,
     assertOwned: () => void,
   ): Promise<boolean> {
+    if (await this.lapses.isCoveredNow(candidate)) return this.lapses.clear(candidate);
     switch (candidate.kind) {
       case 'server':
         await this.purge.stopRunningContainersForGraceEntry(
@@ -239,8 +243,12 @@ export class AccessLapseProcessor implements OnModuleInit, OnModuleDestroy {
     actor: Actor,
     assertOwned: () => void,
   ): Promise<boolean> {
-    // Volumes re-attached during the grace are detached first; that is
-    // reversible and goes through its own transactions.
+    // Volumes re-attached during the grace (or whose detach failed) are
+    // detached first; that is reversible and goes through its own
+    // transactions, so only a lock-free look at coverage guards it.
+    if (candidate.kind !== 'server' && await this.lapses.isCoveredNow(candidate)) {
+      return this.lapses.clear(candidate);
+    }
     if (candidate.kind === 'storage_pool') {
       await this.purge.detachVolumesForStoragePool(actor, candidate.userId, candidate.resourceId);
     } else if (candidate.kind === 'shared_backend') {

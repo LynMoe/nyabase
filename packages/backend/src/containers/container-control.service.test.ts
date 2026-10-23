@@ -144,6 +144,7 @@ function makeHarness() {
   return {
     service,
     transaction,
+    transactions,
     row,
     repository,
     access,
@@ -317,6 +318,17 @@ describe('ContainerControlService intent boundary', () => {
       Role.Operator,
     );
     expect(resolveServerAccessMock).not.toHaveBeenCalled();
+    // Read committed: the role re-check reads past the IAM lock wait, not a
+    // snapshot from before it. Only the owner's start admission needs serializable.
+    expect(harness.transactions.run).toHaveBeenLastCalledWith(
+      expect.any(Function),
+      expect.objectContaining({ isolationLevel: 'read committed' }),
+    );
+    await harness.service.action(owner, containerId, 'stop');
+    expect(harness.transactions.run).toHaveBeenLastCalledWith(
+      expect.any(Function),
+      expect.objectContaining({ isolationLevel: 'serializable' }),
+    );
   });
 
   it('blocks root changes while a quota application is pending', async () => {

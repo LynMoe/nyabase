@@ -556,6 +556,77 @@ describePg('access lapse processor', () => {
     });
   });
 
+  it('detaches a lapsed pool volume again when its detach intent ended without unplugging it', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const { processor } = await fixture(database);
+      const { userId, serverId, poolId, imageId } = await world(database);
+      const lapsedPool = await seedPool(database, serverId);
+      await grantServer(database, { user: userId }, serverId);
+      await grantPool(database, { user: userId }, poolId);
+      await grantPool(database, { user: userId }, lapsedPool, days(-1));
+      const container = await seedContainer(database, {
+        ownerId: userId, serverId, poolId, imageId, running: true,
+      });
+      const volume = await seedVolume(database, { ownerId: userId, poolId: lapsedPool, serverId });
+      const attachmentId = await seedAttachment(database, container, volume);
+      await processor.process();
+      expect(await pendingDetaches(database, container)).toEqual([attachmentId]);
+
+      // While the detach intent is pending, later passes leave it alone.
+      await processor.process();
+      expect(await containerIntents(database, container)).toHaveLength(1);
+
+      // The intent fails (the device may still be in the instance): the row
+      // stays detaching, which counts as exposed, and the next pass detaches again.
+      await database.updateTable('control.intents')
+        .set({ status: 'failed', failure_code: 'TEST', settled_at: new Date() })
+        .where('resource_id', '=', container).execute();
+      await processor.process();
+      expect(await pendingDetaches(database, container)).toEqual([attachmentId]);
+      expect(await containerIntents(database, container)).toHaveLength(2);
+      expect((await bindStates(database)).get(attachmentId)).toBe('detaching');
+    });
+  });
+
+  it('does not detach when a pool grant commits between the scan and the detach', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const { processor } = await fixture(database);
+      const { userId, serverId, poolId, imageId } = await world(database);
+      const lapsedPool = await seedPool(database, serverId);
+      await grantServer(database, { user: userId }, serverId);
+      await grantPool(database, { user: userId }, poolId);
+      await grantPool(database, { user: userId }, lapsedPool, days(-1));
+      const container = await seedContainer(database, {
+        ownerId: userId, serverId, poolId, imageId, running: true,
+      });
+      const volume = await seedVolume(database, { ownerId: userId, poolId: lapsedPool, serverId });
+      // In grace, enforced once, and exposed again (re-attached by an administrator).
+      await database.insertInto('control.access_lapses').values({
+        user_id: userId,
+        resource_kind: 'storage_pool',
+        resource_id: lapsedPool,
+        lapsed_at: new Date(Date.now() - DAY_MS),
+        stopped_at: new Date(Date.now() - DAY_MS),
+      }).execute();
+      const attachmentId = await seedAttachment(database, container, volume);
+      // The scan still sees the pair uncovered; the grant lands right after it.
+      const lapses = (processor as unknown as { lapses: AccessLapseRepository }).lapses;
+      const inspect = lapses.inspect.bind(lapses);
+      vi.spyOn(lapses, 'inspect').mockImplementationOnce(async (key) => {
+        const scanned = await inspect(key);
+        await database.updateTable('iam.storage_pool_grants').set({ expires_at: null })
+          .where('user_id', '=', userId).where('pool_id', '=', lapsedPool).execute();
+        return scanned;
+      });
+
+      await processor.process();
+
+      expect((await bindStates(database)).get(attachmentId)).toBe('attached');
+      expect(await containerIntents(database, container)).toEqual([]);
+      expect(await ledger(database, userId)).toEqual([]);
+    });
+  });
+
   it('detaches a lapsed shared backend\'s volumes and destroys them, never the containers', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const { processor, actions } = await fixture(database);
@@ -840,6 +911,12 @@ async function pendingDetaches(database: Kysely<NyabaseDatabase>, containerId: s
     .map((row) => row.request_json as { operation?: string; attachmentId?: string } | null)
     .filter((request) => request?.operation === 'detach_volume')
     .map((request) => request!.attachmentId);
+}
+
+async function containerIntents(database: Kysely<NyabaseDatabase>, containerId: string): Promise<unknown[]> {
+  return database.selectFrom('control.intents').select(['id', 'status'])
+    .where('resource_id', '=', containerId)
+    .execute();
 }
 
 async function powerOf(database: Kysely<NyabaseDatabase>, containerId: string): Promise<string> {

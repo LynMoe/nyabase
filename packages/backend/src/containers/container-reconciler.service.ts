@@ -45,6 +45,7 @@ import {
   putManagedFields,
   readRequired,
   readState,
+  removeDevices,
   renameInstance,
   restartTransition,
   restartWithProof,
@@ -65,6 +66,7 @@ import { isRestartIntent } from './container-rules.js';
 import {
   awaitsSshDaemon,
   guardRootShrink,
+  NotReadyPasses,
   prepareAttachments,
   rootShrinkDecision,
   scanServerContainers,
@@ -98,6 +100,7 @@ export function rootQuotaRetryDelay(attemptCount: number): number {
 export class ContainerReconciler implements ManagedReconciler, OnModuleInit {
   readonly resourceType = 'container' as const;
   private readonly logger = new Logger(ContainerReconciler.name);
+  private readonly notReady = new NotReadyPasses();
 
   constructor(
     private readonly store: ContainerReconcileStore,
@@ -158,9 +161,9 @@ export class ContainerReconciler implements ManagedReconciler, OnModuleInit {
     if (row.lifecycle_phase === 'deleting' || context.intent.kind === 'container.delete') {
       return this.reconcileDelete(context, client, row, expectedName);
     }
-    await this.stopBeforeAttachments(client, row, expectedName);
+    await this.beforeAttachments(context, client, row, expectedName);
     const prepared = await prepareAttachments(
-      { store: this.store, logger: this.logger },
+      { store: this.store, logger: this.logger, notReady: this.notReady },
       context,
       client,
       row,
@@ -332,21 +335,40 @@ export class ContainerReconciler implements ManagedReconciler, OnModuleInit {
   }
 
   /**
-   * Powering off never waits for the attachments: a volume that is not ready
-   * on this server (its create failed, a placement is pending) would hold the
-   * stop, the access-lapse one included, in retries while the instance runs.
+   * Powering off and unplugging never wait for the other attachments: a
+   * volume that is not ready on this server (its create failed, a placement
+   * is pending) would hold the stop or the detach, the access-lapse ones
+   * included, in retries (and then a failure) while the instance keeps
+   * running, or keeps the detached volume mounted. A detach that lands here
+   * settles its attachment row at once, whatever the rest of the pass does.
    */
-  private async stopBeforeAttachments(
+  private async beforeAttachments(
+    context: ReconcileRunContext,
     client: IncusClientPort,
     row: ContainerRow,
     expectedName: string,
   ): Promise<void> {
-    if (row.power_intent !== 'stopped') return;
+    const detaching = await this.store.readDetachingDevices(row.id);
+    if (row.power_intent !== 'stopped' && detaching.length === 0) return;
     const actual = await this.findInstance(client, expectedName, row);
-    if (!actual || this.checkIdentity(actual, row, expectedName)) return;
+    if (!actual) {
+      // No instance on this server: nothing carries the detached volumes.
+      if (detaching.length > 0) await this.store.settleVolumeBinds(row.id, { devices: {} }, true);
+      return;
+    }
+    if (this.checkIdentity(actual, row, expectedName)) return;
     const status = actual.document.state?.status ?? actual.document.status;
-    if (powerTransition(status, 'stopped') !== 'stop') return;
-    await setPowerState(client, actual.name, 'stop');
+    if (row.power_intent === 'stopped' && powerTransition(status, 'stopped') === 'stop') {
+      await setPowerState(client, actual.name, 'stop');
+    }
+    if (detaching.length === 0) return;
+    let document = actual.document;
+    if (detaching.some((device) => Object.prototype.hasOwnProperty.call(document.devices ?? {}, device))) {
+      await this.auditMutate(context.intent, 'PUT', `/1.0/instances/${actual.name}`, actual.name);
+      await removeDevices(client, actual.name, detaching);
+      document = (await readRequired(client, actual.name)).document;
+    }
+    await this.store.settleVolumeBinds(row.id, document, true);
   }
 
   // --- instance lifecycle --------------------------------------------------------

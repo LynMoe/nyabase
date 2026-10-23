@@ -337,6 +337,18 @@ export class ContainerReconcileStore {
     };
   }
 
+  /** Device names of the attachments being removed from the container. */
+  async readDetachingDevices(containerId: string): Promise<string[]> {
+    const rows = await this.database
+      .selectFrom('control.volume_attachments')
+      .select('device_name')
+      .where('container_id', '=', containerId)
+      .where('bind_state', '=', 'detaching')
+      .orderBy('id')
+      .execute();
+    return rows.map((row) => row.device_name);
+  }
+
   async markCatalogPresent(volumeId: string, serverId: string): Promise<void> {
     await this.database
       .updateTable('control.volume_placements')
@@ -353,8 +365,15 @@ export class ContainerReconcileStore {
 
   // --- observation -------------------------------------------------------------
 
-  /** Attachments that finished binding become `attached`; finished unbinds disappear. */
-  async settleVolumeBinds(containerId: string, document: IncusSchema<'InstanceFull'>): Promise<void> {
+  /**
+   * Attachments that finished binding become `attached`; finished unbinds
+   * disappear. `detachedOnly` settles only the unbinds.
+   */
+  async settleVolumeBinds(
+    containerId: string,
+    document: Pick<IncusSchema<'InstanceFull'>, 'devices'>,
+    detachedOnly = false,
+  ): Promise<void> {
     const devices = document.devices ?? {};
     const rows = await this.database
       .selectFrom('control.volume_attachments')
@@ -363,7 +382,7 @@ export class ContainerReconcileStore {
       .execute();
     for (const row of rows) {
       const present = Object.prototype.hasOwnProperty.call(devices, row.device_name);
-      if (row.bind_state === 'attaching' && present) {
+      if (row.bind_state === 'attaching' && present && !detachedOnly) {
         await this.database
           .updateTable('control.volume_attachments')
           .set({ bind_state: 'attached' })

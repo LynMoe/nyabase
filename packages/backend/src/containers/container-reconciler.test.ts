@@ -462,12 +462,15 @@ describe('container reconciler §15.1 fixture-driven Incus mocks', () => {
 
     const outcome = await reconciler.reconcile(context(client));
     expect(outcome).toEqual({ outcome: 'succeeded', observedRevision: 3 });
-    expect(putBodies[0]!.devices[addName]).toMatchObject({
+    // The detaching device is unplugged on its own first, then the spec is applied.
+    expect(putBodies).toHaveLength(2);
+    expect(putBodies[0]!.devices[removeName]).toBeUndefined();
+    expect(putBodies[1]!.devices[addName]).toMatchObject({
       type: 'disk',
       path: '/data/add',
       source: deriveVolumeName(VOLUME_ADD),
     });
-    expect(putBodies[0]!.devices[removeName]).toBeUndefined();
+    expect(putBodies[1]!.devices[removeName]).toBeUndefined();
     expect(binds.updated).toContain(ATTACH_ADD);
     expect(binds.deleted).toContain(ATTACH_REMOVE);
   });
@@ -1408,12 +1411,13 @@ describe('container reconciler: changes that need a stopped instance never block
     const actions = followPower(setup);
     setup.client.getStorageVolume.mockRejectedValue(new IncusError('INCUS_NOT_FOUND', 'managed_failure'));
 
-    await expect(setup.reconciler.reconcile(context(setup.client, {
-      attemptCount: VOLUME_ADOPT_FAIL_AFTER_ATTEMPTS - 1,
-    }))).rejects.toMatchObject({ code: 'VOLUME_PLACEMENT_PENDING' });
-    const outcome = await setup.reconciler.reconcile(context(setup.client, {
-      attemptCount: VOLUME_ADOPT_FAIL_AFTER_ATTEMPTS,
-    }));
+    // Only not-ready passes count: an intent whose attempts piled up while the
+    // agent was away (unreachable retries) still gets every one of them.
+    const pass = context(setup.client, { attemptCount: 40 });
+    for (let attempt = 0; attempt < VOLUME_ADOPT_FAIL_AFTER_ATTEMPTS; attempt += 1) {
+      await expect(setup.reconciler.reconcile(pass)).rejects.toMatchObject({ code: 'VOLUME_PLACEMENT_PENDING' });
+    }
+    const outcome = await setup.reconciler.reconcile(pass);
 
     expect(outcome).toMatchObject({
       outcome: 'failed',
@@ -1425,6 +1429,104 @@ describe('container reconciler: changes that need a stopped instance never block
     // It never starts without the volume, and never writes the instance.
     expect(actions).toEqual([]);
     expect(setup.client.readModifyWriteInstance).not.toHaveBeenCalled();
+  });
+
+  it('counts consecutive not-ready passes per intent and starts over once the volume was ready', async () => {
+    const setup = await harness({
+      status: 'Stopped',
+      powerIntent: 'stopped',
+      attachments: [attachment(ATTACH_ADD, VOLUME_ADD, '/data/add', 'attaching')],
+    });
+    setup.client.getStorageVolume.mockRejectedValue(new IncusError('INCUS_NOT_FOUND', 'managed_failure'));
+    const first = context(setup.client);
+    for (let attempt = 0; attempt < VOLUME_ADOPT_FAIL_AFTER_ATTEMPTS; attempt += 1) {
+      await expect(setup.reconciler.reconcile(first)).rejects.toMatchObject({ code: 'VOLUME_PLACEMENT_PENDING' });
+    }
+    // Another intent of the same container has its own count.
+    const other = context(setup.client, { id: '66666666-6666-4666-8666-666666666666' });
+    await expect(setup.reconciler.reconcile(other)).rejects.toMatchObject({ code: 'VOLUME_PLACEMENT_PENDING' });
+    // One ready pass (failing later, reading the instance) resets the first intent's count.
+    setup.client.getStorageVolume.mockResolvedValueOnce(syncResponse({ name: 'volume' }));
+    setup.client.getInstanceState.mockRejectedValueOnce(new IncusError('INCUS_TIMEOUT', 'retry'));
+    await expect(setup.reconciler.reconcile(first)).rejects.toMatchObject({ code: 'INCUS_TIMEOUT' });
+    for (let attempt = 0; attempt < VOLUME_ADOPT_FAIL_AFTER_ATTEMPTS; attempt += 1) {
+      await expect(setup.reconciler.reconcile(first)).rejects.toMatchObject({ code: 'VOLUME_PLACEMENT_PENDING' });
+    }
+    await expect(setup.reconciler.reconcile(first)).resolves.toMatchObject({
+      outcome: 'failed',
+      failure: { code: FailureCode.VolumePlacementFailed },
+    });
+  });
+});
+
+describe('container reconciler: detaching never waits for the other attachments', () => {
+  async function detachingSetup(options: { readonly status: 'Running' | 'Stopped'; readonly missingInstance?: boolean }) {
+    const removeName = deriveAttachmentDeviceName(ATTACH_REMOVE);
+    const setup = await harness({
+      status: options.status,
+      powerIntent: 'running',
+      missingInstance: options.missingInstance,
+      // The attachment kept on the container is local and was never created on this server.
+      attachments: [attachment(ATTACH_KEEP, VOLUME_KEEP, '/data/keep')],
+      documentExtras: {
+        devices: {
+          [deriveAttachmentDeviceName(ATTACH_KEEP)]: diskDevice(VOLUME_KEEP, '/data/keep'),
+          [removeName]: diskDevice(VOLUME_REMOVE, '/data/remove'),
+        },
+      },
+    });
+    const store = storeOf(setup.reconciler) as unknown as {
+      readDetachingDevices: () => Promise<string[]>;
+      settleVolumeBinds: () => Promise<void>;
+    };
+    vi.spyOn(store, 'readDetachingDevices').mockResolvedValue([removeName]);
+    const settle = vi.spyOn(store, 'settleVolumeBinds').mockResolvedValue(undefined);
+    setup.client.getStorageVolume.mockRejectedValue(new IncusError('INCUS_NOT_FOUND', 'managed_failure'));
+    return { ...setup, removeName, settle };
+  }
+
+  it('unplugs a detaching volume from the running instance while another volume is not ready', async () => {
+    const setup = await detachingSetup({ status: 'Running' });
+    const actions = followPower(setup);
+
+    const detach = context(setup.client, {
+      request: { operation: 'detach_volume', attachmentId: ATTACH_REMOVE },
+    });
+    await expect(setup.reconciler.reconcile(detach)).rejects.toMatchObject({ code: 'VOLUME_PLACEMENT_PENDING' });
+
+    // Only the detaching device left; the instance, its other devices and its power stay.
+    expect(setup.putBodies).toHaveLength(1);
+    expect(setup.putBodies[0]!.devices[setup.removeName]).toBeUndefined();
+    expect(setup.putBodies[0]!.devices[deriveAttachmentDeviceName(ATTACH_KEEP)]).toBeDefined();
+    expect(setup.putBodies[0]!.devices.root).toBeDefined();
+    expect(actions).toEqual([]);
+    // The detach is settled at once: its row goes although the pass fails.
+    const settled = setup.settle.mock.calls[0] as unknown as [string, { devices: Record<string, unknown> }, boolean];
+    expect(settled[0]).toBe(CONTAINER_ID);
+    expect(settled[1].devices[setup.removeName]).toBeUndefined();
+    expect(settled[2]).toBe(true);
+
+    // The pass still ends (and at last fails) on the volume that is not ready,
+    // without touching the instance again.
+    for (let attempt = 0; attempt < VOLUME_ADOPT_FAIL_AFTER_ATTEMPTS - 1; attempt += 1) {
+      await expect(setup.reconciler.reconcile(detach)).rejects.toMatchObject({ code: 'VOLUME_PLACEMENT_PENDING' });
+    }
+    await expect(setup.reconciler.reconcile(detach)).resolves.toMatchObject({
+      outcome: 'failed',
+      failure: { code: FailureCode.VolumePlacementFailed },
+    });
+    expect(setup.putBodies).toHaveLength(1);
+  });
+
+  it('settles a detach at once when the container has no instance on the server', async () => {
+    const setup = await detachingSetup({ status: 'Stopped', missingInstance: true });
+
+    await expect(setup.reconciler.reconcile(context(setup.client))).rejects.toMatchObject({
+      code: 'VOLUME_PLACEMENT_PENDING',
+    });
+
+    expect(setup.client.readModifyWriteInstance).not.toHaveBeenCalled();
+    expect(setup.settle).toHaveBeenCalledWith(CONTAINER_ID, { devices: {} }, true);
   });
 });
 

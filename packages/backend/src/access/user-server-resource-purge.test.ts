@@ -8,7 +8,10 @@ import {
 } from '@nyabase/common';
 import { SYSTEM_ACTOR } from '../iam/actor.js';
 import { testActor } from '../iam/actor.test-helper.js';
+import { assertActorRole } from '../iam/administration.js';
 import { UserServerResourcePurgeService } from './user-server-resource-purge.service.js';
+
+vi.mock('../iam/administration.js', () => ({ assertActorRole: vi.fn() }));
 
 const SYSTEM = SYSTEM_ACTOR;
 
@@ -85,13 +88,17 @@ describe('UserServerResourcePurgeService grant expiry actions', () => {
           { id: 'attachment-2', container_id: 'container-2', bind_state: 'detaching' },
         ]
         : [{ id: 'attachment-3', container_id: 'container-3', bind_state: 'attached' }]);
-    fixture.attachments.forceDetach.mockResolvedValue({ id: 'detach-intent' });
+    // A detaching attachment is offered again; forceDetach leaves it alone while its intent runs.
+    fixture.attachments.forceDetach.mockImplementation(async (_actor: unknown, id: string) =>
+      id === 'attachment-1' ? { id: 'detach-intent' } : null);
 
     const result = await fixture.service.detachVolumesForSharedBackend(SYSTEM, 'user-1', 'backend-1');
 
     expect(result).toEqual({ intentIds: ['detach-intent'] });
-    expect(fixture.attachments.forceDetach).toHaveBeenCalledTimes(1);
-    expect(fixture.attachments.forceDetach).toHaveBeenCalledWith(SYSTEM, 'attachment-1');
+    expect(fixture.attachments.forceDetach.mock.calls).toEqual([
+      [SYSTEM, 'attachment-1'],
+      [SYSTEM, 'attachment-2'],
+    ]);
     expect(fixture.containers.action).not.toHaveBeenCalled();
     expect(fixture.audit.append).toHaveBeenCalledWith(
       {},
@@ -278,6 +285,13 @@ describe('UserServerResourcePurgeService grant expiry actions', () => {
 
     await adminFixture.service.purge(testActor('admin-1', Role.Admin), 'user-1', 'server-1');
 
+    // The administrator's role is re-read first, in a read-committed transaction.
+    expect(assertActorRole).toHaveBeenCalledWith({}, 'admin-1', Role.Admin);
+    expect(adminFixture.transactions.run).toHaveBeenCalledWith(
+      expect.any(Function),
+      expect.objectContaining({ isolationLevel: 'read committed' }),
+    );
+    vi.mocked(assertActorRole).mockClear();
     expect(adminFixture.audit.append).toHaveBeenCalledWith(
       {},
       'admin-1',
@@ -293,6 +307,7 @@ describe('UserServerResourcePurgeService grant expiry actions', () => {
 
     await expiryFixture.service.purge(SYSTEM, 'user-1', 'server-1');
 
+    expect(assertActorRole).not.toHaveBeenCalled();
     expect(expiryFixture.audit.append).toHaveBeenCalledWith(
       {},
       null,

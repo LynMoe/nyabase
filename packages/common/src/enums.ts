@@ -129,6 +129,8 @@ export function roleAtLeast(role: Role, minimum: Role): boolean {
 
 export enum FailureCode {
   RevisionConflict = 'REVISION_CONFLICT',
+  /** A concurrent write kept the request's transaction from committing; retry it. */
+  TransactionConflict = 'TRANSACTION_CONFLICT',
   StorageGrantExceeded = 'STORAGE_GRANT_EXCEEDED',
   MemoryGrantExceeded = 'MEMORY_GRANT_EXCEEDED',
   StoragePoolExhausted = 'STORAGE_POOL_EXHAUSTED',

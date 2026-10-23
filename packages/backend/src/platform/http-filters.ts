@@ -2,13 +2,19 @@ import {
   ExceptionFilter,
   Catch,
   ArgumentsHost,
+  ConflictException,
+  Logger,
   NotFoundException,
   type ArgumentMetadata,
   type PipeTransform,
 } from '@nestjs/common';
+import { BaseExceptionFilter } from '@nestjs/core';
 import type { NestExpressApplication } from '@nestjs/platform-express';
 import { join, sep } from 'node:path';
+import { DatabaseError } from 'pg';
 import { ZodError } from 'zod';
+import { FailureCode } from '@nyabase/common';
+import { isRetryablePgTransactionError } from './persistence-pg/transaction.js';
 
 /**
  * Converts ZodError thrown by z.parse() in controllers into a 400 response.
@@ -39,6 +45,31 @@ export class ZodExceptionFilter implements ExceptionFilter {
         })),
       },
     });
+  }
+}
+
+/**
+ * A serialization failure (40001) or deadlock (40P01) that outlasted the
+ * transaction's own retries lost to concurrent writes; nothing is wrong with
+ * the server or the request. It answers 409 TRANSACTION_CONFLICT, which the
+ * client may simply send again, instead of a 500. Any other database error
+ * keeps Nest's default handling (500, logged). Construct it with the HTTP
+ * adapter (`app.getHttpAdapter()`), which the default handling replies through.
+ */
+@Catch(DatabaseError)
+export class PgTransactionConflictFilter extends BaseExceptionFilter {
+  private readonly logger = new Logger(PgTransactionConflictFilter.name);
+
+  catch(exception: DatabaseError, host: ArgumentsHost): void {
+    if (!isRetryablePgTransactionError(exception)) {
+      super.catch(exception, host);
+      return;
+    }
+    this.logger.warn(`Request lost to concurrent writes (sqlstate=${exception.code}); answered 409`);
+    super.catch(new ConflictException({
+      code: FailureCode.TransactionConflict,
+      message: '与其他同时进行的修改冲突，请重试',
+    }), host);
   }
 }
 

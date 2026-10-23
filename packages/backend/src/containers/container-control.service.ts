@@ -356,8 +356,12 @@ export class ContainerControlService {
     return this.transactions.run(
       (transaction) => this.actionInTransaction(transaction, actor, containerId, action, scope),
       {
-        // Expiry/system stops must not lose to concurrent reconcile observation writes.
-        isolationLevel: isSystemActor(actor) ? 'read committed' : 'serializable',
+        // Only the owner's start admission (running memory) relies on
+        // serializable. Expiry/system stops must not lose to concurrent
+        // reconcile observation writes, and the administrator override
+        // (`scope=all`, which admits nothing) must read the role re-check
+        // after the IAM lock wait, not from a snapshot taken before it.
+        isolationLevel: isSystemActor(actor) || scope === 'all' ? 'read committed' : 'serializable',
         maxAttempts: 5,
       },
     );

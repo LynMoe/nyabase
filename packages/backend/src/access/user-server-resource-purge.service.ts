@@ -6,6 +6,7 @@ import {
   ContainerPowerIntent,
   IntentKind,
   IntentResourceType,
+  Role,
 } from '@nyabase/common';
 import { AuditService } from '../iam/audit.service.js';
 import { ContainerControlRepository } from '../containers/container-control.repository.js';
@@ -16,7 +17,8 @@ import { IntentRepository } from '../reconcile/intent.repository.js';
 import { VOLUME_DESTROY_PLACEMENT_ID } from '../reconcile/reconcile-claim.repository.js';
 import { VolumeAttachmentsService } from '../volumes/volume-attachments.service.js';
 import { listEligibleDestroyExecutors, VolumesRepository } from '../volumes/volumes.repository.js';
-import { isSystemActor, type Actor } from '../iam/actor.js';
+import { isSystemActor, requireUserId, type Actor } from '../iam/actor.js';
+import { assertActorRole } from '../iam/administration.js';
 
 const OPERATOR_PURGE_AUDIT_ACTION = 'user.server.purge_resources' as AuditAction;
 /**
@@ -57,7 +59,11 @@ export class UserServerResourcePurgeService {
 
   /**
    * Deletes a user's containers and local volumes on one server, all queued in
-   * one transaction (an administrator purges as themselves).
+   * one transaction (an administrator purges as themselves). Read committed,
+   * as for the expiry purge: nothing here is admitted against a quota, every
+   * row is locked before it is read, and the administrator's role is re-read
+   * first, after the IAM lock wait (a snapshot would predate the wait and miss
+   * a demotion committed during it).
    */
   async purge(
     actor: Actor,
@@ -65,11 +71,11 @@ export class UserServerResourcePurgeService {
     serverId: string,
   ): Promise<PurgeUserServerResourcesResult> {
     return this.transactions.run(
-      (transaction) => this.purgeServerInTransaction(transaction, actor, userId, serverId),
-      {
-        isolationLevel: isSystemActor(actor) ? 'read committed' : 'serializable',
-        maxAttempts: 5,
+      async (transaction) => {
+        if (!isSystemActor(actor)) await assertActorRole(transaction, requireUserId(actor), Role.Admin);
+        return this.purgeServerInTransaction(transaction, actor, userId, serverId);
       },
+      { isolationLevel: 'read committed', maxAttempts: 5 },
     );
   }
 
@@ -255,7 +261,11 @@ export class UserServerResourcePurgeService {
     return { intentIds };
   }
 
-  /** Detach intents for every attachment of the matching volumes that is not already going. */
+  /**
+   * Detach intents for every attachment of the matching volumes that is not
+   * already going (one whose detach intent ended without unplugging it is
+   * detached again: `forceDetach`).
+   */
   private async detachAll(
     actor: Actor,
     userId: string,
@@ -264,7 +274,6 @@ export class UserServerResourcePurgeService {
     const intentIds: string[] = [];
     for (const volume of (await this.volumes.list(userId)).filter(matches)) {
       for (const attachment of await this.volumes.listAttachments(undefined, volume.id)) {
-        if (attachment.bind_state === 'detaching') continue;
         const intent = await this.attachments.forceDetach(actor, attachment.id);
         if (intent) intentIds.push(intent.id);
       }
