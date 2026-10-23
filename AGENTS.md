@@ -67,10 +67,13 @@ Vite 通过 alias 将 `@nyabase/common` 指向 `src/index.ts`，但 `index.ts` �
   或池 / 后端上的卷又被挂上，例如管理员用 `scope=all`），每轮都会再次处置；`stopped_at` 保留第一次处置时间。
   清除时复核覆盖、标记 `purged_at` 与全部删除 / 销毁 intent 的入队在同一个持有 `lockIamPolicy` 的 **read committed** 事务里
   （`AccessLapseRepository.purgeIfUncovered`）：serializable / repeatable read 的快照取自加锁语句、早于锁等待，会漏掉等锁期间提交的授权。
-  池 / 后端清除前的强制卸载是可逆的，在锁外进行。
+  池 / 后端清除前的强制卸载是可逆的，在锁外进行。处置（停机 / 卸载）前先无锁重读覆盖，扫描后新提交的授权直接结束宽限。
+  没有待处理 intent 的 `detaching` 挂载也算暴露，`forceDetach` 会重新下发卸载。
 - 禁用用户 = 失去覆盖，与撤销同一条流程：覆盖只认 `iam.effective_*_access`（active 用户 + 当前授权），禁用后其名下资源按检测时间开宽限、立即停机，
   14 天后清除；宽限内重新启用则删台账行（容器不自动启动）。用户状态变更在 `afterCommit` 里通知 `AccessChangeNotifier`。
 - 宽限中（无当前覆盖）的用户不能新建、启动、挂载、扩容；已停机的容器在覆盖恢复后不会自动启动。所有者扩容本地卷要同时有服务器和存储池的当前授权。
+- 重试耗尽的 40001 / 40P01 返回 409 `TRANSACTION_CONFLICT`（`PgTransactionConflictFilter`），不是 500。
+  管理员 `scope=all` 的容器动作与管理员清除跑 read committed（不做配额准入），这样事务内 `assertActorRole` 能看到等锁期间提交的降级。
 - intent 重试归属重试者（`requested_by`，system 为 NULL）并记审计 `intent.retry`；重试 `volume.resize` 只能把 `size_bytes` 调小，不会绕过配额重新扩容。
 - 会话：refresh token 每次轮换顺延 `auth.refreshTokenExpiresDays`（空闲超时），但不超过登录时间 + `auth.sessionMaxLifetimeDays`（绝对上限）；两者都是 admin-only 在线设置。
   已轮换掉的旧 token 再出现即判为重放，删除整个会话并记审计 `user.refresh_token_reuse`（同一 `requestId` 的丢响应重试、以及 15 s 内紧邻上一枚 token 的并发刷新除外，后者返回 `REFRESH_SUPERSEDED`，前端换新 requestId 重试一次、不登出）；
@@ -186,6 +189,7 @@ lab 场景 API 测试，不在 CI 里跑；CI 只跑 `pnpm e2e:check`（e2e 包 
 - 进程数 / 网卡带宽 / 磁盘读写是可在线编辑的系统设置 `containers.*`，统一作用于所有容器（CephFS 卷不限 IO）。
 - 漂移：平台拥有整份实例文档，只放过 `volatile.*`、`image.*`；未知配置键、多出的设备、设备内多出的键、
   非空 profiles 都算漂移，写回时整份覆盖并记审计 `container.drift_corrected`。
-- `power_intent='stopped'` 时 reconciler 先停机再准备挂载，停机绝不等卷就绪；挂载卷超过 `VOLUME_ADOPT_FAIL_AFTER_ATTEMPTS` 次仍未就绪，
-  intent 以 `VOLUME_PLACEMENT_FAILED` 失败，不再无限重试。
+- `power_intent='stopped'` 时 reconciler 先停机再准备挂载，停机绝不等卷就绪；卸载（含强制卸载）同样先于其他挂载的就绪检查：
+  detaching 设备单独热拔并立即结清该行。同一 intent 连续 `VOLUME_ADOPT_FAIL_AFTER_ATTEMPTS` 次检查挂载卷都未就绪
+  （进程内计数，不含服务器不可达 / 忙重试）才以 `VOLUME_PLACEMENT_FAILED` 失败，不再无限重试。
 
