@@ -22,11 +22,10 @@ async function migrationDirectory(): Promise<string> {
 }
 
 describe('SQL migration discovery', () => {
-  it('discovers the clean PostgreSQL initial migration first, then the appended ones', async () => {
+  it('discovers exactly one clean PostgreSQL initial migration', async () => {
     const migrations = await discoverSqlMigrations(resolve(__dirname, 'migrations'));
     expect(migrations.map(({ version, name }) => ({ version, name }))).toEqual([
       { version: '000001', name: 'initial' },
-      { version: '000002', name: 'shrink-reservations' },
     ]);
     const [initial] = migrations;
     expect(initial.sql).toContain('CREATE TABLE iam.users');

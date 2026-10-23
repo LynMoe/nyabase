@@ -446,6 +446,7 @@ CREATE TABLE control.containers (
     root_pool_id uuid NOT NULL REFERENCES infra.storage_pools(id) ON DELETE RESTRICT,
     root_size_bytes bigint NOT NULL,
     root_size_pending_bytes bigint,
+    root_shrink_reserved_bytes bigint,
     mem_bytes bigint NOT NULL,
     -- The CPU set last applied to the instance (observed; NULL until reconciled).
     cpu_set integer[],
@@ -472,6 +473,8 @@ CREATE TABLE control.containers (
     CONSTRAINT containers_root_size_check CHECK (root_size_bytes > 0),
     CONSTRAINT containers_root_size_pending_check
         CHECK (root_size_pending_bytes IS NULL OR root_size_pending_bytes > 0),
+    CONSTRAINT containers_root_shrink_reserved_bytes_check
+        CHECK (root_shrink_reserved_bytes IS NULL OR root_shrink_reserved_bytes > 0),
     CONSTRAINT containers_mem_bytes_check CHECK (mem_bytes > 0),
     CONSTRAINT containers_cpu_set_check
         CHECK (cpu_set IS NULL OR (cardinality(cpu_set) > 0
@@ -501,6 +504,9 @@ COMMENT ON TABLE control.containers IS
 COMMENT ON COLUMN control.containers.root_used_bytes IS
   'Last observed Incus root disk usage; null until reconcile has seen instance state';
 
+COMMENT ON COLUMN control.containers.root_shrink_reserved_bytes IS
+  'Largest root size Incus may still hold until a requested root shrink is verified and applied';
+
 CREATE TABLE control.volumes (
     id uuid NOT NULL,
     owner_id uuid NOT NULL REFERENCES iam.users(id) ON DELETE RESTRICT,
@@ -510,6 +516,7 @@ CREATE TABLE control.volumes (
     name text NOT NULL,
     incus_name text NOT NULL,
     size_bytes bigint NOT NULL,
+    shrink_reserved_bytes bigint,
     used_bytes bigint,
     revision integer DEFAULT 1 NOT NULL,
     observed_revision integer,
@@ -524,6 +531,8 @@ CREATE TABLE control.volumes (
     CONSTRAINT volumes_name_check CHECK (length(btrim(name)) > 0),
     CONSTRAINT volumes_incus_name_check CHECK (incus_name ~ '^nyv-[0-9a-f]{32}$'),
     CONSTRAINT volumes_size_check CHECK (size_bytes > 0),
+    CONSTRAINT volumes_shrink_reserved_bytes_check
+        CHECK (shrink_reserved_bytes IS NULL OR shrink_reserved_bytes > 0),
     CONSTRAINT volumes_used_bytes_check CHECK (used_bytes IS NULL OR used_bytes >= 0),
     CONSTRAINT volumes_revision_check CHECK (revision > 0),
     CONSTRAINT volumes_observed_revision_check
@@ -542,6 +551,9 @@ CREATE TABLE control.volumes (
         CHECK (lifecycle_phase <> 'failed' OR failure_code IS NOT NULL),
     PRIMARY KEY (id)
 );
+
+COMMENT ON COLUMN control.volumes.shrink_reserved_bytes IS
+  'Largest size Incus may still hold until a requested shrink is verified; committed bytes are greatest(size_bytes, shrink_reserved_bytes)';
 
 CREATE TABLE control.volume_attachments (
     id uuid NOT NULL,

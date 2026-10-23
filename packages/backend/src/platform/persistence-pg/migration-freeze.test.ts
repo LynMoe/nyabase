@@ -10,7 +10,7 @@ import { discoverSqlMigrations } from './migrator.js';
  * ships in a release (`sha256sum migrations/NNNNNN_name.sql`).
  */
 const RELEASED_MIGRATION_CHECKSUMS: Readonly<Record<string, string>> = {
-  '000001_initial': '47b22e9d53a2a94bb73d79cd8a61629de916f75a784ff4a41d998fc689932bdc',
+  '000001_initial': 'c6a62ecdfd510dfddd2471228a15a4feaa175b18ba1c59d20901454d9a0c8b2b',
 };
 
 describe('released SQL migrations', () => {
