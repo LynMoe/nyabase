@@ -28,6 +28,7 @@ import { SshProxySnapshotService } from './ssh-proxy-snapshot.service.js';
 import { NyabaseConfigService } from '../platform/config/nyabase-config.service.js';
 import { ProxySnapshotNotifierService } from '../proxy-snapshots/proxy-snapshot-notifier.service.js';
 import { snapshotBuildFailureMessage } from '../proxy-snapshots/snapshot-build-failure.js';
+import { ProxyControlHeartbeat } from '../proxy-snapshots/proxy-control-heartbeat.js';
 import {
   configuredProxyTokenDigest,
   hasValidBearerToken,
@@ -87,6 +88,7 @@ export class SshProxyGateway implements OnModuleInit, OnModuleDestroy {
   /** Refused login attempts by reason since the last summary line. */
   private refusedLogins = new Map<string, number>();
   private refusedLoginTimer: NodeJS.Timeout | null = null;
+  private readonly heartbeat = new ProxyControlHeartbeat(() => this.clients);
   private snapshotBroadcastPromise: Promise<void> | null = null;
   private snapshotDirty = false;
   /**
@@ -124,6 +126,7 @@ export class SshProxyGateway implements OnModuleInit, OnModuleDestroy {
       () => this.broadcastSnapshot(),
     );
     this.scheduleSnapshotRenewal();
+    this.heartbeat.start();
   }
 
   attachToHttpServer(server: http.Server): void {
@@ -162,6 +165,7 @@ export class SshProxyGateway implements OnModuleInit, OnModuleDestroy {
 
   async onModuleDestroy(): Promise<void> {
     this.destroyed = true;
+    this.heartbeat.stop();
     this.unregisterSnapshotListener?.();
     this.unregisterSnapshotListener = null;
     try {
@@ -358,6 +362,7 @@ export class SshProxyGateway implements OnModuleInit, OnModuleDestroy {
       }
       this.initializingClients.delete(ws);
       this.clients.add(ws);
+      this.heartbeat.track(ws);
       ws.on('message', (raw) => this.handleMessage(ws, raw.toString()));
 
       const initialEncoded = JSON.stringify({

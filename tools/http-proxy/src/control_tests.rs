@@ -171,6 +171,7 @@ fn loop_config(backend: std::net::SocketAddr, control_hold: Duration) -> Config 
         reconnect_delay: Duration::from_millis(20),
         status_interval: Duration::from_secs(60),
         control_hold,
+        control_liveness: Default::default(),
     }
 }
 
@@ -236,5 +237,67 @@ async fn control_loop_drops_held_sites_when_the_hold_expires() {
     time::sleep(Duration::from_millis(60)).await;
     assert!(store.authorize_route("app.example.test").is_some());
     wait_for(&store, "app.example.test", false).await;
+    proxy.abort();
+}
+
+fn fast_liveness() -> proxy_common::control_link::ControlLiveness {
+    proxy_common::control_link::ControlLiveness {
+        connect_deadline: Duration::from_millis(500),
+        ping_interval: Duration::from_millis(20),
+        read_deadline: Duration::from_millis(80),
+    }
+}
+
+#[tokio::test]
+async fn a_silent_backend_is_dropped_and_reconnected_but_a_live_one_is_kept() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mut config = loop_config(listener.local_addr().unwrap(), Duration::from_secs(300));
+    config.control_liveness = fast_liveness();
+    let store = Arc::new(SnapshotStore::default());
+    let (_status_tx, status_rx) = mpsc::channel(4);
+    let proxy = tokio::spawn(control_loop(
+        config,
+        store.clone(),
+        test_runtime(),
+        status_rx,
+    ));
+
+    // A Backend that answers pings (by reading) keeps the link well past the
+    // read deadline.
+    let mut live = accept_backend(&listener).await;
+    live.send(snapshot_frame(1, "app.example.test"))
+        .await
+        .unwrap();
+    assert_eq!(read_ack(&mut live).await, 1);
+    let mut pings = 0;
+    let kept = time::timeout(Duration::from_millis(300), async {
+        loop {
+            if let Message::Ping(_) = live.next().await.unwrap().unwrap() {
+                pings += 1;
+            }
+        }
+    })
+    .await;
+    assert!(kept.is_err(), "the proxy closed a live control link");
+    assert!(pings >= 3, "only {pings} pings in 300 ms");
+    assert!(
+        time::timeout(Duration::from_millis(1), listener.accept())
+            .await
+            .is_err(),
+        "the proxy reconnected while the link was alive"
+    );
+
+    // The same Backend now stops reading: no pongs, no frames. The proxy
+    // gives up on it and reconnects, keeping the held routes meanwhile.
+    let mut second = time::timeout(Duration::from_secs(2), accept_backend(&listener))
+        .await
+        .expect("the proxy did not drop a silent control link");
+    assert!(store.authorize_route("app.example.test").is_some());
+    second
+        .send(snapshot_frame(1, "other.example.test"))
+        .await
+        .unwrap();
+    assert_eq!(read_ack(&mut second).await, 1);
+    drop(live);
     proxy.abort();
 }

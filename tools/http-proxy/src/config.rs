@@ -2,6 +2,7 @@ use crate::container_limit::UpstreamCaps;
 use anyhow::{anyhow, Result};
 use proxy_common::backend_tls::{backend_tls_config_from_env, validate_backend_ws_url};
 use proxy_common::conn_limit::{validate_limit, LimitSettings};
+use proxy_common::control_link::ControlLiveness;
 use proxy_common::control_token::required_control_token;
 use proxy_common::env::{env_u64, env_usize, validate_status_interval_ms};
 use std::sync::Arc;
@@ -157,6 +158,7 @@ pub(crate) struct Config {
     pub(crate) reconnect_delay: Duration,
     pub(crate) status_interval: Duration,
     pub(crate) control_hold: Duration,
+    pub(crate) control_liveness: ControlLiveness,
 }
 
 impl Config {
@@ -315,6 +317,7 @@ impl Config {
             reconnect_delay,
             status_interval,
             control_hold,
+            control_liveness: ControlLiveness::default(),
         })
     }
 }

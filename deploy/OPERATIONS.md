@@ -439,6 +439,16 @@ When a response is cut short (idle timeout, response lifetime, route
 revocation, upstream error) the proxy resets the client connection (TCP RST)
 instead of closing it, so a close-delimited body cannot look complete.
 
+**Control link liveness.** Each proxy must finish connecting to the
+Backend (TCP, TLS and the WebSocket upgrade) within 10 s, pings the Backend
+every 15 s, and drops the link when nothing at all (pong, ping, snapshot)
+arrives for 45 s; it then starts its hold window and reconnects, so a Backend
+that vanished without closing the socket is noticed in under a minute
+rather than when TCP gives up. The Backend pings every admitted proxy every
+15 s and terminates a link that sent nothing between two pings, so a proxy
+host that disappeared frees its slot (the Backend admits at most 4 links per
+proxy kind) within 30 s and cannot lock out its own reconnect.
+
 **Backend restarts and agent outages.** After losing its control connection
 the HTTP proxy keeps serving its last snapshot for `NYABASE_HTTP_CONTROL_HOLD_MS`,
 but never past that snapshot's own lease (300 s), so the effective hold is

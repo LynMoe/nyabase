@@ -1,6 +1,7 @@
 use anyhow::Result;
 use proxy_common::backend_tls::{backend_tls_config_from_env, validate_backend_ws_url};
 use proxy_common::conn_limit::{validate_limit, LimitSettings};
+use proxy_common::control_link::ControlLiveness;
 use proxy_common::control_token::required_control_token;
 use proxy_common::env::{env_u64, env_usize, validate_status_interval_ms};
 use std::sync::Arc;
@@ -64,6 +65,7 @@ pub(crate) struct ProxyConfig {
     pub(crate) route_connect_timeout: Duration,
     pub(crate) status_interval: Duration,
     pub(crate) control_hold: Duration,
+    pub(crate) control_liveness: ControlLiveness,
 }
 
 impl ProxyConfig {
@@ -155,6 +157,7 @@ impl ProxyConfig {
             route_connect_timeout: Duration::from_millis(route_connect_timeout_ms),
             status_interval: Duration::from_millis(status_interval_ms),
             control_hold: Duration::from_millis(control_hold_ms),
+            control_liveness: ControlLiveness::default(),
         })
     }
 }

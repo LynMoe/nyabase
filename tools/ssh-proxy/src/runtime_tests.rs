@@ -48,6 +48,7 @@ async fn unregistering_a_connection_aborts_and_cleans_all_child_tasks() {
         route_connect_timeout: Duration::from_secs(1),
         status_interval: Duration::from_secs(1),
         control_hold: Duration::from_secs(300),
+        control_liveness: Default::default(),
     };
     let runtime = ProxyRuntime::new(&config);
     let (connection, _main_registration) =
@@ -152,6 +153,7 @@ async fn revoked_connections_abort_directly_without_protocol_backpressure() {
         route_connect_timeout: Duration::from_secs(1),
         status_interval: Duration::from_secs(1),
         control_hold: Duration::from_secs(300),
+        control_liveness: Default::default(),
     };
     let runtime = ProxyRuntime::new(&config);
     let snapshot = fixture_snapshot();

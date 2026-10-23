@@ -13,13 +13,14 @@ use anyhow::{Context, Result};
 use futures_util::{Sink, SinkExt, StreamExt};
 use proxy_common::backend_tls::validate_backend_ws_url;
 use proxy_common::clock::now_ms;
+use proxy_common::control_link::connect_control;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, watch};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message;
-use tokio_tungstenite::{connect_async_tls_with_config, Connector};
+use tokio_tungstenite::Connector;
 use tracing::{debug, info, warn};
 
 pub(crate) const BACKEND_CONTROL_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -298,7 +299,8 @@ pub(crate) async fn run_backend_once(
         .headers_mut()
         .insert("authorization", format!("Bearer {}", config.token).parse()?);
     let connector = config.backend_tls.clone().map(Connector::Rustls);
-    let (ws, _) = connect_async_tls_with_config(request, None, false, connector).await?;
+    let liveness = config.control_liveness;
+    let ws = connect_control(request, connector, liveness.connect_deadline).await?;
     let (mut write, mut read) = ws.split();
     // A new WebSocket is a new generation epoch. Keep the held snapshot so a
     // restarted Backend can publish generation=1 without clearing live Jump.
@@ -309,8 +311,17 @@ pub(crate) async fn run_backend_once(
     let mut status_tick = tokio::time::interval(config.status_interval);
     status_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut telemetry_closed = false;
+    let mut ping = liveness.ping_timer();
+    let mut last_frame = tokio::time::Instant::now();
     loop {
         tokio::select! {
+            _ = ping.tick() => {
+                send_control_frame(
+                    &mut write,
+                    Message::Ping(Default::default()),
+                    BACKEND_CONTROL_WRITE_TIMEOUT,
+                ).await?;
+            }
             _ = status_tick.tick() => {
                 send_control_frame(
                     &mut write,
@@ -318,11 +329,17 @@ pub(crate) async fn run_backend_once(
                     BACKEND_CONTROL_WRITE_TIMEOUT,
                 ).await?;
             }
-            frame = read.next() => {
+            frame = tokio::time::timeout_at(liveness.read_deadline_after(last_frame), read.next()) => {
+                let Ok(frame) = frame else {
+                    return Err(liveness.dead_link_error("SSH proxy"));
+                };
                 let Some(frame) = frame else {
                     break;
                 };
                 let frame = frame?;
+                // Any frame (pongs and the Backend's own pings included)
+                // proves the link is alive.
+                last_frame = tokio::time::Instant::now();
                 if !frame.is_text() {
                     continue;
                 }

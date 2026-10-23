@@ -44,6 +44,7 @@ async fn assert_invalid_key_snapshot_revokes(invalid: ProxySnapshot, expected_er
         route_connect_timeout: Duration::from_secs(1),
         status_interval: Duration::from_secs(1),
         control_hold: Duration::from_secs(300),
+        control_liveness: Default::default(),
     };
     let store = SnapshotStore::default();
     let runtime = ProxyRuntime::new(&config);
@@ -107,6 +108,7 @@ async fn snapshot_deadline_expires_and_revokes_without_a_status_tick() {
         route_connect_timeout: Duration::from_secs(1),
         status_interval: Duration::from_millis(MAX_STATUS_INTERVAL_MS),
         control_hold: Duration::from_secs(300),
+        control_liveness: Default::default(),
     };
     let store = Arc::new(SnapshotStore::default());
     let runtime = Arc::new(ProxyRuntime::new(&config));
@@ -178,6 +180,7 @@ async fn blocked_control_write_times_out_and_control_revocation_aborts_sessions(
         route_connect_timeout: Duration::from_secs(1),
         status_interval: Duration::from_secs(1),
         control_hold: Duration::from_secs(300),
+        control_liveness: Default::default(),
     };
     let runtime = ProxyRuntime::new(&config);
     let store = SnapshotStore::default();
@@ -550,4 +553,55 @@ async fn control_timers_retarget_on_pause_before_snapshot_deadline() {
     timers.abort();
     let _ = task.await;
     let _ = timers.await;
+}
+
+#[tokio::test]
+async fn a_backend_that_stops_answering_is_dropped_by_the_read_deadline() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mut config = test_config();
+    config.backend_ws = format!("ws://{}/ws/ssh-proxy", listener.local_addr().unwrap());
+    config.status_interval = Duration::from_secs(60);
+    config.control_liveness = proxy_common::control_link::ControlLiveness {
+        connect_deadline: Duration::from_millis(500),
+        ping_interval: Duration::from_millis(20),
+        read_deadline: Duration::from_millis(80),
+    };
+    let backend = tokio::spawn(async move {
+        let (socket, _) = listener.accept().await.unwrap();
+        let mut ws = tokio_tungstenite::accept_async(socket).await.unwrap();
+        // Read (and so answer pings) for a while, then go silent while
+        // keeping the TCP connection open, like a vanished host.
+        let mut pings = 0;
+        let _ = tokio::time::timeout(Duration::from_millis(200), async {
+            while let Some(Ok(frame)) = ws.next().await {
+                if frame.is_ping() {
+                    pings += 1;
+                }
+            }
+        })
+        .await;
+        (ws, pings)
+    });
+    let store = SnapshotStore::default();
+    let runtime = ProxyRuntime::new(&config);
+    let control = ControlPlane::new();
+    let (_telemetry_tx, mut telemetry_rx) = mpsc::channel(4);
+
+    let started = Instant::now();
+    let error = tokio::time::timeout(
+        Duration::from_secs(2),
+        run_backend_once(&config, &store, &runtime, &control, &mut telemetry_rx),
+    )
+    .await
+    .expect("a silent Backend kept the control link open")
+    .unwrap_err();
+
+    assert!(
+        error.to_string().contains("delivered no frame"),
+        "{error:#}"
+    );
+    // It was kept while the Backend answered.
+    assert!(started.elapsed() >= Duration::from_millis(200));
+    let (_ws, pings) = backend.await.unwrap();
+    assert!(pings >= 3, "only {pings} pings while the Backend answered");
 }
