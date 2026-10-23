@@ -1,4 +1,5 @@
 import { sql, type RawBuilder } from 'kysely';
+import { runsDespiteAttentionSql } from '../reconcile/intent-model.js';
 
 /** Wait after the container's last intent before a stuck detach is queued again. */
 export const DETACH_REDRIVE_BACKOFF_MS = 15 * 60_000;
@@ -7,9 +8,13 @@ export const DETACH_REDRIVE_MAX_BACKOFF_MS = 4 * 60 * 60_000;
 
 /**
  * Whether a `detaching` attachment is due to be detached again: no intent of
- * its container is pending (none is left to unplug the device; the reconciler
- * deletes the row once the device is gone), and the container's last intent
- * settled at least the backoff ago. The backoff starts at
+ * its container is pending that the worker will run (none is left to unplug
+ * the device; the reconciler deletes the row once the device is gone), and
+ * the container's last intent settled at least the backoff ago. An intent
+ * pending on a container that needs attention counts only when it runs
+ * despite the attention (`runsDespiteAttention`, the worker's own rule): any
+ * other one (an SSH key sync, say) waits for an operator and would otherwise
+ * hold the revoked volume mounted indefinitely. The backoff starts at
  * `DETACH_REDRIVE_BACKOFF_MS` and doubles with every detach intent the
  * attachment already had, up to `DETACH_REDRIVE_MAX_BACKOFF_MS`: a transient
  * failure is enforced again soon, while a container whose intents keep
@@ -27,6 +32,13 @@ export function detachRedriveDue(
       WHERE pending_intent.resource_type = 'container'
         AND pending_intent.resource_id = ${containerId}
         AND pending_intent.status = 'pending'
+        AND (
+          ${runsDespiteAttentionSql(sql.ref('pending_intent.request_json'))}
+          OR NOT EXISTS (
+            SELECT 1 FROM control.containers AS parked
+            WHERE parked.id = ${containerId} AND parked.needs_attention
+          )
+        )
     )
     AND coalesce((
       SELECT max(settled_intent.settled_at) FROM control.intents AS settled_intent

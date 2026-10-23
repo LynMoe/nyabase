@@ -26,6 +26,7 @@ import {
   intentIdempotencyKey,
   mapRow,
   objectValue,
+  RETRY_OF_FIELD,
   type CreatePendingIntentInput,
   type EnsurePendingIntentInput,
   type IntentExecutor,
@@ -123,7 +124,7 @@ export class IntentRepository {
       requestedBy,
       request: {
         ...request,
-        retryOf: sourceIntentId,
+        [RETRY_OF_FIELD]: sourceIntentId,
       },
       targetRevision,
       baseline: objectValue(source.baseline_json),

@@ -31,6 +31,13 @@ export interface LapseCandidate extends LapseKey {
    * there is still attached to a container.
    */
   exposed: boolean;
+  /**
+   * Pool or backend: a volume of the user there is being destroyed and its
+   * destroy waits for an attachment that is due to be detached (again).
+   * Independent of coverage and of the ledger: a purge is not undone when
+   * coverage returns, so its destroys must still be able to finish.
+   */
+  destroyBlocked: boolean;
   /** The ledger row, when the pair is in grace. */
   lapse: { lapsedAt: Date; stoppedAt: Date | null; purgedAt: Date | null } | null;
   /** Database clock at the time of the scan. */
@@ -45,7 +52,12 @@ export function purgeDeadline(lapsedAt: Date): Date {
 export type LapseWork = 'clear' | 'lapse' | 'stop' | 'purge' | 'detach' | 'none';
 
 export function lapseWork(candidate: LapseCandidate): LapseWork {
-  if (candidate.covered) return candidate.lapse ? 'clear' : 'none';
+  if (candidate.covered) {
+    if (candidate.lapse) return 'clear';
+    // Coverage came back after the purge: the volumes it destroys are still
+    // detached (only those) until the attachments are gone.
+    return candidate.destroyBlocked ? 'detach' : 'none';
+  }
   if (!candidate.lapse) return 'lapse';
   const due = candidate.now.getTime() >= purgeDeadline(candidate.lapse.lapsedAt).getTime();
   if (due) {
@@ -88,6 +100,7 @@ interface CandidateRow {
   resource_id: string;
   covered: boolean;
   exposed: boolean;
+  destroy_blocked: boolean;
   lapsed_at: Date | null;
   stopped_at: Date | null;
   purged_at: Date | null;
@@ -120,9 +133,14 @@ export class AccessLapseRepository {
     return Number(result.numAffectedRows ?? 0);
   }
 
-  /** Pairs that are uncovered or already in grace, most overdue first. */
+  /**
+   * Pairs that are uncovered, already in grace, or have a blocked destroy,
+   * most overdue first.
+   */
   async scan(): Promise<LapseCandidate[]> {
-    return this.candidates(sql`WHERE NOT candidate.covered OR candidate.lapsed_at IS NOT NULL`);
+    return this.candidates(sql`
+      WHERE NOT candidate.covered OR candidate.lapsed_at IS NOT NULL OR candidate.destroy_blocked
+    `);
   }
 
   /** Fresh state of one pair, or null when the user no longer owns anything on it. */
@@ -147,28 +165,35 @@ export class AccessLapseRepository {
         UNION ALL
         SELECT user_id, 'shared_backend', shared_backend_id
         FROM iam.effective_shared_backend_access
-      ), exposed AS (
-        -- Servers: a container (also one still provisioning) is meant to run.
-        SELECT owner_id AS user_id, 'server' AS kind, server_id AS resource_id
-        FROM control.containers
-        WHERE power_intent = 'running' AND lifecycle_phase IN ('active', 'provisioning')
-        UNION
+      ), exposed_attachment AS (
         -- Pools and backends: a volume is attached to a container, running or
         -- not, or is still detaching from one with no intent left to unplug it
         -- (its detach failed: the reconciler deletes the row once it is gone),
         -- once the re-drive backoff has passed (detachRedriveDue).
-        SELECT volume.owner_id, CASE WHEN volume.shared_backend_id IS NULL THEN 'storage_pool' ELSE 'shared_backend' END,
-               coalesce(volume.shared_backend_id, volume.pool_id)
+        SELECT volume.owner_id AS user_id,
+               CASE WHEN volume.shared_backend_id IS NULL THEN 'storage_pool' ELSE 'shared_backend' END AS kind,
+               coalesce(volume.shared_backend_id, volume.pool_id) AS resource_id,
+               volume.lifecycle_phase = 'deleting' AS volume_deleting
         FROM control.volume_attachments AS attachment
         JOIN control.volumes AS volume ON volume.id = attachment.volume_id
         JOIN control.containers AS container ON container.id = attachment.container_id
         WHERE container.lifecycle_phase <> 'deleting'
           AND (attachment.bind_state <> 'detaching'
             OR ${detachRedriveDue(sql.ref('attachment.id'), sql.ref('container.id'))})
+      ), exposed AS (
+        -- Servers: a container (also one still provisioning) is meant to run.
+        SELECT owner_id AS user_id, 'server' AS kind, server_id AS resource_id
+        FROM control.containers
+        WHERE power_intent = 'running' AND lifecycle_phase IN ('active', 'provisioning')
+        UNION
+        SELECT user_id, kind, resource_id FROM exposed_attachment
+      ), destroy_blocked AS (
+        SELECT DISTINCT user_id, kind, resource_id FROM exposed_attachment WHERE volume_deleting
       ), candidate AS (
         SELECT owned.user_id, owned.kind, owned.resource_id,
                (coverage.user_id IS NOT NULL) AS covered,
                (exposed.user_id IS NOT NULL) AS exposed,
+               (destroy_blocked.user_id IS NOT NULL) AS destroy_blocked,
                lapse.lapsed_at, lapse.stopped_at, lapse.purged_at
         FROM (${OWNED}) AS owned
         LEFT JOIN coverage
@@ -179,13 +204,17 @@ export class AccessLapseRepository {
           ON exposed.user_id = owned.user_id
          AND exposed.kind = owned.kind
          AND exposed.resource_id = owned.resource_id
+        LEFT JOIN destroy_blocked
+          ON destroy_blocked.user_id = owned.user_id
+         AND destroy_blocked.kind = owned.kind
+         AND destroy_blocked.resource_id = owned.resource_id
         LEFT JOIN control.access_lapses AS lapse
           ON lapse.user_id = owned.user_id
          AND lapse.resource_kind = owned.kind
          AND lapse.resource_id = owned.resource_id
       )
       SELECT candidate.user_id::text AS user_id, candidate.kind, candidate.resource_id::text AS resource_id,
-             candidate.covered, candidate.exposed, candidate.lapsed_at,
+             candidate.covered, candidate.exposed, candidate.destroy_blocked, candidate.lapsed_at,
              candidate.stopped_at, candidate.purged_at, clock_timestamp() AS now
       FROM candidate
       ${filter}
@@ -198,6 +227,7 @@ export class AccessLapseRepository {
       resourceId: row.resource_id,
       covered: row.covered,
       exposed: row.exposed,
+      destroyBlocked: row.destroy_blocked,
       lapse: row.lapsed_at
         ? { lapsedAt: row.lapsed_at, stoppedAt: row.stopped_at, purgedAt: row.purged_at }
         : null,

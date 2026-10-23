@@ -42,7 +42,9 @@ const MAX_PAIRS_PER_PASS = 128;
  *  - purged pool or backend whose volumes are still attached (a detach whose
  *    re-drive was not due at the purge): detach them again, with the re-drive
  *    backoff, until the attachments are gone and the destroys can run;
- *  - coverage back: delete the row (nothing is restarted or re-attached).
+ *  - coverage back: delete the row (nothing is restarted or re-attached);
+ *    volumes the purge already marked deleting are still detached, with the
+ *    same backoff and without the row, until their destroys can run.
  *
  * Runs every minute and right after IAM writes commit (`AccessChangeNotifier`).
  * Each pair is leased through `ReconcileClaimRepository` (resource_type
@@ -279,18 +281,29 @@ export class AccessLapseProcessor implements OnModuleInit, OnModuleDestroy {
    * After the purge of a pool or backend: the deleting volumes still attached
    * are detached again (`forceDetach` follows the re-drive backoff), so their
    * destroys are not left waiting on an attachment no intent will remove.
-   * Reversible, so only the lock-free look at coverage guards it.
+   * Reversible, so only the lock-free look at coverage guards it. A covered
+   * user's ledger row is cleared first; without the row (coverage came back)
+   * only the volumes already being destroyed are detached (the purge is not
+   * undone), never the ones the user uses again.
    */
   private async detachAfterPurge(candidate: LapseCandidate, actor: Actor): Promise<boolean> {
-    if (await this.lapses.isCoveredNow(candidate)) return this.lapses.clear(candidate);
-    const { intentIds } = await this.detachVolumes(candidate, actor);
+    if (candidate.lapse && await this.lapses.isCoveredNow(candidate)) {
+      return this.lapses.clear(candidate);
+    }
+    const { intentIds } = await this.detachVolumes(candidate, actor, {
+      deletingOnly: candidate.lapse === null,
+    });
     return intentIds.length > 0;
   }
 
   /** Pool or backend: detach the user's volumes there from their containers. */
-  private detachVolumes(candidate: LapseCandidate, actor: Actor): Promise<{ intentIds: string[] }> {
+  private detachVolumes(
+    candidate: LapseCandidate,
+    actor: Actor,
+    options: { readonly deletingOnly?: boolean } = {},
+  ): Promise<{ intentIds: string[] }> {
     return candidate.kind === 'shared_backend'
-      ? this.purge.detachVolumesForSharedBackend(actor, candidate.userId, candidate.resourceId)
-      : this.purge.detachVolumesForStoragePool(actor, candidate.userId, candidate.resourceId);
+      ? this.purge.detachVolumesForSharedBackend(actor, candidate.userId, candidate.resourceId, options)
+      : this.purge.detachVolumesForStoragePool(actor, candidate.userId, candidate.resourceId, options);
   }
 }

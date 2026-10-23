@@ -314,18 +314,23 @@ export class VolumeAttachmentsService {
 
   /**
    * Detaches whatever the container's power state: the owner lost access to
-   * the volume's pool or shared backend. The reconciler unplugs the disk from
-   * a running container live; the container itself is left alone. Returns
-   * null when the attachment is already going or its container is. A
-   * detaching attachment whose container has no pending intent is detached
-   * again once the re-drive backoff has passed (`detachRedriveDue`): its
-   * intent ended without removing the device (the reconciler deletes the row
-   * once the device is gone). A re-drive keeps the container's
-   * `needs_attention`, so one whose intents keep failing stays visible.
-   * Every intent queued here is marked to run despite the attention
-   * (`runsDespiteAttention`), so a parked container (busy strikes) is still
-   * unplugged: success clears the attention, a failure leaves it set and the
-   * next re-drive follows the backoff.
+   * the volume's pool or shared backend, or the volume is being destroyed.
+   * The reconciler unplugs the disk from a running container live (and
+   * deletes the row once the device is gone); the container itself is left
+   * alone. Returns null when the attachment or its container is gone, the
+   * container is deleting, or the attachment is already detaching and no
+   * re-drive is due. A detaching attachment is detached again once
+   * `detachRedriveDue` holds: no intent of the container is pending that the
+   * worker will run (one that waits on the container's `needs_attention` does
+   * not count) and the backoff since its last settled intent has passed.
+   * Every intent queued here runs despite the attention
+   * (`runsDespiteAttention`); a re-drive keeps `needs_attention`, so a
+   * container whose intents keep failing stays visible. Success clears the
+   * attention; a failure, or a stale pass superseded by a newer revision,
+   * leaves the row detaching. So a caller that keeps calling this (the
+   * access-lapse pass) gets a new intent each time the backoff has passed,
+   * until the row is gone, whatever the container's other intents do; it
+   * cannot force an instance that keeps refusing the unplug.
    */
   async forceDetach(actor: Actor, attachmentId: string): Promise<IntentRecord | null> {
     return this.transactions.run(async (transaction) => {

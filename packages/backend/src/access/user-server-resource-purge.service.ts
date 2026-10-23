@@ -31,9 +31,15 @@ const PURGE_SCOPE = 'all';
 interface OwnedVolume {
   id: string;
   owner_id: string;
+  lifecycle_phase: string;
   pool_id: string | null;
   server_id: string | null;
   shared_backend_id: string | null;
+}
+
+/** `deletingOnly`: only volumes already being destroyed (coverage came back after the purge). */
+export interface DetachVolumesOptions {
+  readonly deletingOnly?: boolean;
 }
 
 const STOPPABLE_PHASES: ReadonlySet<string> = new Set([ContainerPhase.Active, ContainerPhase.Provisioning]);
@@ -183,12 +189,14 @@ export class UserServerResourcePurgeService {
     actor: Actor,
     userId: string,
     poolId: string,
+    options: DetachVolumesOptions = {},
   ): Promise<{ intentIds: string[] }> {
     return this.detachVolumesForResource(
       actor,
       userId,
       (volume) => volume.pool_id === poolId && volume.shared_backend_id === null,
       { resourceKind: 'storage_pool', resourceId: poolId },
+      options,
     );
   }
 
@@ -197,12 +205,14 @@ export class UserServerResourcePurgeService {
     actor: Actor,
     userId: string,
     sharedBackendId: string,
+    options: DetachVolumesOptions = {},
   ): Promise<{ intentIds: string[] }> {
     return this.detachVolumesForResource(
       actor,
       userId,
       (volume) => volume.shared_backend_id === sharedBackendId,
       { resourceKind: 'shared_backend', resourceId: sharedBackendId },
+      options,
     );
   }
 
@@ -244,8 +254,15 @@ export class UserServerResourcePurgeService {
     userId: string,
     matches: (volume: OwnedVolume) => boolean,
     resource: { resourceKind: string; resourceId: string },
+    options: DetachVolumesOptions,
   ): Promise<{ intentIds: string[] }> {
-    const intentIds = await this.detachAll(actor, userId, matches);
+    const intentIds = await this.detachAll(
+      actor,
+      userId,
+      options.deletingOnly
+        ? (volume) => volume.lifecycle_phase === 'deleting' && matches(volume)
+        : matches,
+    );
     if (intentIds.length > 0) {
       await this.transactions.run(async (transaction) => {
         await this.audit.append(

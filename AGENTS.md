@@ -68,12 +68,14 @@ Vite 通过 alias 将 `@nyabase/common` 指向 `src/index.ts`，但 `index.ts` �
   清除时复核覆盖、标记 `purged_at` 与全部删除 / 销毁 intent 的入队在同一个持有 `lockIamPolicy` 的 **read committed** 事务里
   （`AccessLapseRepository.purgeIfUncovered`）：serializable / repeatable read 的快照取自加锁语句、早于锁等待，会漏掉等锁期间提交的授权。
   池 / 后端清除前的强制卸载是可逆的，在锁外进行。处置（停机 / 卸载）前先无锁重读覆盖，扫描后新提交的授权直接结束宽限。
-  没有待处理 intent 的 `detaching` 挂载也算暴露，`forceDetach` 会重新下发卸载，但仅当容器最后一个 intent 结清已超过退避
+  没有待处理 intent 的 `detaching` 挂载也算暴露（被搁置容器上 worker 不会运行的 intent——既无 `retryOf` 也无 `despiteAttention`，
+  例如 SSH 密钥同步——不算待处理，SQL 用 `reconcile/intent-model.ts` 的 `runsDespiteAttentionSql` 与 worker 保持一致），`forceDetach` 会重新下发卸载，但仅当容器最后一个 intent 结清已超过退避
   （15 分钟起，按该挂载已有的 detach intent 数翻倍，封顶 4 小时；`volumes/detach-redrive.ts` 的 `detachRedriveDue`，扫描与 `forceDetach` 共用）；
   重新下发不清 `needs_attention`，持续失败的容器对运维可见；`forceDetach` 下发的 intent 都带 `despiteAttention: true`
   （`reconcile/intent-model.ts` 的 `runsDespiteAttention`，与用户重试 `retryOf` 同理），worker 对被搁置（busy strikes）的容器也照常处理：
-  成功清 attention，失败保留 / 重新搁置，下一次按退避再下发。清除后（`purged_at` 已设）池 / 后端上仍暴露的挂载（清除时退避未到而跳过的卸载）
-  由 `lapseWork` 的 `detach` 继续按退避重新下发，直到挂载消失、卷销毁得以进行；清除本身不重复。
+  成功清 attention，失败或因更新的 revision 成为 stale 空操作时保留 / 重新搁置，下一次按退避再下发。清除后（`purged_at` 已设）池 / 后端上仍暴露的挂载（清除时退避未到而跳过的卸载）
+  由 `lapseWork` 的 `detach` 继续按退避重新下发，直到挂载消失、卷销毁得以进行；清除本身不重复。清除后覆盖恢复：台账行照常删除，
+  但 `deleting` 卷上到期的 `detaching` 挂载（`destroyBlocked`，不依赖台账和覆盖）仍由 `detach` 按退避重新下发，且只卸这些卷，不碰用户重新使用的卷。
 - 禁用用户 = 失去覆盖，与撤销同一条流程：覆盖只认 `iam.effective_*_access`（active 用户 + 当前授权），禁用后其名下资源按检测时间开宽限、立即停机，
   14 天后清除；宽限内重新启用则删台账行（容器不自动启动）。用户状态变更在 `afterCommit` 里通知 `AccessChangeNotifier`。
 - 宽限中（无当前覆盖）的用户不能新建、启动、挂载、扩容；已停机的容器在覆盖恢复后不会自动启动。所有者扩容本地卷要同时有服务器和存储池的当前授权。

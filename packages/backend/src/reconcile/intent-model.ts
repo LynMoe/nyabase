@@ -1,5 +1,5 @@
 import { Buffer } from 'node:buffer';
-import type { Kysely, Transaction } from 'kysely';
+import { sql, type Kysely, type RawBuilder, type Transaction } from 'kysely';
 import {
   ADMIN_INTENT_LIST_MAX,
   IntentKind,
@@ -118,10 +118,14 @@ const MAX_JSON_BYTES = 8 * 1024;
 const MAX_JSON_DEPTH = 5;
 const MAX_JSON_KEYS = 64;
 
+/** Request field naming the failed intent an explicit retry replaces (`IntentRepository.retry`). */
+export const RETRY_OF_FIELD = 'retryOf';
+
 export function isUserRetryIntent(
   request: Record<string, unknown> | null | undefined,
 ): boolean {
-  return typeof request?.retryOf === 'string' && request.retryOf.length > 0;
+  const retryOf = request?.[RETRY_OF_FIELD];
+  return typeof retryOf === 'string' && retryOf.length > 0;
 }
 
 /**
@@ -138,6 +142,22 @@ export function runsDespiteAttention(
   request: Record<string, unknown> | null | undefined,
 ): boolean {
   return isUserRetryIntent(request) || request?.[DESPITE_ATTENTION_FIELD] === true;
+}
+
+/**
+ * `runsDespiteAttention` over an intent's `request_json` column, for queries
+ * that must agree with the worker on which intents of a parked resource run
+ * (`detachRedriveDue`). Never NULL.
+ */
+export function runsDespiteAttentionSql(requestJson: RawBuilder<unknown>): RawBuilder<boolean> {
+  return sql<boolean>`(
+    coalesce(
+      jsonb_typeof(${requestJson} -> ${RETRY_OF_FIELD}::text) = 'string'
+        AND ${requestJson} ->> ${RETRY_OF_FIELD}::text <> '',
+      false
+    )
+    OR coalesce(${requestJson} -> ${DESPITE_ATTENTION_FIELD}::text = 'true'::jsonb, false)
+  )`;
 }
 
 export function assertKindResource(kind: TypedIntentKind, resourceType: IntentResource): void {
