@@ -335,6 +335,13 @@ Tenants of one pool still share its parent domain, so for cookie isolation
 between tenants list the pool's domain in the Public Suffix List or give each
 tenant group its own registrable domain.
 
+Disabling a pool stops routing its bindings and refuses new hostnames under
+it; its existing bindings stay, can still be pointed at another container or
+port or deleted, and are served again once the pool is re-enabled. These
+rules apply when a hostname is claimed: a binding edited without changing its
+hostname keeps it even if its pool was disabled or a newer pool now lies
+under it.
+
 A token file must be a regular file (not a symlink) readable only by the
 service user; with `DynamicUser` deliver it through a `LoadCredential=` drop-in
 rather than a root-owned path. Per-IP limits bucket IPv6 clients per `/64`

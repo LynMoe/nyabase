@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { NotFoundException } from '@nestjs/common';
+import { BadRequestException, NotFoundException } from '@nestjs/common';
 import { Role, UserStatus } from '@nyabase/common';
 import { describe, expect, it } from 'vitest';
 import {
@@ -59,6 +59,57 @@ describePg('HttpProxyBindingsService ownership (PostgreSQL)', () => {
       // The explicit operator override still reaches it.
       await service.deleteBinding(testActor(operatorId, Role.Operator), binding.id, 'all');
       await expect(service.listBindings(owner, 'mine', true)).resolves.toEqual([]);
+    });
+  });
+
+  it('keeps an unchanged hostname through edits even when its pool rules would now refuse it', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const service = new HttpProxyBindingsService(
+        database,
+        new PgTransactionManager(database),
+        { append: async () => undefined } as never,
+      );
+      const ownerId = await seedUser(database, 'binding-editor');
+      const otherId = await seedUser(database, 'binding-bystander');
+      const serverId = await seedServer(database);
+      const poolId = await seedPool(database, serverId);
+      const imageId = await seedImage(database);
+      const containerId = await seedContainer(database, { ownerId, serverId, poolId, imageId });
+      const nextContainerId = await seedContainer(database, { ownerId, serverId, poolId, imageId });
+      const otherContainerId = await seedContainer(database, { ownerId: otherId, serverId, poolId, imageId });
+      const domainPoolId = randomUUID();
+      await database.insertInto('interaction.http_domain_pools')
+        .values({ id: domainPoolId, wildcard_domain: '*.apps.example.test', enabled: true, https_enabled: false })
+        .execute();
+      const owner = testActor(ownerId);
+      const binding = await service.createBinding(owner, {
+        hostname: 'web.apps.example.test', containerId, targetPort: 8000,
+      });
+      // Since then the pool was disabled and a pool under the binding's
+      // hostname appeared, so the hostname could not be claimed today.
+      await database.updateTable('interaction.http_domain_pools')
+        .set({ enabled: false })
+        .where('id', '=', domainPoolId)
+        .execute();
+      await database.insertInto('interaction.http_domain_pools')
+        .values({ id: randomUUID(), wildcard_domain: '*.web.apps.example.test', enabled: true, https_enabled: false })
+        .execute();
+
+      // The UI resends the hostname with every edit.
+      await expect(service.updateBinding(owner, binding.id, {
+        hostname: 'web.apps.example.test', containerId: nextContainerId, targetPort: 9000,
+      })).resolves.toEqual(expect.objectContaining({
+        hostname: 'web.apps.example.test', domainPoolId, containerId: nextContainerId, targetPort: 9000,
+      }));
+      await expect(service.updateBinding(owner, binding.id, { hostname: 'WEB.apps.example.test' }))
+        .resolves.toEqual(expect.objectContaining({ hostname: 'web.apps.example.test', domainPoolId }));
+      // Ownership still applies to the other fields.
+      await expect(service.updateBinding(owner, binding.id, {
+        hostname: 'web.apps.example.test', containerId: otherContainerId,
+      })).rejects.toEqual(expect.any(NotFoundException));
+      // A new hostname is still checked: the disabled pool takes none.
+      await expect(service.updateBinding(owner, binding.id, { hostname: 'api.apps.example.test' }))
+        .rejects.toEqual(expect.any(BadRequestException));
     });
   });
 });

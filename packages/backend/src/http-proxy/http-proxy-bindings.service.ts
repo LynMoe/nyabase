@@ -293,15 +293,20 @@ export class HttpProxyBindingsService {
       await this.assertRequesterActive(transaction, requesterId);
       let hostname = binding.hostname;
       let domainPoolId = binding.domain_pool_id;
-      if (dto.hostname !== undefined) {
-        const nextHostname = parseHttpProxyHostname(dto.hostname);
+      // Pool rules apply to a hostname being claimed, not to the one the
+      // binding already holds (the UI resends it on every edit): changing the
+      // port or container must not fail because a newer rule would refuse
+      // the hostname now or its pool was disabled since, which only stops
+      // the pool from taking new hostnames and from being routed.
+      const nextHostname = dto.hostname === undefined || dto.hostname === binding.hostname
+        ? binding.hostname
+        : parseHttpProxyHostname(dto.hostname);
+      if (nextHostname !== binding.hostname) {
         const pool = await this.enabledPoolForHostname(transaction, nextHostname);
-        if (nextHostname !== binding.hostname) {
-          await reserveHostname(transaction, nextHostname, requesterId, binding.id);
-          await releaseHostname(transaction, binding);
-          hostname = nextHostname;
-          domainPoolId = pool.id;
-        }
+        await reserveHostname(transaction, nextHostname, requesterId, binding.id);
+        await releaseHostname(transaction, binding);
+        hostname = nextHostname;
+        domainPoolId = pool.id;
       }
       let containerId = binding.container_id;
       if (dto.containerId !== undefined) {
