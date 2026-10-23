@@ -231,7 +231,11 @@ from a checkout (as root): it builds with cargo (or installs `--binary FILE`),
 installs the binary and unit, creates `/etc/nyabase/<kind>-proxy.env` from the
 example only once (and then stops, so you can edit it), and on later runs
 replaces the binary and unit and restarts the service, failing loudly with the
-journal if it does not stay up. The manual equivalent:
+journal if it does not stay up. The Rust toolchain is pinned in the
+repository's `rust-toolchain.toml`; rustup applies (and on first use
+installs) it only when cargo runs from inside the checkout, because it looks
+for that file from the working directory, not from `--manifest-path`. The
+manual equivalent, from the checkout root:
 
 ```bash
 cargo build --release --locked --manifest-path tools/Cargo.toml
