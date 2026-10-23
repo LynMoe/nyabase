@@ -13,7 +13,8 @@
 #
 # Environment (/etc/nyabase/backup.env):
 #   NYABASE_DEPLOY_DIR             checkout's deploy/ directory (postgres-ops.sh)
-#   NYABASE_BACKUP_ROOT            local archive directory (/srv/nyabase-backups)
+#   NYABASE_BACKUP_ROOT            local archive directory (/srv/nyabase-backups),
+#                                  mode 0700, owned by the operator who runs pg_ops
 #   NYABASE_BACKUP_KEEP_DAYS       delete local archives older than this (14)
 #   NYABASE_BACKUP_UPLOAD_COMMAND  optional executable, called with the archive
 #                                  and its .sha256; a failure fails the run
@@ -54,7 +55,10 @@ image=$(docker inspect --format '{{.Config.Image}}' "$container")
 
 umask 077
 name="nyabase-$(date -u +%Y%m%dT%H%M%SZ).dump"
-# As the directory's owner: without capabilities nobody else may write there.
+# Every archive in the staging directory belongs to its owner, the operator
+# account that also runs pg_ops by hand (OPERATIONS.md, "Backup and restore
+# contract"), so hand-run verifications and restores can read these. Without
+# capabilities nobody else may write there anyway.
 docker run --rm \
   --network "container:$container" \
   --user "$(stat -c '%u:%g' "$backup_root")" \

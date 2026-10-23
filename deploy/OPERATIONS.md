@@ -905,15 +905,27 @@ mounted. Compose names the network `<project>_control-plane`; the file sets
 `name: nyabase`, so it is `nyabase_control-plane` unless you override the
 project name (`docker network ls --filter label=com.docker.compose.network=control-plane`).
 
-One-time setup, from `deploy/` on the Compose host, as an operator who can run
-`docker`:
+The local staging directory `/srv/nyabase-backups` has one owner: the
+operator account that runs `pg_ops` by hand (root, if only root does). Every
+archive in it is written and read as that owner: `pg_ops` runs its container
+as you and refuses a staging directory you do not own, and the scheduled
+backup (**Scheduled backups**) runs its dump as the directory's owner. So the
+archives the timer takes can be verified and restored by hand, and a
+pre-upgrade backup can be taken without root. Other operators use that
+account (`sudo -iu <owner>`); `postgres-ops.sh` reports a uid that may not
+read an archive or write the directory as such, not as a checksum failure.
+
+One-time setup, from `deploy/` on the Compose host, as that operator (who can
+run `docker`):
 
 ```bash
 umask 077
 ops_dir="$HOME/nyabase-ops"            # holds only the password file
 backup_root=/srv/nyabase-backups       # local staging; copy off-host afterwards
-mkdir -p "$ops_dir" "$backup_root"
-chmod 0700 "$ops_dir" "$backup_root"
+mkdir -p "$ops_dir"
+chmod 0700 "$ops_dir"
+# Owned by you, mode 0700 (skip if it exists and `ls -ld` shows you as owner).
+sudo install -d -m 0700 -o "$(id -un)" -g "$(id -gn)" "$backup_root"
 
 # libpq password file: host:port:database:user:password. The password is read
 # from the terminal, so it is neither in shell history nor on a command line.
@@ -937,6 +949,10 @@ pg_network=nyabase_control-plane
 pg_image="$(docker compose --env-file .env config --images | grep '^postgres:' | sort -u)"
 
 pg_ops() {
+  [[ -O "$backup_root" ]] || {
+    echo "pg_ops: $backup_root belongs to $(stat -c %U "$backup_root"), not $(id -un); run pg_ops as its owner" >&2
+    return 1
+  }
   docker run --rm \
     --network "${PG_OPS_NETWORK:-$pg_network}" \
     --user "$(id -u):$(id -g)" \
@@ -951,9 +967,10 @@ pg_ops() {
 }
 ```
 
-The container runs as your uid, so the archives in `$backup_root` belong to
-you (mode 0600) and the password file stays readable only by you. Paths given
-to `pg_ops` are container paths under `/backups`.
+The container runs as your uid, the staging directory's owner, so the
+archives in `$backup_root` belong to you (mode 0600) and the password file
+stays readable only by you. Paths given to `pg_ops` are container paths under
+`/backups`.
 
 ### Logical backups
 
@@ -1011,7 +1028,9 @@ install -m 0644 deploy/nyabase-backup.service deploy/nyabase-backup.timer \
   /etc/systemd/system/
 install -d -m 0755 /etc/nyabase
 install -m 0600 deploy/backup.env.example /etc/nyabase/backup.env
-install -d -m 0700 /srv/nyabase-backups
+# Owned by the operator who runs pg_ops by hand (see Backup and restore
+# contract); skip if that setup already created it.
+install -d -m 0700 -o <operator> -g <operator-group> /srv/nyabase-backups
 # edit /etc/nyabase/backup.env: NYABASE_DEPLOY_DIR, the upload command
 systemctl daemon-reload
 systemctl enable --now nyabase-backup.timer
@@ -1020,11 +1039,12 @@ journalctl -u nyabase-backup.service -n 20 --no-pager
 ```
 
 Re-run the first `install` after each upgrade of the checkout; the service
-takes `postgres-ops.sh` from `NYABASE_DEPLOY_DIR` itself. A run finds the
-running `postgres` container by its Compose labels, dumps and verifies in a
-throwaway container from the same image joined to that container's network
-namespace (the trusted loopback, so there is no password file), hands the
-archive and its `.sha256` to `NYABASE_BACKUP_UPLOAD_COMMAND`, and then deletes
+takes `postgres-ops.sh` from `NYABASE_DEPLOY_DIR` itself, so the staging
+directory's owner must be able to read it. A run finds the running `postgres`
+container by its Compose labels, dumps and verifies as the staging
+directory's owner in a throwaway container from the same image joined to that
+container's network namespace (the trusted loopback, so there is no password
+file), hands the archive and its `.sha256` to `NYABASE_BACKUP_UPLOAD_COMMAND`, and then deletes
 local archives older than `NYABASE_BACKUP_KEEP_DAYS` (14). A failed dump,
 verification or upload fails the unit and deletes nothing. The timer fires
 daily at 03:15 plus up to 30 minutes and catches up at boot after a missed

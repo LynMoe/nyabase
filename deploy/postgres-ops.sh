@@ -29,19 +29,38 @@ require_command() {
   command -v "$1" >/dev/null 2>&1 || die "required command not found: $1"
 }
 
+# Archives are written and read as the owner of their directory (OPERATIONS.md,
+# "Backup and restore contract"); another uid is told so, not handed a
+# checksum or dump failure.
+permission_hint() {
+  printf 'it is uid %s mode %s and this runs as uid %s; run as the owner of the backup directory' \
+    "$(stat -c %u -- "$1" 2>/dev/null || echo '?')" \
+    "$(stat -c %a -- "$1" 2>/dev/null || echo '?')" \
+    "$(id -u)"
+}
+
 require_regular_input() {
   local input_path="$1"
+  local input_parent
+  input_parent="$(dirname "$input_path")"
+  [[ ! -d "$input_parent" || -x "$input_parent" ]] \
+    || die "cannot open $input_parent: $(permission_hint "$input_parent")"
   [[ -f "$input_path" && ! -L "$input_path" ]] \
     || die "input must be a regular, non-symlink file: $input_path"
+  [[ -r "$input_path" ]] || die "cannot read $input_path: $(permission_hint "$input_path")"
 }
 
 require_new_output() {
   local output_path="$1"
+  local output_parent
   [[ "$output_path" != "/" ]] || die "refusing filesystem root as output"
   [[ ! -e "$output_path" && ! -L "$output_path" ]] \
     || die "output already exists: $output_path"
-  [[ -d "$(dirname "$output_path")" ]] \
-    || die "output parent directory does not exist: $(dirname "$output_path")"
+  output_parent="$(dirname "$output_path")"
+  [[ -d "$output_parent" ]] \
+    || die "output parent directory does not exist: $output_parent"
+  [[ -w "$output_parent" && -x "$output_parent" ]] \
+    || die "cannot write to $output_parent: $(permission_hint "$output_parent")"
 }
 
 connection_from_env() {

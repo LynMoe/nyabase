@@ -165,6 +165,37 @@ bash "$ops" upgrade-preflight \
   --output "$test_root/out/upgrade-preflight.txt"
 grep -qx 'result=pass' "$test_root/out/upgrade-preflight.txt"
 
+# A uid that may not read the archives or write their directory is told so,
+# not handed a checksum or dump failure. Root ignores mode bits, so as root
+# the script runs as nobody.
+perm_root="$test_root/perm"
+mkdir -p "$perm_root/archives"
+cp deploy/postgres-ops.sh "$perm_root/postgres-ops.sh"
+cp "$test_root/out/nyabase.dump" "$test_root/out/nyabase.dump.sha256" "$perm_root/archives/"
+chmod 0000 "$perm_root/archives/nyabase.dump" "$perm_root/archives/nyabase.dump.sha256"
+chmod 0500 "$perm_root/archives"
+as_other=()
+if [[ "$(id -u)" -eq 0 ]]; then
+  chmod 0755 "$test_root" "$perm_root"
+  chmod 0644 "$perm_root/postgres-ops.sh"
+  as_other=(setpriv --reuid=65534 --regid=65534 --clear-groups)
+fi
+if "${as_other[@]}" bash "$perm_root/postgres-ops.sh" verify-logical \
+  --input "$perm_root/archives/nyabase.dump" 2>"$test_root/err"; then
+  echo "verify unexpectedly read an archive it may not read" >&2
+  exit 1
+fi
+grep -Eq 'cannot (open|read) .*run as the owner of the backup directory' "$test_root/err"
+! grep -q checksum "$test_root/err"
+if "${as_other[@]}" bash "$perm_root/postgres-ops.sh" logical-backup \
+  --output "$perm_root/archives/new.dump" 2>"$test_root/err"; then
+  echo "backup unexpectedly wrote to a directory it may not write" >&2
+  exit 1
+fi
+grep -q 'cannot write to .*run as the owner of the backup directory' "$test_root/err"
+chmod 0700 "$perm_root/archives"
+chmod 0600 "$perm_root/archives/nyabase.dump" "$perm_root/archives/nyabase.dump.sha256"
+
 # Scheduled backup wrapper: a fake docker runs the in-container command on the
 # host with the bind mounts mapped back to their sources.
 make_fake docker '
