@@ -38,9 +38,11 @@ function databaseTypeContract(): Map<string, ColumnContract[]> {
     ts.sys,
     dirname(configPath),
   );
-  const program = ts.createProgram(parsed.fileNames, parsed.options);
-  const checker = program.getTypeChecker();
+  // Root the program at the one file whose types are read; its imports load on
+  // demand. Type-checking every backend source made this test CPU-bound.
   const databaseTypesPath = resolve(__dirname, 'database.types.ts');
+  const program = ts.createProgram([databaseTypesPath], parsed.options);
+  const checker = program.getTypeChecker();
   const source = program.getSourceFile(databaseTypesPath);
   if (!source) throw new Error('database.types.ts was not loaded');
   const declaration = source.statements.find(
