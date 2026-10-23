@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { createAgentHandlers, type AgentDependencies } from './agent.js';
 import { AgentRequestError } from './backend-connection.js';
+import { LocalIncusError } from './incus-local.js';
 import { Ipv6Guard, type NftRunner } from './ipv6-guard.js';
 import { OperationLedger } from './operation-ledger.js';
 
@@ -10,7 +11,7 @@ const COMPLETE_TABLE = ['forward', 'input', 'output']
   .map((hook) => `hook ${hook}\n iifname "nyh*" ether type { ip6 } drop\n oifname "nyh*" ether type { ip6 } drop`)
   .join('\n');
 
-function harness(guardInPlace: boolean) {
+function harness(guardInPlace: boolean, requestJson = vi.fn(async (): Promise<unknown> => ({}))) {
   const nft: NftRunner = {
     apply: vi.fn(async () => {
       if (!guardInPlace) throw new Error('nft: Operation not permitted');
@@ -20,7 +21,7 @@ function harness(guardInPlace: boolean) {
   const request = vi.fn(async () => ({ status: 202, headers: {}, body: Buffer.from('{}') }));
   const deps = {
     config: {} as AgentDependencies['config'],
-    incus: { request, requestJson: vi.fn(async () => ({})) } as unknown as AgentDependencies['incus'],
+    incus: { request, requestJson } as unknown as AgentDependencies['incus'],
     guard: new Ipv6Guard(nft),
     operations: new OperationLedger(),
     metrics: { collect: async () => [] },
@@ -73,6 +74,31 @@ describe('agent request handling', () => {
     await handlers.incusHttp(wait, new AbortController().signal);
     expect(request).toHaveBeenCalledTimes(2);
     expect(request).toHaveBeenLastCalledWith(expect.objectContaining({ path: wait.path }));
+  });
+
+  it('refuses an update of a missing instance, but retries when its document cannot be read', async () => {
+    const update = {
+      method: 'PATCH' as const,
+      path: `/1.0/instances/${INSTANCE}`,
+      body: Buffer.from(JSON.stringify({ config: { 'limits.memory': '1GiB' } })).toString('base64'),
+      timeoutMs: 1_000,
+    };
+    const missing = harness(true, vi.fn(async () => {
+      throw new LocalIncusError('incus_unavailable', 'Instance not found', 404);
+    }));
+    await expect(missing.handlers.incusHttp(update, new AbortController().signal))
+      .rejects.toMatchObject({ code: 'policy_denied' });
+    for (const failure of [
+      new LocalIncusError('timeout', 'Incus did not answer in time'),
+      new LocalIncusError('incus_unavailable', 'Internal error', 500),
+    ]) {
+      const busy = harness(true, vi.fn(async () => {
+        throw failure;
+      }));
+      await expect(busy.handlers.incusHttp(update, new AbortController().signal))
+        .rejects.toMatchObject({ code: failure.code });
+      expect(busy.request).not.toHaveBeenCalled();
+    }
   });
 
   it('starts a guest once the guard verifies', async () => {

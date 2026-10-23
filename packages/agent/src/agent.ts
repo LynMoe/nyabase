@@ -70,10 +70,16 @@ async function incusHttp(
   signal: AbortSignal,
 ): Promise<AgentIncusHttpResult> {
   const body = params.body === undefined ? undefined : Buffer.from(params.body, 'base64');
-  const verdict = await checkIncusHttp({ method: params.method, path: params.path, body }, {
-    readCurrent: (path) => deps.incus.requestJson<Record<string, unknown>>('GET', path).catch(() => undefined),
-    operations: deps.operations,
-  });
+  let verdict;
+  try {
+    verdict = await checkIncusHttp({ method: params.method, path: params.path, body }, {
+      readCurrent: (path) => readCurrent(deps.incus, path),
+      operations: deps.operations,
+    });
+  } catch (error) {
+    // Reading the current document failed (a busy host, a timeout): retryable, not a refusal.
+    throw asRequestError(error);
+  }
   if (!verdict.allowed && verdict.notFound) return notFound();
   if (!verdict.allowed) {
     deps.log(`refused ${params.method} ${params.path.split('?')[0]}: ${verdict.reason}`);
@@ -151,6 +157,20 @@ async function collectMetrics(deps: AgentDependencies): Promise<AgentMetricsResu
     throw new AgentRequestError('too_large', 'metrics exceed the transfer limit');
   }
   return { text };
+}
+
+/**
+ * The document an update would change, for the policy. Only Incus saying it
+ * does not exist (404) reads as absent, which the policy refuses for good;
+ * any other failure throws, so the Backend retries the request.
+ */
+async function readCurrent(incus: LocalIncus, path: string): Promise<Record<string, unknown> | undefined> {
+  try {
+    return await incus.requestJson<Record<string, unknown>>('GET', path);
+  } catch (error) {
+    if (error instanceof LocalIncusError && error.status === 404) return undefined;
+    throw error;
+  }
 }
 
 /** What Incus answers for an operation it does not know. */
