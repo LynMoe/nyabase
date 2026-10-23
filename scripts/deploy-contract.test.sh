@@ -131,10 +131,17 @@ for (const name of ['POSTGRES_PASSWORD', 'POSTGRES_USER', 'NYABASE_DB_PASSWORD']
 if ('INCUS_CA_FILE' in backend.environment || backend.secrets?.length || config.secrets) {
   throw new Error('backend must not be given Incus TLS secrets');
 }
-if (backend.read_only !== true) throw new Error('backend root filesystem is not read-only');
-if (!backend.cap_drop?.includes('ALL')) throw new Error('backend does not drop all capabilities');
-if (!backend.security_opt?.some((entry) => entry.startsWith('no-new-privileges'))) {
-  throw new Error('backend does not set no-new-privileges');
+for (const serviceName of ['backend', 'victoriametrics']) {
+  const service = config.services[serviceName];
+  if (service.read_only !== true) throw new Error(`${serviceName} root filesystem is not read-only`);
+  if (!service.cap_drop?.includes('ALL')) throw new Error(`${serviceName} does not drop all capabilities`);
+  if (!service.security_opt?.some((entry) => entry.startsWith('no-new-privileges'))) {
+    throw new Error(`${serviceName} does not set no-new-privileges`);
+  }
+}
+// VictoriaMetrics' API (admin endpoints included) has no authentication.
+if ((config.services.victoriametrics.ports ?? []).length !== 0) {
+  throw new Error('victoriametrics must not publish a host port');
 }
 // The Backend is reached only through the TLS edge on the same host.
 const backendPorts = backend.ports ?? [];

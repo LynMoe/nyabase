@@ -51,8 +51,10 @@ docker compose --env-file .env ps
 ```
 
 The Backend is published only on `127.0.0.1:3001`; the public entrypoint is
-the TLS edge described below. VictoriaMetrics keeps its loopback-only endpoint
-on `127.0.0.1:8428`. PostgreSQL has no host-published port.
+the TLS edge described below. VictoriaMetrics and PostgreSQL have no
+host-published port: VictoriaMetrics' HTTP API, including its admin endpoints
+(deleting series, snapshots), has no authentication, so only the Backend
+reaches it over the internal `telemetry` network.
 
 The Backend starts after healthy PostgreSQL. PostgreSQL and VictoriaMetrics
 retain service healthchecks; the Backend does not wait for VictoriaMetrics and
@@ -63,7 +65,8 @@ Useful probes:
 ```bash
 curl --fail http://127.0.0.1:3001/api/health/live
 curl --fail http://127.0.0.1:3001/api/health/ready
-curl --fail http://127.0.0.1:8428/health
+docker compose --env-file .env exec victoriametrics \
+  wget --quiet --output-document=- http://127.0.0.1:8428/health
 ```
 
 `/api/health/live` proves only that the Backend process is alive.
@@ -1060,7 +1063,11 @@ operator=
 
 VictoriaMetrics backup must use `vmbackup` against an instant snapshot and copy
 it to object storage or another host. `vmrestore` is an offline operation:
-stop VictoriaMetrics, restore into its data path, then start it.
+stop VictoriaMetrics, restore into its data path, then start it. Its API is
+not published on the host: run `vmbackup` as a container attached to the
+`nyabase_telemetry` network (`-snapshot.createURL=http://victoriametrics:8428/snapshot/create`)
+with the `vm-data` volume mounted, plus whatever network reaches the backup
+destination.
 
 ### Lost `ssh.keyEncryptionSecret`
 
@@ -1224,6 +1231,10 @@ from the product SLO and measured baseline, not from this example deployment.
   It does not send HSTS; enable HSTS at the TLS edge once every host under the
   chosen scope serves HTTPS.
 - Only the Backend joins both the control-plane and telemetry networks.
+- VictoriaMetrics publishes no host port (its API has no authentication) and
+  runs with a read-only root filesystem, no capabilities and
+  `no-new-privileges`. The image runs as root and owns `vm-data`; without
+  capabilities that root can write only the files it owns.
 - The Backend image runs as the dedicated unprivileged `10001:10001` identity.
   Writable mounts and temporary files must be owned by that identity; do not
   grant root merely to fix a mount-permission error.
@@ -1255,8 +1266,9 @@ from the product SLO and measured baseline, not from this example deployment.
   `DATABASE_URL`, so that hostname must still be accepted by the endpoint's TLS
   router. `PG_SSL_MODE=require` encrypts without authenticating the server and
   is reserved for explicitly trusted networks.
-- Add a VictoriaMetrics auth proxy only when telemetry endpoints cross a trust
-  boundary.
+- To reach VictoriaMetrics from outside the Compose networks (a dashboard on
+  another host, say), put an authenticating proxy such as `vmauth` in front of
+  it, or set its `-httpAuth.*` and `-*AuthKey` flags; never publish 8428 as is.
 
 ## 授权失效与 14 天宽限
 

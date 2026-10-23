@@ -122,9 +122,6 @@ services:
       - "127.0.0.1::3001"
     volumes: !override
       - ${SMOKE_CONFIG_PATH}:/etc/nyabase/config.yaml:ro
-  victoriametrics:
-    ports: !override
-      - "127.0.0.1::8428"
 YAML
 
 compose=(
@@ -185,6 +182,19 @@ process.stdin.on("end", () => {
       )
       FROM pg_roles AS role WHERE role.rolname = 'nyabase'"
 )" == t ]]
+
+docker inspect "$("${compose[@]}" ps -q victoriametrics)" | node -e '
+let input = "";
+process.stdin.on("data", (chunk) => { input += chunk; });
+process.stdin.on("end", () => {
+  const [container] = JSON.parse(input);
+  const host = container.HostConfig;
+  if (host.ReadonlyRootfs !== true) throw new Error("VictoriaMetrics root filesystem is writable");
+  if (!host.CapDrop?.includes("ALL")) throw new Error("VictoriaMetrics capabilities were not dropped");
+  if (Object.keys(host.PortBindings ?? {}).length !== 0) {
+    throw new Error("VictoriaMetrics publishes a host port");
+  }
+});'
 
 [[ "$(docker exec "$backend_container" id -u)" == 10001 ]]
 docker exec "$backend_container" test -r /etc/nyabase/config.yaml

@@ -46,15 +46,24 @@ services:
   victoriametrics:
     <<: *service-defaults
     image: victoriametrics/victoria-metrics:v1.148.0@sha256:407013e902f9a0ba1d4b2d4c077c47bbaf917c893c52ff39b19efe83a654afda
-    ports:
-      # Keep the existing loopback-only operational endpoint.
-      - "127.0.0.1:8428:8428"
+    # No host port: its HTTP API, admin endpoints (delete series, snapshots)
+    # included, is unauthenticated, so only the Backend reaches it over the
+    # internal telemetry network (see OPERATIONS.md for operator access).
     volumes:
       - vm-data:/victoria-metrics-data
     command:
       - -storageDataPath=/victoria-metrics-data
       - -retentionPeriod=${VM_RETENTION_PERIOD:-30d}
       - -storage.minFreeDiskSpaceBytes=${VM_MIN_FREE_DISK_SPACE_BYTES:-5GiB}
+    # The image runs as root and vm-data belongs to root; without capabilities
+    # that root can write only what it owns (the data volume).
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,noexec,mode=1777,size=64m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     cpus: ${VICTORIAMETRICS_CPUS:-2.0}
     mem_limit: ${VICTORIAMETRICS_MEMORY_LIMIT:-4g}
     pids_limit: ${VICTORIAMETRICS_PIDS_LIMIT:-512}
