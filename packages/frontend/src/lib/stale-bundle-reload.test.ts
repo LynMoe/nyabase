@@ -4,14 +4,16 @@ import { reloadOnStaleBundle, STALE_BUNDLE_RELOAD_GUARD_MS } from './stale-bundl
 function fakeHost(storage: Pick<Storage, 'getItem' | 'setItem'> | (() => never)) {
   let listener: (() => void) | undefined;
   const reload = vi.fn();
+  const navigator = { onLine: true };
   const host = {
+    navigator,
     addEventListener: (_type: 'vite:preloadError', handler: () => void) => { listener = handler; },
     get sessionStorage() {
       return typeof storage === 'function' ? storage() : storage;
     },
     location: { reload },
   };
-  return { host, reload, fire: () => listener?.() };
+  return { host, reload, navigator, fire: () => listener?.() };
 }
 
 function memoryStorage() {
@@ -56,5 +58,20 @@ describe('reloadOnStaleBundle', () => {
     reloadOnStaleBundle(failingWrite.host);
     failingWrite.fire();
     expect(failingWrite.reload).not.toHaveBeenCalled();
+  });
+
+  it('does not reload while the browser reports being offline, nor spend the guard', () => {
+    const storage = memoryStorage();
+    const { host, reload, navigator, fire } = fakeHost(storage);
+    reloadOnStaleBundle(host, () => 1_000_000);
+
+    navigator.onLine = false;
+    fire();
+    expect(reload).not.toHaveBeenCalled();
+
+    // Back online: the next failure still gets its one reload.
+    navigator.onLine = true;
+    fire();
+    expect(reload).toHaveBeenCalledOnce();
   });
 });

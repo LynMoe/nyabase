@@ -19,8 +19,8 @@ interface RefreshSession {
   previousHash: string | null;
   previousRequestIdHash: string | null;
   rotatedAt: Date | null;
-  /** Every hash this session rotated away from. */
-  ancestors: Set<string>;
+  /** Retained retired hashes -> retirement time, oldest first. */
+  ancestors: Map<string, Date>;
   revoked: boolean;
 }
 
@@ -111,7 +111,7 @@ export class InMemoryAuthPersistenceTestAdapter implements AuthPersistence {
         previousHash: null,
         previousRequestIdHash: null,
         rotatedAt: null,
-        ancestors: new Set(),
+        ancestors: new Map(),
         revoked: false,
       });
       return user;
@@ -133,8 +133,15 @@ export class InMemoryAuthPersistenceTestAdapter implements AuthPersistence {
         this.refresh.delete(current.id);
         return { kind: 'invalid' };
       }
+      const evicted = [...current.ancestors.values()].at(-input.retainedAncestors);
+      if (evicted && now.getTime() - evicted.getTime() < input.ancestorMinimumAgeMs) {
+        return { kind: 'throttled' };
+      }
       this.trim(user.id, input.maximumSessions - 1, current.id);
-      current.ancestors.add(input.hash);
+      current.ancestors.set(input.hash, now);
+      for (const hash of [...current.ancestors.keys()].slice(0, -input.retainedAncestors)) {
+        current.ancestors.delete(hash);
+      }
       current.previousHash = input.hash;
       current.previousRequestIdHash = input.requestIdHash;
       current.rotatedAt = now;
@@ -179,10 +186,10 @@ export class InMemoryAuthPersistenceTestAdapter implements AuthPersistence {
     return { kind: 'reused', ...reuse };
   }
 
-  deleteRefreshSessionByCurrentOrPreviousHash(hash: string): Promise<string | null> {
+  deleteRefreshSessionByCurrentOrRetiredHash(hash: string): Promise<string | null> {
     return this.serialized(async () => {
       const row = [...this.refresh.values()].find(
-        (item) => item.hash === hash || item.previousHash === hash,
+        (item) => item.hash === hash || item.ancestors.has(hash),
       );
       if (!row) return null;
       this.refresh.delete(row.id);

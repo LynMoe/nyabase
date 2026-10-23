@@ -44,6 +44,21 @@ export const MAX_REFRESH_SESSIONS_PER_USER = 16;
  * without revoking the session. Any other retired token is reuse.
  */
 export const REFRESH_REUSE_GRACE_MS = 15_000;
+/**
+ * Retired refresh hashes remembered per session. Normal use rotates about once
+ * per tab per access-token lifetime (plus one per page load), so 64 covers
+ * hours of history for a busy multi-tab session while capping the table at 64
+ * rows per session (x16 sessions per user) however long the session lives.
+ */
+export const REFRESH_RETAINED_ANCESTORS = 64;
+/**
+ * A session may not forget a hash retired less than this long ago: at most
+ * REFRESH_RETAINED_ANCESTORS rotations per window (one every ~14 s on average;
+ * excess gets 429). A thief who rotates a stolen token therefore cannot flush
+ * the victim's token out of the window before the victim's next refresh, which
+ * comes within one default access-token lifetime (auth.jwtExpiresIn = 15m).
+ */
+export const REFRESH_ANCESTOR_MINIMUM_AGE_MS = 15 * 60_000;
 /** Failed logins per (client address bucket, username) per window. */
 export const MAX_LOGIN_FAILURES_PER_IP_USERNAME = 10;
 /** Failed logins per client address bucket (any usernames) per window. */
@@ -177,6 +192,8 @@ export class AuthService {
       requestIdHash,
       ...this.sessionLifetimeMs(),
       reuseGraceMs: REFRESH_REUSE_GRACE_MS,
+      retainedAncestors: REFRESH_RETAINED_ANCESTORS,
+      ancestorMinimumAgeMs: REFRESH_ANCESTOR_MINIMUM_AGE_MS,
       maximumSessions: MAX_REFRESH_SESSIONS_PER_USER,
       successorHash: (sessionId) => {
         successor = this.deriveRotatedRefreshToken(sessionId, hash, requestId);
@@ -193,6 +210,8 @@ export class AuthService {
       ),
     });
     if (result.kind === 'superseded') throw new RefreshSupersededException();
+    // Not a 401: the session is intact and the cookie must be kept.
+    if (result.kind === 'throttled') throw this.tooManyRequests('Too many session refreshes');
     if (result.kind === 'reused') {
       this.logger.warn(
         `Refresh token reuse: revoked session ${result.sessionId} of user ${result.userId}`,
@@ -220,12 +239,12 @@ export class AuthService {
 
   /**
    * Possession of a refresh secret is the authority to terminate that session.
-   * The one-step predecessor resolves the same row so a logout replayed after
-   * automatic rotation still deletes the current token.
+   * A retained ancestor resolves the same row, so a logout from a tab whose
+   * cookie read predates later rotations still deletes the current token.
    */
   async logout(rawRefreshToken: string): Promise<string | null> {
     const hash = this.tokenHash(rawRefreshToken);
-    return this.persistence.deleteRefreshSessionByCurrentOrPreviousHash(
+    return this.persistence.deleteRefreshSessionByCurrentOrRetiredHash(
       hash,
       (transaction, userId) => this.audit.append(
         transaction,

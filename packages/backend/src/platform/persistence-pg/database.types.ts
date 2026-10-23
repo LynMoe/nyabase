@@ -67,6 +67,7 @@ export interface IamRefreshTokenTable {
 export interface IamRefreshTokenAncestorTable {
   hash: string;
   session_id: string;
+  retired_at: Date;
 }
 
 export interface IamSshPublicKeyTable {

@@ -220,26 +220,28 @@ export class IncusClient implements IncusClientPort {
       options.channels ??
       (document.interactive ? (['0', 'control'] as const) : (['0', '1', '2'] as const));
     const sockets: Partial<Record<IncusExecFd, IncusWebSocketLike>> = {};
-    try {
-      await Promise.all(
-        requestedChannels.map(async (channel) => {
-          const secret = fds[channel];
-          if (!secret) {
-            throw new IncusError('INCUS_INVALID_RESPONSE', 'managed_failure', {
-              reason: `missing_exec_fd_${channel}`,
-            });
-          }
-          sockets[channel] = await this.transport.dialWebSocket(
-            `/1.0/operations/${encodeSegment(operationId, 'operation_id')}/websocket?secret=${encodeURIComponent(secret)}`,
-            options.signal,
-          );
-        }),
-      );
-    } catch (error) {
+    // Wait for every dial to settle: a channel that opens after a sibling
+    // failed must still be closed, or its agent stream leaks.
+    const dials = await Promise.allSettled(
+      requestedChannels.map(async (channel) => {
+        const secret = fds[channel];
+        if (!secret) {
+          throw new IncusError('INCUS_INVALID_RESPONSE', 'managed_failure', {
+            reason: `missing_exec_fd_${channel}`,
+          });
+        }
+        sockets[channel] = await this.transport.dialWebSocket(
+          `/1.0/operations/${encodeSegment(operationId, 'operation_id')}/websocket?secret=${encodeURIComponent(secret)}`,
+          options.signal,
+        );
+      }),
+    );
+    const failed = dials.find((dial) => dial.status === 'rejected');
+    if (failed) {
       for (const socket of Object.values(sockets)) {
         socket?.close();
       }
-      throw error;
+      throw failed.reason;
     }
     return {
       operationId,

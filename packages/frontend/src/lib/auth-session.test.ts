@@ -243,6 +243,36 @@ describe('cookie-backed auth session', () => {
     expect(pendingRefreshRequestId()).toBeNull();
   });
 
+  it('rotates again with a new request id after losing a concurrent rotation', async () => {
+    signIn();
+    const server = authServer([
+      { status: 401, body: { code: 'REFRESH_SUPERSEDED', message: 'Refresh token was already rotated' } },
+      { body: { accessToken: 'A2', user: alice } },
+    ]);
+    vi.stubGlobal('fetch', server.fetchMock);
+
+    await expect(app.api.get('/ping')).resolves.toEqual({ ok: true });
+
+    const [lost, retried] = server.refreshCalls().map((call) => body(call).requestId);
+    expect(retried).not.toBe(lost);
+    expect(app.useAuthStore.getState()).toMatchObject({ accessToken: 'A2', status: 'authenticated' });
+    expect(app.takePendingLoginReason()).toBeUndefined();
+    expect(pendingRefreshRequestId()).toBeNull();
+  });
+
+  it('retries a superseded refresh only once and keeps the session', async () => {
+    signIn();
+    const superseded = { status: 401, body: { code: 'REFRESH_SUPERSEDED', message: 'Refresh token was already rotated' } };
+    const server = authServer([superseded, superseded]);
+    vi.stubGlobal('fetch', server.fetchMock);
+
+    await expect(app.api.get('/ping')).rejects.toMatchObject({ code: 'REFRESH_SUPERSEDED' });
+
+    expect(server.refreshCalls()).toHaveLength(2);
+    expect(app.useAuthStore.getState()).toMatchObject({ accessToken: 'A1', user: alice, status: 'error' });
+    expect(app.takePendingLoginReason()).toBeUndefined();
+  });
+
   it('treats a cold load without a cookie as anonymous, not expired', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(json({ message: 'Invalid refresh token' }, 401)));
     await app.bootstrapAuthSession();

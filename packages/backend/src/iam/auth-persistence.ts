@@ -47,6 +47,14 @@ export interface RefreshRotationInput {
    * request id, still counts as a concurrent refresh instead of reuse.
    */
   reuseGraceMs: number;
+  /** Retired hashes kept per session; older ones are forgotten (just invalid). */
+  retainedAncestors: number;
+  /**
+   * A rotation that would forget a hash retired less than this long ago is
+   * refused (`throttled`), so every recent ancestor stays detectable however
+   * fast a holder loops refresh.
+   */
+  ancestorMinimumAgeMs: number;
   maximumSessions: number;
   successorHash: (sessionId: string) => string;
   /** Runs in the transaction that deleted a session for token reuse. */
@@ -62,6 +70,8 @@ export type RefreshRotationResult =
   | { kind: 'invalid' }
   /** The just-retired token lost a concurrent rotation; the session is intact. */
   | { kind: 'superseded' }
+  /** The session rotated `retainedAncestors` times within `ancestorMinimumAgeMs`. */
+  | { kind: 'throttled' }
   /** A retired token was presented again; the whole session was deleted. */
   | ({ kind: 'reused' } & RefreshTokenReuse)
   | { kind: 'recovered'; user: AuthUser; sessionId: string; expiresInMs: number }
@@ -78,7 +88,7 @@ export interface AuthPersistence {
     onIssued?: AuthTransactionHook<AuthUser>,
   ): Promise<AuthUser | null>;
   rotateRefreshSession(input: RefreshRotationInput): Promise<RefreshRotationResult>;
-  deleteRefreshSessionByCurrentOrPreviousHash(
+  deleteRefreshSessionByCurrentOrRetiredHash(
     hash: string,
     onDeleted?: AuthTransactionHook<string>,
   ): Promise<string | null>;

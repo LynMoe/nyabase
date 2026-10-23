@@ -131,9 +131,12 @@ export class IamAuthRepository implements AuthPersistence {
 
   /**
    * One session is one row whose hash rotates in place; `created_at` is the
-   * login time and survives every rotation. Each retired hash is kept in
-   * `iam.refresh_token_ancestors` until the session row goes away, so a
-   * replayed old token is recognised and takes the whole session down.
+   * login time and survives every rotation. The newest `retainedAncestors`
+   * retired hashes are kept in `iam.refresh_token_ancestors`, so a replayed
+   * recent token is recognised and takes the whole session down; an older one
+   * is merely invalid. Forgetting a hash younger than `ancestorMinimumAgeMs`
+   * is refused instead, so looping refresh can neither grow the table nor
+   * push a stolen token's predecessor out of the window to dodge detection.
    */
   rotateRefreshSession(input: RefreshRotationInput): Promise<RefreshRotationResult> {
     return this.transactions.run(async (transaction) => {
@@ -158,6 +161,9 @@ export class IamAuthRepository implements AuthPersistence {
         return { kind: 'invalid' };
       }
       const expiresAt = new Date(Math.min(now.getTime() + input.idleMs, sessionEnd));
+      if (await this.rotatesTooFast(transaction, current.token_id, now, input)) {
+        return { kind: 'throttled' };
+      }
 
       await this.trimRefreshSessions(
         transaction,
@@ -166,11 +172,13 @@ export class IamAuthRepository implements AuthPersistence {
         input.maximumSessions - 1,
         current.token_id,
       );
-      await transaction
-        .insertInto('iam.refresh_token_ancestors')
-        .values({ hash: input.hash, session_id: current.token_id })
-        .onConflict((conflict) => conflict.column('hash').doNothing())
-        .execute();
+      await this.retireRefreshHash(
+        transaction,
+        current.token_id,
+        input.hash,
+        now,
+        input.retainedAncestors,
+      );
       const updated = await transaction
         .updateTable('iam.refresh_tokens')
         .set({
@@ -193,7 +201,8 @@ export class IamAuthRepository implements AuthPersistence {
     });
   }
 
-  deleteRefreshSessionByCurrentOrPreviousHash(
+  /** The current hash or any retained ancestor (the previous hash is always one). */
+  deleteRefreshSessionByCurrentOrRetiredHash(
     hash: string,
     onDeleted?: AuthTransactionHook<string>,
   ): Promise<string | null> {
@@ -203,7 +212,10 @@ export class IamAuthRepository implements AuthPersistence {
         .select(['id', 'user_id'])
         .where((expression) => expression.or([
           expression('hash', '=', hash),
-          expression('previous_hash', '=', hash),
+          expression('id', 'in', expression
+            .selectFrom('iam.refresh_token_ancestors')
+            .select('session_id')
+            .where('hash', '=', hash)),
         ]))
         .forUpdate()
         .executeTakeFirst();
@@ -276,6 +288,56 @@ export class IamAuthRepository implements AuthPersistence {
     const reuse = { userId: retired.user_id, sessionId: retired.token_id };
     await input.onReuse?.(transaction, reuse);
     return { kind: 'reused', ...reuse };
+  }
+
+  /**
+   * Called under the session row lock, so a session's rotations (and its
+   * `retired_at` values) are serialized. The rotation about to happen evicts
+   * the `retainedAncestors`-th newest ancestor; refuse if that one is young.
+   */
+  private async rotatesTooFast(
+    transaction: IamTransaction,
+    sessionId: string,
+    now: Date,
+    input: RefreshRotationInput,
+  ): Promise<boolean> {
+    const evicted = await transaction
+      .selectFrom('iam.refresh_token_ancestors')
+      .select('retired_at')
+      .where('session_id', '=', sessionId)
+      .orderBy('retired_at', 'desc')
+      .orderBy('hash', 'desc')
+      .offset(input.retainedAncestors - 1)
+      .limit(1)
+      .executeTakeFirst();
+    return evicted !== undefined
+      && now.getTime() - evicted.retired_at.getTime() < input.ancestorMinimumAgeMs;
+  }
+
+  /** Record a retired hash and drop all but the session's newest `keepCount`. */
+  private async retireRefreshHash(
+    transaction: IamTransaction,
+    sessionId: string,
+    hash: string,
+    now: Date,
+    keepCount: number,
+  ): Promise<void> {
+    await transaction
+      .insertInto('iam.refresh_token_ancestors')
+      .values({ hash, session_id: sessionId, retired_at: now })
+      .onConflict((conflict) => conflict.column('hash').doNothing())
+      .execute();
+    await transaction
+      .deleteFrom('iam.refresh_token_ancestors')
+      .where('session_id', '=', sessionId)
+      .where('hash', 'in', (expression) => expression
+        .selectFrom('iam.refresh_token_ancestors')
+        .select('hash')
+        .where('session_id', '=', sessionId)
+        .orderBy('retired_at', 'desc')
+        .orderBy('hash', 'desc')
+        .offset(keepCount))
+      .execute();
   }
 
   async revokeBrowserSessions(

@@ -119,12 +119,14 @@ COMMENT ON COLUMN iam.refresh_tokens.rotated_at IS
 COMMENT ON COLUMN iam.refresh_tokens.created_at IS
   'Session start (login); rotation keeps it, auth.sessionMaxLifetimeDays counts from it';
 
--- Every hash a session has rotated away from. Presenting one again (outside
--- the immediate-predecessor recovery / grace paths) is refresh-token reuse:
--- the whole session is deleted, and these rows go with it.
+-- The newest hashes a session has rotated away from (the repository keeps a
+-- bounded window per session, see REFRESH_RETAINED_ANCESTORS). Presenting one
+-- again (outside the immediate-predecessor recovery / grace paths) is
+-- refresh-token reuse: the whole session is deleted, and these rows go with it.
 CREATE TABLE iam.refresh_token_ancestors (
     hash character(64) NOT NULL,
     session_id uuid NOT NULL,
+    retired_at timestamp with time zone NOT NULL,
     CONSTRAINT refresh_token_ancestors_hash_check CHECK (hash ~ '^[0-9a-f]{64}$'),
     PRIMARY KEY (hash)
 );
@@ -1133,7 +1135,7 @@ CREATE INDEX iam_refresh_tokens_user_idx ON iam.refresh_tokens (user_id);
 CREATE UNIQUE INDEX iam_refresh_tokens_previous_hash_unique
     ON iam.refresh_tokens (previous_hash) WHERE previous_hash IS NOT NULL;
 CREATE INDEX iam_refresh_token_ancestors_session_idx
-    ON iam.refresh_token_ancestors (session_id);
+    ON iam.refresh_token_ancestors (session_id, retired_at, hash);
 CREATE INDEX iam_ssh_public_keys_user_idx
     ON iam.ssh_public_keys (user_id, created_at, id);
 CREATE INDEX iam_users_status_idx ON iam.users (status, username);

@@ -27,6 +27,8 @@ function rotation(
     idleMs: 7 * DAY,
     absoluteMs: 30 * DAY,
     reuseGraceMs: 15_000,
+    retainedAncestors: 64,
+    ancestorMinimumAgeMs: 15 * 60_000,
     maximumSessions: 5,
     successorHash: () => successor,
     ...overrides,
@@ -187,6 +189,66 @@ describePg('IamAuthRepository refresh token reuse', () => {
       await expect(repository.rotateRefreshSession(rotation(hex('9'), hex('a'), hex('2'))))
         .resolves.toEqual({ kind: 'invalid' });
       expect((await sessionRows(database, sessionId)).token?.hash).toBe(hex('1'));
+    });
+  });
+});
+
+describePg('IamAuthRepository bounded ancestors', () => {
+  const window = { retainedAncestors: 2, ancestorMinimumAgeMs: 60_000 };
+  const age = (database: Kysely<NyabaseDatabase>, sessionId: string) => sql`
+    UPDATE iam.refresh_token_ancestors
+    SET retired_at = retired_at - interval '1 hour'
+    WHERE session_id = ${sessionId}`.execute(database);
+
+  it('keeps only the newest ancestors; a forgotten token is invalid, not reuse', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const { repository, sessionId } = await sessionWithToken(database, hex('1'));
+      await repository.rotateRefreshSession(rotation(hex('1'), hex('a'), hex('2'), window));
+      await repository.rotateRefreshSession(rotation(hex('2'), hex('b'), hex('3'), window));
+      await age(database, sessionId);
+      await expect(repository.rotateRefreshSession(rotation(hex('3'), hex('c'), hex('4'), window)))
+        .resolves.toMatchObject({ kind: 'rotated' });
+      expect((await sessionRows(database, sessionId)).ancestors).toEqual([hex('2'), hex('3')]);
+
+      const onReuse = vi.fn(async () => undefined);
+      await expect(repository.rotateRefreshSession(
+        rotation(hex('1'), hex('d'), hex('5'), { ...window, onReuse }),
+      )).resolves.toEqual({ kind: 'invalid' });
+      expect(onReuse).not.toHaveBeenCalled();
+      expect((await sessionRows(database, sessionId)).token?.hash).toBe(hex('4'));
+      // A retained one still is reuse.
+      await expect(repository.rotateRefreshSession(rotation(hex('2'), hex('d'), hex('5'), window)))
+        .resolves.toMatchObject({ kind: 'reused', sessionId });
+    });
+  });
+
+  it('refuses a rotation that would forget a recently retired token', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const { repository, sessionId } = await sessionWithToken(database, hex('1'));
+      await repository.rotateRefreshSession(rotation(hex('1'), hex('a'), hex('2'), window));
+      await repository.rotateRefreshSession(rotation(hex('2'), hex('b'), hex('3'), window));
+      await expect(repository.rotateRefreshSession(rotation(hex('3'), hex('c'), hex('4'), window)))
+        .resolves.toEqual({ kind: 'throttled' });
+      // Nothing changed: same current token, same ancestors.
+      expect(await sessionRows(database, sessionId)).toMatchObject({
+        token: { hash: hex('3') },
+        ancestors: [hex('1'), hex('2')],
+      });
+    });
+  });
+
+  it('logs out by the current token or any retained ancestor', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const { repository, userId, sessionId } = await sessionWithToken(database, hex('1'));
+      await repository.rotateRefreshSession(rotation(hex('1'), hex('a'), hex('2')));
+      await repository.rotateRefreshSession(rotation(hex('2'), hex('b'), hex('3')));
+      await expect(repository.deleteRefreshSessionByCurrentOrRetiredHash(hex('9')))
+        .resolves.toBeNull();
+      const onDeleted = vi.fn(async () => undefined);
+      await expect(repository.deleteRefreshSessionByCurrentOrRetiredHash(hex('1'), onDeleted))
+        .resolves.toBe(userId);
+      expect(onDeleted).toHaveBeenCalledWith(expect.anything(), userId);
+      expect(await sessionRows(database, sessionId)).toEqual({ token: undefined, ancestors: [] });
     });
   });
 });

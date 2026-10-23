@@ -19,6 +19,8 @@ import { clearPrincipalQueryState } from './query-client.js';
 const BASE_URL = '/api';
 /** Required by the Backend on cookie endpoints; forces a CORS preflight cross-site. */
 const AUTH_INTENT_HEADERS = { 'Content-Type': 'application/json', 'X-Nyabase-Auth': '1' };
+/** 401 from /auth/refresh: this tab lost a concurrent rotation; the cookie is kept. */
+const REFRESH_SUPERSEDED = 'REFRESH_SUPERSEDED';
 
 let refreshAttempt: { epoch: number; promise: Promise<string | null> } | null = null;
 let bootstrapPromise: Promise<void> | null = null;
@@ -59,6 +61,38 @@ async function readJson(res: Response): Promise<unknown> {
 }
 
 /**
+ * One POST /auth/refresh with the pending request id. The id is settled once
+ * the server has answered 2xx/401/403; on a network error it is kept so a
+ * retry recovers the same successor if the server rotated but the response
+ * was lost.
+ */
+async function postRefresh(fail: (message: string) => void): Promise<Response> {
+  const requestId = pendingRefreshRequestId();
+  let res: Response;
+  try {
+    res = await fetch(`${BASE_URL}/auth/refresh`, {
+      method: 'POST',
+      headers: AUTH_INTENT_HEADERS,
+      credentials: 'same-origin',
+      body: JSON.stringify({ requestId }),
+    });
+  } catch {
+    fail('无法连接服务器验证会话，请检查网络后重试');
+    throw new ApiError(0, 'NETWORK_ERROR', '无法连接服务器验证会话，请检查网络后重试');
+  }
+  if (res.ok || res.status === 401 || res.status === 403) settleRefreshRequestId(requestId);
+  return res;
+}
+
+/** Reads the body of a 401 (the caller does not need it afterwards). */
+async function isSupersededRefresh(res: Response): Promise<boolean> {
+  if (res.status !== 401) return false;
+  const body = await readJson(res);
+  return Boolean(body && typeof body === 'object'
+    && (body as { code?: unknown }).code === REFRESH_SUPERSEDED);
+}
+
+/**
  * Rotate the shared HttpOnly refresh cookie into a fresh access token.
  * `hadSession` distinguishes an expired session (tell the user) from a cold
  * page load with no cookie at all (just show the login page).
@@ -84,24 +118,20 @@ async function tryRefresh(hadSession = true): Promise<string | null> {
 
   const work = withCrossTabRefreshLock(async () => {
     if (!isCurrent()) return useAuthStore.getState().accessToken;
-    const requestId = pendingRefreshRequestId();
-    let res: Response;
-    try {
-      res = await fetch(`${BASE_URL}/auth/refresh`, {
-        method: 'POST',
-        headers: AUTH_INTENT_HEADERS,
-        credentials: 'same-origin',
-        body: JSON.stringify({ requestId }),
-      });
-    } catch {
-      // Keep the request id: a retry recovers the same successor if the
-      // server rotated but the response was lost.
-      fail('无法连接服务器验证会话，请检查网络后重试');
-      throw new ApiError(0, 'NETWORK_ERROR', '无法连接服务器验证会话，请检查网络后重试');
+    let res = await postRefresh(fail);
+    if (await isSupersededRefresh(res)) {
+      // Another tab won a concurrent rotation (only possible without Web
+      // Locks) and the shared cookie now holds its successor: rotate once
+      // more from it with a fresh request id. Losing again is a transient
+      // failure, never a logout, since the session itself is intact.
+      res = await postRefresh(fail);
+      if (await isSupersededRefresh(res)) {
+        fail('会话正在其他标签页刷新，请重试');
+        throw new ApiError(401, REFRESH_SUPERSEDED, '会话正在其他标签页刷新，请重试');
+      }
     }
 
     if (res.status === 401 || res.status === 403) {
-      settleRefreshRequestId(requestId);
       if (isCurrent()) {
         if (hadSession) setPendingLoginReason(res.status === 403 ? 'account-changed' : 'session-expired');
         // The cookie is shared, so every tab will reach the same answer.
@@ -115,7 +145,6 @@ async function tryRefresh(hadSession = true): Promise<string | null> {
       throw error;
     }
 
-    settleRefreshRequestId(requestId);
     const payload = await readJson(res);
     if (!isAuthResponse(payload)) {
       fail('会话刷新响应无效，请重试');

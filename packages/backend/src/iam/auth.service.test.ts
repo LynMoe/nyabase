@@ -7,6 +7,8 @@ import {
   MAX_LOGIN_FAILURES_PER_IP,
   MAX_LOGIN_FAILURES_PER_IP_USERNAME,
   MAX_REAUTH_FAILURES_PER_USER,
+  REFRESH_ANCESTOR_MINIMUM_AGE_MS,
+  REFRESH_RETAINED_ANCESTORS,
   REFRESH_REUSE_GRACE_MS,
   RefreshSupersededException,
 } from './auth.service.js';
@@ -276,6 +278,48 @@ describe('AuthService refresh sessions', () => {
     expect(persistence.refreshRows()).toHaveLength(0);
     await expect(service.refreshTokens(third.refreshToken, requestId('d')))
       .rejects.toBeInstanceOf(UnauthorizedException);
+  });
+
+  it('caps rotations per window with 429 so recent ancestors cannot be flushed out', async () => {
+    const { service, persistence, first, advance } = await signedIn();
+    let token = first;
+    for (let index = 0; index < REFRESH_RETAINED_ANCESTORS; index += 1) {
+      token = (await service.refreshTokens(token, index.toString(16).padStart(64, '0'))).refreshToken;
+    }
+    expect(persistence.refreshRows()[0]!.ancestors.size).toBe(REFRESH_RETAINED_ANCESTORS);
+    await expect(service.refreshTokens(token, requestId('e'))).rejects.toEqual(rateLimited);
+    // The very first token is still remembered: replaying it is reuse.
+    advance(REFRESH_REUSE_GRACE_MS);
+    await expect(service.refreshTokens(first, requestId('f')))
+      .rejects.toBeInstanceOf(UnauthorizedException);
+    expect(persistence.refreshRows()).toHaveLength(0);
+  });
+
+  it('forgets ancestors beyond the window: an old token is invalid without revoking', async () => {
+    const { service, persistence, auditLog, first, advance } = await signedIn();
+    let token = first;
+    for (let index = 0; index <= REFRESH_RETAINED_ANCESTORS; index += 1) {
+      advance(REFRESH_ANCESTOR_MINIMUM_AGE_MS);
+      token = (await service.refreshTokens(token, index.toString(16).padStart(64, '0'))).refreshToken;
+    }
+    expect(persistence.refreshRows()[0]!.ancestors.size).toBe(REFRESH_RETAINED_ANCESTORS);
+    await expect(service.refreshTokens(first, requestId('e')))
+      .rejects.toBeInstanceOf(UnauthorizedException);
+    expect(persistence.refreshRows()).toHaveLength(1);
+    expect(auditLog.append).not.toHaveBeenCalledWith(
+      expect.anything(), expect.anything(), AuditAction.RefreshTokenReuse, expect.anything(),
+      expect.anything(), expect.anything(),
+    );
+    await expect(service.refreshTokens(token, requestId('f')))
+      .resolves.toMatchObject({ refreshToken: expect.any(String) });
+  });
+
+  it('logs out the session from any retained ancestor token', async () => {
+    const { service, persistence, user, first } = await signedIn();
+    const second = await service.refreshTokens(first, requestId('a'));
+    await service.refreshTokens(second.refreshToken, requestId('b'));
+    await expect(service.logout(first)).resolves.toBe(user.id);
+    expect(persistence.refreshRows()).toHaveLength(0);
   });
 });
 

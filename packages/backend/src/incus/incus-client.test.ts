@@ -558,4 +558,30 @@ describe('IncusClient', () => {
     expect(JSON.stringify(session)).not.toContain('fixture-control-secret');
     session.close();
   });
+
+  it('closes a channel that opens after a sibling channel failed to dial', async () => {
+    const closed: string[] = [];
+    let releaseStdin!: () => void;
+    const stdinGate = new Promise<void>((resolve) => { releaseStdin = resolve; });
+    class FailingControlDriver extends RequestDriver {
+      override async openWebSocket(path: string): Promise<IncusWebSocketLike> {
+        if (path.includes('fixture-control-secret')) {
+          // stdin is still dialing when control fails.
+          setTimeout(releaseStdin, 10);
+          throw new IncusError('SERVER_UNREACHABLE', 'retry', { reason: 'control' });
+        }
+        await stdinGate;
+        const socket = await super.openWebSocket(path);
+        socket.close = () => { closed.push('stdin'); };
+        return socket;
+      }
+    }
+    const incus = client(new FailingControlDriver([{ status: 202, body: fixture(execAcceptedResponse) }]));
+
+    await expect(incus.openExecWebSockets('nyc-11111111111141118111111111111111', {
+      command: ['/bin/sh'],
+      interactive: true,
+    })).rejects.toMatchObject({ code: 'SERVER_UNREACHABLE' });
+    expect(closed).toEqual(['stdin']);
+  });
 });
