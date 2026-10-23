@@ -74,6 +74,13 @@ export class VolumeReconcileStore {
     return row?.needs_attention === true && row.lifecycle_phase !== 'deleting';
   }
 
+  /**
+   * One placement's success clears the volume's failure only once the volume
+   * is reconciled as a whole, as `recordVerified` decides: this is still its
+   * revision and every placement has observed it. Otherwise an intent that
+   * finishes on one server would hide a failure another placement just
+   * recorded. A parked volume is released by a retry or the next edit anyway.
+   */
   async markSucceeded(volumeId: string, revision: number): Promise<void> {
     await this.database
       .updateTable('control.volumes')
@@ -83,7 +90,18 @@ export class VolumeReconcileStore {
         failure_code: null,
       })
       .where('id', '=', volumeId)
+      .where('revision', '=', revision)
       .where('lifecycle_phase', '!=', 'deleting')
+      .where(({ exists, not, selectFrom }) => not(exists(
+        selectFrom('control.volume_placements')
+          .select('server_id')
+          .where('volume_id', '=', volumeId)
+          .where((expression) => expression.or([
+            expression('catalog_state', '!=', 'present'),
+            expression('observed_revision', 'is', null),
+            expression('observed_revision', '!=', revision),
+          ])),
+      )))
       .execute();
   }
 

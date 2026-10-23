@@ -235,6 +235,7 @@ export enum AuditAction {
   ExpiryPurgeResources = 'grant.expiry.purge_resources',
   IncusMutate = 'incus.mutate',
   ContainerDriftCorrected = 'container.drift_corrected',
+  RetryIntent = 'intent.retry',
   UpdateSystemSettings = 'system_settings.update',
   CreateUser = 'user.create',
   UpdateUser = 'user.update',

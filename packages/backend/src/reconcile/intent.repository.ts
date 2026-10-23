@@ -91,8 +91,13 @@ export class IntentRepository {
     return mapRow(row);
   }
 
+  /**
+   * A fresh pending copy of a failed intent, attributed to whoever retries it
+   * (`null` for the system), not to the original requester.
+   */
   async retry(
     sourceIntentId: string,
+    requestedBy: string | null,
     executor: IntentExecutor = this.database,
   ): Promise<IntentRecord> {
     assertUuidLike(sourceIntentId, 'Source intent id');
@@ -115,7 +120,7 @@ export class IntentRepository {
       resourceType: source.resource_type,
       resourceId: source.resource_id,
       serverId: source.server_id,
-      requestedBy: source.requested_by,
+      requestedBy,
       request: {
         ...request,
         retryOf: sourceIntentId,
@@ -125,6 +130,14 @@ export class IntentRepository {
     }, executor);
   }
 
+  /**
+   * A shrink the volume's usage blocked was reverted to the actual size
+   * (`revertImpossibleShrink`); retrying it asks for the smaller size again.
+   * Only ever downwards: a failed grow already left the row at its size, and
+   * raising the row here would skip every grant and capacity check (it may
+   * have been shrunk and the quota spent since). Any other retry reconciles
+   * toward the row as it is now.
+   */
   private async restoreVolumeResizeSize(
     kind: string,
     resourceId: string,
@@ -140,6 +153,7 @@ export class IntentRepository {
       .updateTable('control.volumes')
       .set({ size_bytes: sizeBytes })
       .where('id', '=', resourceId)
+      .where('size_bytes', '>', String(sizeBytes))
       .where('lifecycle_phase', 'not in', ['deleting', 'failed'])
       .execute();
   }

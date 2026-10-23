@@ -262,7 +262,11 @@ export class VolumeCapacityService {
     await this.assertSharedBackendPhysicalCapacity(backend, sharedBackendId, delta, transaction);
   }
 
-  /** Grant limits plus physical capacity for growing a volume (owner rules). */
+  /**
+   * Grant limits plus physical capacity for growing a volume (owner rules):
+   * a local volume needs the server and the pool covered now, as on create
+   * and attach, so a lapsed pool grant stops growth too.
+   */
   async assertCapacityWithinGrants(
     transaction: Tx,
     ownerId: string,
@@ -285,6 +289,7 @@ export class VolumeCapacityService {
     const pool = await transaction.selectFrom('infra.storage_pools')
       .selectAll().where('id', '=', poolId).executeTakeFirstOrThrow();
     const grant = await requireServerAccess(transaction, ownerId, serverId);
+    await assertPoolGrant(transaction, ownerId, poolId);
     const sums = await this.ownerServerCommittedBytes(ownerId, serverId, transaction);
     if (grant.diskBytes !== null && sums.root + sums.local + delta > grant.diskBytes) {
       throw new ConflictException({

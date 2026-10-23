@@ -164,7 +164,7 @@ describePg('server agent onboarding and removal', () => {
     });
   });
 
-  it('refuses a server that still holds resources, then force-cascades it without Incus and preserves peer shared catalogs', async () => {
+  it('refuses a server that still holds resources, then force-cascades it without Incus and keeps shared volumes a peer reaches', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const actor = await seedUser(database, undefined, UserStatus.Active, Role.Operator);
       const ownerId = randomUUID();
@@ -524,9 +524,14 @@ describePg('server agent onboarding and removal', () => {
       expect(
         await database.selectFrom('control.volumes').select('id').where('id', '=', localVolumeId).executeTakeFirst(),
       ).toBeUndefined();
+      // Placed only on S, but T still reaches the backend: the volume stays tracked.
       expect(
         await database.selectFrom('control.volumes').select('id').where('id', '=', sharedOnlySId).executeTakeFirst(),
-      ).toBeUndefined();
+      ).toMatchObject({ id: sharedOnlySId });
+      expect(
+        await database.selectFrom('control.volume_placements').select('server_id')
+          .where('volume_id', '=', sharedOnlySId).execute(),
+      ).toEqual([]);
       expect(
         await database.selectFrom('control.volumes').select(['id', 'remove_all_committed'])
           .where('id', '=', sharedClaimedId).executeTakeFirst(),

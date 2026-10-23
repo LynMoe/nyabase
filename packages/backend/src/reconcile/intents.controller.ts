@@ -10,7 +10,9 @@ import {
   Post,
   Query,
 } from '@nestjs/common';
+import type { Transaction } from 'kysely';
 import {
+  AuditAction,
   IntentResourceType,
   IntentStatus,
   Role,
@@ -22,6 +24,9 @@ import {
 import { CurrentActor } from '../iam/decorators.js';
 import { hasRole, type Actor, requireUserId } from '../iam/actor.js';
 import { AccessResolverService } from '../iam/access-resolver.service.js';
+import { AuditService } from '../iam/audit.service.js';
+import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
+import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
 import { IntentRepository, type IntentListOptions, type IntentRecord } from './intent.repository.js';
 import { ReconcilerRegistry } from './reconciler-registry.service.js';
 
@@ -83,6 +88,8 @@ export class IntentsController {
     private readonly intents: IntentRepository,
     private readonly access: AccessResolverService,
     private readonly registry: ReconcilerRegistry,
+    private readonly transactions: PgTransactionManager,
+    private readonly audit: AuditService,
   ) {}
 
   @Get()
@@ -134,7 +141,7 @@ export class IntentsController {
       if (intent.status !== IntentStatus.Failed) {
         throw new ConflictException('Only failed intents can be retried');
       }
-      return toDto(await this.intents.retry(intentId));
+      return this.transactions.run((transaction) => this.retryAudited(actor, intent.id, transaction));
     }
     return this.retryAsAdministrator(actor, intent);
   }
@@ -147,19 +154,38 @@ export class IntentsController {
       return await this.access.runWithActorRole(
         requireUserId(actor),
         required,
-        async (transaction) => {
-          const current = await this.intents.findById(intent.id, transaction);
-          if (!current) throw new NotFoundException('Intent not found');
-          if (current.status !== IntentStatus.Failed) {
-            throw new ConflictException('Only failed intents can be retried');
-          }
-          return toDto(await this.intents.retry(intent.id, transaction));
-        },
+        (transaction) => this.retryAudited(actor, intent.id, transaction),
       );
     } catch (error) {
       if (error instanceof ForbiddenException) throw new NotFoundException('Intent not found');
       throw error;
     }
+  }
+
+  /**
+   * A retry is the retrying actor's own request: the new intent and its audit
+   * entry are attributed to them, whoever issued the failed one.
+   */
+  private async retryAudited(
+    actor: Actor,
+    intentId: string,
+    transaction: Transaction<NyabaseDatabase>,
+  ): Promise<IntentDto> {
+    const current = await this.intents.findById(intentId, transaction);
+    if (!current) throw new NotFoundException('Intent not found');
+    if (current.status !== IntentStatus.Failed) {
+      throw new ConflictException('Only failed intents can be retried');
+    }
+    const retried = await this.intents.retry(intentId, actor.userId, transaction);
+    await this.audit.append(
+      transaction,
+      actor.userId,
+      AuditAction.RetryIntent,
+      current.resourceId,
+      current.resourceType,
+      { intentId: retried.id, retryOf: current.id, kind: current.kind },
+    );
+    return toDto(retried);
   }
 
   private async listMine(
@@ -220,12 +246,7 @@ export class IntentsController {
       }
       return this.intents.list(options);
     }
-    // `?serverId=` for an operator: every intent on that server, whatever its
-    // resource type.
-    if (options.serverId && hasRole(actor, Role.Operator)) {
-      const page = await this.intents.list(options);
-      return { items: page.items, nextCursor: page.nextCursor };
-    }
+    // `?serverId=` only narrows: an operator still sees no volume intents there.
     const allowedTypes = (Object.values(IntentResourceType) as IntentRecord['resourceType'][])
       .filter((type) => {
         const required = typeRole(type);

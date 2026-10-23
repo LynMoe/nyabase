@@ -1,5 +1,6 @@
 import { ConflictException, ForbiddenException, NotFoundException } from '@nestjs/common';
 import {
+  AuditAction,
   IntentKind,
   IntentResourceType,
   IntentStatus,
@@ -78,16 +79,25 @@ function controller(options: {
         new Map(authority === 'missing' ? [] : ids.map((id) => [id, authority]))),
     })),
   };
+  const transactions = { run: vi.fn(async (work: (transaction: unknown) => Promise<unknown>) => work(OWN_TX)) };
+  const audit = { append: vi.fn() };
   return {
     controller: new IntentsController(
       intents as unknown as IntentRepository,
       access as unknown as AccessResolverService,
       registry as never,
+      transactions as never,
+      audit as never,
     ),
     intents,
     access,
+    transactions,
+    audit,
   };
 }
+
+/** The transaction an owner's retry runs in. */
+const OWN_TX = { own: true };
 
 const volumeId = '00000000-0000-4000-8000-000000000002';
 
@@ -336,8 +346,38 @@ describe('IntentsController GET /intents/:id and retry', () => {
     });
     const result = await c.retry(own.id, testActor(USER_ID), {});
     expect(result.id).toBe(retried.id);
-    expect(intents.retry).toHaveBeenCalledWith(own.id);
+    expect(intents.retry).toHaveBeenCalledWith(own.id, USER_ID, OWN_TX);
     expect(access.runWithActorRole).not.toHaveBeenCalled();
+  });
+
+  it('attributes and audits an owner\'s retry of an admin\'s intent to the owner', async () => {
+    // An admin's resize of the owner's volume failed; the owner retries it.
+    const byAdmin = intent({ requestedBy: OTHER_ID, kind: IntentKind.VolumeResize });
+    const retried = intent({
+      id: '00000000-0000-4000-8000-000000000099',
+      kind: IntentKind.VolumeResize,
+      requestedBy: USER_ID,
+      status: IntentStatus.Pending,
+      failure: null,
+      failureCode: null,
+    });
+    const { controller: c, intents, audit } = controller({
+      findById: vi.fn().mockResolvedValue(byAdmin),
+      retry: vi.fn().mockResolvedValue(retried),
+      authority: { ownerId: USER_ID },
+    });
+
+    await expect(c.retry(byAdmin.id, testActor(USER_ID), {})).resolves.toMatchObject({ requestedBy: USER_ID });
+
+    expect(intents.retry).toHaveBeenCalledWith(byAdmin.id, USER_ID, OWN_TX);
+    expect(audit.append).toHaveBeenCalledWith(
+      OWN_TX,
+      USER_ID,
+      AuditAction.RetryIntent,
+      byAdmin.resourceId,
+      IntentResourceType.Volume,
+      { intentId: retried.id, retryOf: byAdmin.id, kind: IntentKind.VolumeResize },
+    );
   });
 
   it('only retries failed intents', async () => {
@@ -375,7 +415,15 @@ describe('IntentsController GET /intents/:id and retry', () => {
       'all',
     );
     expect(allowed.intents.findById).toHaveBeenCalledTimes(2);
-    expect(allowed.intents.retry).toHaveBeenCalledWith(foreign.id, {});
+    expect(allowed.intents.retry).toHaveBeenCalledWith(foreign.id, USER_ID, {});
+    expect(allowed.audit.append).toHaveBeenCalledWith(
+      {},
+      USER_ID,
+      AuditAction.RetryIntent,
+      foreign.resourceId,
+      IntentResourceType.Container,
+      expect.objectContaining({ retryOf: foreign.id }),
+    );
     expect(result.id).toBe(retried.id);
 
     // the role was revoked between the guard and the retry: 404, nothing mutated
@@ -401,19 +449,32 @@ describe('IntentsController server-scoped visibility (old /admin/servers/:id/int
     intent({ id: '00000000-0000-4000-8000-0000000000c3', resourceType: IntentResourceType.ImageAssignment }),
   ];
 
-  it('lets an operator see every resource type on the server, with no type filter', async () => {
+  it('keeps the per-type role filter on a server: no volume intents for an operator', async () => {
     const { controller: c, intents } = controller({
       list: vi.fn().mockResolvedValue({ items: onServer, nextCursor: null }),
       authority: { ownerId: null },
     });
-    const result = await c.list(testActor(USER_ID, Role.Operator), { scope: 'all', serverId });
-    expect(result.items.map((item) => item.resourceType)).toEqual([
-      IntentResourceType.Container,
-      IntentResourceType.Volume,
-      IntentResourceType.ImageAssignment,
-    ]);
-    expect(intents.list).toHaveBeenCalledWith(expect.objectContaining({ serverId, limit: 500 }));
-    expect(intents.list.mock.calls[0]![0]).not.toHaveProperty('resourceTypes');
+    await c.list(testActor(USER_ID, Role.Operator), { scope: 'all', serverId });
+    expect(intents.list).toHaveBeenCalledWith(expect.objectContaining({
+      serverId,
+      limit: 500,
+      resourceTypes: [
+        IntentResourceType.Container,
+        IntentResourceType.ImageAssignment,
+        IntentResourceType.Server,
+      ],
+    }));
+    await expect(c.list(testActor(USER_ID, Role.Operator), {
+      scope: 'all', serverId, resourceType: IntentResourceType.Volume,
+    })).resolves.toEqual({ items: [], nextCursor: null });
+    expect(intents.list).toHaveBeenCalledOnce();
+
+    const admin = controller({ authority: { ownerId: null } });
+    await admin.controller.list(testActor(USER_ID, Role.Admin), { scope: 'all', serverId });
+    expect(admin.intents.list).toHaveBeenCalledWith(expect.objectContaining({
+      serverId,
+      resourceTypes: expect.arrayContaining([IntentResourceType.Volume]),
+    }));
   });
 
   it('without a serverId an operator keeps the resource type filter', async () => {

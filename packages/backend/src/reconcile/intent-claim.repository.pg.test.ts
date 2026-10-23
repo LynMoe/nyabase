@@ -65,7 +65,7 @@ describePg('Incus reconciliation intent and lease repositories', () => {
           },
         },
       );
-      const retried = await repository.retry(first.id);
+      const retried = await repository.retry(first.id, null);
       expect(retried.id).not.toBe(first.id);
       const latest = await repository.createPending({
         kind: IntentKind.ContainerUpdate,

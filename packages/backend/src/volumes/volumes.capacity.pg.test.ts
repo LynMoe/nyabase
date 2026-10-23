@@ -3,10 +3,20 @@ import { randomUUID } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
 import { testActor } from '../iam/actor.test-helper.js';
 import {
+  days,
+  grantPool,
+  grantServer,
+  seedServer,
+  seedUser,
+  seedVolume,
+} from '../iam/access.pg-test-helper.js';
+import {
   ContainerPowerIntent,
   FailureCode,
   IntentKind,
   IntentResourceType,
+  Role,
+  UserStatus,
 } from '@nyabase/common';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 import { withPostgresTestDatabase } from '../platform/persistence-pg/postgres-test-harness.js';
@@ -729,6 +739,36 @@ describePg('volume capacity locking and scope exclusions', () => {
         .where('pool_id', '=', poolId)
         .execute();
       expect(rows).toEqual([]);
+    });
+  });
+
+  it('growing a local volume needs the pool grant now; an administrator override does not', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const ownerId = await seedUser(database);
+      const adminId = await seedUser(database, undefined, UserStatus.Active, Role.Admin);
+      const serverId = await seedServer(database);
+      const poolId = await insertLocalPool(database, serverId);
+      await grantServer(database, { user: ownerId }, serverId);
+      // The pool grant lapsed: the owner keeps the server but no longer the pool.
+      await grantPool(database, { user: ownerId }, poolId, days(-1));
+      const volumeId = await seedVolume(database, { ownerId, poolId, serverId });
+      await database.insertInto('control.volume_placements').values({
+        volume_id: volumeId,
+        server_id: serverId,
+        pool_id: poolId,
+        catalog_state: 'present',
+        observed_revision: 1,
+      }).execute();
+      const service = makeService(database);
+
+      await expect(service.patch(testActor(ownerId), volumeId, { expectedRevision: 1, sizeBytes: 200 }))
+        .rejects.toThrow(/Storage pool access is not granted/);
+      expect(await database.selectFrom('control.volumes').select('size_bytes')
+        .where('id', '=', volumeId).executeTakeFirstOrThrow()).toMatchObject({ size_bytes: '100' });
+
+      await service.patch(testActor(adminId, Role.Admin), volumeId, { expectedRevision: 1, sizeBytes: 200 }, 'all');
+      expect(await database.selectFrom('control.volumes').select('size_bytes')
+        .where('id', '=', volumeId).executeTakeFirstOrThrow()).toMatchObject({ size_bytes: '200' });
     });
   });
 });
