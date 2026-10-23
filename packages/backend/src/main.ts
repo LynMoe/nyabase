@@ -7,7 +7,7 @@ import { join } from 'path';
 import { AGENT_CONTROL_PATH, AGENT_STREAM_PATH } from '@nyabase/common';
 import { AppModule } from './app.module.js';
 import { NyabaseConfigService } from './platform/config/nyabase-config.service.js';
-import { RouteIdPipe, SpaFallbackFilter, ZodExceptionFilter } from './platform/http-filters.js';
+import { RouteIdPipe, serveBundledFrontend, ZodExceptionFilter } from './platform/http-filters.js';
 import { securityHeaders, trustProxySetting, warnOnUntrustedForwarding } from './platform/http-security.js';
 import { RuntimeLifecycleService } from './health/runtime-lifecycle.service.js';
 import { ConsoleBridgeGateway } from './containers/console-bridge.gateway.js';
@@ -69,10 +69,10 @@ async function bootstrap() {
   const indexPath = join(publicDir, 'index.html');
   const hasStaticFrontend = existsSync(indexPath);
   if (hasStaticFrontend) {
-    app.useStaticAssets(publicDir);
-    // Intercept NestJS 404s so that SPA client-side routes (e.g. /dashboard) receive
-    // index.html instead of a JSON 404. API paths still get the standard JSON response.
-    app.useGlobalFilters(new SpaFallbackFilter(indexPath));
+    // Hashed /assets/* are cached for a year, index.html is revalidated, and
+    // NestJS 404s on client-side routes (e.g. /dashboard) receive index.html.
+    // API paths still get the standard JSON response.
+    serveBundledFrontend(app, publicDir);
     logger.log(`Serving frontend static files from ${publicDir} with SPA fallback`);
   }
 

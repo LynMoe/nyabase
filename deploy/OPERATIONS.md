@@ -68,8 +68,11 @@ curl --fail http://127.0.0.1:8428/health
 `/api/health/ready` also proves exact PostgreSQL schema readiness. VictoriaMetrics
 failure must not make the Backend unready; metric queries degrade independently.
 Readiness is held closed until the control-plane process is accepting traffic
-and is closed again before dependency shutdown. Authenticated operators and
-administrators can query `/api/admin/metrics/runtime` for aggregate
+and is closed again before dependency shutdown. Its database check borrows a
+connection from the request pool, so concurrent probes share one check and the
+verdict is reused for one second. The probes are for local monitoring only;
+the TLS edge example below does not expose `/api/health/` publicly.
+Authenticated operators and administrators can query `/api/admin/metrics/runtime` for aggregate
 PostgreSQL pool pressure and bounded telemetry queue health;
 the response intentionally contains no SQL, keys, identities, or raw errors.
 
@@ -106,10 +109,13 @@ secret, `admin123`, key encryption reusing the JWT secret) apply only when
 deployment.
 
 With `auth.adminInitPassword` empty, the first production boot creates the
-`admin` account with a random password and prints it **once** as a
-`Generated one-time admin password: …` warning in the Backend log. Sign in and
-change it immediately, then treat the log line as a leaked secret (rotate the
-log or restrict who can read it).
+`admin` account with a random password and prints it **once**, at that first
+boot only and whatever `server.logLevel` is, as a
+`Generated one-time admin password: …` line in the Backend log
+(`docker compose --env-file .env logs backend | grep -i 'admin password'`).
+Later boots never print it again, so capture it before the log rotates. Sign in
+and change it immediately, then treat the log line as a leaked secret (rotate
+the log or restrict who can read it).
 
 ### TLS edge
 
@@ -180,8 +186,26 @@ server {
         proxy_read_timeout 1h;
         proxy_send_timeout 1h;
     }
+
+    # Unauthenticated probes; readiness queries PostgreSQL. Monitoring on this
+    # host uses http://127.0.0.1:3001/api/health/* directly.
+    location /api/health/ {
+        # allow 192.0.2.10;   # an external monitoring host, if there is one
+        deny all;
+        proxy_pass http://127.0.0.1:3001;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $remote_addr;
+    }
 }
 ```
+
+Nothing outside the host needs the health probes: Compose, agents and proxies
+never call them through the edge. The Backend also serves the bundled panel:
+hashed files under `/assets/` with `Cache-Control: public, max-age=31536000,
+immutable`, and `index.html` with `no-cache`, so a redeploy is picked up on the
+next page load. Do not add edge caching rules that override these. A missing
+`/assets/*` file is a plain 404 (never `index.html`); an open tab that hits one
+after a redeploy reloads itself once.
 
 Agents and proxies refuse to start on a plaintext Backend URL unless the
 Backend host is loopback (`localhost`, `127.0.0.0/8`, `::1`):
@@ -607,50 +631,180 @@ Compose volumes are not backups. Store backups in a different failure domain.
 The repository ships `deploy/postgres-ops.sh` as the fail-closed local
 primitive for logical backups, physical base backups, verification, restores,
 and upgrade preflight. It reads connection strings from named environment
-variables so they are not copied into shell history. For production, keep
-passwords out of the URL too: use a least-privilege PostgreSQL service identity
-and a mode-0600 `PGPASSFILE` or equivalent secret injection. PostgreSQL client
-tools necessarily receive the connection target while running, so restrict
-process inspection on the operations host.
+variables so they are not copied into shell history; keep passwords out of the
+URL too and give libpq a mode-0600 `PGPASSFILE`.
+
+The script needs PostgreSQL 18 client tools and a network path to the server.
+In the shipped Compose file PostgreSQL has no published port and sits only on
+the internal `control-plane` network, so do not run the script on the host.
+Run it in a throwaway container from the same `postgres` image, attached to
+that network, with the script, the password file and a backup directory
+mounted. Compose names the network `<project>_control-plane`; the file sets
+`name: nyabase`, so it is `nyabase_control-plane` unless you override the
+project name (`docker network ls --filter label=com.docker.compose.network=control-plane`).
+
+One-time setup, from `deploy/` on the Compose host, as an operator who can run
+`docker`:
+
+```bash
+umask 077
+ops_dir="$HOME/nyabase-ops"            # holds only the password file
+backup_root=/srv/nyabase-backups       # local staging; copy off-host afterwards
+mkdir -p "$ops_dir" "$backup_root"
+chmod 0700 "$ops_dir" "$backup_root"
+
+# libpq password file: host:port:database:user:password. The password is read
+# from the terminal, so it is neither in shell history nor on a command line.
+IFS= read -rsp 'PostgreSQL password (POSTGRES_PASSWORD): ' pg_password; echo
+pg_password="${pg_password//\\/\\\\}"
+pg_password="${pg_password//:/\\:}"
+printf 'postgres:5432:*:%s:%s\n' nyabase "$pg_password" >"$ops_dir/pgpass"
+unset pg_password
+chmod 0600 "$ops_dir/pgpass"
+```
+
+Replace `nyabase` with `POSTGRES_USER` (and below, the database name with
+`POSTGRES_DB`) if `.env` changes them. Then define a helper in the shell that
+runs the operations (repeat this in every new shell, from `deploy/`):
+
+```bash
+ops_dir="$HOME/nyabase-ops"
+backup_root=/srv/nyabase-backups
+pg_network=nyabase_control-plane
+pg_image="$(docker compose --env-file .env config --images | grep '^postgres:')"
+
+pg_ops() {
+  docker run --rm \
+    --network "${PG_OPS_NETWORK:-$pg_network}" \
+    --user "$(id -u):$(id -g)" \
+    --volume "$PWD/postgres-ops.sh:/opt/nyabase/postgres-ops.sh:ro" \
+    --volume "$ops_dir/pgpass:/run/nyabase/pgpass:ro" \
+    --volume "$backup_root:/backups" \
+    --env PGPASSFILE=/run/nyabase/pgpass \
+    --env NYABASE_PG_SOURCE_URL="${NYABASE_PG_SOURCE_URL:-postgresql://nyabase@postgres:5432/nyabase}" \
+    --env NYABASE_PG_TARGET_URL="${NYABASE_PG_TARGET_URL:-}" \
+    "$pg_image" \
+    bash /opt/nyabase/postgres-ops.sh "$@"
+}
+```
+
+The container runs as your uid, so the archives in `$backup_root` belong to
+you (mode 0600) and the password file stays readable only by you. Paths given
+to `pg_ops` are container paths under `/backups`.
+
+### Logical backups
 
 Before every release and at the chosen logical-backup interval:
 
 ```bash
-umask 077
-export NYABASE_PG_SOURCE_URL='postgresql://...'
-backup_file="/explicit/off-host-staging/nyabase-$(date -u +%Y%m%dT%H%M%SZ).dump"
-deploy/postgres-ops.sh logical-backup --output "$backup_file"
-deploy/postgres-ops.sh verify-logical --input "$backup_file"
+backup_name="nyabase-$(date -u +%Y%m%dT%H%M%SZ).dump"
+pg_ops logical-backup --output "/backups/$backup_name"
+pg_ops verify-logical --input "/backups/$backup_name"
 ```
 
 The command refuses to overwrite an existing target, creates a SHA-256
 sidecar, and validates the custom archive with `pg_restore --list`. Transfer
-both files to immutable/off-host storage only after this succeeds.
+both files (`$backup_root/$backup_name` and `$backup_root/$backup_name.sha256`)
+to immutable/off-host storage only after this succeeds. Back up `config.yaml`
+with them (see **Lost `ssh.keyEncryptionSecret`**).
 
-For a physical base backup suitable for PITR, the source role needs
-`REPLICATION` plus an appropriate `pg_hba.conf` entry:
+### Restore drills
+
+Restore drills always use a new, explicitly named database. Never point a
+drill at production. Create the empty target over the local socket inside the
+`postgres` container (no password needed there), restore, inspect, drop:
 
 ```bash
-base_dir="/explicit/off-host-staging/base-$(date -u +%Y%m%dT%H%M%SZ)"
-deploy/postgres-ops.sh base-backup --output-dir "$base_dir"
-deploy/postgres-ops.sh verify-base --input-dir "$base_dir"
+docker compose --env-file .env exec -T postgres \
+  psql -U nyabase -d postgres -v ON_ERROR_STOP=1 \
+  -c 'CREATE DATABASE nyabase_restore_drill TEMPLATE template0'
+NYABASE_PG_TARGET_URL=postgresql://nyabase@postgres:5432/nyabase_restore_drill \
+  pg_ops restore-logical \
+    --input "/backups/$backup_name" \
+    --confirm-database nyabase_restore_drill
+docker compose --env-file .env exec -T postgres \
+  psql -U nyabase -d nyabase_restore_drill \
+  -c 'SELECT version, name, applied_at FROM system.schema_migrations'
+docker compose --env-file .env exec -T postgres \
+  psql -U nyabase -d postgres -c 'DROP DATABASE nyabase_restore_drill'
 ```
 
-`base-backup` streams WAL and runs `pg_verifybackup` before success. A
-production PITR policy must additionally archive every WAL segment
-continuously to a separate failure domain. Alert on archive failure and on WAL
-archive age exceeding the declared RPO. Retain at least one verified base
-backup older than the RPO window. Storage-specific archive transport and
-retention belong to the deployment platform; do not pretend a local Compose
-volume provides either.
+The restore refuses PostgreSQL maintenance databases, checks the exact
+database name, and refuses every non-empty target without modifying it. There
+is no in-script replace mode. Objects are restored without their original
+owners and grants, so they belong to the restoring role (`nyabase`), which is
+the role the Backend connects as. The logical archive and this helper do not
+preserve database-level ACL, comments, or `ALTER DATABASE` settings; the
+shipped Compose database has none.
 
-After configuring the platform-specific archive command/library, prove the
-chain instead of checking configuration text alone:
+### Restoring production
+
+To put a backup back into service (disaster recovery, or rolling back an
+upgrade), restore into a new database and swap names while the Backend is
+stopped. The replaced database stays in place until you drop it:
 
 ```bash
-probe_file="/explicit/change-record/pitr-probe-$(date -u +%Y%m%dT%H%M%SZ).txt"
-deploy/postgres-ops.sh pitr-archive-probe \
-  --output "$probe_file" \
+docker compose --env-file .env stop backend
+docker compose --env-file .env exec -T postgres \
+  psql -U nyabase -d postgres -v ON_ERROR_STOP=1 \
+  -c 'CREATE DATABASE nyabase_restored TEMPLATE template0'
+NYABASE_PG_TARGET_URL=postgresql://nyabase@postgres:5432/nyabase_restored \
+  pg_ops restore-logical \
+    --input "/backups/$backup_name" \
+    --confirm-database nyabase_restored
+docker compose --env-file .env exec -T postgres \
+  psql -U nyabase -d postgres -v ON_ERROR_STOP=1 \
+  -c 'ALTER DATABASE nyabase RENAME TO nyabase_replaced' \
+  -c 'ALTER DATABASE nyabase_restored RENAME TO nyabase'
+# Check out / build the Backend release the backup was taken with, then:
+docker compose --env-file .env up -d --build backend
+```
+
+Start the Backend release whose migrations match the backup (see **Upgrading
+the Backend**); a newer one migrates the restored database forward on boot, an
+older one refuses to start. Once readiness and the panel check out, drop
+`nyabase_replaced`.
+
+### Physical base backups and PITR
+
+The shipped Compose PostgreSQL keeps the image's default `pg_hba.conf`:
+replication connections are accepted only from inside the container
+(`127.0.0.1`/`::1`, `trust`), not over the `control-plane` network. Run the
+base backup in the `postgres` container's network namespace so it connects
+over loopback (no password is used there). The `nyabase` role created by the
+image is a superuser and already has `REPLICATION`:
+
+```bash
+base_name="base-$(date -u +%Y%m%dT%H%M%SZ)"
+PG_OPS_NETWORK="container:$(docker compose --env-file .env ps -q postgres)" \
+NYABASE_PG_SOURCE_URL=postgresql://nyabase@127.0.0.1:5432/nyabase \
+  pg_ops base-backup --output-dir "/backups/$base_name"
+pg_ops verify-base --input-dir "/backups/$base_name"
+```
+
+To take base backups over the network instead (from another host or a
+dedicated least-privilege role with `REPLICATION`), add a
+`host replication <role> <network> scram-sha-256` line to `pg_hba.conf` in the
+`postgres-data` volume and reload PostgreSQL; the default Compose setup does
+not do this.
+
+`base-backup` streams WAL and runs `pg_verifybackup` before success, so the
+result is a consistent standalone copy of the cluster. Point-in-time recovery
+additionally needs every WAL segment archived continuously to a separate
+failure domain, and the shipped Compose PostgreSQL does **not** archive WAL
+(`archive_mode` is off): PITR is not available until you configure
+`archive_mode` and an `archive_command`/`archive_library` for your storage.
+Then alert on archive failure and on WAL archive age exceeding the declared
+RPO, and retain at least one verified base backup older than the RPO window.
+Storage-specific archive transport and retention belong to the deployment
+platform; do not pretend a local Compose volume provides either.
+
+After configuring archiving, prove the chain instead of checking configuration
+text alone:
+
+```bash
+pg_ops pitr-archive-probe \
+  --output "/backups/pitr-probe-$(date -u +%Y%m%dT%H%M%SZ).txt" \
   --timeout-seconds 60
 ```
 
@@ -663,32 +817,15 @@ historical/final failure counts and last failed segment without the archive
 command or credentials. Run it from a monitored schedule at an interval
 shorter than the declared RPO.
 
-Restore drills always use a new, explicitly named database. Never point a
-drill at production:
-
-```bash
-export NYABASE_PG_TARGET_URL='postgresql://.../nyabase_restore_drill'
-deploy/postgres-ops.sh restore-logical \
-  --input "$backup_file" \
-  --confirm-database nyabase_restore_drill
-```
-
-The restore refuses PostgreSQL maintenance databases, checks the exact
-database name, and refuses every non-empty target without modifying it. There
-is no in-script replace mode. Provisioning or replacing a target database is a
-separate operator-owned procedure that must first verify its own backup,
-database owner, encoding, locale provider/collation/ctype, tablespace,
-connection limit, database ACL, comments, and `ALTER DATABASE` settings. Only
-after that procedure has produced and independently confirmed an empty database
-should `restore-logical` be invoked. The logical archive and this helper do not
-claim to preserve database-level ACL, comments, or settings.
-
 For physical PITR, provision a new empty cluster using the same PostgreSQL
-major, verify the base backup, copy it into that stopped cluster's `PGDATA`,
+major, verify the base backup, copy it into that stopped cluster's `PGDATA`
+(owned by the server's uid, `999` in the `postgres` image, mode 0700),
 configure `restore_command` for the off-host WAL archive and set the required
 `recovery_target_time`, then start it isolated from application traffic.
 Promote only after schema compatibility, row-count/application invariants, and
 the desired recovery timestamp are verified.
+
+### After a restore
 
 After restoring a database that is older than the hosts' state, every
 container and volume created after the backup is an orphan: its instances are
@@ -708,6 +845,8 @@ measured_rto_seconds=
 backup_artifact_sha256=
 operator=
 ```
+
+### VictoriaMetrics
 
 VictoriaMetrics backup must use `vmbackup` against an instant snapshot and copy
 it to object storage or another host. `vmrestore` is an offline operation:
@@ -732,6 +871,45 @@ one), nothing else breaks, but the encrypted keys are unrecoverable:
 
 ## Upgrades
 
+### Upgrading the Backend
+
+The schema lives in `packages/backend/src/platform/persistence-pg/migrations/`.
+With `DB_MIGRATIONS_RUN=true` (the Compose default) every Backend boot takes a
+PostgreSQL advisory lock, applies the pending migrations in order (each in its
+own transaction), and only then serves traffic; with `false` it refuses to
+boot while any migration is pending. Every boot also checks that the applied
+migrations are exactly a prefix of the ones it ships, with matching checksums.
+After launch, migrations are append-only: a released migration is never
+edited, and a CI test pins each released file's checksum.
+
+1. Take and verify a logical backup (see **Logical backups**) immediately
+   before the upgrade, and keep it with the release record.
+2. Check out the new release, then rebuild and restart only the Backend:
+   `docker compose --env-file .env up -d --build backend`.
+3. Watch `docker compose --env-file .env logs -f backend` for
+   `Applied N PostgreSQL migration(s)` and confirm
+   `curl --fail http://127.0.0.1:3001/api/health/ready`.
+
+There is no down-migration. A Backend from before a migration does not start
+on a database that has it applied (`Applied migration … is missing from the
+application`), so rolling back across a new migration means restoring the
+pre-upgrade backup (see **Restoring production**) and starting the previous
+release on it. Changes made between the upgrade and the restore are lost, and
+hosts may hold containers or volumes created in that window (they become
+orphans; see **After a restore**). A rollback within the same migration set
+is just checking out and rebuilding the previous release.
+
+A database created by a pre-launch build is not upgradable to the launch
+build: before launch the single baseline migration was edited in place, so its
+checksum no longer matches (`Applied migration 000001_initial no longer
+matches its SQL file`). Recreate it: stop the stack, remove the
+`postgres-data` volume (`docker compose --env-file .env down` then
+`docker volume rm nyabase_postgres-data`), start again, and re-enroll the
+servers. Incus instances and volumes created by the old database are orphans
+to the new one; clean them up on the hosts.
+
+### Data services
+
 - Pin PostgreSQL to the current PostgreSQL 18 minor after staging its release
   notes and restore test.
 - Upgrade one data service at a time. Take and verify backups before PostgreSQL
@@ -743,13 +921,13 @@ one), nothing else breaks, but the encrypted keys are unrecoverable:
 - Never lower VictoriaMetrics retention or disk limits without checking
   current disk use and the resulting data-loss window.
 
-Run the read-only PostgreSQL preflight before a major upgrade:
+Run the read-only PostgreSQL preflight before a major upgrade (with `pg_ops`
+from **Backup and restore contract**):
 
 ```bash
-export NYABASE_PG_SOURCE_URL='postgresql://.../nyabase'
-deploy/postgres-ops.sh upgrade-preflight \
+pg_ops upgrade-preflight \
   --target-major 19 \
-  --output "/explicit/change-record/pg19-preflight.txt"
+  --output "/backups/pg19-preflight-$(date -u +%Y%m%dT%H%M%SZ).txt"
 ```
 
 It verifies client/server compatibility, performs a schema-only dump, and
@@ -818,8 +996,6 @@ from the product SLO and measured baseline, not from this example deployment.
   `X-Nyabase-Auth: 1` header, which cross-site pages cannot send without a
   CORS preflight. Serve the SPA from the same site as the API (the bundled
   frontend does); a frontend on another site cannot use the cookie session.
-  Upgrading from a release that stored tokens in `localStorage` signs every
-  browser out once and erases the old keys on first load.
 - The Backend sends a strict Content-Security-Policy (`script-src 'self'`,
   `frame-ancestors 'none'`), `nosniff`, and related headers on every response.
   It does not send HSTS; enable HSTS at the TLS edge once every host under the
@@ -911,6 +1087,11 @@ Backend **不直连** Incus，也不主动连接任何主机。每台 Incus 主�
    保存在 `/var/lib/nyabase-agent/credential`（0600）。之后令牌不再被读取。
 3. 新 agent 用令牌接入成功会替换凭据并断开旧连接。若要在已接入过的主机上
    重新接入：停 agent、删 `/var/lib/nyabase-agent/credential`、写入新令牌后再启动。
+4. 凭据泄露时：重新签发（`POST /api/servers/:id/agent-enrollment`，即轮换）
+   只换接入令牌，**不会**吊销当前的 `nyak.…` 凭据；旧凭据一直有效，直到新令牌
+   被 `POST /api/agent/enroll` 兑换成功。要立即吊销，签发新令牌后马上在该主机上
+   按第 3 步用它完成接入：兑换成功的那一刻旧凭据失效、旧连接被断开。主机已不可用时
+   改为删除该服务器（还有容器 / 本地卷时需要 `?force=true`，见上文删除服务器的说明）。
 
 ### 构建与安装
 

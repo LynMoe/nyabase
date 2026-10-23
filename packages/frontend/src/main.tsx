@@ -10,6 +10,9 @@ import { ThemeApplier } from './components/theme-applier.js';
 import { queryClient } from './lib/query-client.js';
 import { initializeAuthSync } from './lib/auth-session.js';
 import { adoptPeerSession } from './lib/api.js';
+import { reloadOnStaleBundle } from './lib/stale-bundle-reload.js';
+
+reloadOnStaleBundle(window);
 
 initializeAuthSync({ onPeerLogin: () => { void adoptPeerSession(); } });
 
