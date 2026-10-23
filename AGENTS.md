@@ -79,8 +79,9 @@ Vite 通过 alias 将 `@nyabase/common` 指向 `src/index.ts`，但 `index.ts` �
 - intent 重试归属重试者（`requested_by`，system 为 NULL）并记审计 `intent.retry`；重试 `volume.resize` 只能把 `size_bytes` 调小，不会绕过配额重新扩容。
 - 会话：refresh token 每次轮换顺延 `auth.refreshTokenExpiresDays`（空闲超时），但不超过登录时间 + `auth.sessionMaxLifetimeDays`（绝对上限）；两者都是 admin-only 在线设置。
   已轮换掉的旧 token 再出现即判为重放，删除整个会话并记审计 `user.refresh_token_reuse`（同一 `requestId` 的丢响应重试、以及 15 s 内紧邻上一枚 token 的并发刷新除外，后者返回 `REFRESH_SUPERSEDED`，前端换新 requestId 重试一次、不登出）；
-  退役哈希在 `iam.refresh_token_ancestors`，每会话只留最新 64 条，且 15 分钟内最多轮换 64 次（超出 429 `AUTH_RATE_LIMITED`，保留 cookie），
-  所以 15 分钟内退役的 token 必然能被识别为重放；更老的只是无效。登出接受当前或任一保留的退役 token。
+  退役哈希在 `iam.refresh_token_ancestors`，每会话只留最新 256 条；不得遗忘 `auth.jwtExpiresIn` + 2 分钟内退役的哈希，即每个这样的窗口最多轮换 256 次
+  （超出 429 `AUTH_RATE_LIMITED` + `Retry-After`，保留 cookie；前端在锁外按 Retry-After 退避、最多 3 次，之后只让该请求失败 / 冷加载显示「会话刷新繁忙」，
+  不登出、不进入「无法验证会话」），所以一个访问令牌有效期（+2 分钟）内退役的 token 必然能被识别为重放；更老的只是无效。登出接受当前或任一保留的退役 token。
 
 ## 后端结构规则（`packages/backend/src`）
 
