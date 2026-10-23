@@ -3,7 +3,7 @@ import {
   AGENT_CLOSE_PROTOCOL_UNSUPPORTED,
   AGENT_HEARTBEAT_INTERVAL_MS,
   AGENT_PROTOCOL_VERSION,
-  MAX_AGENT_CONTROL_FRAME_BYTES,
+  MAX_AGENT_BACKEND_FRAME_BYTES,
   zAgentBackendFrame,
   type AgentErrorCode,
   type AgentHello,
@@ -115,7 +115,7 @@ export class BackendConnection {
         headers: { authorization: `Bearer ${this.options.credential()}` },
         ca: this.options.ca,
         handshakeTimeout: WELCOME_TIMEOUT_MS,
-        maxPayload: MAX_AGENT_CONTROL_FRAME_BYTES,
+        maxPayload: MAX_AGENT_BACKEND_FRAME_BYTES,
         perMessageDeflate: false,
       });
       let welcomed = false;

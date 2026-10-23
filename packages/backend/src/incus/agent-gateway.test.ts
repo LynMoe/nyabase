@@ -159,6 +159,13 @@ describe('agent gateway hello', () => {
     expect(ws.closed?.code).toBe(1008);
   });
 
+  it('closes on an oversized frame before parsing it', () => {
+    const { ws, confirmControl } = acceptControl(async () => true);
+    ws.emit('message', Buffer.alloc(600 * 1024, 0x20), false);
+    expect(ws.closed?.code).toBe(1009);
+    expect(confirmControl).not.toHaveBeenCalled();
+  });
+
   it('turns away a hello of another protocol and reports why', async () => {
     const { registry, ws, confirmControl } = acceptControl(async () => true);
     const refused = vi.fn();

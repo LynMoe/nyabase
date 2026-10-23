@@ -1599,6 +1599,10 @@ Backend **不直连** Incus，也不主动连接任何主机。每台 Incus 主�
 
 - 控制连接 `wss://<backend>/ws/agent`，以 `Authorization: Bearer <凭据>` 鉴权；
   Backend 只存凭据的 sha256。backend 发来的 Incus 请求、指标采集都走这条连接。
+- 控制帧有界：Backend 发给 agent 的请求体最多 1 MiB（帧约 1.6 MiB），agent 回的 Incus
+  响应体最多 16 MiB（帧约 22 MiB）。Backend 在解析前按大小把关：hello 最多 512 KiB；之后
+  只有在等某个请求的回复时才接受大于 4 KiB 的帧，回复必须对应一个在等或刚放弃的请求，
+  status 帧每分钟最多 30 个——违反者连接被关闭，一台主机让 Backend 解析的量不超过 Backend 自己请求的量。
 - 每个 Incus WebSocket（事件、exec/控制台）由 agent 另开一条
   `wss://<backend>/ws/agent/stream?id=…` 回连，逐帧转发。
 - 认证前的 `/ws/agent*` 升级有限流（每次凭据检查都要查库）：同一客户端地址（IPv6 按 /64，

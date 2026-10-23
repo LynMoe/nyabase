@@ -20,7 +20,7 @@ const CONTRACT_SOURCES = [
 
 const PINNED: { readonly protocol: number; readonly sha256: string } = {
   protocol: 2,
-  sha256: '47fe3e9141439bab13c8e99b770609e3ec0f40ba2fe01772f30bcad2f125609f',
+  sha256: 'b7f4bb43dd1a471fbad8140c9f4187cf68092a0d96597833ff7725715edd1166',
 };
 
 function contractDigest(): string {

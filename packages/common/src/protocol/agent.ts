@@ -26,10 +26,23 @@ export const AGENT_CLOSE_PROTOCOL_UNSUPPORTED = 4426;
 export const AGENT_ENROLLMENT_TTL_MS = 24 * 60 * 60 * 1000;
 export const AGENT_HEARTBEAT_INTERVAL_MS = 15_000;
 export const AGENT_STREAM_CONNECT_TIMEOUT_MS = 15_000;
-/** Largest Incus request or response body carried through the tunnel. */
+/** Largest Incus response body carried back through the tunnel (instance lists with state). */
 export const MAX_AGENT_INCUS_BODY_BYTES = 16 * 1024 * 1024;
-/** Control frames carry base64 bodies; leave room for the 4/3 expansion. */
-export const MAX_AGENT_CONTROL_FRAME_BYTES = 24 * 1024 * 1024;
+/** Largest request body the Backend sends: instance / volume documents and small guest files. */
+export const MAX_AGENT_INCUS_REQUEST_BODY_BYTES = 1024 * 1024;
+const base64Bytes = (bytes: number): number => Math.ceil(bytes / 3) * 4;
+/** Room for the JSON frame around a body: ids, the path, the header map. */
+const AGENT_FRAME_ENVELOPE_BYTES = 256 * 1024;
+/** Agent -> Backend: a response carrying the largest response body, base64 encoded. */
+export const MAX_AGENT_CONTROL_FRAME_BYTES = base64Bytes(MAX_AGENT_INCUS_BODY_BYTES) + AGENT_FRAME_ENVELOPE_BYTES;
+/** Backend -> agent: a request carrying the largest request body, base64 encoded. */
+export const MAX_AGENT_BACKEND_FRAME_BYTES = base64Bytes(MAX_AGENT_INCUS_REQUEST_BODY_BYTES) + AGENT_FRAME_ENVELOPE_BYTES;
+/** hello (up to 2048 API extensions) is the largest frame that answers no request. */
+export const MAX_AGENT_HELLO_FRAME_BYTES = 512 * 1024;
+/** After hello only status frames come unasked; anything larger must answer a pending request. */
+export const MAX_AGENT_STATUS_FRAME_BYTES = 4 * 1024;
+/** Status frames one control connection may send per minute (the agent sends them on change only). */
+export const MAX_AGENT_STATUS_FRAMES_PER_MINUTE = 30;
 export const MAX_AGENT_STREAM_FRAME_BYTES = 8 * 1024 * 1024;
 export const MAX_AGENT_METRICS_TEXT_BYTES = 8 * 1024 * 1024;
 
@@ -130,7 +143,7 @@ export const zAgentIncusHttpParams = z.object({
   path: zText(4096).regex(/^\/1\.0(?:[/?].*)?$/),
   headers: z.record(zText(256), z.string().max(4096)).optional(),
   /** Request body, base64 encoded. */
-  body: z.string().max(Math.ceil(MAX_AGENT_INCUS_BODY_BYTES / 3) * 4 + 4).optional(),
+  body: z.string().max(base64Bytes(MAX_AGENT_INCUS_REQUEST_BODY_BYTES)).optional(),
   timeoutMs: z.number().int().positive().max(600_000),
 }).strict();
 

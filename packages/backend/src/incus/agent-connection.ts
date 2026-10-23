@@ -2,6 +2,8 @@ import { randomUUID } from 'node:crypto';
 import WebSocket from 'ws';
 import {
   AGENT_STREAM_CONNECT_TIMEOUT_MS,
+  MAX_AGENT_STATUS_FRAME_BYTES,
+  MAX_AGENT_STATUS_FRAMES_PER_MINUTE,
   zAgentIncusHttpResult,
   zAgentMetricsResult,
   zAgentResponse,
@@ -51,6 +53,13 @@ interface PendingStream {
  */
 export const AGENT_STREAM_REPLY_TIMEOUT_MS = AGENT_STREAM_CONNECT_TIMEOUT_MS * 2;
 export const AGENT_STREAM_WAIT_TIMEOUT_MS = AGENT_STREAM_REPLY_TIMEOUT_MS + 5_000;
+
+/**
+ * Requests given up on (timeout, abort) whose reply may still arrive. A
+ * reply to anything else was never asked for and ends the connection.
+ */
+const MAX_ABANDONED_REQUESTS = 1_024;
+const ABANDONED_REQUEST_TTL_MS = 10 * 60_000;
 
 /** Hands agent-opened stream sockets to the Backend request waiting for them. */
 export class AgentStreamBroker {
@@ -140,6 +149,9 @@ export class AgentConnection implements StreamOwner {
   private readonly streams = new Set<WebSocket>();
   private closed = false;
   private hostStatus: AgentHostStatus;
+  /** id -> when it was given up; insertion order is age order. */
+  private readonly abandoned = new Map<string, number>();
+  private statusWindow = { startedAt: 0, count: 0 };
 
   constructor(
     readonly serverId: string,
@@ -198,11 +210,22 @@ export class AgentConnection implements StreamOwner {
     return parseAgentResult(zAgentMetricsResult, 'metrics.collect', await this.call('metrics.collect', {}, timeoutMs, signal)).text;
   }
 
+  /**
+   * Checked before a frame is parsed: an agent sends large frames only to
+   * answer requests, so with nothing outstanding only a status frame fits.
+   * One host cannot make the Backend parse more than it asked for.
+   */
+  admits(bytes: number): boolean {
+    if (bytes <= MAX_AGENT_STATUS_FRAME_BYTES) return true;
+    this.pruneAbandoned();
+    return this.pending.size > 0 || this.abandoned.size > 0;
+  }
+
   /** Route one agent frame that is not hello; returns false for a protocol violation. */
   handleFrame(raw: unknown): boolean {
     if (isRecord(raw) && raw.type === 'status') {
       const status = zAgentStatus.safeParse(raw);
-      if (!status.success) return false;
+      if (!status.success || !this.countStatusFrame()) return false;
       this.hostStatus = status.data.status;
       this.onStatus(this);
       return true;
@@ -211,7 +234,8 @@ export class AgentConnection implements StreamOwner {
     if (!parsed.success) return false;
     const frame = parsed.data;
     const pending = this.pending.get(frame.id);
-    if (!pending) return true;
+    // A late reply to a request given up on is dropped; any other is unsolicited.
+    if (!pending) return this.abandoned.delete(frame.id);
     this.pending.delete(frame.id);
     clearTimeout(pending.timer);
     pending.cleanup();
@@ -236,6 +260,7 @@ export class AgentConnection implements StreamOwner {
       else stream.terminate();
     }
     this.streams.clear();
+    this.abandoned.clear();
     for (const [id, pending] of this.pending) {
       clearTimeout(pending.timer);
       pending.cleanup();
@@ -263,6 +288,7 @@ export class AgentConnection implements StreamOwner {
         if (!pending) return;
         this.pending.delete(id);
         clearTimeout(pending.timer);
+        this.abandon(id);
         this.send({ type: 'cancel', id });
         reject(new IncusError('INCUS_TIMEOUT', 'retry', { phase: 'total', reason: 'aborted' }));
       };
@@ -270,6 +296,7 @@ export class AgentConnection implements StreamOwner {
       const timer = setTimeout(() => {
         if (!this.pending.delete(id)) return;
         cleanup();
+        this.abandon(id);
         this.send({ type: 'cancel', id });
         reject(new IncusError('INCUS_TIMEOUT', 'retry', { phase: 'total', reason: 'agent_response_timeout' }));
       }, timeoutMs);
@@ -277,6 +304,32 @@ export class AgentConnection implements StreamOwner {
       signal?.addEventListener('abort', abort, { once: true });
       this.send({ type: 'request', id, method, params });
     });
+  }
+
+  private abandon(id: string): void {
+    this.pruneAbandoned();
+    while (this.abandoned.size >= MAX_ABANDONED_REQUESTS) {
+      const oldest = this.abandoned.keys().next().value;
+      if (oldest === undefined) break;
+      this.abandoned.delete(oldest);
+    }
+    this.abandoned.set(id, Date.now());
+  }
+
+  private pruneAbandoned(): void {
+    const cutoff = Date.now() - ABANDONED_REQUEST_TTL_MS;
+    for (const [id, abandonedAt] of this.abandoned) {
+      if (abandonedAt > cutoff) return;
+      this.abandoned.delete(id);
+    }
+  }
+
+  /** The agent reports status on change only; a stream of them is abuse. */
+  private countStatusFrame(): boolean {
+    const now = Date.now();
+    if (now - this.statusWindow.startedAt >= 60_000) this.statusWindow = { startedAt: now, count: 0 };
+    this.statusWindow.count += 1;
+    return this.statusWindow.count <= MAX_AGENT_STATUS_FRAMES_PER_MINUTE;
   }
 
   private send(frame: Record<string, unknown>): void {

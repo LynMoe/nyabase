@@ -7,6 +7,7 @@ import {
   AGENT_CONTROL_PATH,
   AGENT_HEARTBEAT_INTERVAL_MS,
   AGENT_PROTOCOL_VERSION,
+  MAX_AGENT_HELLO_FRAME_BYTES,
   AGENT_STREAM_PATH,
   MAX_AGENT_CONTROL_FRAME_BYTES,
   MAX_AGENT_STREAM_FRAME_BYTES,
@@ -152,6 +153,11 @@ export class AgentGateway implements OnModuleDestroy {
         ws.close(1003, 'binary control frame');
         return;
       }
+      // Sized before parsing: a frame nobody asked for is not worth parsing.
+      if (connection ? !connection.admits(frameBytes(data)) : frameBytes(data) > MAX_AGENT_HELLO_FRAME_BYTES) {
+        ws.close(1009, 'unsolicited oversized frame');
+        return;
+      }
       let frame: unknown;
       try {
         frame = JSON.parse(data.toString());
@@ -223,6 +229,11 @@ export class AgentGateway implements OnModuleDestroy {
       ws.ping();
     }
   }
+}
+
+function frameBytes(data: WebSocket.RawData): number {
+  if (Array.isArray(data)) return data.reduce((total, chunk) => total + chunk.byteLength, 0);
+  return data.byteLength;
 }
 
 /**

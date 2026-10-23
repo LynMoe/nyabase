@@ -130,6 +130,35 @@ describe('agent connection RPC', () => {
     expect(agent.handleFrame({ type: 'hello' })).toBe(false);
   });
 
+  it('takes large frames and replies only for requests it is waiting on or gave up on', async () => {
+    const { socket, agent } = connection();
+    const reply = (id: string) => ({ type: 'response', id, ok: true, result: { status: 200, headers: {}, body: '' } });
+    expect(agent.admits(4 * 1024)).toBe(true);
+    expect(agent.admits(64 * 1024)).toBe(false);
+    // A reply nobody asked for ends the connection.
+    expect(agent.handleFrame(reply('0b6b2f5e-2f8f-4b64-8a8e-5f4c4c4c4c4c'))).toBe(false);
+
+    const controller = new AbortController();
+    const aborted = agent.request({ method: 'GET', path: '/1.0', headers: {}, timeoutMs: 60_000, signal: controller.signal })
+      .catch(() => undefined);
+    const abortedId = socket.lastRequest().id;
+    expect(agent.admits(16 * 1024 * 1024)).toBe(true);
+    controller.abort();
+    await aborted;
+    // Its late reply may still be large, once.
+    expect(agent.admits(16 * 1024 * 1024)).toBe(true);
+    expect(agent.handleFrame(reply(abortedId))).toBe(true);
+    expect(agent.admits(16 * 1024 * 1024)).toBe(false);
+    expect(agent.handleFrame(reply(abortedId))).toBe(false);
+  });
+
+  it('closes on a flood of status frames', () => {
+    const { agent } = connection();
+    const status = { type: 'status', status: { ipv6Guard: { present: true, error: null } } };
+    for (let index = 0; index < 30; index += 1) expect(agent.handleFrame(status)).toBe(true);
+    expect(agent.handleFrame(status)).toBe(false);
+  });
+
   it('pairs the agent-opened stream socket and replays frames sent before anyone listened', async () => {
     const { socket, broker, agent } = connection();
     const opening = agent.openWebSocket('/1.0/events');
