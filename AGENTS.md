@@ -155,6 +155,12 @@ SSH 代理按公钥认证、按名路由：direct-tcpip 目标是容器 IP 或 `
 （`ssh-host-ca/`，只依赖 platform；`SshKeyCryptoService` 在 `platform/`），reconciler 在 sshd 就绪后签发确定性的主机证书并写 sshd drop-in，
 尽力而为、不让 intent 失败；guest 的 `authorized_keys` 只改标记块内的内容。
 
+代理快照（`tools/`、`http-proxy/`、`ssh/`、`proxy-snapshots/`）：租约（`validUntil`）是撤销的上限，构建失败时什么都不发，
+代理在租约到期后 fail closed；**不得**用新租约重发旧路由（会让撤销活过租约），失败只在 error 日志里写明何时 fail closed。
+HTTP 代理按路由撤销：每个 hostname 有一个 incarnation，只在连续快照里权限元组不变时延续，交换只在自己的路由被删 / 改权限或租约到期时中断，
+绝不因其他站点的变化而全局重置。域名池必须互不嵌套（`http-domain-overlap.ts`），绑定主机名不得是任何池域名或其父域。
+控制链路两端都有存活检测（代理 `proxy_common::control_link`，Backend `ProxyControlHeartbeat`）；待握手 / 未认证槽位按来源公平分配并在满时驱逐最重来源（`conn_limit.rs`）。
+
 GPU 是平台内置功能（`gpu/` 模块、`common/src/gpu/`、agent 的 `gpu-collector`），不存在扩展框架。
 
 ## Schema 规则（上线冻结）
