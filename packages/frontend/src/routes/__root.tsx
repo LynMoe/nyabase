@@ -41,8 +41,31 @@ function Root() {
     return () => window.removeEventListener('focus', syncOnFocus);
   }, []);
 
+  const retryButton = (
+    <Button disabled={retrying} onClick={() => {
+      setRetrying(true);
+      void bootstrapAuthSession().finally(() => setRetrying(false));
+    }}>
+      {retrying ? '重试中...' : '重试'}
+    </Button>
+  );
+
   if (status === 'checking') {
     return <div className="min-h-screen flex items-center justify-center text-sm text-muted-foreground">正在验证会话...</div>;
+  }
+
+  if (status === 'throttled') {
+    // Transient: the session is intact, so there is no sign-out here. Focusing
+    // the tab or retrying after the wait loads it normally.
+    return (
+      <div className="min-h-screen flex items-center justify-center p-6">
+        <div className="max-w-sm text-center space-y-3">
+          <h1 className="text-lg font-semibold">会话刷新繁忙</h1>
+          <p className="text-sm text-muted-foreground">{authError ?? '请稍后重试。'}</p>
+          {retryButton}
+        </div>
+      </div>
+    );
   }
 
   if (status === 'error') {
@@ -53,12 +76,7 @@ function Root() {
           <p className="text-sm text-muted-foreground">{authError ?? '请检查网络后重试。'}</p>
           <div className="flex justify-center gap-2">
             <Button variant="outline" onClick={() => { void terminateBrowserSession(); }}>退出登录</Button>
-            <Button disabled={retrying} onClick={() => {
-              setRetrying(true);
-              void bootstrapAuthSession().finally(() => setRetrying(false));
-            }}>
-              {retrying ? '重试中...' : '重试'}
-            </Button>
+            {retryButton}
           </div>
         </div>
       </div>

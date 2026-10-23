@@ -7,10 +7,12 @@ import {
   MAX_LOGIN_FAILURES_PER_IP,
   MAX_LOGIN_FAILURES_PER_IP_USERNAME,
   MAX_REAUTH_FAILURES_PER_USER,
-  REFRESH_ANCESTOR_MINIMUM_AGE_MS,
+  REFRESH_ANCESTOR_WINDOW_SLACK_MS,
   REFRESH_RETAINED_ANCESTORS,
   REFRESH_REUSE_GRACE_MS,
+  refreshAncestorMinimumAgeMs,
   RefreshSupersededException,
+  RefreshThrottledException,
 } from './auth.service.js';
 import { InMemoryAuthPersistenceTestAdapter } from './in-memory-auth-persistence.test-helper.js';
 import {
@@ -24,6 +26,31 @@ import {
 const rateLimited = expect.objectContaining({
   status: HttpStatus.TOO_MANY_REQUESTS,
   response: expect.objectContaining({ code: 'AUTH_RATE_LIMITED' }),
+});
+
+describe('refresh ancestor protection window', () => {
+  it('covers one access-token lifetime plus the refresh lag', () => {
+    expect(REFRESH_ANCESTOR_WINDOW_SLACK_MS).toBe(2 * 60_000);
+    expect(refreshAncestorMinimumAgeMs(60_000)).toBe(3 * 60_000);
+    expect(refreshAncestorMinimumAgeMs(15 * 60_000)).toBe(17 * 60_000);
+    expect(refreshAncestorMinimumAgeMs(24 * 3_600_000)).toBe(24 * 3_600_000 + 2 * 60_000);
+    // Never below the 1-minute minimum lifetime, even if misconfigured.
+    expect(refreshAncestorMinimumAgeMs(1_000)).toBe(3 * 60_000);
+  });
+
+  it('rounds Retry-After up to whole seconds, at least one', () => {
+    expect(new RefreshThrottledException(41_200).retryAfterSeconds).toBe(42);
+    expect(new RefreshThrottledException(1).retryAfterSeconds).toBe(1);
+  });
+
+  it('refuses to refresh with an unparseable access-token lifetime', async () => {
+    const persistence = new InMemoryAuthPersistenceTestAdapter();
+    const service = createAuth({ persistence, jwtExpiresIn: '15 minutes' });
+    const user = persistence.seedUser({ id: randomUUID(), username: 'alice' });
+    const { refreshToken } = await service.login(user);
+    await expect(service.refreshTokens(refreshToken, 'a'.repeat(64)))
+      .rejects.toThrow('Invalid auth.jwtExpiresIn');
+  });
 });
 
 describe('AuthService login limiter', () => {
@@ -191,12 +218,12 @@ const DAY = 86_400_000;
 const requestId = (digit: string) => digit.repeat(64);
 
 describe('AuthService refresh sessions', () => {
-  async function signedIn() {
+  async function signedIn(jwtExpiresIn?: string) {
     const persistence = new InMemoryAuthPersistenceTestAdapter();
     let now = Date.parse('2026-01-01T00:00:00Z');
     persistence.now = () => new Date(now);
     const auditLog = audit();
-    const service = createAuth({ persistence, audit: auditLog });
+    const service = createAuth({ persistence, audit: auditLog, jwtExpiresIn });
     const user = persistence.seedUser({ id: randomUUID(), username: 'alice' });
     const { refreshToken } = await service.login(user);
     return {
@@ -295,11 +322,31 @@ describe('AuthService refresh sessions', () => {
     expect(persistence.refreshRows()).toHaveLength(0);
   });
 
+  it('ties the throttle window to the access-token lifetime', async () => {
+    const { service, first, advance } = await signedIn('1m');
+    const windowMs = 60_000 + REFRESH_ANCESTOR_WINDOW_SLACK_MS;
+    let token = first;
+    for (let index = 0; index < REFRESH_RETAINED_ANCESTORS; index += 1) {
+      advance(500);
+      token = (await service.refreshTokens(token, index.toString(16).padStart(64, '0'))).refreshToken;
+    }
+    // The oldest retained ancestor was retired 127.5 s ago.
+    const throttled = service.refreshTokens(token, requestId('e'));
+    await expect(throttled).rejects.toBeInstanceOf(RefreshThrottledException);
+    await expect(throttled).rejects.toMatchObject({
+      retryAfterSeconds: Math.ceil((windowMs - (REFRESH_RETAINED_ANCESTORS - 1) * 500) / 1_000),
+    });
+    // A 1-minute lifetime frees the slot after 3 minutes, not a fixed 15.
+    advance(windowMs - (REFRESH_RETAINED_ANCESTORS - 1) * 500);
+    await expect(service.refreshTokens(token, requestId('e')))
+      .resolves.toMatchObject({ refreshToken: expect.any(String) });
+  });
+
   it('forgets ancestors beyond the window: an old token is invalid without revoking', async () => {
     const { service, persistence, auditLog, first, advance } = await signedIn();
     let token = first;
     for (let index = 0; index <= REFRESH_RETAINED_ANCESTORS; index += 1) {
-      advance(REFRESH_ANCESTOR_MINIMUM_AGE_MS);
+      advance(refreshAncestorMinimumAgeMs(15 * 60_000));
       token = (await service.refreshTokens(token, index.toString(16).padStart(64, '0'))).refreshToken;
     }
     expect(persistence.refreshRows()[0]!.ancestors.size).toBe(REFRESH_RETAINED_ANCESTORS);
@@ -345,11 +392,12 @@ function createAuth(options: {
   persistence?: InMemoryAuthPersistenceTestAdapter;
   monotonicNow?: () => number;
   audit?: ReturnType<typeof audit>;
+  jwtExpiresIn?: string;
 } = {}) {
   return new AuthService(
     (options.persistence ?? new InMemoryAuthPersistenceTestAdapter()) as never,
     jwt(),
-    config(),
+    config(options.jwtExpiresIn),
     (options.audit ?? audit()) as never,
     { now: options.monotonicNow ?? (() => performance.now()) } as never,
   );
@@ -362,12 +410,13 @@ function jwt() {
   } as never;
 }
 
-function config() {
+function config(jwtExpiresIn = '15m') {
   return {
     get: (key: string) => {
       if (key === 'auth.jwtSecret') return 'test-jwt-secret-test-jwt-secret-32ch';
       if (key === 'auth.refreshTokenExpiresDays') return 7;
       if (key === 'auth.sessionMaxLifetimeDays') return 30;
+      if (key === 'auth.jwtExpiresIn') return jwtExpiresIn;
       return undefined;
     },
   } as never;

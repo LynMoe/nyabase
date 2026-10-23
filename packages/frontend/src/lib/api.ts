@@ -22,7 +22,21 @@ const AUTH_INTENT_HEADERS = { 'Content-Type': 'application/json', 'X-Nyabase-Aut
 /** 401 from /auth/refresh: this tab lost a concurrent rotation; the cookie is kept. */
 const REFRESH_SUPERSEDED = 'REFRESH_SUPERSEDED';
 
+/**
+ * 429 from /auth/refresh: the session rotated too often recently (many tabs,
+ * a short access-token lifetime). The session and cookie are intact, so this
+ * is transient: wait (Retry-After) and try again a bounded number of times.
+ */
+const REFRESH_RATE_LIMITED = 'AUTH_RATE_LIMITED';
+const MAX_THROTTLED_REFRESH_REQUESTS = 3;
+/** Without Retry-After: 1 s, then 2 s. */
+const THROTTLED_REFRESH_BACKOFF_MS = 1_000;
+/** A longer Retry-After is not waited out in place; the request fails instead. */
+const MAX_THROTTLED_REFRESH_WAIT_MS = 15_000;
+
 let refreshAttempt: { epoch: number; promise: Promise<string | null> } | null = null;
+/** No refresh request leaves this tab before this time (Date.now() ms). */
+let refreshThrottledUntil = 0;
 let bootstrapPromise: Promise<void> | null = null;
 let bootstrapQueued = false;
 
@@ -92,6 +106,106 @@ async function isSupersededRefresh(res: Response): Promise<boolean> {
     && (body as { code?: unknown }).code === REFRESH_SUPERSEDED);
 }
 
+/** Retry-After as delta-seconds or an HTTP date; null when absent or malformed. */
+export function parseRetryAfterMs(header: string | null, now = Date.now()): number | null {
+  const value = header?.trim();
+  if (!value) return null;
+  if (/^\d+$/.test(value)) return Number(value) * 1_000;
+  const date = Date.parse(value);
+  return Number.isNaN(date) ? null : Math.max(0, date - now);
+}
+
+type RotationOutcome = { token: string | null } | { retryAfterMs: number | null };
+
+/**
+ * One rotation under the cross-tab lock. A 429 is returned, not thrown, so
+ * the caller waits for the retry outside the lock: other tabs are never
+ * queued behind a sleeping one.
+ */
+async function rotateOnce(
+  expectedEpoch: number,
+  hadSession: boolean,
+  fail: (message: string) => void,
+): Promise<RotationOutcome> {
+  const isCurrent = () => useAuthStore.getState().epoch === expectedEpoch;
+  if (!isCurrent()) return { token: useAuthStore.getState().accessToken };
+  let res = await postRefresh(fail);
+  if (await isSupersededRefresh(res)) {
+    // Another tab won a concurrent rotation (only possible without Web
+    // Locks) and the shared cookie now holds its successor: rotate once
+    // more from it with a fresh request id. Losing again is a transient
+    // failure, never a logout, since the session itself is intact.
+    res = await postRefresh(fail);
+    if (await isSupersededRefresh(res)) {
+      fail('会话正在其他标签页刷新，请重试');
+      throw new ApiError(401, REFRESH_SUPERSEDED, '会话正在其他标签页刷新，请重试');
+    }
+  }
+  if (res.status === 429) return { retryAfterMs: parseRetryAfterMs(res.headers.get('Retry-After')) };
+
+  if (res.status === 401 || res.status === 403) {
+    if (isCurrent()) {
+      if (hadSession) setPendingLoginReason(res.status === 403 ? 'account-changed' : 'session-expired');
+      // The cookie is shared, so every tab will reach the same answer.
+      clearLocalSession(false);
+    }
+    return { token: null };
+  }
+  if (!res.ok) {
+    const error = await apiErrorFromResponse(res);
+    fail(error.message);
+    throw error;
+  }
+
+  const payload = await readJson(res);
+  if (!isAuthResponse(payload)) {
+    fail('会话刷新响应无效，请重试');
+    throw new ApiError(502, 'INVALID_REFRESH_RESPONSE', '会话刷新响应无效，请重试');
+  }
+  if (!isCurrent()) return { token: useAuthStore.getState().accessToken };
+  if (shouldClearPrincipalState(useAuthStore.getState().user, payload.user)) clearPrincipalQueryState();
+  useAuthStore.getState().commitRefresh(expectedEpoch, payload.accessToken, payload.user);
+  return { token: payload.accessToken };
+}
+
+/**
+ * Stop retrying a throttled refresh. Nothing is signed out: a tab that has a
+ * user keeps its page and the request fails like any other; a tab still
+ * loading shows a wait-and-retry screen instead of the session-check error.
+ */
+function refreshThrottled(waitMs: number, isCurrent: () => boolean): ApiError {
+  refreshThrottledUntil = Math.max(refreshThrottledUntil, Date.now() + waitMs);
+  const message = `会话刷新过于频繁，请 ${Math.max(1, Math.ceil(waitMs / 1_000))} 秒后重试`;
+  const state = useAuthStore.getState();
+  if (isCurrent() && state.status !== 'authenticated') state.markCheckThrottled(message);
+  return new ApiError(429, REFRESH_RATE_LIMITED, message);
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => { setTimeout(resolve, ms); });
+}
+
+async function rotateWithBackoff(
+  expectedEpoch: number,
+  hadSession: boolean,
+  fail: (message: string) => void,
+): Promise<string | null> {
+  const isCurrent = () => useAuthStore.getState().epoch === expectedEpoch;
+  const cooldownMs = refreshThrottledUntil - Date.now();
+  if (cooldownMs > 0) throw refreshThrottled(cooldownMs, isCurrent);
+  for (let request = 1; ; request += 1) {
+    const outcome = await withCrossTabRefreshLock(() => rotateOnce(expectedEpoch, hadSession, fail));
+    if ('token' in outcome) return outcome.token;
+    const waitMs = outcome.retryAfterMs ?? THROTTLED_REFRESH_BACKOFF_MS * 2 ** (request - 1);
+    if (request >= MAX_THROTTLED_REFRESH_REQUESTS || waitMs > MAX_THROTTLED_REFRESH_WAIT_MS) {
+      throw refreshThrottled(waitMs, isCurrent);
+    }
+    // Jitter so tabs throttled together do not come back in lockstep.
+    await sleep(waitMs + Math.floor(Math.random() * 250));
+    if (!isCurrent()) return useAuthStore.getState().accessToken;
+  }
+}
+
 /**
  * Rotate the shared HttpOnly refresh cookie into a fresh access token.
  * `hadSession` distinguishes an expired session (tell the user) from a cold
@@ -111,50 +225,10 @@ async function tryRefresh(hadSession = true): Promise<string | null> {
     return tryRefresh(hadSession);
   }
 
-  const isCurrent = () => useAuthStore.getState().epoch === expectedEpoch;
   const fail = (message: string) => {
-    if (isCurrent()) useAuthStore.getState().markCheckFailed(message);
+    if (useAuthStore.getState().epoch === expectedEpoch) useAuthStore.getState().markCheckFailed(message);
   };
-
-  const work = withCrossTabRefreshLock(async () => {
-    if (!isCurrent()) return useAuthStore.getState().accessToken;
-    let res = await postRefresh(fail);
-    if (await isSupersededRefresh(res)) {
-      // Another tab won a concurrent rotation (only possible without Web
-      // Locks) and the shared cookie now holds its successor: rotate once
-      // more from it with a fresh request id. Losing again is a transient
-      // failure, never a logout, since the session itself is intact.
-      res = await postRefresh(fail);
-      if (await isSupersededRefresh(res)) {
-        fail('会话正在其他标签页刷新，请重试');
-        throw new ApiError(401, REFRESH_SUPERSEDED, '会话正在其他标签页刷新，请重试');
-      }
-    }
-
-    if (res.status === 401 || res.status === 403) {
-      if (isCurrent()) {
-        if (hadSession) setPendingLoginReason(res.status === 403 ? 'account-changed' : 'session-expired');
-        // The cookie is shared, so every tab will reach the same answer.
-        clearLocalSession(false);
-      }
-      return null;
-    }
-    if (!res.ok) {
-      const error = await apiErrorFromResponse(res);
-      fail(error.message);
-      throw error;
-    }
-
-    const payload = await readJson(res);
-    if (!isAuthResponse(payload)) {
-      fail('会话刷新响应无效，请重试');
-      throw new ApiError(502, 'INVALID_REFRESH_RESPONSE', '会话刷新响应无效，请重试');
-    }
-    if (!isCurrent()) return useAuthStore.getState().accessToken;
-    if (shouldClearPrincipalState(useAuthStore.getState().user, payload.user)) clearPrincipalQueryState();
-    useAuthStore.getState().commitRefresh(expectedEpoch, payload.accessToken, payload.user);
-    return payload.accessToken;
-  });
+  const work = rotateWithBackoff(expectedEpoch, hadSession, fail);
   const guarded = work.catch((error: unknown) => {
     if (error instanceof AuthSessionCoordinationError) {
       fail(error.message);
@@ -232,6 +306,8 @@ async function login(body: unknown): Promise<void> {
     throw new ApiError(502, 'INVALID_RESPONSE', '服务器响应格式无效，请稍后重试');
   }
   discardPendingRefreshRequestId();
+  // A new login is a new session with no rotation history.
+  refreshThrottledUntil = 0;
   clearPrincipalQueryState();
   useAuthStore.getState().setAuth(response.accessToken, response.user);
   announceLogin();
@@ -242,6 +318,7 @@ async function login(body: unknown): Promise<void> {
  * still names the old principal, so drop it and re-derive from the cookie.
  */
 export function adoptPeerSession(): Promise<void> {
+  refreshThrottledUntil = 0;
   clearPrincipalQueryState();
   useAuthStore.setState((state) => ({
     accessToken: null,
@@ -257,8 +334,9 @@ async function runBootstrap(): Promise<void> {
   const initial = useAuthStore.getState();
   if (!initial.accessToken) {
     // Cold load or after a peer login: only the HttpOnly cookie can tell.
-    if (initial.status !== 'checking' && initial.status !== 'error') return;
-    initial.markChecking();
+    if (initial.status !== 'checking' && initial.status !== 'error' && initial.status !== 'throttled') return;
+    // A throttled tab keeps its wait screen while it retries.
+    if (initial.status !== 'throttled') initial.markChecking();
     try {
       await tryRefresh(initial.user !== null);
     } catch {

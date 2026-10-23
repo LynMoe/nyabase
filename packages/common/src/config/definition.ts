@@ -37,11 +37,19 @@ const jwtSecret = z.string().trim().refine(
   (value) => value === developmentJwtSecret || value.length >= 32,
   'Expected at least 32 characters',
 );
+export const MIN_JWT_LIFETIME_MS = 60_000;
+export const MAX_JWT_LIFETIME_MS = 24 * 60 * 60_000;
+/** `auth.jwtExpiresIn` (`<n>s|m|h|d`) in milliseconds; null when malformed. */
+export function jwtLifetimeMs(value: unknown): number | null {
+  if (typeof value !== 'string') return null;
+  const match = /^(\d+)(s|m|h|d)$/.exec(value.trim());
+  if (!match) return null;
+  const unitMs = { s: 1_000, m: 60_000, h: 3_600_000, d: 86_400_000 }[match[2] as 's' | 'm' | 'h' | 'd'];
+  return Number.parseInt(match[1]!, 10) * unitMs;
+}
 const jwtLifetime = z.string().trim().regex(/^\d+(?:s|m|h|d)$/).refine((value) => {
-  const amount = Number.parseInt(value, 10);
-  const unit = value.at(-1);
-  const milliseconds = amount * ({ s: 1_000, m: 60_000, h: 3_600_000, d: 86_400_000 }[unit!] ?? 0);
-  return milliseconds >= 60_000 && milliseconds <= 24 * 60 * 60_000;
+  const milliseconds = jwtLifetimeMs(value) ?? 0;
+  return milliseconds >= MIN_JWT_LIFETIME_MS && milliseconds <= MAX_JWT_LIFETIME_MS;
 }, 'Expected a duration between 1 minute and 24 hours');
 const adminInitialPassword = z.string().refine(
   (value) => value === '' || (value.length >= 8 && value.length <= 256),

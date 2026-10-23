@@ -8,6 +8,7 @@ import { withPostgresTestDatabase } from '../platform/persistence-pg/postgres-te
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
 import { seedUser } from './access.pg-test-helper.js';
 import type { RefreshRotationInput } from './auth-persistence.js';
+import { refreshAncestorMinimumAgeMs, REFRESH_RETAINED_ANCESTORS } from './auth.service.js';
 import { IamAuthRepository } from './iam-auth.repository.js';
 
 const hex = (digit: string): string => digit.repeat(64);
@@ -27,8 +28,8 @@ function rotation(
     idleMs: 7 * DAY,
     absoluteMs: 30 * DAY,
     reuseGraceMs: 15_000,
-    retainedAncestors: 64,
-    ancestorMinimumAgeMs: 15 * 60_000,
+    retainedAncestors: REFRESH_RETAINED_ANCESTORS,
+    ancestorMinimumAgeMs: refreshAncestorMinimumAgeMs(15 * 60_000),
     maximumSessions: 5,
     successorHash: () => successor,
     ...overrides,
@@ -227,8 +228,12 @@ describePg('IamAuthRepository bounded ancestors', () => {
       const { repository, sessionId } = await sessionWithToken(database, hex('1'));
       await repository.rotateRefreshSession(rotation(hex('1'), hex('a'), hex('2'), window));
       await repository.rotateRefreshSession(rotation(hex('2'), hex('b'), hex('3'), window));
-      await expect(repository.rotateRefreshSession(rotation(hex('3'), hex('c'), hex('4'), window)))
-        .resolves.toEqual({ kind: 'throttled' });
+      const throttled = await repository.rotateRefreshSession(rotation(hex('3'), hex('c'), hex('4'), window));
+      expect(throttled).toEqual({ kind: 'throttled', retryAfterMs: expect.any(Number) });
+      // Until the oldest retained ancestor (retired just now) is a window old.
+      const { retryAfterMs } = throttled as { retryAfterMs: number };
+      expect(retryAfterMs).toBeGreaterThan(50_000);
+      expect(retryAfterMs).toBeLessThanOrEqual(60_000);
       // Nothing changed: same current token, same ancestors.
       expect(await sessionRows(database, sessionId)).toMatchObject({
         token: { hash: hex('3') },

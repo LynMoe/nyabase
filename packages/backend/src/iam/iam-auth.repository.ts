@@ -161,9 +161,8 @@ export class IamAuthRepository implements AuthPersistence {
         return { kind: 'invalid' };
       }
       const expiresAt = new Date(Math.min(now.getTime() + input.idleMs, sessionEnd));
-      if (await this.rotatesTooFast(transaction, current.token_id, now, input)) {
-        return { kind: 'throttled' };
-      }
+      const retryAfterMs = await this.rotationThrottleMs(transaction, current.token_id, now, input);
+      if (retryAfterMs > 0) return { kind: 'throttled', retryAfterMs };
 
       await this.trimRefreshSessions(
         transaction,
@@ -293,14 +292,15 @@ export class IamAuthRepository implements AuthPersistence {
   /**
    * Called under the session row lock, so a session's rotations (and its
    * `retired_at` values) are serialized. The rotation about to happen evicts
-   * the `retainedAncestors`-th newest ancestor; refuse if that one is young.
+   * the `retainedAncestors`-th newest ancestor; refuse while that one is
+   * young. Returns how long until it is old enough (0: rotate now).
    */
-  private async rotatesTooFast(
+  private async rotationThrottleMs(
     transaction: IamTransaction,
     sessionId: string,
     now: Date,
     input: RefreshRotationInput,
-  ): Promise<boolean> {
+  ): Promise<number> {
     const evicted = await transaction
       .selectFrom('iam.refresh_token_ancestors')
       .select('retired_at')
@@ -310,8 +310,8 @@ export class IamAuthRepository implements AuthPersistence {
       .offset(input.retainedAncestors - 1)
       .limit(1)
       .executeTakeFirst();
-    return evicted !== undefined
-      && now.getTime() - evicted.retired_at.getTime() < input.ancestorMinimumAgeMs;
+    if (!evicted) return 0;
+    return Math.max(0, evicted.retired_at.getTime() + input.ancestorMinimumAgeMs - now.getTime());
   }
 
   /** Record a retired hash and drop all but the session's newest `keepCount`. */

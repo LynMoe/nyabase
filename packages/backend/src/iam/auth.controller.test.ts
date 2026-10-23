@@ -7,7 +7,7 @@ import {
   REFRESH_COOKIE_PATH,
   SECURE_REFRESH_COOKIE_NAME,
 } from './auth.controller.js';
-import { RefreshSupersededException } from './auth.service.js';
+import { RefreshSupersededException, RefreshThrottledException } from './auth.service.js';
 
 const REQUEST_ID = 'a'.repeat(64);
 const user = {
@@ -33,7 +33,7 @@ function harness(options: { cookieSecure?: boolean } = {}) {
   };
   const config = { get: vi.fn(() => options.cookieSecure ?? true) };
   const controller = new AuthController(auth as never, access as never, config as never);
-  const response = { cookie: vi.fn(), clearCookie: vi.fn() };
+  const response = { cookie: vi.fn(), clearCookie: vi.fn(), setHeader: vi.fn() };
   return { auth, controller, response };
 }
 
@@ -96,6 +96,19 @@ describe('AuthController refresh cookie transport', () => {
       response,
     )).rejects.toBeInstanceOf(UnauthorizedException);
     expect(response.clearCookie).toHaveBeenCalledWith(SECURE_REFRESH_COOKIE_NAME, expect.objectContaining({ path: '/' }));
+  });
+
+  it('keeps the cookie and sends Retry-After when refresh is throttled', async () => {
+    const { auth, controller, response } = harness();
+    auth.refreshTokens.mockRejectedValueOnce(new RefreshThrottledException(41_200));
+    await expect(controller.refresh(
+      { requestId: REQUEST_ID },
+      request({ cookie: `${SECURE_REFRESH_COOKIE_NAME}=r1` }),
+      response,
+    )).rejects.toMatchObject({ status: 429, response: { code: 'AUTH_RATE_LIMITED' } });
+    expect(response.setHeader).toHaveBeenCalledWith('Retry-After', '42');
+    expect(response.clearCookie).not.toHaveBeenCalled();
+    expect(response.cookie).not.toHaveBeenCalled();
   });
 
   it('keeps the cookie when a concurrent rotation already replaced it', async () => {

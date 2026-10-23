@@ -134,9 +134,10 @@ export class InMemoryAuthPersistenceTestAdapter implements AuthPersistence {
         return { kind: 'invalid' };
       }
       const evicted = [...current.ancestors.values()].at(-input.retainedAncestors);
-      if (evicted && now.getTime() - evicted.getTime() < input.ancestorMinimumAgeMs) {
-        return { kind: 'throttled' };
-      }
+      const retryAfterMs = evicted
+        ? evicted.getTime() + input.ancestorMinimumAgeMs - now.getTime()
+        : 0;
+      if (retryAfterMs > 0) return { kind: 'throttled', retryAfterMs };
       this.trim(user.id, input.maximumSessions - 1, current.id);
       current.ancestors.set(input.hash, now);
       for (const hash of [...current.ancestors.keys()].slice(0, -input.retainedAncestors)) {

@@ -1,7 +1,8 @@
 import { create } from 'zustand';
 import type { UserDto } from '@nyabase/common';
 
-export type AuthStatus = 'checking' | 'authenticated' | 'anonymous' | 'error';
+/** `throttled`: no session loaded yet and refresh is rate limited (transient, nothing is signed out). */
+export type AuthStatus = 'checking' | 'authenticated' | 'anonymous' | 'error' | 'throttled';
 
 /**
  * Tab-local, memory-only session. The refresh secret lives in the HttpOnly
@@ -21,6 +22,7 @@ export interface AuthState {
   clearAuth: () => void;
   markChecking: () => void;
   markCheckFailed: (message: string) => void;
+  markCheckThrottled: (message: string) => void;
 }
 
 export const useAuthStore = create<AuthState>()((set) => ({
@@ -64,4 +66,5 @@ export const useAuthStore = create<AuthState>()((set) => ({
   })),
   markChecking: () => set({ status: 'checking', authError: null }),
   markCheckFailed: (message) => set({ status: 'error', authError: message }),
+  markCheckThrottled: (message) => set({ status: 'throttled', authError: message }),
 }));

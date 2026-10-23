@@ -11,7 +11,13 @@ import { JwtService } from '@nestjs/jwt';
 import * as argon2 from 'argon2';
 import { v4 as uuidv4 } from 'uuid';
 import { createHash, createHmac, randomBytes } from 'crypto';
-import { AuditAction, FailureCode, UserStatus } from '@nyabase/common';
+import {
+  AuditAction,
+  FailureCode,
+  jwtLifetimeMs,
+  MIN_JWT_LIFETIME_MS,
+  UserStatus,
+} from '@nyabase/common';
 import { NyabaseConfigService } from '../platform/config/nyabase-config.service.js';
 import { type AuthUser, isPgIamTransaction } from './auth-persistence.js';
 import { IamAuthRepository } from './iam-auth.repository.js';
@@ -45,20 +51,36 @@ export const MAX_REFRESH_SESSIONS_PER_USER = 16;
  */
 export const REFRESH_REUSE_GRACE_MS = 15_000;
 /**
- * Retired refresh hashes remembered per session. Normal use rotates about once
- * per tab per access-token lifetime (plus one per page load), so 64 covers
- * hours of history for a busy multi-tab session while capping the table at 64
- * rows per session (x16 sessions per user) however long the session lives.
+ * Retired refresh hashes remembered per session, and the most rotations a
+ * session may make per protection window (below). A tab rotates once per
+ * access-token lifetime while it makes requests, plus once per page load or
+ * new tab, so a window of one lifetime plus slack sees roughly
+ * tabs + page loads + (tabs x 2 min / lifetime) rotations: 60 tabs opened at
+ * once, or 60 tabs polling at the 1-minute minimum lifetime (~180), stay
+ * well below 256. Storage stays bounded at 256 rows per session (x16
+ * sessions per user, ~1 MB per user at worst) however long a session lives.
  */
-export const REFRESH_RETAINED_ANCESTORS = 64;
+export const REFRESH_RETAINED_ANCESTORS = 256;
 /**
- * A session may not forget a hash retired less than this long ago: at most
- * REFRESH_RETAINED_ANCESTORS rotations per window (one every ~14 s on average;
- * excess gets 429). A thief who rotates a stolen token therefore cannot flush
- * the victim's token out of the window before the victim's next refresh, which
- * comes within one default access-token lifetime (auth.jwtExpiresIn = 15m).
+ * Lag between an active tab's access token expiring and its next refresh:
+ * the next authenticated request (polls run every 5-30 s), network latency
+ * and clock skew between the browser's request and the JWT expiry check.
  */
-export const REFRESH_ANCESTOR_MINIMUM_AGE_MS = 15 * 60_000;
+export const REFRESH_ANCESTOR_WINDOW_SLACK_MS = 2 * 60_000;
+
+/**
+ * A session may not forget a hash retired less than this long ago; a rotation
+ * that would is refused with 429 (at most REFRESH_RETAINED_ANCESTORS per
+ * window). The guarantee: a tab that is making requests refreshes within one
+ * access-token lifetime (+ slack) of the rotation that issued the cookie it
+ * holds, so if a thief rotates that cookie first, the victim's next refresh
+ * presents a hash retired less than a window ago, which is still remembered
+ * and revokes the session. Longer windows only add throttling, so the window
+ * follows `auth.jwtExpiresIn` (1m..24h) rather than a fixed constant.
+ */
+export function refreshAncestorMinimumAgeMs(accessTokenLifetimeMs: number): number {
+  return Math.max(accessTokenLifetimeMs, MIN_JWT_LIFETIME_MS) + REFRESH_ANCESTOR_WINDOW_SLACK_MS;
+}
 /** Failed logins per (client address bucket, username) per window. */
 export const MAX_LOGIN_FAILURES_PER_IP_USERNAME = 10;
 /** Failed logins per client address bucket (any usernames) per window. */
@@ -84,6 +106,23 @@ export function currentPasswordIncorrect(): ForbiddenException {
 export class RefreshSupersededException extends UnauthorizedException {
   constructor() {
     super({ code: 'REFRESH_SUPERSEDED', message: 'Refresh token was already rotated' });
+  }
+}
+
+/**
+ * The session rotated REFRESH_RETAINED_ANCESTORS times within one protection
+ * window. Not a 401: the session is intact and the cookie must be kept. The
+ * controller turns `retryAfterSeconds` into a Retry-After header.
+ */
+export class RefreshThrottledException extends HttpException {
+  readonly retryAfterSeconds: number;
+
+  constructor(retryAfterMs: number) {
+    super(
+      { code: 'AUTH_RATE_LIMITED', message: 'Too many session refreshes' },
+      HttpStatus.TOO_MANY_REQUESTS,
+    );
+    this.retryAfterSeconds = Math.max(1, Math.ceil(retryAfterMs / 1_000));
   }
 }
 
@@ -193,7 +232,7 @@ export class AuthService {
       ...this.sessionLifetimeMs(),
       reuseGraceMs: REFRESH_REUSE_GRACE_MS,
       retainedAncestors: REFRESH_RETAINED_ANCESTORS,
-      ancestorMinimumAgeMs: REFRESH_ANCESTOR_MINIMUM_AGE_MS,
+      ancestorMinimumAgeMs: this.refreshAncestorWindowMs(),
       maximumSessions: MAX_REFRESH_SESSIONS_PER_USER,
       successorHash: (sessionId) => {
         successor = this.deriveRotatedRefreshToken(sessionId, hash, requestId);
@@ -211,7 +250,7 @@ export class AuthService {
     });
     if (result.kind === 'superseded') throw new RefreshSupersededException();
     // Not a 401: the session is intact and the cookie must be kept.
-    if (result.kind === 'throttled') throw this.tooManyRequests('Too many session refreshes');
+    if (result.kind === 'throttled') throw new RefreshThrottledException(result.retryAfterMs);
     if (result.kind === 'reused') {
       this.logger.warn(
         `Refresh token reuse: revoked session ${result.sessionId} of user ${result.userId}`,
@@ -356,6 +395,14 @@ export class AuthService {
       ver: user.authVersion,
     };
     return this.jwtService.sign(payload);
+  }
+
+  /** `auth.jwtExpiresIn` is restart-only, so this is stable per process. */
+  private refreshAncestorWindowMs(): number {
+    const configured = this.config.get<string>('auth.jwtExpiresIn');
+    const lifetimeMs = jwtLifetimeMs(configured);
+    if (lifetimeMs === null) throw new Error(`Invalid auth.jwtExpiresIn: ${String(configured)}`);
+    return refreshAncestorMinimumAgeMs(lifetimeMs);
   }
 
   /**

@@ -3,7 +3,7 @@ import {
   SSH_PROXY_SNAPSHOT_STALE_MAX_MS,
   SSH_PROXY_SNAPSHOT_STALE_MIN_MS,
 } from '../constants.js';
-import { controlPlaneConfigDefinitions } from './definition.js';
+import { controlPlaneConfigDefinitions, jwtLifetimeMs } from './definition.js';
 
 describe('SSH proxy snapshot lease configuration', () => {
   it('bounds leases by snapshot freshness and fail-closed recovery', () => {
@@ -14,6 +14,21 @@ describe('SSH proxy snapshot lease configuration', () => {
     expect(field?.schema.safeParse(SSH_PROXY_SNAPSHOT_STALE_MIN_MS).success).toBe(true);
     expect(field?.schema.safeParse(SSH_PROXY_SNAPSHOT_STALE_MAX_MS).success).toBe(true);
     expect(field?.schema.safeParse(SSH_PROXY_SNAPSHOT_STALE_MAX_MS + 1).success).toBe(false);
+  });
+});
+
+describe('access-token lifetime configuration', () => {
+  it('parses the lifetime the refresh throttle window is derived from', () => {
+    expect(jwtLifetimeMs('90s')).toBe(90_000);
+    expect(jwtLifetimeMs(' 15m ')).toBe(15 * 60_000);
+    expect(jwtLifetimeMs('24h')).toBe(24 * 3_600_000);
+    expect(jwtLifetimeMs('1d')).toBe(86_400_000);
+    expect(jwtLifetimeMs('15 minutes')).toBeNull();
+    expect(jwtLifetimeMs(900)).toBeNull();
+    const field = controlPlaneConfigDefinitions.find((definition) => definition.key === 'auth.jwtExpiresIn');
+    expect(field?.schema.safeParse('59s').success).toBe(false);
+    expect(field?.schema.safeParse('1m').success).toBe(true);
+    expect(field?.schema.safeParse('25h').success).toBe(false);
   });
 });
 

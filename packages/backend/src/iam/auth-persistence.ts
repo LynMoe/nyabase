@@ -70,8 +70,11 @@ export type RefreshRotationResult =
   | { kind: 'invalid' }
   /** The just-retired token lost a concurrent rotation; the session is intact. */
   | { kind: 'superseded' }
-  /** The session rotated `retainedAncestors` times within `ancestorMinimumAgeMs`. */
-  | { kind: 'throttled' }
+  /**
+   * The session rotated `retainedAncestors` times within `ancestorMinimumAgeMs`;
+   * the next rotation is allowed in `retryAfterMs`.
+   */
+  | { kind: 'throttled'; retryAfterMs: number }
   /** A retired token was presented again; the whole session was deleted. */
   | ({ kind: 'reused' } & RefreshTokenReuse)
   | { kind: 'recovered'; user: AuthUser; sessionId: string; expiresInMs: number }

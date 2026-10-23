@@ -9,7 +9,11 @@ import {
   ForbiddenException,
   UnauthorizedException,
 } from '@nestjs/common';
-import { AuthService, RefreshSupersededException } from './auth.service.js';
+import {
+  AuthService,
+  RefreshSupersededException,
+  RefreshThrottledException,
+} from './auth.service.js';
 import { CurrentUser, Public } from './decorators.js';
 import type { UserRecord } from './auth-persistence.js';
 import { AccessResolverService } from './access-resolver.service.js';
@@ -50,6 +54,7 @@ export interface CookieRequest {
 export interface CookieResponse {
   cookie(name: string, value: string, options: Record<string, unknown>): unknown;
   clearCookie(name: string, options: Record<string, unknown>): unknown;
+  setHeader(name: string, value: string): unknown;
 }
 
 export function requireAuthIntent(request: CookieRequest): void {
@@ -168,6 +173,10 @@ export class AuthController {
     try {
       rotated = await this.authService.refreshTokens(presented, requestId);
     } catch (error) {
+      // Throttled: the session is intact; tell the client when to come back.
+      if (error instanceof RefreshThrottledException) {
+        response.setHeader('Retry-After', String(error.retryAfterSeconds));
+      }
       // A superseded refresh lost a concurrent rotation: the cookie jar may
       // already hold the winner's successor, which a clear would destroy.
       if (
