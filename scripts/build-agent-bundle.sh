@@ -55,6 +55,9 @@ cp -RL "$ws" "$tree/node_modules/ws"
 find "$tree" \( -name '*.test.*' -o -name '*.tsbuildinfo' \) -delete
 
 tarball="$out/nyabase-agent-$version.tar.gz"
+# Modes are normalized too: copied dependencies keep the build host's modes (a
+# pnpm store can hold 0700/0600 trees), which the unprivileged agent user could
+# not read and which would make the bytes depend on the build host.
 tar -C "$out" --sort=name --mtime="@$commit_time" --owner=0 --group=0 --numeric-owner \
-  -cf - agent | gzip -n >"$tarball"
+  --mode='u=rwX,go=rX' -cf - agent | gzip -n >"$tarball"
 echo "$tarball"
