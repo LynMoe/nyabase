@@ -40,7 +40,8 @@ export class VolumeLifecycleService {
   /**
    * Persist the new desired size (and name) with the shrink reservation the
    * caller admitted (`shrinkReservation`), and queue one resize intent per
-   * placement.
+   * placement. Without placements nothing holds the old size, so no
+   * reservation is kept (`releaseSettledShrinkReservations`).
    */
   async applyResize(
     transaction: Tx,
@@ -60,6 +61,9 @@ export class VolumeLifecycleService {
       transaction,
     );
     if (!row) throw new ConflictException({ code: FailureCode.RevisionConflict });
+    if (await this.repository.releaseSettledShrinkReservation(row.id, transaction)) {
+      row.shrink_reserved_bytes = null;
+    }
     const intents: IntentRecord[] = [];
     for (const placement of placements) {
       intents.push(await createVolumeIntent(this.intents, {

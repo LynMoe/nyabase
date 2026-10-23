@@ -349,10 +349,19 @@ export class ContainerReconcileStore {
     return rows.map((row) => row.device_name);
   }
 
+  /**
+   * A catalog that was not known present appears without a verified size (it
+   * may have been created at a size read before a shrink): it drops the
+   * observed revision, so it counts as not caught up
+   * (`releaseSettledShrinkReservations`) until a volume pass verifies it.
+   */
   async markCatalogPresent(volumeId: string, serverId: string): Promise<void> {
     await this.database
       .updateTable('control.volume_placements')
-      .set({ catalog_state: 'present' })
+      .set({
+        catalog_state: 'present',
+        observed_revision: sql<number | null>`case when catalog_state = 'present' then observed_revision end`,
+      })
       .where('volume_id', '=', volumeId)
       .where('server_id', '=', serverId)
       .execute();

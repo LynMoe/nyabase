@@ -159,11 +159,14 @@ export class VolumeReconciler implements ManagedReconciler, OnModuleInit {
     }
 
     if (!actual) {
+      // A catalog that does not exist holds no size (`recordCatalogMissing`).
       if (context.intent.kind === 'volume.resize' && row.shared_backend_id) {
+        await this.store.recordCatalogMissing(row);
         return { outcome: 'succeeded', observedRevision: row.revision };
       }
       actual = await this.adoptOrCreate(context, context.client, row);
       if (!actual) {
+        await this.store.recordCatalogMissing(row);
         const failure = intentFailure(
           context.intent.attemptCount >= VOLUME_ADOPT_FAIL_AFTER_ATTEMPTS
             ? 'VOLUME_CATALOG_ADOPT_FAILED'
@@ -681,8 +684,15 @@ export class VolumeReconciler implements ManagedReconciler, OnModuleInit {
       if (!placement) continue;
       const listed = inventory.listedByName.get(row.incus_name);
       const shared = row.shared_backend_id !== null;
+      // A placement that has not caught up keeps a shrink reserved; a pass
+      // verifies it or records its catalog missing (`recordCatalogMissing`).
+      const holdsReservation = row.shrink_reserved_bytes !== null
+        && placement.observed_revision !== row.revision;
       if (shared && listed === undefined) {
         logger.warn(`dangling_pg volume=${row.id} server=${serverId}`);
+        if (client && holdsReservation && !row.needs_attention) {
+          await store.enqueueResize(row, serverId);
+        }
         continue;
       }
       if (listed !== undefined && placement.catalog_state === 'present' && client) {
@@ -696,12 +706,12 @@ export class VolumeReconciler implements ManagedReconciler, OnModuleInit {
         continue;
       }
       if (shared) {
-        if (listed !== undefined && scanNeedsEnsure(row, listed)) {
+        if (listed !== undefined && (holdsReservation || scanNeedsEnsure(row, listed))) {
           await store.enqueueResize(row, serverId);
         }
         continue;
       }
-      if (scanNeedsEnsure(row, listed)) {
+      if (holdsReservation || scanNeedsEnsure(row, listed)) {
         await store.enqueueEnsure(
           row,
           serverId,

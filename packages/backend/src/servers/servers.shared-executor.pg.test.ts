@@ -73,6 +73,33 @@ describePg('server removal and shared backend executors', () => {
     });
   });
 
+  it('releases a shrink reservation that only the removed server\'s placement still held', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const actor = await seedUser(database, undefined, UserStatus.Active, Role.Operator);
+      const ownerId = await seedUser(database);
+      const backendId = await seedBackend(database);
+      const serverS = await seedServer(database);
+      const serverT = await seedServer(database);
+      const cephS = await seedBackendPool(database, serverS, backendId);
+      const cephT = await seedBackendPool(database, serverT, backendId);
+      const volumeId = await seedVolume(database, { ownerId, poolId: null, serverId: null, sharedBackendId: backendId });
+      await placeOn(database, volumeId, serverS, cephS);
+      await placeOn(database, volumeId, serverT, cephT);
+      // Shrunk at revision 2: T verified it, S never did.
+      await database.updateTable('control.volumes')
+        .set({ dir_ensured: true, size_bytes: 20, shrink_reserved_bytes: 100, revision: 2 })
+        .where('id', '=', volumeId).execute();
+      await database.updateTable('control.volume_placements').set({ observed_revision: 2 })
+        .where('volume_id', '=', volumeId).where('server_id', '=', serverT).execute();
+
+      await serversService(database).delete(actor, serverS, 1);
+
+      expect(await database.selectFrom('control.volumes').select(['size_bytes', 'shrink_reserved_bytes'])
+        .where('id', '=', volumeId).executeTakeFirstOrThrow())
+        .toEqual({ size_bytes: '20', shrink_reserved_bytes: null });
+    });
+  });
+
   it('refuses to remove the last executor of a backend with volumes unless forced, then keeps live volumes', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const actor = await seedUser(database, undefined, UserStatus.Active, Role.Operator);

@@ -3,7 +3,10 @@ import { IntentKind, IntentResourceType } from '@nyabase/common';
 import { sql, type Kysely, type Transaction } from 'kysely';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
-import { committedVolumeBytesSql } from '../platform/persistence-pg/committed-bytes.js';
+import {
+  committedVolumeBytesSql,
+  releaseSettledShrinkReservations,
+} from '../platform/persistence-pg/committed-bytes.js';
 import {
   resolvePoolAccess,
   resolveServerAccess,
@@ -229,6 +232,11 @@ export class VolumesRepository {
       .where('volume_id', '=', volumeId)
       .where('server_id', '=', serverId)
       .execute();
+  }
+
+  /** `releaseSettledShrinkReservations` for one volume: whether its reservation was released. */
+  async releaseSettledShrinkReservation(volumeId: string, executor: VolumeExecutor): Promise<boolean> {
+    return (await releaseSettledShrinkReservations(executor, [volumeId])).length > 0;
   }
 
   async dropAllPlacements(volumeId: string, executor: VolumeExecutor = this.database): Promise<void> {

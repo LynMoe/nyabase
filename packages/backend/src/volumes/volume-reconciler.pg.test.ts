@@ -5,6 +5,7 @@ import { withPostgresTestDatabase } from '../platform/persistence-pg/postgres-te
 import { IntentRepository } from '../reconcile/intent.repository.js';
 import { VolumeReconciler } from './volume-reconciler.service.js';
 import { VolumeReconcileStore } from './volume-reconcile.store.js';
+import { ContainerReconcileStore } from '../containers/container-reconcile.store.js';
 import { noopWake } from '../reconcile/reconcile-wake.test-helper.js';
 
 const describePg = process.env.NYABASE_TEST_DATABASE_URL ? describe : describe.skip;
@@ -341,6 +342,157 @@ describePg('volume reconciler equal-node destroy', () => {
       expect(ensurePending).not.toHaveBeenCalledWith(expect.objectContaining({
         kind: 'volume.destroy',
       }));
+    });
+  });
+});
+
+describePg('volume reconciler shrink reservation release', () => {
+  function sizeIntent(kind: 'volume.resize' | 'volume.ensure', volumeId: string, serverId: string) {
+    return {
+      id: randomUUID(),
+      kind,
+      resourceType: 'volume' as const,
+      resourceId: volumeId,
+      serverId,
+      request: { operation: kind === 'volume.resize' ? 'resize' : 'ensure_attachment', idempotencyKey: 'x' },
+      attemptCount: 0,
+      targetRevision: 3,
+    };
+  }
+
+  function reconcilerFor(database: Parameters<Parameters<typeof withPostgresTestDatabase>[0]>[0]['database']) {
+    const store = new VolumeReconcileStore(database, new IntentRepository(database, noopWake()));
+    const reconciler = new VolumeReconciler(
+      store,
+      { log: vi.fn().mockResolvedValue(undefined) } as never,
+      { get: vi.fn() } as never,
+      { register: vi.fn() } as never,
+    );
+    return { store, reconciler };
+  }
+
+  /** A shared volume shrunk from 100 to 20 at revision 3; both placements verified revision 2. */
+  async function shrunkSharedVolume(
+    database: Parameters<Parameters<typeof withPostgresTestDatabase>[0]>[0]['database'],
+    bState: 'ensuring' | 'present' = 'present',
+  ) {
+    const fixture = await seedSharedVolume(database, { aState: 'present', bState, lifecyclePhase: 'active' });
+    await database.updateTable('control.volumes')
+      .set({ size_bytes: 20, shrink_reserved_bytes: 100, revision: 3, observed_revision: 2 })
+      .where('id', '=', fixture.volumeId).execute();
+    return fixture;
+  }
+
+  async function reservationOf(
+    database: Parameters<Parameters<typeof withPostgresTestDatabase>[0]>[0]['database'],
+    volumeId: string,
+  ) {
+    const row = await database.selectFrom('control.volumes').select('shrink_reserved_bytes')
+      .where('id', '=', volumeId).executeTakeFirstOrThrow();
+    return row.shrink_reserved_bytes;
+  }
+
+  it('releases the reservation once the lagging placement\'s resize finds its catalog missing', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const fixture = await shrunkSharedVolume(database);
+      const { store, reconciler } = reconcilerFor(database);
+      await store.recordVerified((await store.readVolume(fixture.volumeId, fixture.serverA))!, 10n);
+      // Server B's catalog may still hold 100 bytes.
+      expect(await reservationOf(database, fixture.volumeId)).toBe('100');
+
+      const client = catalogClient(fixture.serverB, new Set(), fixture.incusName);
+      const outcome = await reconciler.reconcile({
+        intent: sizeIntent('volume.resize', fixture.volumeId, fixture.serverB) as never,
+        claim: {} as never,
+        lease: { assertOwned: vi.fn() } as never,
+        client: client as never,
+        signal: new AbortController().signal,
+      });
+
+      expect(outcome).toMatchObject({ outcome: 'succeeded' });
+      // A catalog that does not exist holds nothing.
+      expect(await reservationOf(database, fixture.volumeId)).toBeNull();
+      expect(await database.selectFrom('control.volume_placements')
+        .select(['catalog_state', 'observed_revision'])
+        .where('volume_id', '=', fixture.volumeId)
+        .where('server_id', '=', fixture.serverB)
+        .executeTakeFirstOrThrow()).toEqual({ catalog_state: 'ensuring', observed_revision: 3 });
+
+      // A container pass that creates the catalog later did so at whatever
+      // size it read: the placement counts as unverified again.
+      await new ContainerReconcileStore(database, new IntentRepository(database, noopWake()))
+        .markCatalogPresent(fixture.volumeId, fixture.serverB);
+      expect(await database.selectFrom('control.volume_placements')
+        .select(['catalog_state', 'observed_revision'])
+        .where('volume_id', '=', fixture.volumeId)
+        .where('server_id', '=', fixture.serverB)
+        .executeTakeFirstOrThrow()).toEqual({ catalog_state: 'present', observed_revision: null });
+      await store.markSucceeded(fixture.volumeId, 3);
+      expect(await database.selectFrom('control.volumes').select('observed_revision')
+        .where('id', '=', fixture.volumeId).executeTakeFirstOrThrow()).toEqual({ observed_revision: 2 });
+    });
+  });
+
+  it('releases the reservation when a placement stuck ensuring cannot adopt its catalog', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const fixture = await shrunkSharedVolume(database, 'ensuring');
+      const { store, reconciler } = reconcilerFor(database);
+      await store.recordVerified((await store.readVolume(fixture.volumeId, fixture.serverA))!, 10n);
+      expect(await reservationOf(database, fixture.volumeId)).toBe('100');
+
+      // Incus accepts the adopt but the catalog never appears.
+      const client = catalogClient(fixture.serverB, new Set(), fixture.incusName);
+      client.createStorageVolume.mockResolvedValue({ status: 200, envelope: { type: 'sync' } });
+      const outcome = await reconciler.reconcile({
+        intent: sizeIntent('volume.ensure', fixture.volumeId, fixture.serverB) as never,
+        claim: {} as never,
+        lease: { assertOwned: vi.fn() } as never,
+        client: client as never,
+        signal: new AbortController().signal,
+      });
+
+      expect(outcome).toMatchObject({ outcome: 'retry' });
+      expect(await reservationOf(database, fixture.volumeId)).toBeNull();
+    });
+  });
+
+  it('keeps the reservation while a placement whose catalog exists has not verified the shrink', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const fixture = await shrunkSharedVolume(database);
+      const { store } = reconcilerFor(database);
+      await store.recordVerified((await store.readVolume(fixture.volumeId, fixture.serverA))!, 10n);
+      await store.markSucceeded(fixture.volumeId, 3);
+      expect(await reservationOf(database, fixture.volumeId)).toBe('100');
+      await store.recordVerified((await store.readVolume(fixture.volumeId, fixture.serverB))!, 10n);
+      expect(await reservationOf(database, fixture.volumeId)).toBeNull();
+    });
+  });
+
+  it('scan queues a resize for a dangling placement that keeps a shrink reserved', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const fixture = await shrunkSharedVolume(database);
+      const ensurePending = vi.fn().mockResolvedValue({ id: 'intent' });
+      const reconciler = new VolumeReconciler(new VolumeReconcileStore(database, { ensurePending } as never),
+        { log: vi.fn().mockResolvedValue(undefined) } as never,
+        { get: vi.fn().mockResolvedValue(undefined), listServerIds: vi.fn() } as never,
+        { register: vi.fn() } as never,
+      );
+      const emptyListing = { listStorageVolumes: vi.fn().mockResolvedValue({ metadata: [] }) };
+
+      await reconciler.scan(fixture.serverB, emptyListing as never, new AbortController().signal);
+      expect(ensurePending).toHaveBeenCalledWith(expect.objectContaining({
+        kind: 'volume.resize',
+        resourceId: fixture.volumeId,
+        serverId: fixture.serverB,
+        targetRevision: 3,
+      }));
+
+      // Without a reservation a dangling placement is only reported.
+      ensurePending.mockClear();
+      await database.updateTable('control.volumes').set({ shrink_reserved_bytes: null })
+        .where('id', '=', fixture.volumeId).execute();
+      await reconciler.scan(fixture.serverB, emptyListing as never, new AbortController().signal);
+      expect(ensurePending).not.toHaveBeenCalled();
     });
   });
 });

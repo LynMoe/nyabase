@@ -406,6 +406,7 @@ describe('volume reconciler scan and shifted policy', () => {
         needs_attention: false,
         incus_name: listedName,
         size_bytes: 10,
+        shrink_reserved_bytes: null,
         pool_id: 'pool-home',
       }],
       pools: [{
@@ -452,6 +453,7 @@ describe('volume reconciler scan and shifted policy', () => {
         needs_attention: false,
         incus_name: listedName,
         size_bytes: 10,
+        shrink_reserved_bytes: null,
         pool_id: null,
       }],
       pools: [{
@@ -498,6 +500,7 @@ describe('volume reconciler scan and shifted policy', () => {
         needs_attention: true,
         incus_name: incusName,
         size_bytes: 10,
+        shrink_reserved_bytes: null,
         pool_id: 'pool-home',
       }],
       pools: [{
@@ -575,6 +578,7 @@ describe('volume reconciler scan and shifted policy', () => {
         needs_attention: false,
         incus_name: listedName,
         size_bytes: 10,
+        shrink_reserved_bytes: null,
         pool_id: null,
       }],
       pools: [{
@@ -621,6 +625,7 @@ describe('volume reconciler scan and shifted policy', () => {
         needs_attention: false,
         incus_name: listedName,
         size_bytes: 10,
+        shrink_reserved_bytes: null,
         pool_id: 'pool-t',
       }],
       pools: [{
@@ -670,6 +675,7 @@ describe('volume reconciler scan and shifted policy', () => {
         needs_attention: false,
         incus_name: listedName,
         size_bytes: 10,
+        shrink_reserved_bytes: null,
         pool_id: null,
       }],
       pools: [{
@@ -808,6 +814,10 @@ describe('volume reconciler scan and shifted policy', () => {
       storeOf(reconciler) as unknown as { readAttachments: () => Promise<unknown[]> },
       'readAttachments',
     ).mockResolvedValue([]);
+    vi.spyOn(
+      storeOf(reconciler) as unknown as { isCurrentRevision: () => Promise<boolean> },
+      'isCurrentRevision',
+    ).mockResolvedValue(false);
     const outcome = await reconciler.reconcile(runContext({
       kind: 'volume.resize',
       client: {
@@ -1604,6 +1614,7 @@ function localVolume(input: {
     needs_attention: input.needs_attention ?? false,
     incus_name: input.incusName,
     size_bytes: input.size_bytes ?? 10,
+    shrink_reserved_bytes: null,
     pool_id: 'pool-1',
   };
 }
@@ -1636,7 +1647,7 @@ function volumeExistsDb(row: { lifecycle_phase?: string; updatedRows?: bigint } 
     }),
     updateTable: vi.fn(() => {
       const query = chain();
-      query.execute = vi.fn().mockResolvedValue(undefined);
+      query.execute = vi.fn().mockResolvedValue([]);
       query.executeTakeFirst = vi.fn().mockResolvedValue({ numUpdatedRows: row.updatedRows ?? 1n });
       return query;
     }),
@@ -1695,7 +1706,7 @@ function selectDb(input: {
     }),
     updateTable: vi.fn(() => {
       const query = chain();
-      query.execute = vi.fn().mockResolvedValue(undefined);
+      query.execute = vi.fn().mockResolvedValue([]);
       return query;
     }),
     deleteFrom: vi.fn(() => {
@@ -1719,6 +1730,7 @@ function chain(): Record<string, unknown> {
     'forUpdate',
     'values',
     'onConflict',
+    'returning',
   ]) {
     query[method] = vi.fn(() => query);
   }

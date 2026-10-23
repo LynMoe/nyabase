@@ -851,6 +851,18 @@ describePg('volume shrink reservations', () => {
       expect(await reservationOf(database, volumeId))
         .toMatchObject({ size_bytes: '200', shrink_reserved_bytes: null });
       await expect(createRest('rest-3')).resolves.toMatchObject({ resourceId: expect.any(String) });
+
+      // Incus holding more than the row ever committed never grows the row:
+      // the volume is only parked.
+      await database.updateTable('control.volumes').set({ revision: 5 }).where('id', '=', volumeId).execute();
+      expect(await store.revertImpossibleShrink(
+        { id: volumeId, revision: 5 },
+        900n,
+        800n,
+        'VOLUME_SHRINK_BELOW_USAGE',
+      )).toBe(true);
+      expect(await reservationOf(database, volumeId))
+        .toMatchObject({ size_bytes: '200', shrink_reserved_bytes: null });
     });
   });
 });

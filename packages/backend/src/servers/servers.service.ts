@@ -29,6 +29,7 @@ import { AuditService } from '../iam/audit.service.js';
 import { assertListScope, type Actor, requireUserId } from '../iam/actor.js';
 import { numberValue, isoDate, poolLabel } from '../platform/domain-utils.js';
 import { lockServerOnboarding } from '../platform/persistence-pg/advisory-locks.js';
+import { releaseSettledShrinkReservations } from '../platform/persistence-pg/committed-bytes.js';
 import { ProxySnapshotNotifierService } from '../proxy-snapshots/proxy-snapshot-notifier.service.js';
 import { listEligibleDestroyExecutors } from '../volumes/volumes.repository.js';
 import { assertActorRole } from '../iam/administration.js';
@@ -557,7 +558,12 @@ async function purgeServerControlPlane(
 ): Promise<void> {
   await purgeContainers(transaction, serverId);
   await purgeLocalVolumes(transaction, serverId);
-  await transaction.deleteFrom('control.volume_placements').where('server_id', '=', serverId).execute();
+  const dropped = await transaction.deleteFrom('control.volume_placements')
+    .where('server_id', '=', serverId)
+    .returning('volume_id')
+    .execute();
+  // A shrink no longer waits for a catalog that went with the server.
+  await releaseSettledShrinkReservations(transaction, dropped.map((row) => row.volume_id));
   await finishStrandedDestroys(transaction, audit, strandedBackendIds);
   await purgeGrantsAndInventory(transaction, serverId);
 }
