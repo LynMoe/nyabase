@@ -97,6 +97,8 @@ the response intentionally contains no SQL, keys, identities, or raw errors.
       (**Capacity**).
 - [ ] The TLS edge is the only public entrypoint and `TRUSTED_PROXIES` matches
       it (**TLS edge**).
+- [ ] `config.yaml` and `.env` are kept in a secret store separate from the
+      backups (**Secrets are not in the backup**).
 - [ ] `nyabase-backup.timer` is enabled, its upload command copies every
       archive off the host, a failed run or an archive older than a day
       alerts, and one restore drill from an off-host copy has passed
@@ -120,10 +122,12 @@ openssl rand -hex 32   # ssh.proxyToken
 - `auth.jwtSecret`: at least 32 characters.
 - `ssh.keyEncryptionSecret`: dedicated secret of at least 32 characters that
   differs from `auth.jwtSecret` (production refuses to start otherwise). It
-  encrypts the SSH proxy host key and every HTTP domain pool's TLS private key
-  in the database, so it belongs to the database: back it up with every
-  database backup and never rotate it in place (there is no re-encryption).
-  See **Lost `ssh.keyEncryptionSecret`** under the backup contract.
+  encrypts the SSH proxy host key, every user's container host CA key and
+  every HTTP domain pool's TLS private key in the database, so a restored
+  database is only fully usable with it. Keep it, like the other secrets, in a
+  secret store apart from the database backups (**Secrets are not in the
+  backup**), and never rotate it in place (there is no re-encryption). See
+  **Lost `ssh.keyEncryptionSecret`** under the backup contract.
 - `http.proxyToken` and `ssh.proxyToken`: 32–1024 character ASCII using only
   letters, digits, `_`, or `-`. `openssl rand -hex 32` is valid. The HTTP and
   SSH WebSocket handlers refuse to start with an empty token.
@@ -934,8 +938,36 @@ pg_ops verify-logical --input "/backups/$backup_name"
 The command refuses to overwrite an existing target, creates a SHA-256
 sidecar, and validates the custom archive with `pg_restore --list`. Transfer
 both files (`$backup_root/$backup_name` and `$backup_root/$backup_name.sha256`)
-to immutable/off-host storage only after this succeeds. Back up `config.yaml`
-with them (see **Lost `ssh.keyEncryptionSecret`**).
+to immutable/off-host storage only after this succeeds. Never store
+`config.yaml` or `.env` with them (see **Secrets are not in the backup**).
+
+### Secrets are not in the backup
+
+A dump holds the TLS private key of every HTTP domain pool, the SSH proxy host
+key and every user's container host CA key, encrypted with a key derived from
+`ssh.keyEncryptionSecret`, and every user id, role and `auth_version` an access
+token carries. Anyone holding a dump and `config.yaml` can therefore decrypt
+those keys and, with `auth.jwtSecret`, sign an access token for any
+administrator. Backups and secrets must not be readable by the same people or
+credentials:
+
+- Keep `deploy/config.yaml` and `deploy/.env` (the four boot secrets and both
+  database passwords) in a secret store of their own (a password manager or
+  vault entry, or an offline encrypted copy) that only the administrators of
+  the Compose host can read. Not in `NYABASE_BACKUP_ROOT`, not in the off-host
+  backup destination, and not reachable with the upload command's
+  credentials; exclude `deploy/` from any host-level file backup that lands
+  there.
+- `ssh.keyEncryptionSecret` never changes, so the one stored copy pairs with
+  every database backup. Update the stored copy whenever another secret is
+  rotated (see **Rotating secrets**).
+- Restoring onto a new host needs only `ssh.keyEncryptionSecret` from the
+  store; the other secrets and the database passwords may be new.
+- The dumps still contain personal data and password hashes. Keep the backup
+  destination access-restricted and encrypted at rest (storage-side
+  encryption, or encrypt in the upload command, for example with `age` to a
+  recipient whose identity lives in the secret store); `postgres-ops.sh`
+  does not encrypt.
 
 ### Scheduled backups
 
@@ -1162,9 +1194,9 @@ destination.
 
 ### Lost `ssh.keyEncryptionSecret`
 
-Restore `config.yaml` from the same backup set as the database whenever
-possible. If the secret is gone (or a restore paired the database with a new
-one), nothing else breaks, but the encrypted keys are unrecoverable:
+Take `ssh.keyEncryptionSecret` from the secret store (**Secrets are not in
+the backup**). If the secret is gone (or a restore paired the database with a
+new one), nothing else breaks, but the encrypted keys are unrecoverable:
 
 - **SSH proxy**: rotate the proxy host key from the admin SSH proxy page
   (rotation does not need the old key). Users see a new host key fingerprint.
