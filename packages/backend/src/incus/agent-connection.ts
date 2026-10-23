@@ -40,6 +40,15 @@ interface PendingStream {
   readonly detach: () => void;
 }
 
+/**
+ * The agent answers incus.ws only after dialing Incus and then the Backend
+ * (each bounded by AGENT_STREAM_CONNECT_TIMEOUT_MS), so the reply may take
+ * twice that. The stream wait outlasts the reply wait: it is only a backstop
+ * for a reply that arrived without its stream.
+ */
+export const AGENT_STREAM_REPLY_TIMEOUT_MS = AGENT_STREAM_CONNECT_TIMEOUT_MS * 2;
+export const AGENT_STREAM_WAIT_TIMEOUT_MS = AGENT_STREAM_REPLY_TIMEOUT_MS + 5_000;
+
 /** Hands agent-opened stream sockets to the Backend request waiting for them. */
 export class AgentStreamBroker {
   private readonly pending = new Map<string, PendingStream>();
@@ -57,11 +66,15 @@ export class AgentStreamBroker {
       const detach = (): void => signal?.removeEventListener('abort', abort);
       const timer = setTimeout(() => {
         this.fail(streamId, new IncusError('INCUS_TIMEOUT', 'retry', { phase: 'connect', reason: 'agent_stream_timeout' }));
-      }, AGENT_STREAM_CONNECT_TIMEOUT_MS + 5_000);
+      }, AGENT_STREAM_WAIT_TIMEOUT_MS);
       this.pending.set(streamId, { owner, resolve, reject, timer, detach });
       if (signal?.aborted) abort();
       else signal?.addEventListener('abort', abort, { once: true });
     });
+    // The caller awaits the incus.ws reply before it looks at the stream, and
+    // the stream may fail (timeout, abort) meanwhile: an unobserved rejection
+    // would take the process down. Awaiting `socket` still sees the error.
+    void socket.catch(() => undefined);
     return { streamId, socket };
   }
 
@@ -146,7 +159,7 @@ export class AgentConnection implements StreamOwner {
   async openWebSocket(path: string, signal?: AbortSignal): Promise<IncusWebSocketLike> {
     const { streamId, socket } = this.broker.expect(this, signal);
     try {
-      await this.call('incus.ws', { path, streamId }, AGENT_STREAM_CONNECT_TIMEOUT_MS * 2, signal);
+      await this.call('incus.ws', { path, streamId }, AGENT_STREAM_REPLY_TIMEOUT_MS, signal);
     } catch (error) {
       this.broker.fail(streamId, error);
       // The agent may have connected the stream before its reply was lost or late.

@@ -3,24 +3,42 @@ import WebSocket, { type RawData } from 'ws';
 import type { IncusWebSocketLike } from './incus-client-types.js';
 
 /**
+ * What a stream may hold before anyone listens. The window is normally a few
+ * milliseconds; an agent that floods it is cut off instead of growing the heap.
+ */
+export const MAX_BUFFERED_STREAM_BYTES = 16 * 1024 * 1024;
+export const MAX_BUFFERED_STREAM_FRAMES = 4_096;
+/** WebSocket close code 1009: message too big. */
+const CLOSE_BUFFER_OVERFLOW = 1009;
+
+/**
  * An agent stream socket handed to Backend code. The agent may relay Incus
  * frames before the caller has its listeners in place (the stream is accepted
  * before the incus.ws reply arrives), so frames are held until the first
  * `message` listener is attached and then replayed in order; a close that
- * arrives meanwhile is delivered after them.
+ * arrives meanwhile is delivered after them. Overflowing the buffer drops the
+ * held frames, terminates the stream and delivers an error and a 1009 close.
  */
 export class BufferedStreamSocket extends EventEmitter implements IncusWebSocketLike {
   private buffered: Array<[RawData, boolean]> | null = [];
+  private bufferedBytes = 0;
   private pendingClose: [number, Buffer] | null = null;
+  private overflow: Error | null = null;
   private flushScheduled = false;
 
-  constructor(private readonly socket: WebSocket) {
+  constructor(
+    private readonly socket: WebSocket,
+    private readonly maxBufferedBytes = MAX_BUFFERED_STREAM_BYTES,
+    private readonly maxBufferedFrames = MAX_BUFFERED_STREAM_FRAMES,
+  ) {
     super();
     socket.on('message', (data, isBinary) => {
-      if (this.buffered) this.buffered.push([data, isBinary]);
+      if (this.overflow) return;
+      if (this.buffered) this.hold(data, isBinary);
       else this.emit('message', data, isBinary);
     });
     socket.on('close', (code, reason) => {
+      if (this.overflow) return;
       if (!this.buffered) {
         this.emit('close', code, reason);
         return;
@@ -29,6 +47,7 @@ export class BufferedStreamSocket extends EventEmitter implements IncusWebSocket
       if (this.listenerCount('close') > 0) this.scheduleFlush('close');
     });
     socket.on('error', (error) => {
+      if (this.overflow) return;
       if (this.listenerCount('error') > 0) this.emit('error', error);
     });
   }
@@ -81,17 +100,37 @@ export class BufferedStreamSocket extends EventEmitter implements IncusWebSocket
     }
   }
 
+  private hold(data: RawData, isBinary: boolean): void {
+    this.buffered!.push([data, isBinary]);
+    this.bufferedBytes += rawDataBytes(data);
+    if (this.bufferedBytes <= this.maxBufferedBytes && this.buffered!.length <= this.maxBufferedFrames) return;
+    this.overflow = new Error(
+      `agent stream buffered more than ${this.maxBufferedBytes} bytes or ${this.maxBufferedFrames} frames before anyone listened`,
+    );
+    this.buffered = [];
+    this.bufferedBytes = 0;
+    this.pendingClose = [CLOSE_BUFFER_OVERFLOW, Buffer.from('stream buffer overflow')];
+    this.socket.terminate();
+    if (this.listenerCount('close') > 0) this.scheduleFlush('close');
+  }
+
   private flush(): void {
     const frames = this.buffered;
     if (!frames) return;
     this.buffered = null;
     for (const [data, isBinary] of frames) this.emit('message', data, isBinary);
+    if (this.overflow && this.listenerCount('error') > 0) this.emit('error', this.overflow);
     if (this.pendingClose) {
       const [code, reason] = this.pendingClose;
       this.pendingClose = null;
       this.emit('close', code, reason);
     }
   }
+}
+
+function rawDataBytes(data: RawData): number {
+  if (Array.isArray(data)) return data.reduce((total, chunk) => total + chunk.length, 0);
+  return data.byteLength;
 }
 
 export function isOpen(socket: WebSocket): boolean {

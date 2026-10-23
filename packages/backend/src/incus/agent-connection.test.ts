@@ -2,8 +2,14 @@ import { EventEmitter, getEventListeners } from 'node:events';
 import { describe, expect, it, vi } from 'vitest';
 import WebSocket from 'ws';
 import type { AgentHello } from '@nyabase/common';
-import { AgentConnection, AgentStreamBroker } from './agent-connection.js';
+import {
+  AGENT_STREAM_REPLY_TIMEOUT_MS,
+  AGENT_STREAM_WAIT_TIMEOUT_MS,
+  AgentConnection,
+  AgentStreamBroker,
+} from './agent-connection.js';
 import { AGENT_CLOSE_REPLACED, AgentRegistry } from './agent-registry.service.js';
+import { BufferedStreamSocket } from './agent-stream-socket.js';
 
 const SERVER_ID = '11111111-1111-4111-8111-111111111111';
 const HELLO: AgentHello = {
@@ -209,6 +215,58 @@ describe('agent connection RPC', () => {
     expect(broker.pendingCount).toBe(0);
   });
 
+  it('leaves no stream rejection unhandled when the agent never answers incus.ws', async () => {
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown): void => {
+      unhandled.push(reason);
+    };
+    process.on('unhandledRejection', onUnhandled);
+    // Only timeouts are faked: Node reports unhandled rejections between real macrotasks.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const realTurn = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
+    try {
+      const { socket, broker, agent } = connection();
+      const opening = agent.openWebSocket('/1.0/events').catch((error: unknown) => error);
+      const request = socket.lastRequest();
+      for (let elapsed = 0; elapsed <= AGENT_STREAM_WAIT_TIMEOUT_MS; elapsed += 1_000) {
+        await vi.advanceTimersByTimeAsync(1_000);
+        await realTurn();
+        await realTurn();
+      }
+      await expect(opening).resolves.toMatchObject({
+        code: 'INCUS_TIMEOUT',
+        details: { reason: 'agent_response_timeout' },
+      });
+      expect(socket.sent).toContainEqual({ type: 'cancel', id: request.id });
+      expect(broker.pendingCount).toBe(0);
+      // A stream the agent connects late finds nobody waiting and is refused.
+      expect(broker.accept(String(request.params.streamId), SERVER_ID, new FakeSocket() as unknown as WebSocket))
+        .toBe(false);
+      expect(unhandled).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+      process.off('unhandledRejection', onUnhandled);
+    }
+  });
+
+  it('times the stream out after the reply wait when the agent answers without connecting it', async () => {
+    expect(AGENT_STREAM_WAIT_TIMEOUT_MS).toBeGreaterThan(AGENT_STREAM_REPLY_TIMEOUT_MS);
+    vi.useFakeTimers();
+    try {
+      const { socket, broker, agent } = connection();
+      const opening = agent.openWebSocket('/1.0/events').catch((error: unknown) => error);
+      agent.handleFrame({ type: 'response', id: socket.lastRequest().id, ok: true, result: {} });
+      await vi.advanceTimersByTimeAsync(AGENT_STREAM_WAIT_TIMEOUT_MS);
+      await expect(opening).resolves.toMatchObject({
+        code: 'INCUS_TIMEOUT',
+        details: { phase: 'connect', reason: 'agent_stream_timeout' },
+      });
+      expect(broker.pendingCount).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('treats an agent-side failure as retryable without calling the server unreachable', async () => {
     const { socket, agent } = connection();
     const pending = agent.request({ method: 'GET', path: '/1.0', headers: {}, timeoutMs: 1_000 });
@@ -219,6 +277,53 @@ describe('agent connection RPC', () => {
       error: { code: 'internal', message: 'agent is at its concurrent request limit' },
     });
     await expect(pending).rejects.toMatchObject({ code: 'AGENT_REQUEST_FAILED', disposition: 'retry' });
+  });
+});
+
+describe('buffered stream socket', () => {
+  function buffered(maxBytes: number, maxFrames: number) {
+    const raw = Object.assign(new FakeSocket(), { terminate: vi.fn() });
+    return { raw, stream: new BufferedStreamSocket(raw as unknown as WebSocket, maxBytes, maxFrames) };
+  }
+
+  async function listen(stream: BufferedStreamSocket): Promise<string[]> {
+    const events: string[] = [];
+    stream.on('message', (data) => events.push(`message:${String(data)}`));
+    stream.on('error', (error) => events.push(`error:${(error as Error).message.split(' ').slice(0, 3).join(' ')}`));
+    stream.on('close', (code) => events.push(`close:${String(code)}`));
+    await new Promise((resolve) => setImmediate(resolve));
+    return events;
+  }
+
+  it('holds frames up to its limits', async () => {
+    const { raw, stream } = buffered(8, 2);
+    raw.emit('message', Buffer.from('1234'), true);
+    raw.emit('message', Buffer.from('5678'), true);
+    expect(stream.bufferedCount).toBe(2);
+    expect(raw.terminate).not.toHaveBeenCalled();
+    expect(await listen(stream)).toEqual(['message:1234', 'message:5678']);
+  });
+
+  it('terminates with an error once unconsumed bytes exceed the cap', async () => {
+    const { raw, stream } = buffered(8, 100);
+    raw.emit('message', Buffer.from('12345'), true);
+    raw.emit('message', [Buffer.from('67'), Buffer.from('89')], true);
+    expect(raw.terminate).toHaveBeenCalledOnce();
+    expect(stream.bufferedCount).toBe(0);
+    // Whatever the dying socket still reports is dropped; the overflow is what callers see.
+    raw.emit('message', Buffer.from('late'), true);
+    raw.emit('close', 1006, Buffer.alloc(0));
+    expect(await listen(stream)).toEqual(['error:agent stream buffered', 'close:1009']);
+  });
+
+  it('terminates once too many frames are held, telling a close-only listener', async () => {
+    const { raw, stream } = buffered(1_000, 2);
+    const closes: unknown[] = [];
+    stream.once('close', (code) => closes.push(code));
+    for (const frame of ['a', 'b', 'c']) raw.emit('message', Buffer.from(frame), false);
+    expect(raw.terminate).toHaveBeenCalledOnce();
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(closes).toEqual([1009]);
   });
 });
 
