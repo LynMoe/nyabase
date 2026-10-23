@@ -295,6 +295,16 @@ certificate with an RSA 2048–4096, ECDSA P-256/P-384, or Ed25519 key, the key
 types the proxy can load. The Backend refuses anything else at upload and
 stores the key re-encoded as PKCS#8.
 
+Domain pools must be disjoint: a pool whose domain equals, contains or lies
+under another pool's (`*.example.com` next to `*.a.example.com`) is refused
+(`HTTP_PROXY_DOMAIN_POOL_OVERLAP`), because a user of the outer pool could
+bind `a.example.com`, a parent domain of every site in the inner pool, and set
+cookies they all receive. Likewise a binding hostname that is any pool's
+domain or a parent of it is refused (`HTTP_PROXY_HOSTNAME_COVERS_DOMAIN_POOL`).
+Tenants of one pool still share its parent domain, so for cookie isolation
+between tenants list the pool's domain in the Public Suffix List or give each
+tenant group its own registrable domain.
+
 A token file must be a regular file (not a symlink) readable only by the
 service user; with `DynamicUser` deliver it through a `LoadCredential=` drop-in
 rather than a root-owned path. Per-IP limits bucket IPv6 clients per `/64`

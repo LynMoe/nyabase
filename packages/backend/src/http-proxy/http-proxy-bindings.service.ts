@@ -31,6 +31,7 @@ import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.
 import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
 import { poolHasSafeTlsLease } from './http-proxy-certificates.js';
+import { hostnameCoversWildcardDomain } from './http-domain-overlap.js';
 import {
   BINDING_CAPACITY_LOCK,
   HOSTNAME_RESERVATION_LOCK,
@@ -384,11 +385,18 @@ export class HttpProxyBindingsService {
     const pools = await executor
       .selectFrom('interaction.http_domain_pools')
       .selectAll()
-      .where('enabled', '=', true)
       .orderBy('wildcard_domain')
       .execute();
-    const pool = pools.find((row) =>
-      hostnameMatchesHttpProxyWildcard(hostname, row.wildcard_domain));
+    // Disabled pools too: a hostname that is (a parent of) any pool's domain
+    // would be a parent domain of that pool's sites.
+    if (pools.some((row) => hostnameCoversWildcardDomain(hostname, row.wildcard_domain))) {
+      throw new BadRequestException({
+        code: 'HTTP_PROXY_HOSTNAME_COVERS_DOMAIN_POOL',
+        message: 'Hostname is the domain of a wildcard domain pool or a parent of one',
+      });
+    }
+    const pool = pools.find((row) => row.enabled
+      && hostnameMatchesHttpProxyWildcard(hostname, row.wildcard_domain));
     if (!pool) {
       throw new BadRequestException(
         'Hostname is not under an enabled wildcard domain pool',

@@ -25,6 +25,7 @@ import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.
 import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
 import { certificateFields, validateCertificate } from './http-proxy-certificates.js';
+import { wildcardDomainsOverlap } from './http-domain-overlap.js';
 import {
   DOMAIN_POOL_MUTATION_LOCK,
   isUniqueConstraintViolation,
@@ -50,6 +51,14 @@ function duplicateDomainPoolConflict(): ConflictException {
   return new ConflictException({
     code: 'HTTP_PROXY_DOMAIN_POOL_EXISTS',
     message: 'A domain pool already owns this wildcard domain',
+  });
+}
+
+function overlappingDomainPoolConflict(other: string): ConflictException {
+  return new ConflictException({
+    code: 'HTTP_PROXY_DOMAIN_POOL_OVERLAP',
+    message: `A domain pool may not contain or lie under another pool (${other}): `
+      + 'a hostname in the outer pool would be a parent domain of the inner pool\'s sites',
   });
 }
 
@@ -116,12 +125,7 @@ export class HttpDomainPoolsService {
       const row = await runSerializable(this.transactions, async (transaction) => {
         await assertActorRole(transaction, actorId, Role.Operator);
         await lockHttpProxy(transaction, DOMAIN_POOL_MUTATION_LOCK);
-        const existing = await transaction
-          .selectFrom('interaction.http_domain_pools')
-          .select('id')
-          .where('wildcard_domain', '=', wildcardDomain)
-          .executeTakeFirst();
-        if (existing) throw duplicateDomainPoolConflict();
+        await this.assertDisjointFromOtherPools(transaction, wildcardDomain);
         const count = await this.domainPoolCount(transaction);
         if (count >= MAX_HTTP_PROXY_DOMAIN_POOLS) {
           throw new ConflictException({
@@ -179,12 +183,7 @@ export class HttpDomainPoolsService {
         if (dto.wildcardDomain !== undefined) {
           const nextWildcard = parseHttpProxyWildcardDomain(dto.wildcardDomain);
           if (nextWildcard !== current.wildcard_domain) {
-            const owner = await transaction
-              .selectFrom('interaction.http_domain_pools')
-              .select('id')
-              .where('wildcard_domain', '=', nextWildcard)
-              .executeTakeFirst();
-            if (owner && owner.id !== current.id) throw duplicateDomainPoolConflict();
+            await this.assertDisjointFromOtherPools(transaction, nextWildcard, current.id);
             const binding = await transaction
               .selectFrom('interaction.http_proxy_bindings')
               .select('id')
@@ -308,6 +307,25 @@ export class HttpDomainPoolsService {
       httpsEnabled: row.https_enabled,
       certificateFingerprint: row.certificate_fingerprint,
     };
+  }
+
+  /** Pools are disjoint DNS subtrees: neither equal nor nested. */
+  private async assertDisjointFromOtherPools(
+    executor: HttpExecutor,
+    wildcardDomain: string,
+    exceptId?: string,
+  ): Promise<void> {
+    const pools = await executor
+      .selectFrom('interaction.http_domain_pools')
+      .select(['id', 'wildcard_domain'])
+      .execute();
+    for (const pool of pools) {
+      if (pool.id === exceptId) continue;
+      if (pool.wildcard_domain === wildcardDomain) throw duplicateDomainPoolConflict();
+      if (wildcardDomainsOverlap(pool.wildcard_domain, wildcardDomain)) {
+        throw overlappingDomainPoolConflict(pool.wildcard_domain);
+      }
+    }
   }
 
   private async domainPoolCount(executor: HttpExecutor): Promise<number> {
