@@ -615,6 +615,8 @@ export class VolumeReconciler implements ManagedReconciler, OnModuleInit {
 
   async scan(serverId: string, client?: IncusClientPort, signal?: AbortSignal): Promise<void> {
     const inventory = await this.loadInventory(serverId, client, signal);
+    await this.store.releaseSettledShrinkReservations(inventory.rows
+      .filter((row) => row.shrink_reserved_bytes !== null).map((row) => row.id));
     await this.converge(serverId, client, inventory);
     if (!client) return;
     await this.quarantineOrphans(serverId, client, inventory, signal);

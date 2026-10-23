@@ -242,10 +242,13 @@ lab 场景 API 测试，不在 CI 里跑；CI 只跑 `pnpm e2e:check`（e2e 包 
   （`revertImpossibleShrink` / `revertImpossibleRootShrink`）只作用于本轮 reconcile 的 revision，回退尺寸在预留之内，绝不让用户超出授权；
   卷的这次失败若已被更新的 revision 取代，按 stale 结清、不搁置卷；Incus 上的尺寸若超出行的承诺量（预留已释放后才以旧尺寸建出的目录），
   回退不改尺寸、只搁置。卷的预留只按一条规则释放（`committed-bytes.ts` 的 `releaseSettledShrinkReservations`）：没有任何 placement
-  的 `observed_revision` 落后于当前 revision——placement 验证了该 revision，或在该 revision 下发现目录不存在（不存在的目录不占尺寸，
-  `recordCatalogMissing` 同时把它改回 `ensuring`；之后容器侧建出目录时 `markCatalogPresent` 清空 `observed_revision`）；没有 placement 的卷
-  （从未挂载的共享卷）在准入时就不留预留。每个可能让规则成立的转换都调用它：缩容准入、`recordVerified`、`markSucceeded`、发现目录缺失、
-  删除服务器丢弃 placement；全量扫描给仍持有预留而未跟上的 placement 补 resize / ensure（含 dangling 的共享 placement）。
+  未跟上当前 revision。跟上 = `observed_revision` 等于当前 revision（验证了该 revision，或在该 revision 下发现目录不存在：不存在的目录不占尺寸，
+  `recordCatalogMissing` 按本轮读到的 `catalog_state` 做 CAS 改回 `ensuring`；CAS 失败说明容器侧刚把它标成 `present`，不算跟上，volume pass 立即重试），
+  且共享卷目录未知存在（非 `present`）的 placement 所在服务器上没有该卷的任何挂载行（不论 bind_state：该服务器上容器的 pass 可能正以缩容前读到的尺寸建目录，
+  读到挂载的 pass 结束前挂载行不会消失）。容器侧建出目录时 `markCatalogPresent` 清空 `observed_revision`，尺寸已变或仍有预留时立即补一个 resize
+  （`requeueResizeAfterCatalogPost`，独立幂等键）；没有 placement 的卷（从未挂载的共享卷）在准入时就不留预留。每个可能让规则成立的转换都调用它：
+  缩容准入、`recordVerified`、`markSucceeded`、发现目录缺失、删除服务器丢弃 placement，全量扫描对每个仍持有预留的卷再判一次（兜底挂载消失等转换）；
+  全量扫描给仍持有预留而未跟上的 placement 补 resize / ensure（含 dangling 的共享 placement）。
   系统盘在 Incus 已应用配额（无 `volatile.root.apply_quota` 挂起）的观测后释放。
 - 进程数 / 网卡带宽 / 磁盘读写是可在线编辑的系统设置 `containers.*`，统一作用于所有容器（CephFS 卷不限 IO）。
 - 漂移：平台拥有整份实例文档，只放过 `volatile.*`、`image.*`；未知配置键、多出的设备、设备内多出的键、

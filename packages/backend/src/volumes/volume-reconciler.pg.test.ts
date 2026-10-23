@@ -6,6 +6,8 @@ import { IntentRepository } from '../reconcile/intent.repository.js';
 import { VolumeReconciler } from './volume-reconciler.service.js';
 import { VolumeReconcileStore } from './volume-reconcile.store.js';
 import { ContainerReconcileStore } from '../containers/container-reconcile.store.js';
+import { NotReadyPasses, prepareAttachments } from '../containers/container-reconcile-steps.js';
+import { seedContainer, seedImage, seedPool } from '../iam/access.pg-test-helper.js';
 import { noopWake } from '../reconcile/reconcile-wake.test-helper.js';
 
 const describePg = process.env.NYABASE_TEST_DATABASE_URL ? describe : describe.skip;
@@ -470,6 +472,29 @@ describePg('volume reconciler shrink reservation release', () => {
 
   type Db = Parameters<Parameters<typeof withPostgresTestDatabase>[0]>[0]['database'];
 
+  /** A container on server B with the shared volume attached; returns its id. */
+  async function attachOnServerB(
+    database: Db,
+    fixture: Awaited<ReturnType<typeof shrunkSharedVolume>>,
+  ): Promise<string> {
+    const containerId = await seedContainer(database, {
+      ownerId: fixture.ownerId,
+      serverId: fixture.serverB,
+      poolId: await seedPool(database, fixture.serverB),
+      imageId: await seedImage(database),
+    });
+    await database.insertInto('control.volume_attachments').values({
+      id: randomUUID(),
+      container_id: containerId,
+      volume_id: fixture.volumeId,
+      device_name: `nyd-${randomUUID().replaceAll('-', '')}`,
+      container_path: '/data',
+      read_only: false,
+      bind_state: 'attaching',
+    }).execute();
+    return containerId;
+  }
+
   function placementB(database: Db, fixture: { volumeId: string; serverB: string }) {
     return database.selectFrom('control.volume_placements')
       .select(['catalog_state', 'observed_revision'])
@@ -487,6 +512,81 @@ describePg('volume reconciler shrink reservation release', () => {
       signal: new AbortController().signal,
     });
   }
+
+  it('keeps the reservation while a container pass may create the catalog at the size it read before the shrink', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      // Server B's catalog does not exist yet; a container there mounts the volume.
+      const fixture = await seedSharedVolume(database, { aState: 'present', bState: 'ensuring', lifecyclePhase: 'active' });
+      const containerId = await attachOnServerB(database, fixture);
+      const { store, reconciler } = reconcilerFor(database);
+      const intents = new IntentRepository(database, noopWake());
+      const containerStore = new ContainerReconcileStore(database, intents);
+      const present = new Set<string>();
+      const volumeClient = catalogClient(fixture.serverB, present, fixture.incusName);
+      const containerClient = catalogClient(fixture.serverB, present, fixture.incusName);
+      const posted: string[] = [];
+      containerClient.createStorageVolume.mockImplementation((async (_pool: string, body: { config: { size: string } }) => {
+        // The container pass read the attachment at 100 bytes; while its POST
+        // is in flight the user shrinks to 20, server A verifies and server
+        // B's resize pass finds no catalog yet.
+        posted.push(body.config.size);
+        await database.updateTable('control.volumes')
+          .set({ size_bytes: 20, shrink_reserved_bytes: 100, revision: 3, observed_revision: 2 })
+          .where('id', '=', fixture.volumeId).execute();
+        await store.recordVerified((await store.readVolume(fixture.volumeId, fixture.serverA))!, 10n);
+        await expect(resizePass(reconciler, fixture, volumeClient)).resolves.toMatchObject({ outcome: 'succeeded' });
+        expect(await placementB(database, fixture)).toEqual({ catalog_state: 'ensuring', observed_revision: 3 });
+        // The catalog about to appear may hold 100 bytes: the reservation stays.
+        await store.markSucceeded(fixture.volumeId, 3);
+        expect(await reservationOf(database, fixture.volumeId)).toBe('100');
+        present.add(fixture.serverB);
+        return { status: 200, envelope: { type: 'sync' } };
+      }) as never);
+
+      const prepared = await prepareAttachments(
+        { store: containerStore, logger: { log: vi.fn() }, notReady: new NotReadyPasses() },
+        { intent: { id: randomUUID(), kind: 'container.update', request: {}, resourceId: containerId, targetRevision: 1 } } as never,
+        containerClient as never,
+        { id: containerId, server_id: fixture.serverB } as never,
+      );
+
+      expect(prepared).toHaveProperty('attachments');
+      expect(posted).toEqual(['100']);
+      expect(await placementB(database, fixture)).toEqual({ catalog_state: 'present', observed_revision: null });
+      expect(await reservationOf(database, fixture.volumeId)).toBe('100');
+      // The catalog was created at a stale size: a resize for server B is queued at once.
+      const queued = await database.selectFrom('control.intents')
+        .select(['kind', 'server_id', 'target_revision', 'status'])
+        .where('resource_id', '=', fixture.volumeId)
+        .where('status', '=', 'pending')
+        .execute();
+      expect(queued).toEqual([{ kind: 'volume.resize', server_id: fixture.serverB, target_revision: 3, status: 'pending' }]);
+      // Only verifying the created catalog at the current size releases it.
+      await store.recordVerified((await store.readVolume(fixture.volumeId, fixture.serverB))!, 10n);
+      expect(await reservationOf(database, fixture.volumeId)).toBeNull();
+    });
+  });
+
+  it('a full scan releases the reservation once the attachment that could create the catalog is gone', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const fixture = await shrunkSharedVolume(database, 'ensuring');
+      const containerId = await attachOnServerB(database, fixture);
+      const { store, reconciler } = reconcilerFor(database);
+      await store.recordVerified((await store.readVolume(fixture.volumeId, fixture.serverA))!, 10n);
+      const client = catalogClient(fixture.serverB, new Set(), fixture.incusName);
+      await expect(resizePass(reconciler, fixture, client)).resolves.toMatchObject({ outcome: 'succeeded' });
+      expect(await reservationOf(database, fixture.volumeId)).toBe('100');
+
+      // A detach that settled does not re-evaluate the rule; the scan does.
+      await database.deleteFrom('control.volume_attachments').where('container_id', '=', containerId).execute();
+      const emptyListing = { listStorageVolumes: vi.fn().mockResolvedValue({ metadata: [] }) };
+      await reconciler.scan(fixture.serverB, emptyListing as never, new AbortController().signal);
+      expect(await reservationOf(database, fixture.volumeId)).toBeNull();
+      // Caught up at the revision: the scan queued nothing for it.
+      expect(await database.selectFrom('control.intents').select('id')
+        .where('resource_id', '=', fixture.volumeId).execute()).toEqual([]);
+    });
+  });
 
   it('does not record a catalog missing that a container pass marked present meanwhile', async () => {
     await withPostgresTestDatabase(async ({ database }) => {

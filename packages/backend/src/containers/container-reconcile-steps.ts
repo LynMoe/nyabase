@@ -306,7 +306,10 @@ const NOT_READY_FAILURES: Readonly<Record<string, { code: string; message: strin
 };
 
 export interface AttachmentDeps {
-  readonly store: Pick<ContainerReconcileStore, 'rereadDesired' | 'markCatalogPresent'>;
+  readonly store: Pick<
+    ContainerReconcileStore,
+    'rereadDesired' | 'markCatalogPresent' | 'requeueResizeAfterCatalogPost'
+  >;
   readonly logger: Pick<Logger, 'log'>;
   readonly notReady: NotReadyPasses;
 }
@@ -400,6 +403,10 @@ async function ensureDesiredCatalogs(
         });
       }
       await deps.store.markCatalogPresent(attachment.volume_id, serverId);
+      if (result === 'posted') {
+        // Created at the size read before the POST: verify it at the current one.
+        await deps.store.requeueResizeAfterCatalogPost(attachment.volume_id, serverId, attachment.size_bytes);
+      }
       deps.logger.log(
         `container=${context.intent.resourceId} ensure shared catalog volume=${attachment.volume_id} `
         + `server=${serverId} result=${result}`,

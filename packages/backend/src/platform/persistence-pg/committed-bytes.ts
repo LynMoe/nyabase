@@ -30,12 +30,20 @@ export function committedRootBytesSql(): RawBuilder<string> {
  * `observed_revision` is the last revision it verified, or at which its
  * catalog was found missing: a catalog that does not exist holds nothing, and
  * a volume without placements (a shared volume never attached anywhere) holds
- * nothing at all. Releases the reservation of every listed volume the rule no
- * longer holds for and returns their ids. Called at every transition that can
- * make it false: the resize admission, a placement verified, a resize
- * settled, a catalog found missing and a placement dropped. A revision
- * accepted concurrently keeps the reservation, as the rule compares against
- * the row's current revision.
+ * nothing at all. A shared placement whose catalog is not known present has
+ * not caught up either while an attachment of a container on that server
+ * exists: that container's pass may be creating the catalog at a size it read
+ * before the shrink. Any bind state counts, as the pass that read the
+ * attachment before a detach finishes before the detaching row goes. It
+ * catches up once the created catalog is verified (`markCatalogPresent` drops
+ * the observed revision, so a resize verifies it) or the attachments go.
+ * Releases the reservation of every listed volume the rule no longer holds
+ * for and returns their ids. Called at every transition that can make it
+ * false: the resize admission, a placement verified, a resize settled, a
+ * catalog found missing, a placement dropped and every full scan of a volume
+ * still holding one (a settled detach). A revision accepted concurrently
+ * keeps the reservation, as the rule compares against the row's current
+ * revision.
  */
 export async function releaseSettledShrinkReservations(
   executor: Kysely<NyabaseDatabase>,
@@ -51,7 +59,19 @@ export async function releaseSettledShrinkReservations(
       selectFrom('control.volume_placements as pl')
         .select('pl.volume_id')
         .whereRef('pl.volume_id', '=', 'v.id')
-        .where(sql<boolean>`pl.observed_revision is distinct from v.revision`),
+        .where(sql<boolean>`(
+          pl.observed_revision is distinct from v.revision
+          or (
+            v.shared_backend_id is not null
+            and pl.catalog_state <> 'present'
+            and exists (
+              select 1
+              from control.volume_attachments a
+              join control.containers c on c.id = a.container_id
+              where a.volume_id = v.id and c.server_id = pl.server_id
+            )
+          )
+        )`),
     )))
     .returning('v.id')
     .execute();

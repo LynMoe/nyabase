@@ -372,6 +372,42 @@ export class ContainerReconcileStore {
       .execute();
   }
 
+  /**
+   * This pass created a shared volume's catalog at `postedBytes`, a size it
+   * read before the POST. When the volume's size moved since, or it still
+   * holds a shrink reservation (which only a verified catalog releases), a
+   * resize for this server is queued and woken now instead of waiting for
+   * the full scan. Its own idempotency key keeps a resize already running
+   * for the revision (one that found the catalog missing) from absorbing it.
+   */
+  async requeueResizeAfterCatalogPost(
+    volumeId: string,
+    serverId: string,
+    postedBytes: string | number,
+  ): Promise<void> {
+    const volume = await this.database
+      .selectFrom('control.volumes as v')
+      .innerJoin('control.volume_placements as pl', 'pl.volume_id', 'v.id')
+      .select(['v.revision', 'v.size_bytes', 'v.shrink_reserved_bytes'])
+      .where('v.id', '=', volumeId)
+      .where('pl.server_id', '=', serverId)
+      .where('v.shared_backend_id', 'is not', null)
+      .where('v.lifecycle_phase', '!=', 'deleting')
+      .where('v.needs_attention', '=', false)
+      .executeTakeFirst();
+    if (!volume) return;
+    if (String(volume.size_bytes) === String(postedBytes) && volume.shrink_reserved_bytes === null) return;
+    await this.intents.ensurePending({
+      kind: 'volume.resize',
+      resourceType: 'volume',
+      resourceId: volumeId,
+      serverId,
+      targetRevision: volume.revision,
+      reuseSettled: false,
+      request: { source: 'catalog_posted', operation: 'resize', idempotencyKey: 'resize:catalog_posted' },
+    });
+  }
+
   // --- observation -------------------------------------------------------------
 
   /**

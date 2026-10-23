@@ -467,6 +467,14 @@ export class VolumeReconcileStore {
     return true;
   }
 
+  /**
+   * The full scan's backstop for the reservation rule: any transition that
+   * did not re-evaluate it (an attachment that went away) converges here.
+   */
+  async releaseSettledShrinkReservations(volumeIds: readonly string[]): Promise<void> {
+    await releaseSettledShrinkReservations(this.database, volumeIds);
+  }
+
   // --- destroy -----------------------------------------------------------------
 
   async hasAnyAttachments(volumeId: string): Promise<boolean> {
