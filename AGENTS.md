@@ -68,7 +68,9 @@ Vite 通过 alias 将 `@nyabase/common` 指向 `src/index.ts`，但 `index.ts` �
   清除时复核覆盖、标记 `purged_at` 与全部删除 / 销毁 intent 的入队在同一个持有 `lockIamPolicy` 的 **read committed** 事务里
   （`AccessLapseRepository.purgeIfUncovered`）：serializable / repeatable read 的快照取自加锁语句、早于锁等待，会漏掉等锁期间提交的授权。
   池 / 后端清除前的强制卸载是可逆的，在锁外进行。处置（停机 / 卸载）前先无锁重读覆盖，扫描后新提交的授权直接结束宽限。
-  没有待处理 intent 的 `detaching` 挂载也算暴露，`forceDetach` 会重新下发卸载。
+  没有待处理 intent 的 `detaching` 挂载也算暴露，`forceDetach` 会重新下发卸载，但仅当容器最后一个 intent 结清已超过退避
+  （15 分钟起，按该挂载已有的 detach intent 数翻倍，封顶 4 小时；`volumes/detach-redrive.ts` 的 `detachRedriveDue`，扫描与 `forceDetach` 共用）；
+  重新下发不清 `needs_attention`，持续失败的容器对运维可见。
 - 禁用用户 = 失去覆盖，与撤销同一条流程：覆盖只认 `iam.effective_*_access`（active 用户 + 当前授权），禁用后其名下资源按检测时间开宽限、立即停机，
   14 天后清除；宽限内重新启用则删台账行（容器不自动启动）。用户状态变更在 `afterCommit` 里通知 `AccessChangeNotifier`。
 - 宽限中（无当前覆盖）的用户不能新建、启动、挂载、扩容；已停机的容器在覆盖恢复后不会自动启动。所有者扩容本地卷要同时有服务器和存储池的当前授权。
@@ -190,6 +192,7 @@ lab 场景 API 测试，不在 CI 里跑；CI 只跑 `pnpm e2e:check`（e2e 包 
 - 漂移：平台拥有整份实例文档，只放过 `volatile.*`、`image.*`；未知配置键、多出的设备、设备内多出的键、
   非空 profiles 都算漂移，写回时整份覆盖并记审计 `container.drift_corrected`。
 - `power_intent='stopped'` 时 reconciler 先停机再准备挂载，停机绝不等卷就绪；卸载（含强制卸载）同样先于其他挂载的就绪检查：
-  detaching 设备单独热拔并立即结清该行。同一 intent 连续 `VOLUME_ADOPT_FAIL_AFTER_ATTEMPTS` 次检查挂载卷都未就绪
+  detaching 设备单独热拔并立即结清该行；单独热拔若因内容被拒（`AGENT_POLICY_DENIED` / `INCUS_BAD_REQUEST`，例如宿主侧漂移），
+  交给本轮完整托管文档写回（同时纠正漂移），此时会等其他挂载就绪。同一 intent 连续 `VOLUME_ADOPT_FAIL_AFTER_ATTEMPTS` 次检查挂载卷都未就绪
   （进程内计数，不含服务器不可达 / 忙重试）才以 `VOLUME_PLACEMENT_FAILED` 失败，不再无限重试。
 
