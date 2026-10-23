@@ -1,8 +1,60 @@
 import { EventEmitter } from 'node:events';
 import type * as http from 'node:http';
 import { describe, expect, it, vi } from 'vitest';
+import WebSocket from 'ws';
+import { AGENT_PROTOCOL_VERSION } from '@nyabase/common';
+import { MAX_PENDING_AGENT_AUTHENTICATIONS } from './agent-credentials.js';
 import { AgentGateway } from './agent-gateway.js';
 import { AgentRegistry } from './agent-registry.service.js';
+
+const SERVER_ID = '11111111-1111-4111-8111-111111111111';
+const HELLO = {
+  type: 'hello',
+  protocol: AGENT_PROTOCOL_VERSION,
+  agentVersion: '0.1.0',
+  hostname: 'worker-1',
+  incus: { serverVersion: '7.4', apiExtensions: [] },
+  status: { ipv6Guard: { present: true, error: null } },
+};
+
+class FakeControlSocket extends EventEmitter {
+  readyState: number = WebSocket.OPEN;
+  readonly sent: unknown[] = [];
+  closed?: { code: number; reason: string };
+
+  send(data: string): void {
+    this.sent.push(JSON.parse(data));
+  }
+
+  close(code: number, reason: string): void {
+    if (this.closed) return;
+    this.closed = { code, reason };
+    this.readyState = WebSocket.CLOSING;
+    queueMicrotask(() => {
+      this.readyState = WebSocket.CLOSED;
+      this.emit('close', code, Buffer.from(reason));
+    });
+  }
+
+  ping(): void {}
+
+  terminate(): void {
+    this.readyState = WebSocket.CLOSED;
+  }
+}
+
+/** Run the gateway's control acceptance on a fake socket, as if the upgrade succeeded. */
+function acceptControl(confirm: () => Promise<boolean>) {
+  const registry = new AgentRegistry();
+  const confirmControl = vi.fn(confirm);
+  const gateway = new AgentGateway(registry, { authenticate: vi.fn(), confirmControl } as never);
+  const ws = new FakeControlSocket();
+  (gateway as unknown as { acceptControl(ws: unknown, serverId: string, authorization: string): void })
+    .acceptControl(ws, SERVER_ID, 'Bearer nyak.x.y');
+  return { registry, ws, confirmControl };
+}
+
+const settle = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
 
 class FakeUpgradeSocket extends EventEmitter {
   destroyed = false;
@@ -35,6 +87,48 @@ describe('agent gateway upgrade', () => {
     gateway.onModuleDestroy();
   });
 
+  it('never locks out an address whose other agents keep failing', async () => {
+    const good = 'Bearer nyak.good';
+    const authenticate = vi.fn(async (authorization: string) =>
+      authorization === good ? '11111111-1111-4111-8111-111111111111' : undefined);
+    const gateway = new AgentGateway(new AgentRegistry(), { authenticate } as never);
+    const server = new EventEmitter();
+    gateway.attachToHttpServer(server as unknown as http.Server, { trustProxy: () => false });
+    const attempt = async (authorization: string) => {
+      const socket = new FakeUpgradeSocket();
+      server.emit('upgrade', {
+        url: '/ws/agent/stream?id=x',
+        headers: { authorization },
+        socket: { remoteAddress: '198.51.100.7' },
+      }, socket, Buffer.alloc(0));
+      await new Promise((resolve) => setImmediate(resolve));
+      return socket.ended;
+    };
+    // Stale agents behind the same NAT (or a database outage) fail as often as they like...
+    for (let index = 0; index < 100; index += 1) expect(await attempt('Bearer nyak.stale')).toMatch(/^HTTP\/1\.1 401/);
+    // ...and a healthy agent there still gets its credential checked (400: the stream id is malformed).
+    expect(await attempt(good)).toMatch(/^HTTP\/1\.1 400/);
+    expect(authenticate).toHaveBeenCalledTimes(101);
+    // The client address goes along, so a refused credential can be traced to its host.
+    expect(authenticate).toHaveBeenCalledWith('Bearer nyak.stale', '198.51.100.7');
+    gateway.onModuleDestroy();
+  });
+
+  it('answers 503 while too many credential lookups are in flight', async () => {
+    const authenticate = vi.fn(() => new Promise<string | undefined>(() => undefined));
+    const gateway = new AgentGateway(new AgentRegistry(), { authenticate } as never);
+    const server = new EventEmitter();
+    gateway.attachToHttpServer(server as unknown as http.Server);
+    const sockets = Array.from({ length: MAX_PENDING_AGENT_AUTHENTICATIONS + 1 }, () => new FakeUpgradeSocket());
+    for (const socket of sockets) {
+      server.emit('upgrade', { url: '/ws/agent', headers: { authorization: 'Bearer nyak.x.y' } }, socket, Buffer.alloc(0));
+    }
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(authenticate).toHaveBeenCalledTimes(MAX_PENDING_AGENT_AUTHENTICATIONS);
+    expect(sockets.at(-1)!.ended).toMatch(/^HTTP\/1\.1 503 .*\r\nRetry-After: 5\r\n/s);
+    gateway.onModuleDestroy();
+  });
+
   it('answers 401 to a credential that does not resolve to a server', async () => {
     const gateway = new AgentGateway(new AgentRegistry(), { authenticate: vi.fn().mockResolvedValue(undefined) } as never);
     const server = new EventEmitter();
@@ -44,5 +138,63 @@ describe('agent gateway upgrade', () => {
     await new Promise((resolve) => setImmediate(resolve));
     expect(socket.ended).toMatch(/^HTTP\/1\.1 401/);
     gateway.onModuleDestroy();
+  });
+});
+
+describe('agent gateway hello', () => {
+  it('registers only after the credential is re-verified', async () => {
+    const { registry, ws, confirmControl } = acceptControl(async () => true);
+    ws.emit('message', Buffer.from(JSON.stringify(HELLO)), false);
+    expect(registry.isConnected(SERVER_ID)).toBe(false);
+    await settle();
+    expect(confirmControl).toHaveBeenCalledWith(SERVER_ID, 'Bearer nyak.x.y');
+    expect(ws.sent).toEqual([{ type: 'welcome', serverId: SERVER_ID }]);
+    expect(registry.isConnected(SERVER_ID)).toBe(true);
+  });
+
+  it('closes with 4401 when the credential was rotated or the server deleted after the upgrade', async () => {
+    const { registry, ws } = acceptControl(async () => false);
+    ws.emit('message', Buffer.from(JSON.stringify(HELLO)), false);
+    await settle();
+    expect(ws.closed?.code).toBe(4401);
+    expect(ws.sent).toEqual([]);
+    expect(registry.isConnected(SERVER_ID)).toBe(false);
+  });
+
+  it('lets disconnect reach a socket still waiting for hello or its verification', async () => {
+    let finish!: (valid: boolean) => void;
+    const { registry, ws } = acceptControl(() => new Promise<boolean>((resolve) => { finish = resolve; }));
+    ws.emit('message', Buffer.from(JSON.stringify(HELLO)), false);
+    registry.disconnect(SERVER_ID);
+    expect(ws.closed?.code).toBe(4401);
+    finish(true);
+    await settle();
+    expect(ws.sent).toEqual([]);
+    expect(registry.isConnected(SERVER_ID)).toBe(false);
+  });
+
+  it('refuses a second frame while hello is being verified', async () => {
+    const { ws } = acceptControl(() => new Promise<boolean>(() => undefined));
+    ws.emit('message', Buffer.from(JSON.stringify(HELLO)), false);
+    ws.emit('message', Buffer.from(JSON.stringify(HELLO)), false);
+    expect(ws.closed?.code).toBe(1008);
+  });
+
+  it('closes on an oversized frame before parsing it', () => {
+    const { ws, confirmControl } = acceptControl(async () => true);
+    ws.emit('message', Buffer.alloc(600 * 1024, 0x20), false);
+    expect(ws.closed?.code).toBe(1009);
+    expect(confirmControl).not.toHaveBeenCalled();
+  });
+
+  it('turns away a hello of another protocol and reports why', async () => {
+    const { registry, ws, confirmControl } = acceptControl(async () => true);
+    const refused = vi.fn();
+    registry.onPresence({ connected: vi.fn(), disconnected: vi.fn(), refused });
+    ws.emit('message', Buffer.from(JSON.stringify({ ...HELLO, protocol: 1, agentVersion: '0.1.0+gold' })), false);
+    expect(ws.closed?.code).toBe(4426);
+    expect(confirmControl).not.toHaveBeenCalled();
+    expect(refused).toHaveBeenCalledWith(SERVER_ID, expect.stringContaining('0.1.0+gold speaks protocol 1'));
+    expect(registry.isConnected(SERVER_ID)).toBe(false);
   });
 });

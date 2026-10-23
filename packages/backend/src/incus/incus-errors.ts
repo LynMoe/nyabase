@@ -16,6 +16,7 @@ export type IncusFailureCode =
   | 'INCUS_TIMEOUT'
   | 'AGENT_POLICY_DENIED'
   | 'AGENT_REQUEST_FAILED'
+  | 'AGENT_IPV6_GUARD_MISSING'
   | 'MISSING_MANAGED_NETWORK_ADDRESS'
   | 'INVALID_MANAGED_NETWORK_TYPE'
   | 'INVALID_MANAGED_FILTER_IDENTITY'
@@ -72,6 +73,8 @@ const FAILURE_MESSAGES: Record<IncusFailureCode, string> = {
   INCUS_TIMEOUT: 'The Incus request timed out',
   AGENT_POLICY_DENIED: 'The server agent refused the Incus request',
   AGENT_REQUEST_FAILED: 'The server agent could not complete the request; it will be retried',
+  AGENT_IPV6_GUARD_MISSING:
+    'The server agent will not bring a guest network interface up until its IPv6 guard is in place; it will be retried',
   MISSING_MANAGED_NETWORK_ADDRESS: 'The managed Incus network device is missing',
   INVALID_MANAGED_NETWORK_TYPE: 'The managed Incus network device is not bridged',
   INVALID_MANAGED_FILTER_IDENTITY: 'The managed Incus network filter identity is invalid',

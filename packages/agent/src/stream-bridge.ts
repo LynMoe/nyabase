@@ -30,6 +30,22 @@ export function dialBackendStream(url: string, credential: string, ca?: Buffer):
   });
 }
 
+export interface BridgeOptions {
+  /** The control session the stream belongs to; the bridge closes when it ends. */
+  readonly session?: AbortSignal;
+  /**
+   * Ping `right` (the Backend side) this often and drop the bridge when a
+   * ping goes unanswered, so a half-open link cannot keep an idle exec (and
+   * the shell behind it) alive forever.
+   */
+  readonly heartbeatMs?: number;
+  /**
+   * Rewrite (or drop, by returning undefined) every frame `left` sends before
+   * it reaches `right`; the result goes out as a text frame.
+   */
+  readonly filterLeft?: (text: string) => string | undefined;
+}
+
 /**
  * Relay frames both ways, preserving text/binary, until either side closes.
  * `held` are frames `left` received before the bridge existed; they go first.
@@ -38,34 +54,72 @@ export function bridgeSockets(
   left: WebSocket,
   right: WebSocket,
   held: { readonly frames: ReadonlyArray<[RawData, boolean]>; readonly closed: boolean } = { frames: [], closed: false },
+  options: BridgeOptions = {},
 ): void {
   let closed = false;
-  const closeBoth = (code: number, reason: string): void => {
+  let alive = true;
+  const heartbeat = options.heartbeatMs
+    ? setInterval(() => {
+      if (!alive) {
+        // A half-open peer never completes a close handshake.
+        right.terminate();
+        closeBoth(1001, 'stream peer stopped answering');
+        return;
+      }
+      alive = false;
+      if (right.readyState === WebSocket.OPEN) right.ping();
+    }, options.heartbeatMs)
+    : undefined;
+  const endOfSession = (): void => closeBoth(1001, 'agent control connection closed');
+  function closeBoth(code: number, reason: string): void {
     if (closed) return;
     closed = true;
+    if (heartbeat) clearInterval(heartbeat);
+    options.session?.removeEventListener('abort', endOfSession);
     for (const socket of [left, right]) {
       if (socket.readyState === WebSocket.OPEN) socket.close(code, reason);
-      else socket.terminate();
+      else if (socket.readyState !== WebSocket.CLOSED) socket.terminate();
     }
+  }
+  const markAlive = (): void => {
+    alive = true;
   };
-  const forward = (from: WebSocket, to: WebSocket): void => {
+  right.on('pong', markAlive);
+  right.on('ping', markAlive);
+  right.on('message', markAlive);
+  const relay = (to: WebSocket, data: RawData, isBinary: boolean, filter?: (text: string) => string | undefined): void => {
+    if (!filter) {
+      to.send(data, { binary: isBinary });
+      return;
+    }
+    const kept = filter(rawText(data));
+    if (kept !== undefined) to.send(kept, { binary: false });
+  };
+  const forward = (from: WebSocket, to: WebSocket, filter?: (text: string) => string | undefined): void => {
     from.on('message', (data, isBinary) => {
       if (to.readyState !== WebSocket.OPEN) return;
       if (to.bufferedAmount > MAX_BUFFERED_BYTES) {
         closeBoth(1013, 'stream peer is not reading');
         return;
       }
-      to.send(data, { binary: isBinary });
+      relay(to, data, isBinary, filter);
     });
     from.on('close', (code, reason) => closeBoth(normalizeCloseCode(code), reason.toString().slice(0, 120)));
     from.on('error', () => closeBoth(1011, 'stream error'));
   };
   for (const [data, isBinary] of held.frames) {
-    if (right.readyState === WebSocket.OPEN) right.send(data, { binary: isBinary });
+    if (right.readyState === WebSocket.OPEN) relay(right, data, isBinary, options.filterLeft);
   }
-  forward(left, right);
+  forward(left, right, options.filterLeft);
   forward(right, left);
+  if (options.session?.aborted) endOfSession();
+  else options.session?.addEventListener('abort', endOfSession, { once: true });
   if (held.closed || left.readyState === WebSocket.CLOSED) closeBoth(1000, 'incus closed the stream');
+}
+
+function rawText(data: RawData): string {
+  if (Array.isArray(data)) return Buffer.concat(data).toString('utf8');
+  return Buffer.from(data as ArrayBuffer).toString('utf8');
 }
 
 function normalizeCloseCode(code: number): number {

@@ -7,6 +7,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
+import { committedRootBytesSql } from '../platform/persistence-pg/committed-bytes.js';
 import {
   FailureCode,
   StoragePoolResizeFamily,
@@ -62,12 +63,8 @@ async function committedRootBytes(
   executor: VolumeExecutor,
   filter: { ownerId?: string; serverId?: string; poolId?: string },
 ): Promise<number> {
-  let query = executor.selectFrom('control.containers').select(sql<string>`coalesce(sum(
-      case when root_size_pending_bytes is null
-        then root_size_bytes
-        else greatest(root_size_bytes, root_size_pending_bytes)
-      end
-    ), 0)`.as('bytes'))
+  let query = executor.selectFrom('control.containers')
+    .select(sql<string>`coalesce(sum(${committedRootBytesSql()}), 0)`.as('bytes'))
     .where('lifecycle_phase', 'not in', ['failed', 'deleting']);
   if (filter.ownerId !== undefined) query = query.where('owner_id', '=', filter.ownerId);
   if (filter.serverId !== undefined) query = query.where('server_id', '=', filter.serverId);
@@ -262,7 +259,11 @@ export class VolumeCapacityService {
     await this.assertSharedBackendPhysicalCapacity(backend, sharedBackendId, delta, transaction);
   }
 
-  /** Grant limits plus physical capacity for growing a volume (owner rules). */
+  /**
+   * Grant limits plus physical capacity for growing a volume (owner rules):
+   * a local volume needs the server and the pool covered now, as on create
+   * and attach, so a lapsed pool grant stops growth too.
+   */
   async assertCapacityWithinGrants(
     transaction: Tx,
     ownerId: string,
@@ -284,7 +285,7 @@ export class VolumeCapacityService {
     if (!serverId) throw new BadRequestException('Local capacity requires a server');
     const pool = await transaction.selectFrom('infra.storage_pools')
       .selectAll().where('id', '=', poolId).executeTakeFirstOrThrow();
-    const grant = await requireServerAccess(transaction, ownerId, serverId);
+    const grant = await this.assertLocalCoverage(transaction, ownerId, serverId, poolId);
     const sums = await this.ownerServerCommittedBytes(ownerId, serverId, transaction);
     if (grant.diskBytes !== null && sums.root + sums.local + delta > grant.diskBytes) {
       throw new ConflictException({
@@ -298,6 +299,22 @@ export class VolumeCapacityService {
       });
     }
     await this.assertLocalPoolPhysicalCapacity(pool, poolId, serverId, delta, transaction);
+  }
+
+  /**
+   * The owner's current server and pool coverage of a local volume, needed
+   * for every grow, also one that stays within a pending shrink's
+   * reservation and so commits no new bytes. Returns the server grant.
+   */
+  async assertLocalCoverage(
+    transaction: Tx,
+    ownerId: string,
+    serverId: string,
+    poolId: string,
+  ): Promise<Awaited<ReturnType<typeof requireServerAccess>>> {
+    const grant = await requireServerAccess(transaction, ownerId, serverId);
+    await assertPoolGrant(transaction, ownerId, poolId);
+    return grant;
   }
 
   /** Physical capacity only, for administrators who bypass per-user grant limits. */
@@ -427,8 +444,7 @@ export class VolumeCapacityService {
       throw new BadRequestException('Local volume scope does not match the pool');
     }
     assertPoolMatchesLocalScope(lockedPool, scope);
-    await requireServerAccess(transaction, ownerId, scope.serverId);
-    await assertPoolGrant(transaction, ownerId, lockedPool.id);
+    await this.assertLocalCoverage(transaction, ownerId, scope.serverId, lockedPool.id);
     return {
       poolId: lockedPool.id,
       serverId: scope.serverId,

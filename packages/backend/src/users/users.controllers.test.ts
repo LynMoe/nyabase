@@ -4,6 +4,7 @@ import { UserStatus, Role } from '@nyabase/common';
 import { testActor } from '../iam/actor.test-helper.js';
 import { UsersController } from './users.controller.js';
 import type { UserSshKeysService } from './user-ssh-keys.service.js';
+import type { SshClientConfigService } from './ssh-client-config.service.js';
 import type { UsersService } from './users.service.js';
 
 const toDto = (value: unknown) => value;
@@ -12,6 +13,7 @@ function controllerWith(service: Record<string, unknown>) {
   return new UsersController(
     { toDto, ...service } as unknown as UsersService,
     service as unknown as UserSshKeysService,
+    service as unknown as SshClientConfigService,
   );
 }
 
@@ -45,10 +47,10 @@ describe('user update controller boundaries', () => {
     const user = testActor('user-a');
     const keyText = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAFd/vaXN2I0jY5BiWgFdcK4lc66lU/wUQqmKHUgQzt3';
 
-    await controller.addSshKey('user-a', { name: 'laptop', keyText }, user);
+    await controller.addSshKey('user-a', { name: 'laptop', keyText, currentPassword: 'pw' }, user);
     await controller.deleteSshKey('user-a', 'key-a', user);
 
-    expect(addSshKey).toHaveBeenCalledWith('user-a', 'laptop', keyText, 'user-a');
+    expect(addSshKey).toHaveBeenCalledWith(user, 'laptop', keyText, 'pw');
     expect(deleteSshKey).toHaveBeenCalledWith('user-a', 'key-a', 'user-a');
   });
 });

@@ -1,5 +1,5 @@
-// Another user's resources: the documented 403 (containers, intents,
-// bindings, accounts), 404 (volumes, unknown ids) and the empty "mine" lists.
+// Another user's resources: the documented 403 (scope=all, accounts), 404
+// (containers, volumes, intents, bindings, unknown ids) and the empty "mine" lists.
 // B holds a valid grant on the same server, so only ownership separates them.
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
@@ -124,9 +124,9 @@ describe('cross-user isolation', () => {
       ['GET', '/intents?scope=all', 403],
       ['GET', `/intents?resourceType=container&resourceId=${container.id}`, 404],
       ['GET', '/http-proxy/bindings?scope=all', 403],
-      ['PATCH', `/http-proxy/bindings/${binding.id}`, 403, { targetPort: 9090 }],
-      ['DELETE', `/http-proxy/bindings/${binding.id}`, 403],
-      ['POST', '/http-proxy/bindings', 403, {
+      ['PATCH', `/http-proxy/bindings/${binding.id}`, 404, { targetPort: 9090 }],
+      ['DELETE', `/http-proxy/bindings/${binding.id}`, 404],
+      ['POST', '/http-proxy/bindings', 404, {
         hostname: `b.iso-${h.state.runId}.nyabase-e2e.test`, containerId: container.id, targetPort: 8080,
       }],
     ]);

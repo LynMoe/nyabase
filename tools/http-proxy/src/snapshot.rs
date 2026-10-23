@@ -26,7 +26,6 @@ pub(crate) struct SnapshotState {
     pub(crate) current: Option<Arc<RoutingSnapshot>>,
     pub(crate) generation_high_water: Option<u64>,
     pub(crate) control_epoch: Arc<()>,
-    pub(crate) authorization_epoch: Arc<()>,
 }
 
 impl Default for SnapshotState {
@@ -35,7 +34,6 @@ impl Default for SnapshotState {
             current: None,
             generation_high_water: None,
             control_epoch: Arc::new(()),
-            authorization_epoch: Arc::new(()),
         }
     }
 }
@@ -47,10 +45,27 @@ pub(crate) struct SnapshotLease {
     pub(crate) control_epoch: Arc<()>,
 }
 
+/// What an exchange holds for its whole life: the route it was admitted on
+/// and that hostname's incarnation at the time. The exchange stays
+/// authorized while the current snapshot still carries the same incarnation
+/// for the hostname, so only a change to its own route (or the end of the
+/// lease) ends it, never churn on other sites.
 #[derive(Clone, Debug)]
 pub(crate) struct RouteAuthorization {
     pub(crate) route: Route,
-    pub(crate) authorization_epoch: Arc<()>,
+    pub(crate) incarnation: Arc<()>,
+}
+
+/// A route plus its incarnation. A hostname keeps its incarnation across
+/// snapshots only while every consecutive installed snapshot carries it with
+/// the same authority; a snapshot that drops it, changes its authority, or a
+/// lease that lapses ends the incarnation for good, so a later identical
+/// route cannot revive an exchange that missed the gap (change notifications
+/// coalesce, an exchange may never observe the intermediate snapshot).
+#[derive(Clone, Debug)]
+pub(crate) struct AuthorizedRoute {
+    pub(crate) route: Route,
+    pub(crate) incarnation: Arc<()>,
 }
 
 impl Default for SnapshotStore {
@@ -68,7 +83,7 @@ impl SnapshotStore {
     pub(crate) fn store(&self, snapshot: ProxySnapshot) -> Result<Option<SnapshotLease>> {
         let generation = snapshot.generation;
         let received_at = Instant::now();
-        let routing = Arc::new(RoutingSnapshot::from_received(snapshot, received_at)?);
+        let mut routing = RoutingSnapshot::from_received(snapshot, received_at)?;
         if !routing.is_fresh(Instant::now()) {
             return Err(anyhow!(
                 "HTTP proxy snapshot lease expired before installation"
@@ -81,7 +96,6 @@ impl SnapshotStore {
             .is_some_and(|current| !current.is_fresh(received_at));
         if expired {
             state.current = None;
-            state.authorization_epoch = Arc::new(());
         }
         if state
             .generation_high_water
@@ -94,16 +108,8 @@ impl SnapshotStore {
             warn!(generation, "rejected non-increasing HTTP proxy snapshot");
             return Ok(None);
         }
-        let contracts_authority = state.current.as_ref().is_some_and(|current| {
-            current.routes.values().any(|old_route| {
-                routing
-                    .routes
-                    .get(&old_route.hostname)
-                    .is_none_or(|new_route| !new_route.same_authority(old_route))
-            })
-        });
-        if contracts_authority {
-            state.authorization_epoch = Arc::new(());
+        if let Some(current) = state.current.as_ref() {
+            routing.inherit_incarnations(current);
         }
         let lease = SnapshotLease {
             generation,
@@ -111,7 +117,7 @@ impl SnapshotStore {
             control_epoch: state.control_epoch.clone(),
         };
         let route_count = routing.routes.len();
-        state.current = Some(routing);
+        state.current = Some(Arc::new(routing));
         state.generation_high_water = Some(generation);
         drop(state);
         self.signal_change();
@@ -128,7 +134,6 @@ impl SnapshotStore {
             .is_some_and(|current| !current.is_fresh(now));
         if expired {
             state.current = None;
-            state.authorization_epoch = Arc::new(());
         }
         let current = state.current.clone();
         drop(state);
@@ -149,7 +154,6 @@ impl SnapshotStore {
         });
         if should_expire {
             state.current = None;
-            state.authorization_epoch = Arc::new(());
         }
         drop(state);
         if should_expire {
@@ -206,7 +210,6 @@ impl SnapshotStore {
         state.current = None;
         state.generation_high_water = None;
         state.control_epoch = Arc::new(());
-        state.authorization_epoch = Arc::new(());
         drop(state);
         self.signal_change();
     }
@@ -230,16 +233,14 @@ impl SnapshotStore {
             .is_some_and(|current| !current.is_fresh(now));
         if expired {
             state.current = None;
-            state.authorization_epoch = Arc::new(());
         }
         let authorization = state.current.as_ref().and_then(|snapshot| {
             snapshot
                 .routes
                 .get(hostname)
-                .cloned()
-                .map(|route| RouteAuthorization {
-                    route,
-                    authorization_epoch: state.authorization_epoch.clone(),
+                .map(|current| RouteAuthorization {
+                    route: current.route.clone(),
+                    incarnation: current.incarnation.clone(),
                 })
         });
         drop(state);
@@ -262,20 +263,16 @@ impl SnapshotStore {
             .is_some_and(|current| !current.is_fresh(now));
         if expired {
             state.current = None;
-            state.authorization_epoch = Arc::new(());
         }
-        let deadline =
-            if !expired && Arc::ptr_eq(&state.authorization_epoch, &expected.authorization_epoch) {
-                state.current.as_ref().and_then(|snapshot| {
-                    snapshot
-                        .routes
-                        .get(&expected.route.hostname)
-                        .filter(|route| route.same_authority(&expected.route))
-                        .map(|_| snapshot.deadline)
-                })
-            } else {
-                None
-            };
+        // The incarnation is the whole check: it survives only consecutive
+        // snapshots that keep this hostname with the same authority.
+        let deadline = state.current.as_ref().and_then(|snapshot| {
+            snapshot
+                .routes
+                .get(&expected.route.hostname)
+                .filter(|current| Arc::ptr_eq(&current.incarnation, &expected.incarnation))
+                .map(|_| snapshot.deadline)
+        });
         drop(state);
         if expired {
             self.signal_change();
@@ -300,7 +297,7 @@ pub(crate) struct RoutingSnapshot {
     pub(crate) generation: u64,
     pub(crate) received_at: Instant,
     pub(crate) deadline: Instant,
-    pub(crate) routes: HashMap<String, Route>,
+    pub(crate) routes: HashMap<String, AuthorizedRoute>,
     pub(crate) certs: Vec<DomainCert>,
 }
 
@@ -321,7 +318,13 @@ impl RoutingSnapshot {
         let routes = snapshot
             .routes
             .into_iter()
-            .map(|route| (route.hostname.clone(), route))
+            .map(|route| {
+                let authorized = AuthorizedRoute {
+                    route,
+                    incarnation: Arc::new(()),
+                };
+                (authorized.route.hostname.clone(), authorized)
+            })
             .collect::<HashMap<_, _>>();
         let certs = snapshot
             .domain_pools
@@ -335,6 +338,19 @@ impl RoutingSnapshot {
             routes,
             certs,
         })
+    }
+
+    /// Carries over the incarnation of every hostname whose route the
+    /// installed snapshot `previous` holds with the same authority; every
+    /// other route keeps the fresh incarnation it was received with.
+    pub(crate) fn inherit_incarnations(&mut self, previous: &RoutingSnapshot) {
+        for (hostname, current) in &mut self.routes {
+            if let Some(old) = previous.routes.get(hostname) {
+                if old.route.same_authority(&current.route) {
+                    current.incarnation = old.incarnation.clone();
+                }
+            }
+        }
     }
 
     pub(crate) fn is_fresh(&self, now: Instant) -> bool {

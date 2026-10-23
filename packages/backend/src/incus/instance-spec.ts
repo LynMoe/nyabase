@@ -205,12 +205,45 @@ export function deriveNicHostName(instanceId: string): string {
   return `${MANAGED_NIC_HOST_NAME_PREFIX}${digest.slice(0, 12)}`;
 }
 
-export function deriveInstanceHwaddr(containerId: string): string {
-  const normalizedId = uuid32(containerId, 'container_id');
-  const digest = createHash('sha256').update(normalizedId, 'utf8').digest();
-  const bytes = [digest[0], digest[1], digest[2], digest[3], digest[4], digest[5]];
-  bytes[0] = (bytes[0] & 0xfc) | 0x02;
+/** Locally administered unicast prefix of every guest MAC (Docker uses 02:42). */
+const GUEST_HWADDR_PREFIX = [0x02, 0x6e] as const;
+
+/**
+ * Guest MAC = fixed prefix + the four IPv4 bytes. IPv4 claims are reused after
+ * the drain, but peers (proxies, gateways) keep IP→MAC neighbor entries far
+ * longer, so an address must always resolve to the same MAC.
+ */
+export function deriveGuestHwaddr(ipv4Address: string): string {
+  const address = validateIpv4(ipv4Address, 'guest_ipv4_address');
+  const bytes = [...GUEST_HWADDR_PREFIX, ...address.split('.').map(Number)];
   return bytes.map((byte) => byte.toString(16).padStart(2, '0')).join(':');
+}
+
+/**
+ * The one guest NIC of every nyabase instance (containers and the preflight
+ * probe): bridged onto the server's LAN bridge, IPv4 / MAC filtered to its
+ * address, port-isolated from the other guests and named for the IPv6 guard.
+ * The agent policy refuses any eth0 without these.
+ */
+export function buildGuestNicDevice(input: {
+  readonly parentInterface: string;
+  /** The id the host-side veth name derives from. */
+  readonly hardwareId: string;
+  /** The guest's address; also determines its MAC (see `deriveGuestHwaddr`). */
+  readonly ipv4Address: string;
+}): Record<string, string> {
+  return {
+    type: 'nic',
+    nictype: 'bridged',
+    parent: input.parentInterface,
+    name: 'eth0',
+    hwaddr: deriveGuestHwaddr(input.ipv4Address),
+    host_name: deriveNicHostName(input.hardwareId),
+    'ipv4.address': input.ipv4Address,
+    'security.ipv4_filtering': 'true',
+    'security.mac_filtering': 'true',
+    'security.port_isolation': 'true',
+  };
 }
 
 export interface InstanceSpecContribution {
@@ -288,16 +321,7 @@ export function buildDesiredInstanceSpec(input: InstanceSpecInput): DesiredInsta
       ...diskLimits(input.limits),
     },
     eth0: {
-      type: 'nic',
-      nictype: 'bridged',
-      parent: parentInterface,
-      name: 'eth0',
-      hwaddr: deriveInstanceHwaddr(containerId),
-      host_name: deriveNicHostName(containerId),
-      'ipv4.address': routedIp,
-      'security.ipv4_filtering': 'true',
-      'security.mac_filtering': 'true',
-      'security.port_isolation': 'true',
+      ...buildGuestNicDevice({ parentInterface, hardwareId: containerId, ipv4Address: routedIp }),
       'limits.ingress': `${nonNegativeInteger(input.limits.networkIngressMbit, 'network_ingress')}Mbit`,
       'limits.egress': `${nonNegativeInteger(input.limits.networkEgressMbit, 'network_egress')}Mbit`,
     },

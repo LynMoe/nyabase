@@ -1,5 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import { checkIncusHttp, checkIncusWebSocket, parseIncusPath, type PolicyRequest } from './policy.js';
+import { OperationLedger } from './operation-ledger.js';
+import {
+  checkIncusHttp,
+  checkIncusWebSocket,
+  filterIncusEvent,
+  parseIncusPath,
+  type CurrentDocumentReader,
+  type PolicyRequest,
+} from './policy.js';
 
 const INSTANCE = 'nyc-0123456789abcdef0123456789abcdef';
 const VOLUME = 'nyv-0123456789abcdef0123456789abcdef';
@@ -47,12 +55,24 @@ function instanceDocument(overrides: Record<string, unknown> = {}): Record<strin
   };
 }
 
+const OPERATION = '0b6b2f5e-2f8f-4b64-8a8e-5f4c4c4c4c4c';
 const noCurrent = async (): Promise<undefined> => undefined;
+const noOperations = new OperationLedger();
 
-async function check(request: PolicyRequest, current: Record<string, unknown> | undefined = undefined) {
-  return checkIncusHttp(request, async () => current);
+function context(readCurrent: CurrentDocumentReader, operations = noOperations) {
+  return { readCurrent, operations };
 }
 
+async function check(request: PolicyRequest, current: Record<string, unknown> | undefined = undefined) {
+  return checkIncusHttp(request, context(async () => current));
+}
+
+/*
+ * What the Backend actually sends is checked from its side:
+ * packages/backend/src/agent-policy.contract.test.ts runs the Backend's real
+ * builders and Incus operations through this policy. These tests pin what the
+ * policy refuses.
+ */
 describe('agent Incus policy', () => {
   it('accepts the instance the platform builds', async () => {
     await expect(check({ method: 'POST', path: '/1.0/instances', body: body(instanceDocument({ start: false })) }))
@@ -152,6 +172,54 @@ describe('agent Incus policy', () => {
       .toBe(false);
   });
 
+  it('requires guest NICs to be port-isolated', async () => {
+    const devices = instanceDocument().devices as Record<string, Record<string, string>>;
+    const create = (eth0: Record<string, string>) => check({
+      method: 'POST',
+      path: '/1.0/instances',
+      body: body(instanceDocument({ devices: { ...devices, eth0 } })),
+    });
+    expect((await create(devices.eth0!)).allowed).toBe(true);
+    expect((await create({ ...devices.eth0, 'security.port_isolation': 'false' })).allowed).toBe(false);
+    const unisolated = { ...devices.eth0 };
+    delete unisolated['security.port_isolation'];
+    expect((await create(unisolated)).allowed).toBe(false);
+  });
+
+  it('marks every request that brings a guest NIC up as needing the IPv6 guard', async () => {
+    const needs = async (request: PolicyRequest, current?: Record<string, unknown>) => {
+      const verdict = await check(request, current);
+      expect(verdict.allowed, `${request.method} ${request.path}`).toBe(true);
+      return verdict.allowed && verdict.needsIpv6Guard === true;
+    };
+    const state = (action: string): PolicyRequest =>
+      ({ method: 'PUT', path: `/1.0/instances/${INSTANCE}/state`, body: body({ action }) });
+    expect(await needs(state('start'))).toBe(true);
+    expect(await needs(state('restart'))).toBe(true);
+    expect(await needs(state('unfreeze'))).toBe(true);
+    expect(await needs(state('stop'))).toBe(false);
+    expect(await needs(state('freeze'))).toBe(false);
+    expect(await needs({ method: 'POST', path: '/1.0/instances', body: body(instanceDocument({ start: true })) }))
+      .toBe(true);
+    expect(await needs({ method: 'POST', path: '/1.0/instances', body: body(instanceDocument({ start: false })) }))
+      .toBe(false);
+
+    const { eth0, ...withoutNic } = instanceDocument().devices as Record<string, Record<string, string>>;
+    const update = (devices: Record<string, unknown>): PolicyRequest => ({
+      method: 'PATCH',
+      path: `/1.0/instances/${INSTANCE}`,
+      body: body({ devices }),
+    });
+    const running = { status: 'Running', config: {}, devices: withoutNic };
+    // A NIC hot-plugged into (or changed on) a live guest needs the guard; an unchanged echo does not.
+    expect(await needs(update({ eth0 }), running)).toBe(true);
+    expect(await needs(update({ eth0: { ...eth0, 'limits.egress': '10Mbit' } }), { ...running, devices: { eth0 } }))
+      .toBe(true);
+    expect(await needs(update({ eth0 }), { ...running, devices: { eth0 } })).toBe(false);
+    expect(await needs(update({ eth0 }), { ...running, status: 'Stopped' })).toBe(false);
+    expect(await needs(update({ root: withoutNic.root }), running)).toBe(false);
+  });
+
   it('keeps custom volumes shifted and refuses foreign volumes', async () => {
     const create = { name: VOLUME, type: 'custom', config: { size: '1073741824', 'security.shifted': 'true' } };
     expect((await check({ method: 'POST', path: '/1.0/storage-pools/default/volumes', body: body(create) })).allowed)
@@ -171,6 +239,137 @@ describe('agent Incus policy', () => {
     expect((await check({ method: 'DELETE', path: '/1.0/storage-pools/default' })).allowed).toBe(false);
   });
 
+  it('accepts the platform ownership labels on volumes, but no other user keys', async () => {
+    const labels = { 'user.nyabase.managed': 'true', 'user.nyabase.scope': '0b9f3c7e-0000-4000-8000-000000000001' };
+    const create = { name: VOLUME, type: 'custom', config: { size: '1073741824', 'security.shifted': 'true', ...labels } };
+    expect((await check({ method: 'POST', path: '/1.0/storage-pools/default/volumes', body: body(create) })).allowed)
+      .toBe(true);
+    expect((await check({
+      method: 'PUT',
+      path: `/1.0/storage-pools/default/volumes/custom/${VOLUME}`,
+      body: body({ config: { size: '2147483648', 'security.shifted': 'true', ...labels } }),
+    }, { config: {} })).allowed).toBe(true);
+    expect((await check({
+      method: 'POST',
+      path: '/1.0/storage-pools/default/volumes',
+      body: body({ ...create, config: { ...create.config, 'user.other': 'x' } }),
+    })).allowed).toBe(false);
+  });
+
+  it('refuses volume mounts over kernel pseudo-filesystems', async () => {
+    const withMount = (path: string) => instanceDocument({
+      devices: {
+        ...(instanceDocument().devices as Record<string, unknown>),
+        [ATTACHMENT]: { type: 'disk', pool: 'default', source: VOLUME, path },
+      },
+    });
+    for (const path of ['/proc', '/proc/sys', '/sys', '/sys/fs/cgroup', '/dev', '/dev/shm', '//proc', '/dev/', '/./sys', '/data/../proc']) {
+      const verdict = await check({ method: 'POST', path: '/1.0/instances', body: body(withMount(path)) });
+      expect(verdict.allowed, path).toBe(false);
+    }
+    for (const path of ['/data', '/procfs', '/srv/dev', '/system']) {
+      const verdict = await check({ method: 'POST', path: '/1.0/instances', body: body(withMount(path)) });
+      expect(verdict.allowed, path).toBe(true);
+    }
+  });
+
+  it('requires a volume PUT to keep security.shifted, like PATCH', async () => {
+    const path = `/1.0/storage-pools/default/volumes/custom/${VOLUME}`;
+    const current = { config: { size: '1073741824', 'security.shifted': 'true' } };
+    for (const config of [{ size: '2147483648' }, undefined]) {
+      expect((await check({ method: 'PUT', path, body: body(config ? { config } : { description: '' }) }, current)).allowed)
+        .toBe(false);
+    }
+    expect((await check({ method: 'PUT', path, body: body({ config: { size: '2147483648', 'security.shifted': 'true' } }) }, current)).allowed)
+      .toBe(true);
+    // A PATCH that leaves the key out leaves it as it is.
+    expect((await check({ method: 'PATCH', path, body: body({ config: { size: '2147483648' } }) }, current)).allowed)
+      .toBe(true);
+    expect((await check({ method: 'PATCH', path, body: body({ config: { 'security.shifted': null } }) }, current)).allowed)
+      .toBe(false);
+  });
+
+  it('lets an update echo config Incus already holds, but not change or add it', async () => {
+    const path = `/1.0/storage-pools/default/volumes/custom/${VOLUME}`;
+    // What a pool with volume.zfs.* / volume.snapshots.* defaults gives every new volume.
+    const poolDefaults = { 'zfs.use_refquota': 'true', 'snapshots.schedule': '@daily' };
+    const current = { config: { size: '1073741824', 'security.shifted': 'true', ...poolDefaults } };
+    const put = (config: Record<string, string>) => check({ method: 'PUT', path, body: body({ config }) }, current);
+    expect((await put({ size: '2147483648', 'security.shifted': 'true', ...poolDefaults })).allowed).toBe(true);
+    expect((await put({ size: '2147483648', 'security.shifted': 'true', 'zfs.use_refquota': 'false' })).allowed)
+      .toBe(false);
+    expect((await put({ size: '2147483648', 'security.shifted': 'true', 'zfs.blocksize': '16KiB' })).allowed)
+      .toBe(false);
+    // Nothing is "unchanged" on create.
+    expect((await check({
+      method: 'POST',
+      path: '/1.0/storage-pools/default/volumes',
+      body: body({ name: VOLUME, type: 'custom', config: { size: '1073741824', 'security.shifted': 'true', ...poolDefaults } }),
+    }, current)).allowed).toBe(false);
+
+    const instancePath = `/1.0/instances/${INSTANCE}`;
+    const { config } = instanceDocument() as { config: Record<string, string> };
+    const held = { status: 'Stopped', config: { ...config, 'boot.autostart': 'false' } };
+    const update = (extra: Record<string, string>) => check({
+      method: 'PATCH',
+      path: instancePath,
+      body: body({ config: { ...config, ...extra } }),
+    }, held);
+    expect((await update({ 'boot.autostart': 'false' })).allowed).toBe(true);
+    expect((await update({ 'boot.autostart': 'true' })).allowed).toBe(false);
+    expect((await update({ 'raw.lxc': 'lxc.apparmor.profile=unconfined' })).allowed).toBe(false);
+    // A whole document must still keep the uid shift, whatever the instance holds now.
+    const shiftless = { ...config, 'security.idmap.isolated': 'false' };
+    expect((await check({
+      method: 'PUT',
+      path: instancePath,
+      body: body({ ...instanceDocument({ config: shiftless }), name: undefined, type: undefined, source: undefined }),
+    }, { status: 'Stopped', config: shiftless })).allowed).toBe(false);
+  });
+
+  it('pulls images only from https simplestreams servers, internal mirrors included', async () => {
+    const pull = (server: unknown, protocol: string | null = 'simplestreams') => check({
+      method: 'POST',
+      path: '/1.0/images',
+      body: body({ source: { type: 'image', server, alias: 'ubuntu/24.04', ...(protocol ? { protocol } : {}) } }),
+    });
+    for (const server of [
+      'https://images.linuxcontainers.org',
+      'https://nyabase-images.example.workers.dev/',
+      // In-house mirrors: the host is dedicated to nyabase, and the settings accept these too.
+      'https://10.0.0.8:8443',
+      'https://[fd00::1]/images/',
+      'https://mirror',
+      'https://registry.internal',
+      'https://nas.local',
+      'https://mirror.lan',
+    ]) {
+      expect((await pull(server)).allowed, server).toBe(true);
+    }
+    for (const server of [
+      'http://images.example.com',
+      'https://user:pw@images.example.com',
+      'https://images.example.com/?stream=x',
+      'https://images.example.com/#x',
+      'unix:///var/lib/incus/unix.socket',
+      'not a url',
+      42,
+    ]) {
+      expect((await pull(server)).allowed, String(server)).toBe(false);
+    }
+    expect((await pull('https://images.example.com', 'incus')).allowed).toBe(false);
+    expect((await pull('https://images.example.com', null)).allowed).toBe(false);
+    // Instance creation from a remote image is held to the same rule.
+    const create = (server: string) => check({
+      method: 'POST',
+      path: '/1.0/instances',
+      body: body(instanceDocument({ source: { type: 'image', alias: 'debian/12', server, protocol: 'simplestreams' } })),
+    });
+    expect((await create('https://images.example.com')).allowed).toBe(true);
+    expect((await create('https://192.168.1.10')).allowed).toBe(true);
+    expect((await create('http://192.168.1.10')).allowed).toBe(false);
+  });
+
   it('refuses server, trust, profile and network mutation', async () => {
     for (const request of [
       { method: 'PUT', path: '/1.0', body: body({ config: {} }) },
@@ -182,7 +381,7 @@ describe('agent Incus policy', () => {
       { method: 'GET', path: '/1.0/instances?project=other' },
       { method: 'GET', path: '/1.0/instances?target=node2' },
     ] as const) {
-      expect((await checkIncusHttp(request, noCurrent)).allowed, `${request.method} ${request.path}`).toBe(false);
+      expect((await checkIncusHttp(request, context(noCurrent))).allowed, `${request.method} ${request.path}`).toBe(false);
     }
   });
 
@@ -213,18 +412,59 @@ describe('agent Incus policy', () => {
       { method: 'DELETE', path: `/1.0/instances/${INSTANCE}?recursion=1?&project=other` },
       { method: 'POST', path: `/1.0/instances/${INSTANCE}/exec??&project=other`, body: body({ command: ['true'] }) },
     ] as const) {
-      expect((await checkIncusHttp(request, async () => ({ config: {} }))).allowed, request.path).toBe(false);
+      expect((await checkIncusHttp(request, context(async () => ({ config: {} })))).allowed, request.path).toBe(false);
     }
-    expect(checkIncusWebSocket('/1.0/events??&all-projects=true&type=logging').allowed).toBe(false);
+    expect(checkIncusWebSocket('/1.0/events??&all-projects=true&type=logging', noOperations).allowed).toBe(false);
     expect(parseIncusPath('/1.0/instances?recursion=1&project=default')).toBeDefined();
   });
 
-  it('opens only event and operation websockets', () => {
-    expect(checkIncusWebSocket('/1.0/events').allowed).toBe(true);
-    expect(checkIncusWebSocket('/1.0/operations/0b6b2f5e-2f8f-4b64-8a8e-5f4c4c4c4c4c/websocket?secret=abc').allowed)
-      .toBe(true);
-    expect(checkIncusWebSocket(`/1.0/instances/${INSTANCE}/console`).allowed).toBe(false);
-    expect(checkIncusWebSocket('/1.0/operations/0b6b2f5e-2f8f-4b64-8a8e-5f4c4c4c4c4c/websocket').allowed).toBe(false);
+  it('opens only the event stream and channels of operations the agent started', () => {
+    const started = new OperationLedger();
+    started.record(OPERATION);
+    expect(checkIncusWebSocket('/1.0/events', noOperations)).toEqual({ allowed: true, kind: 'events' });
+    expect(checkIncusWebSocket(`/1.0/operations/${OPERATION}/websocket?secret=abc`, started))
+      .toEqual({ allowed: true, kind: 'operation' });
+    // The host operator's own `incus exec`: its id and secret leak nothing through the agent.
+    expect(checkIncusWebSocket(`/1.0/operations/${OPERATION}/websocket?secret=abc`, noOperations).allowed).toBe(false);
+    expect(checkIncusWebSocket(`/1.0/instances/${INSTANCE}/console`, started).allowed).toBe(false);
+    expect(checkIncusWebSocket(`/1.0/operations/${OPERATION}/websocket`, started).allowed).toBe(false);
+  });
+
+  it('reaches only operations the agent started, and only to read and wait', async () => {
+    const started = new OperationLedger();
+    started.record(OPERATION);
+    const operation = (method: 'GET' | 'DELETE', path: string, operations = started) =>
+      checkIncusHttp({ method, path }, context(noCurrent, operations));
+    expect((await operation('GET', `/1.0/operations/${OPERATION}`)).allowed).toBe(true);
+    expect((await operation('GET', `/1.0/operations/${OPERATION}/wait?timeout=30`)).allowed).toBe(true);
+    // Unknown operations look like Incus' own 404, not like a policy refusal.
+    expect(await operation('GET', `/1.0/operations/${OPERATION}`, noOperations))
+      .toMatchObject({ allowed: false, notFound: true });
+    expect(await operation('GET', `/1.0/operations/${OPERATION}/wait`, noOperations))
+      .toMatchObject({ allowed: false, notFound: true });
+    expect((await operation('DELETE', `/1.0/operations/${OPERATION}`)).allowed).toBe(false);
+    expect((await operation('GET', '/1.0/operations')).allowed).toBe(false);
+    expect((await operation('GET', '/1.0/operations?recursion=1')).allowed).toBe(false);
+  });
+
+  it('relays lifecycle events of nyabase resources only, without who caused them', () => {
+    const event = (source: string, extra: Record<string, unknown> = {}) => JSON.stringify({
+      type: 'lifecycle',
+      timestamp: '2026-10-23T00:00:00Z',
+      metadata: { action: 'instance-started', source, requestor: { username: 'root', address: '@' }, context: {} },
+      ...extra,
+    });
+    expect(JSON.parse(filterIncusEvent(event(`/1.0/instances/${INSTANCE}`))!)).toEqual({
+      type: 'lifecycle',
+      timestamp: '2026-10-23T00:00:00Z',
+      metadata: { action: 'instance-started', source: `/1.0/instances/${INSTANCE}` },
+    });
+    expect(filterIncusEvent(event(`/1.0/storage-pools/default/volumes/custom/${VOLUME}`))).toBeDefined();
+    expect(filterIncusEvent(event('/1.0/instances/customer-db'))).toBeUndefined();
+    expect(filterIncusEvent(event('/1.0/storage-pools/default/volumes/custom/backups'))).toBeUndefined();
+    expect(filterIncusEvent(event(`/1.0/instances/${INSTANCE}`, { type: 'operation' }))).toBeUndefined();
+    expect(filterIncusEvent(event(`/1.0/instances/${INSTANCE}`, { type: 'logging' }))).toBeUndefined();
+    expect(filterIncusEvent('not json')).toBeUndefined();
   });
 });
 
@@ -297,46 +537,8 @@ describe('agent Incus policy body forwarding', () => {
       { method: 'POST', path: '/1.0/images', body: body({ source: { type: 'image', server: 'https://x', Secret: 's' } }) },
       { method: 'POST', path: '/1.0/images/aliases', body: body({ name: 'x', target: 'a'.repeat(64), Description: 'd' }) },
     ] as const) {
-      const verdict = await checkIncusHttp(request, async () => current);
+      const verdict = await checkIncusHttp(request, context(async () => current));
       expect(verdict.allowed, `${request.method} ${request.path} ${request.body.toString()}`).toBe(false);
-    }
-  });
-
-  it('accepts the bodies the Backend sends and forwards them re-serialized', async () => {
-    const current = { config: { 'volatile.idmap.next': '[]' } };
-    const putDocument = {
-      architecture: 'x86_64',
-      config: { ...instanceDocument().config as object, 'volatile.idmap.next': '[]' },
-      description: '',
-      devices: instanceDocument().devices,
-      ephemeral: false,
-      profiles: [],
-      stateful: false,
-    };
-    const probe = {
-      name: 'nyabase-preflight-' + 'b'.repeat(32),
-      type: 'container',
-      profiles: [],
-      source: { type: 'image', alias: 'debian/12', server: 'https://images.example', protocol: 'simplestreams' },
-      config: { 'user.nyabase.preflight': 'true', 'limits.memory': '512MiB', 'security.privileged': 'false', 'security.idmap.isolated': 'true' },
-      devices: { root: { type: 'disk', path: '/', pool: 'default', size: '1073741824' } },
-      start: false,
-    };
-    for (const request of [
-      { method: 'POST', path: '/1.0/instances', body: probe },
-      { method: 'POST', path: `/1.0/instances/${INSTANCE}`, body: { name: 'nyc-' + 'f'.repeat(32) } },
-      { method: 'PUT', path: `/1.0/instances/${INSTANCE}`, body: putDocument },
-      { method: 'PUT', path: `/1.0/instances/${INSTANCE}/state`, body: { action: 'restart', force: true } },
-      { method: 'POST', path: `/1.0/instances/${INSTANCE}/exec`, body: { command: ['bash', '-c', 'true'], 'record-output': false } },
-      { method: 'POST', path: `/1.0/instances/${INSTANCE}/exec`, body: { command: ['/bin/bash'], interactive: true, 'wait-for-websocket': true, width: 80, height: 24, user: 1000, group: 1000 } },
-      { method: 'POST', path: '/1.0/storage-pools/default/volumes', body: { name: VOLUME, type: 'custom', content_type: 'filesystem', config: { size: '1073741824', 'security.shifted': 'true' } } },
-      { method: 'PUT', path: `/1.0/storage-pools/default/volumes/custom/${VOLUME}`, body: { config: { size: '2147483648', 'security.shifted': 'true' }, description: '' } },
-      { method: 'POST', path: '/1.0/images', body: { aliases: [], source: { type: 'image', alias: 'ubuntu/24.04', protocol: 'simplestreams', server: 'https://images.example', image_type: 'container' } } },
-      { method: 'POST', path: '/1.0/images/aliases', body: { name: 'ubuntu/24.04', target: 'a'.repeat(64), type: 'container' } },
-    ] as const) {
-      const raw = body(request.body);
-      const verdict = await checkIncusHttp({ ...request, body: raw }, async () => current);
-      expect(JSON.parse(sent(verdict)), `${request.method} ${request.path}`).toEqual(request.body);
     }
   });
 

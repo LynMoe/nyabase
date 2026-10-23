@@ -20,15 +20,21 @@ import {
   MAX_SSH_PROXY_SNAPSHOT_BYTES,
   MAX_SSH_PROXY_STATUS_CONNECTIONS,
   type SshProxyBackendMessage,
+  type SshProxySnapshot,
+  type SshProxySnapshotSummaryDto,
   type SshProxyStatusReport,
 } from '@nyabase/common';
 import { SshProxySnapshotService } from './ssh-proxy-snapshot.service.js';
 import { NyabaseConfigService } from '../platform/config/nyabase-config.service.js';
 import { ProxySnapshotNotifierService } from '../proxy-snapshots/proxy-snapshot-notifier.service.js';
+import { snapshotBuildFailureMessage } from '../proxy-snapshots/snapshot-build-failure.js';
+import { ProxyControlHeartbeat } from '../proxy-snapshots/proxy-control-heartbeat.js';
 import {
   configuredProxyTokenDigest,
   hasValidBearerToken,
 } from '../platform/proxy-bearer-auth.js';
+
+type SshProxyAuditEvent = ReturnType<typeof zSshProxyAuditEvent.parse>;
 
 export const MAX_SSH_PROXY_BUFFERED_BYTES = MAX_SSH_PROXY_SNAPSHOT_BYTES;
 export const MAX_SSH_PROXY_CLIENTS = 4;
@@ -37,6 +43,10 @@ export const SSH_PROXY_PAUSE_ADMIT_FLUSH_MS = 300;
 const MAX_SSH_PROXY_CONTROL_FRAME_BYTES = 1024 * 1024;
 const MAX_SSH_PROXY_SNAPSHOT_RENEWAL_MS = 60_000;
 const INITIAL_CONNECTION_DEADLINE_MS = 15_000;
+/** Refused logins are summed and logged once per this window. */
+export const SSH_PROXY_REFUSED_LOGIN_SUMMARY_MS = 60_000;
+/** Distinct refusal reasons kept per window; the rest count as `other`. */
+const MAX_REFUSED_LOGIN_REASONS = 16;
 
 function isSshProxyEnvelope(value: unknown): value is {
   kind: 'ack' | 'metrics' | 'status' | 'disconnectAllResult' | 'audit';
@@ -73,6 +83,12 @@ export class SshProxyGateway implements OnModuleInit, OnModuleDestroy {
   /** Slots are reserved synchronously before authentication or snapshot I/O. */
   private initializingClients = new Set<WebSocket>();
   private latestStatus = new Map<WebSocket, SshProxyStatusReport>();
+  /** `validUntil` of the last snapshot sent to each admitted proxy. */
+  private sentLeaseEnds = new Map<WebSocket, number>();
+  /** Refused login attempts by reason since the last summary line. */
+  private refusedLogins = new Map<string, number>();
+  private refusedLoginTimer: NodeJS.Timeout | null = null;
+  private readonly heartbeat = new ProxyControlHeartbeat(() => this.clients);
   private snapshotBroadcastPromise: Promise<void> | null = null;
   private snapshotDirty = false;
   /**
@@ -110,6 +126,7 @@ export class SshProxyGateway implements OnModuleInit, OnModuleDestroy {
       () => this.broadcastSnapshot(),
     );
     this.scheduleSnapshotRenewal();
+    this.heartbeat.start();
   }
 
   attachToHttpServer(server: http.Server): void {
@@ -148,6 +165,7 @@ export class SshProxyGateway implements OnModuleInit, OnModuleDestroy {
 
   async onModuleDestroy(): Promise<void> {
     this.destroyed = true;
+    this.heartbeat.stop();
     this.unregisterSnapshotListener?.();
     this.unregisterSnapshotListener = null;
     try {
@@ -170,9 +188,11 @@ export class SshProxyGateway implements OnModuleInit, OnModuleDestroy {
       for (const client of this.initializingClients) client.terminate();
       if (this.snapshotRenewalTimer) clearTimeout(this.snapshotRenewalTimer);
       this.snapshotRenewalTimer = null;
+      this.flushRefusedLogins();
       this.initializingClients.clear();
       this.clients.clear();
       this.latestStatus.clear();
+      this.sentLeaseEnds.clear();
       this.snapshotDirty = false;
       for (const [requestId, pending] of this.pendingDisconnectAll) {
         clearTimeout(pending.timeout);
@@ -231,6 +251,8 @@ export class SshProxyGateway implements OnModuleInit, OnModuleDestroy {
     bandwidthInBps: number;
     bandwidthOutBps: number;
     updatedAt: string | null;
+    publicEndpoint: { host: string; port: number } | null;
+    snapshot: SshProxySnapshotSummaryDto | null;
     proxies: SshProxyStatusReport[];
   } {
     const proxies = Array.from(this.latestStatus.values())
@@ -253,6 +275,8 @@ export class SshProxyGateway implements OnModuleInit, OnModuleDestroy {
       bandwidthInBps: boundedStatusSum(proxies, (proxy) => proxy.bandwidthInBps),
       bandwidthOutBps: boundedStatusSum(proxies, (proxy) => proxy.bandwidthOutBps),
       updatedAt: safeStatusTimestampIso(last),
+      publicEndpoint: this.snapshots.endpoint(),
+      snapshot: this.snapshots.lastSummary(),
       proxies,
     };
   }
@@ -338,6 +362,7 @@ export class SshProxyGateway implements OnModuleInit, OnModuleDestroy {
       }
       this.initializingClients.delete(ws);
       this.clients.add(ws);
+      this.heartbeat.track(ws);
       ws.on('message', (raw) => this.handleMessage(ws, raw.toString()));
 
       const initialEncoded = JSON.stringify({
@@ -345,7 +370,9 @@ export class SshProxyGateway implements OnModuleInit, OnModuleDestroy {
         kind: 'snapshot',
         payload: initialSnapshot,
       });
-      this.sendOrTerminate(ws, initialEncoded, 'initial snapshot');
+      if (this.sendOrTerminate(ws, initialEncoded, 'initial snapshot')) {
+        this.sentLeaseEnds.set(ws, initialSnapshot.validUntil);
+      }
     } finally {
       this.initializingClients.delete(ws);
     }
@@ -363,11 +390,14 @@ export class SshProxyGateway implements OnModuleInit, OnModuleDestroy {
           this.snapshotDirty = true;
           continue;
         }
-        this.broadcast({ kind: 'update', payload: snapshot });
+        this.broadcastUpdate(snapshot);
       } catch (error) {
-        // Preserve one dirty bit so the next domain event retries. Do not spin
-        // forever on a deterministic snapshot defect.
+        // Preserve one dirty bit so the next domain event or renewal tick
+        // retries. Do not spin forever on a deterministic snapshot defect
+        // (e.g. over the size cap), and never re-send the old routes with a
+        // fresh lease: the proxies fail closed when their lease ends.
         this.snapshotDirty = true;
+        this.logger.error(snapshotBuildFailureMessage('SSH', error, this.sentLeaseEnds.values()));
         throw error;
       }
     }
@@ -392,11 +422,9 @@ export class SshProxyGateway implements OnModuleInit, OnModuleDestroy {
         this.scheduleSnapshotRenewal();
         return;
       }
-      void this.renewSnapshotLease().catch((error: unknown) => {
-        this.logger.warn(
-          `SSH proxy snapshot renewal failed: ${error instanceof Error ? error.message : String(error)}`,
-        );
-      });
+      // A failed build is logged (at error level, with the time the
+      // proxies fail closed) where it happens; the next tick retries.
+      void this.renewSnapshotLease().catch(() => undefined);
     }, renewalMs);
     this.snapshotRenewalTimer.unref();
   }
@@ -440,16 +468,58 @@ export class SshProxyGateway implements OnModuleInit, OnModuleDestroy {
     }
     if (envelope.kind === 'audit') {
       const audit = zSshProxyAuditEvent.safeParse(envelope.payload);
-      if (audit.success) {
-        this.logger.log(`SSH proxy audit action=${audit.data.action} ok=${audit.data.ok} user=${audit.data.username ?? audit.data.userId ?? 'unknown'}`);
-      }
+      if (audit.success) this.recordAudit(audit.data);
     }
   }
 
-  private broadcast(message: SshProxyBackendMessage): void {
+  /**
+   * Successful logins are logged one per line. Refused ones are internet
+   * background noise whose usernames the client chooses; one line per attempt
+   * would rotate the capped container log (and the one-time admin password
+   * line with it), and each attempt is already in the proxy's own journal.
+   * They are summed by reason and logged once per window instead.
+   */
+  private recordAudit(event: SshProxyAuditEvent): void {
+    if (event.ok) {
+      this.logger.log(
+        `SSH proxy audit action=${event.action} ok=true user=${event.username ?? event.userId ?? 'unknown'}`,
+      );
+      return;
+    }
+    const reason = refusalKey(event);
+    const key = this.refusedLogins.has(reason) || this.refusedLogins.size < MAX_REFUSED_LOGIN_REASONS
+      ? reason
+      : 'other';
+    this.refusedLogins.set(key, (this.refusedLogins.get(key) ?? 0) + 1);
+    if (this.refusedLoginTimer || this.destroyed) return;
+    this.refusedLoginTimer = setTimeout(
+      () => this.flushRefusedLogins(),
+      SSH_PROXY_REFUSED_LOGIN_SUMMARY_MS,
+    );
+    this.refusedLoginTimer.unref();
+  }
+
+  private flushRefusedLogins(): void {
+    if (this.refusedLoginTimer) clearTimeout(this.refusedLoginTimer);
+    this.refusedLoginTimer = null;
+    if (this.refusedLogins.size === 0) return;
+    let total = 0;
+    const reasons: string[] = [];
+    for (const [reason, count] of [...this.refusedLogins].sort(([a], [b]) => a.localeCompare(b))) {
+      total += count;
+      reasons.push(`${reason}=${count}`);
+    }
+    this.refusedLogins.clear();
+    this.logger.log(`SSH proxy refused ${total} login attempt(s) since the last summary: ${reasons.join(' ')}`);
+  }
+
+  private broadcastUpdate(snapshot: SshProxySnapshot): void {
+    const message: SshProxyBackendMessage = { kind: 'update', payload: snapshot };
     const encoded = JSON.stringify({ ts: Date.now(), ...message });
     for (const client of this.clients) {
-      this.sendOrTerminate(client, encoded, 'snapshot');
+      if (this.sendOrTerminate(client, encoded, 'snapshot')) {
+        this.sentLeaseEnds.set(client, snapshot.validUntil);
+      }
     }
   }
 
@@ -549,6 +619,7 @@ export class SshProxyGateway implements OnModuleInit, OnModuleDestroy {
   private removeAdmittedClient(client: WebSocket): void {
     this.clients.delete(client);
     this.latestStatus.delete(client);
+    this.sentLeaseEnds.delete(client);
     this.resolveClosedProxy(client);
   }
 
@@ -577,6 +648,12 @@ export class SshProxyGateway implements OnModuleInit, OnModuleDestroy {
       clearTimeout(timer);
     }
   }
+}
+
+/** `action:reason`, printable ASCII only and bounded, for the summary line. */
+function refusalKey(event: SshProxyAuditEvent): string {
+  const raw = `${event.action}:${event.reason ?? 'unknown'}`;
+  return raw.replace(/[^\x21-\x7e]/g, '?').slice(0, 64);
 }
 
 function safeStatusTimestampIso(value: number | undefined): string | null {

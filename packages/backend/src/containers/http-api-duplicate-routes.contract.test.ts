@@ -41,6 +41,7 @@ describe('HTTP API route uniqueness', () => {
       if (first === 'admin' && second) adminResources.add(second);
     }
     expect([...adminResources].sort()).toEqual([
+      'agent-rejections',
       'catalog',
       'groups',
       'ip-pools',

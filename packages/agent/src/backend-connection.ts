@@ -1,10 +1,13 @@
 import WebSocket from 'ws';
 import {
+  AGENT_CLOSE_PROTOCOL_UNSUPPORTED,
   AGENT_HEARTBEAT_INTERVAL_MS,
-  MAX_AGENT_CONTROL_FRAME_BYTES,
+  AGENT_PROTOCOL_VERSION,
+  MAX_AGENT_BACKEND_FRAME_BYTES,
   zAgentBackendFrame,
   type AgentErrorCode,
   type AgentHello,
+  type AgentHostStatus,
   type AgentIncusHttpParams,
   type AgentIncusHttpResult,
   type AgentIncusWebSocketParams,
@@ -22,7 +25,11 @@ export class AgentRequestError extends Error {
 export interface AgentHandlers {
   hello(): Promise<AgentHello>;
   incusHttp(params: AgentIncusHttpParams, signal: AbortSignal): Promise<AgentIncusHttpResult>;
-  incusWebSocket(params: AgentIncusWebSocketParams, signal: AbortSignal): Promise<void>;
+  /**
+   * `signal` cancels the request; `session` ends with the control connection
+   * the request came on, and the bridged stream must not outlive it.
+   */
+  incusWebSocket(params: AgentIncusWebSocketParams, signal: AbortSignal, session: AbortSignal): Promise<void>;
   collectMetrics(signal: AbortSignal): Promise<AgentMetricsResult>;
 }
 
@@ -35,11 +42,18 @@ export interface BackendConnectionOptions {
   /** Called when the Backend refuses the credential (close 4401). */
   readonly onCredentialRejected?: () => Promise<void>;
   readonly maxConcurrentRequests?: number;
+  /** Current host status, sent after welcome and again on every publishStatus(). */
+  readonly status?: () => AgentHostStatus;
 }
 
 /** Close codes the Backend uses on the control socket. */
 export const AGENT_CLOSE_CREDENTIAL_REJECTED = 4401;
 export const AGENT_CLOSE_REPLACED = 4409;
+
+interface SessionEnd {
+  readonly code: number;
+  readonly reason: string;
+}
 
 const WELCOME_TIMEOUT_MS = 10_000;
 const MIN_BACKOFF_MS = 1_000;
@@ -52,16 +66,26 @@ const REJECTED_BACKOFF_MS = 60_000;
  */
 export class BackendConnection {
   private readonly inFlight = new Map<string, AbortController>();
+  /** The control socket once the Backend welcomed it; unsolicited frames go only there. */
+  private welcomedSocket: WebSocket | undefined;
 
   constructor(private readonly options: BackendConnectionOptions) {}
+
+  /** Tell the Backend the host status changed; a no-op while not connected (hello carries it). */
+  publishStatus(): void {
+    const socket = this.welcomedSocket;
+    const status = this.options.status?.();
+    if (!socket || !status || socket.readyState !== WebSocket.OPEN) return;
+    socket.send(JSON.stringify({ type: 'status', status }));
+  }
 
   async run(signal: AbortSignal): Promise<void> {
     let attempt = 0;
     while (!signal.aborted) {
-      let closeCode = 0;
+      let closed: SessionEnd = { code: 0, reason: '' };
       const started = Date.now();
       try {
-        closeCode = await this.session(signal);
+        closed = await this.session(signal);
       } catch (error) {
         this.options.log(`control connection failed: ${error instanceof Error ? error.message : String(error)}`);
       }
@@ -69,27 +93,34 @@ export class BackendConnection {
       if (Date.now() - started > MAX_BACKOFF_MS) attempt = 0;
       let delay = Math.min(MAX_BACKOFF_MS, MIN_BACKOFF_MS * 2 ** attempt);
       attempt += 1;
-      if (closeCode === AGENT_CLOSE_CREDENTIAL_REJECTED) {
+      if (closed.code === AGENT_CLOSE_CREDENTIAL_REJECTED) {
         this.options.log('Backend rejected the agent credential');
         await this.options.onCredentialRejected?.();
         delay = REJECTED_BACKOFF_MS;
+      } else if (closed.code === AGENT_CLOSE_PROTOCOL_UNSUPPORTED) {
+        // Retrying cannot help until one side is upgraded; stay visible but quiet.
+        this.options.log(`Backend refused agent protocol ${AGENT_PROTOCOL_VERSION}: ${closed.reason || 'no reason given'}`);
+        delay = REJECTED_BACKOFF_MS;
+      } else if (closed.code !== 0 && closed.code !== 1000 && closed.code !== 1001) {
+        this.options.log(`control connection closed (${closed.code}${closed.reason ? ` ${closed.reason}` : ''})`);
       }
       await sleep(delay / 2 + Math.random() * (delay / 2), signal);
     }
   }
 
-  /** One connected session; resolves with the close code. */
-  private session(signal: AbortSignal): Promise<number> {
+  /** One connected session; resolves with how it was closed. */
+  private session(signal: AbortSignal): Promise<SessionEnd> {
     return new Promise((resolve, reject) => {
       const socket = new WebSocket(this.options.url, {
         headers: { authorization: `Bearer ${this.options.credential()}` },
         ca: this.options.ca,
         handshakeTimeout: WELCOME_TIMEOUT_MS,
-        maxPayload: MAX_AGENT_CONTROL_FRAME_BYTES,
+        maxPayload: MAX_AGENT_BACKEND_FRAME_BYTES,
         perMessageDeflate: false,
       });
       let welcomed = false;
       let alive = true;
+      const session = new AbortController();
       const welcomeTimer = setTimeout(() => socket.terminate(), WELCOME_TIMEOUT_MS);
       const heartbeat = setInterval(() => {
         if (!alive) {
@@ -130,7 +161,10 @@ export class BackendConnection {
         if (frame.type === 'welcome') {
           welcomed = true;
           clearTimeout(welcomeTimer);
+          this.welcomedSocket = socket;
           this.options.log(`connected to Backend as server ${frame.serverId}`);
+          // The status may have changed between hello and welcome.
+          this.publishStatus();
           return;
         }
         if (!welcomed) {
@@ -141,7 +175,7 @@ export class BackendConnection {
           this.inFlight.get(frame.id)?.abort();
           return;
         }
-        this.serve(socket, frame);
+        this.serve(socket, frame, session.signal);
       });
       socket.once('unexpected-response', (_request, response) => {
         const code = response.statusCode === 401 || response.statusCode === 403
@@ -149,18 +183,20 @@ export class BackendConnection {
           : 0;
         socket.terminate();
         cleanup();
-        resolve(code);
+        resolve({ code, reason: '' });
       });
       const cleanup = (): void => {
+        if (this.welcomedSocket === socket) this.welcomedSocket = undefined;
         clearTimeout(welcomeTimer);
         clearInterval(heartbeat);
         signal.removeEventListener('abort', abort);
+        session.abort();
         for (const controller of this.inFlight.values()) controller.abort();
         this.inFlight.clear();
       };
-      socket.once('close', (code) => {
+      socket.once('close', (code, reason) => {
         cleanup();
-        resolve(code);
+        resolve({ code, reason: reason.toString('utf8').slice(0, 200) });
       });
       socket.once('error', (error) => {
         cleanup();
@@ -169,7 +205,7 @@ export class BackendConnection {
     });
   }
 
-  private serve(socket: WebSocket, request: AgentRequest): void {
+  private serve(socket: WebSocket, request: AgentRequest, session: AbortSignal): void {
     const limit = this.options.maxConcurrentRequests ?? 256;
     if (this.inFlight.has(request.id)) return;
     if (this.inFlight.size >= limit) {
@@ -178,7 +214,7 @@ export class BackendConnection {
     }
     const controller = new AbortController();
     this.inFlight.set(request.id, controller);
-    void this.dispatch(request, controller.signal)
+    void this.dispatch(request, controller.signal, session)
       .then((result) => send(socket, { type: 'response', id: request.id, ok: true, result }))
       .catch((error: unknown) => {
         if (error instanceof AgentRequestError) {
@@ -190,12 +226,12 @@ export class BackendConnection {
       .finally(() => this.inFlight.delete(request.id));
   }
 
-  private dispatch(request: AgentRequest, signal: AbortSignal): Promise<unknown> {
+  private dispatch(request: AgentRequest, signal: AbortSignal, session: AbortSignal): Promise<unknown> {
     switch (request.method) {
       case 'incus.http':
         return this.options.handlers.incusHttp(request.params, signal);
       case 'incus.ws':
-        return this.options.handlers.incusWebSocket(request.params, signal).then(() => ({}));
+        return this.options.handlers.incusWebSocket(request.params, signal, session).then(() => ({}));
       case 'metrics.collect':
         return this.options.handlers.collectMetrics(signal);
     }

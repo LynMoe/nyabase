@@ -120,10 +120,13 @@ export function parseMutatePciAddresses(body: unknown): string[] {
 }
 
 export function gpuOccupiedError() {
-  return gpuConflict(FailureCode.GpuOccupied, 'The server still has GPU claims');
+  return gpuConflict(FailureCode.GpuOccupied, 'GPU is still in use by containers on the server');
 }
 
-/** GPU cannot be switched off while any container holds a card. */
+/**
+ * GPU cannot be switched off while any container holds a card or carries the
+ * NVIDIA runtime (`count` covers both; the DB trigger is the race-safe backstop).
+ */
 export async function assertGpuCanDisable(claims: Pick<GpuClaimsPort, 'count'>): Promise<void> {
   if (await claims.count() > 0) throw gpuOccupiedError();
 }

@@ -45,6 +45,9 @@ const cephPoolMetadata = {
   },
 };
 
+const ACTOR_ID = '00000000-0000-4000-8000-0000000000aa';
+const FAKE_AUDIT = { append: async () => undefined, log: async () => undefined } as never;
+
 function makeService(
   database: ConstructorParameters<typeof StoragePoolsRepository>[0],
   clients: unknown,
@@ -52,8 +55,8 @@ function makeService(
   const repository = new StoragePoolsRepository(database);
   const transactions = new PgTransactionManager(database);
   const discovery = new StoragePoolDiscoveryService(repository, transactions, clients as never);
-  const pools = new StoragePoolsService(repository, transactions, database, discovery);
-  const executors = new SharedBackendExecutorsService(repository, transactions, discovery);
+  const pools = new StoragePoolsService(repository, transactions, database, discovery, FAKE_AUDIT);
+  const executors = new SharedBackendExecutorsService(repository, transactions, discovery, FAKE_AUDIT);
   // One handle for pool and executor operations, as the flows below mix both.
   return Object.assign(pools, {
     listExecutors: executors.listExecutors.bind(executors),
@@ -95,11 +98,11 @@ describePg('storage pool registration and shared mapping', () => {
       const clients = { get: vi.fn().mockResolvedValue(client) };
       const service = makeService(database, clients);
 
-      const discovered = await service.discover(serverId);
+      const discovered = await service.discover(ACTOR_ID, serverId);
       expect(discovered.pools).toEqual([]);
       expect(discovered.identityConflicts).toEqual([]);
 
-      const executors = await service.discoverExecutors(backendId, serverId);
+      const executors = await service.discoverExecutors(ACTOR_ID, backendId, serverId);
       expect(executors.executors).toHaveLength(1);
       expect(executors.executors[0]).toMatchObject({
         backendId,
@@ -109,14 +112,31 @@ describePg('storage pool registration and shared mapping', () => {
         serverStatus: ServerStatus.Online,
       });
 
-      const registered = await service.patchExecutor(backendId, executors.executors[0]!.id, {
+      const registered = await service.patchExecutor(ACTOR_ID, backendId, executors.executors[0]!.id, {
         expectedRevision: executors.executors[0]!.revision,
         registered: true,
       });
       expect(registered.registered).toBe(true);
 
+      // The last executor of a backend that still holds volumes stays registered:
+      // without it nothing could destroy their data.
+      const ownerId = randomUUID();
+      await database.insertInto('iam.users').values({
+        id: ownerId, numeric_id: 200, username: 'shared-owner', password_hash: 'unused',
+        display_name: 'Shared owner', status: 'active', auth_version: 1,
+      }).execute();
+      await database.insertInto('control.volumes').values({
+        id: randomUUID(), owner_id: ownerId, shared_backend_id: backendId, name: 'data',
+        incus_name: `nyv-${randomUUID().replaceAll('-', '')}`, size_bytes: '1024', lifecycle_phase: 'active',
+        revision: 1, needs_attention: false,
+      }).execute();
+      await expect(service.patchExecutor(ACTOR_ID, backendId, registered.id, {
+        expectedRevision: registered.revision,
+        registered: false,
+      })).rejects.toMatchObject({ response: expect.objectContaining({ code: FailureCode.StoragePoolInUse }) });
+
       clients.get.mockResolvedValueOnce(incusClient([{ ...cephPoolMetadata, name: 'cephfs-b' }]));
-      const second = await service.discover(serverId);
+      const second = await service.discover(ACTOR_ID, serverId);
       expect(second.pools).toEqual([]);
       expect(second.identityConflicts[0]).toMatchObject({
         code: FailureCode.StoragePoolInUse,
@@ -152,7 +172,7 @@ describePg('storage pool registration and shared mapping', () => {
         }])),
       });
 
-      const discovered = await service.discover(serverId);
+      const discovered = await service.discover(ACTOR_ID, serverId);
       expect(discovered.pools).toEqual([]);
       expect(discovered.identityConflicts[0]).toMatchObject({
         code: FailureCode.SharedBackendIdentityConflict,
@@ -162,7 +182,7 @@ describePg('storage pool registration and shared mapping', () => {
         serverId,
         incusName: 'cephfs-a',
       });
-      await expect(service.patch(randomUUID(), {
+      await expect(service.patch(ACTOR_ID, randomUUID(), {
         expectedRevision: 1,
         registered: true,
       })).rejects.toMatchObject({ message: 'Storage pool not found' });
@@ -202,7 +222,7 @@ describePg('storage pool registration and shared mapping', () => {
         ])),
       });
 
-      const discovered = await service.discover(serverId);
+      const discovered = await service.discover(ACTOR_ID, serverId);
       expect(discovered.pools).toHaveLength(1);
       expect(discovered.pools[0]).toMatchObject({
         driver: 'dir',
@@ -238,10 +258,10 @@ describePg('storage pool registration and shared mapping', () => {
       const service = makeService(database, {
         get: vi.fn().mockResolvedValue(incusClient([cephPoolMetadata])),
       });
-      await service.discover(serverId);
+      await service.discover(ACTOR_ID, serverId);
       const [executor] = await service.listExecutors(backendId);
       expect(executor?.id).toBeTruthy();
-      await expect(service.patch(executor!.id, {
+      await expect(service.patch(ACTOR_ID, executor!.id, {
         expectedRevision: executor!.revision,
         registered: true,
       })).rejects.toMatchObject({ message: 'Storage pool not found' });
@@ -280,7 +300,7 @@ describePg('storage pool registration and shared mapping', () => {
         }),
       };
       const service = makeService(database, clients);
-      const result = await service.discoverExecutors(backendId);
+      const result = await service.discoverExecutors(ACTOR_ID, backendId);
       expect(result.executors).toHaveLength(1);
       expect(result.executors[0]?.serverId).toBe(onlineId);
       expect(result.identityConflicts).toEqual(expect.arrayContaining([
@@ -311,14 +331,14 @@ describePg('storage pool registration and shared mapping', () => {
         { name: 'dir-bad', driver: 'dir', config: { source: '/bad\npath' } },
       ]);
       const service = makeService(database, { get: vi.fn().mockResolvedValue(client) });
-      const discovered = await service.discover(serverId);
+      const discovered = await service.discover(ACTOR_ID, serverId);
       const dir = discovered.pools.find((pool) => pool.incusName === 'dir-a');
       const bad = discovered.pools.find((pool) => pool.incusName === 'dir-bad');
       expect(dir?.source).toBe('/data1/nyabase/incus');
       expect(dir?.displayName).toBeNull();
       expect(bad?.source).toBeNull();
 
-      const remarked = await service.patch(dir!.id, {
+      const remarked = await service.patch(ACTOR_ID, dir!.id, {
         expectedRevision: dir!.revision,
         displayName: '系统盘',
       });
@@ -326,7 +346,7 @@ describePg('storage pool registration and shared mapping', () => {
       expect(remarked.registered).toBe(false);
       expect(remarked.source).toBe('/data1/nyabase/incus');
 
-      const registered = await service.patch(dir!.id, {
+      const registered = await service.patch(ACTOR_ID, dir!.id, {
         expectedRevision: remarked.revision,
         registered: true,
       });
@@ -361,7 +381,7 @@ describePg('storage pool registration and shared mapping', () => {
           { name: 'dir-bad', driver: 'dir', config: { source: '/bad\npath' } },
         ],
       });
-      const discoveredAgain = await service.discover(serverId);
+      const discoveredAgain = await service.discover(ACTOR_ID, serverId);
       const moved = discoveredAgain.pools.find((pool) => pool.incusName === 'dir-a');
       expect(moved?.source).toBe('/data1/moved');
       expect(moved?.displayName).toBe('系统盘');

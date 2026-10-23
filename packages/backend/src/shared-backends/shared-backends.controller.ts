@@ -18,12 +18,13 @@ import {
   Role,
 } from '@nyabase/common';
 import { RequireRole, CurrentActor } from '../iam/decorators.js';
-import type { Actor } from '../iam/actor.js';
+import { requireUserId, type Actor } from '../iam/actor.js';
 import { SharedBackendsService } from './shared-backends.service.js';
 
 /**
  * Shared backends: `scope=mine` (default) lists the granted ones;
- * `scope=all`, executors and every mutation are admin-only.
+ * `scope=all` lists every backend for operators (executor details for admins);
+ * `scope=all` detail, executors and every mutation are admin-only.
  */
 @Controller('shared-backends')
 export class SharedBackendsController {
@@ -43,19 +44,21 @@ export class SharedBackendsController {
   @Post(':id/executors/discover')
   @RequireRole(Role.Admin)
   @HttpCode(200)
-  discoverExecutors(@Param('id') id: string, @Body() body: unknown) {
+  discoverExecutors(@CurrentActor() actor: Actor, @Param('id') id: string, @Body() body: unknown) {
     const input = zDiscoverSharedExecutorsRequest.parse(body ?? {});
-    return this.service.discoverExecutors(id, input.serverId);
+    return this.service.discoverExecutors(requireUserId(actor), id, input.serverId);
   }
 
   @Patch(':id/executors/:executorId')
   @RequireRole(Role.Admin)
   patchExecutor(
+    @CurrentActor() actor: Actor,
     @Param('id') id: string,
     @Param('executorId') executorId: string,
     @Body() body: unknown,
   ) {
     return this.service.patchExecutor(
+      requireUserId(actor),
       id,
       executorId,
       zPatchSharedBackendExecutorRequest.parse(body),
@@ -73,20 +76,20 @@ export class SharedBackendsController {
 
   @Post()
   @RequireRole(Role.Admin)
-  create(@Body() body: unknown) {
-    return this.service.create(zCreateSharedBackendRequest.parse(body));
+  create(@CurrentActor() actor: Actor, @Body() body: unknown) {
+    return this.service.create(requireUserId(actor), zCreateSharedBackendRequest.parse(body));
   }
 
   @Patch(':id')
   @RequireRole(Role.Admin)
-  patch(@Param('id') id: string, @Body() body: unknown) {
-    return this.service.patch(id, zPatchSharedBackendRequest.parse(body));
+  patch(@CurrentActor() actor: Actor, @Param('id') id: string, @Body() body: unknown) {
+    return this.service.patch(requireUserId(actor), id, zPatchSharedBackendRequest.parse(body));
   }
 
   @Delete(':id')
   @RequireRole(Role.Admin)
   @HttpCode(204)
-  async delete(@Param('id') id: string) {
-    await this.service.delete(id);
+  async delete(@CurrentActor() actor: Actor, @Param('id') id: string) {
+    await this.service.delete(requireUserId(actor), id);
   }
 }

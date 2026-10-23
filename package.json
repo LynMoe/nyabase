@@ -21,6 +21,7 @@
   "scripts": {
     "build": "pnpm --filter @nyabase/agent build && pnpm --filter @nyabase/frontend build && pnpm --filter @nyabase/backend build",
     "build:agent": "pnpm --filter @nyabase/agent build",
+    "build:agent-bundle": "bash scripts/build-agent-bundle.sh",
     "build:frontend": "pnpm --filter @nyabase/frontend build",
     "dev:backend": "pnpm --filter @nyabase/backend dev",
     "dev:frontend": "pnpm --filter @nyabase/frontend dev",

@@ -125,6 +125,8 @@ function makeWorker(overrides: {
     scheduleRetry: vi.fn().mockResolvedValue(undefined),
     settleForObservedRevision: vi.fn().mockResolvedValue(undefined),
     settleOne: vi.fn().mockResolvedValue(true),
+    nextRetryAt: vi.fn().mockResolvedValue(null),
+    pruneSettled: vi.fn().mockResolvedValue(0),
   };
   const withLease = vi.fn(async (
     _claim: unknown,
@@ -319,6 +321,25 @@ describe('ReconcileWorkerService', () => {
     expect(setup.reconciler.reconcile).toHaveBeenCalled();
   });
 
+  it('still processes an intent marked despiteAttention when the resource needs attention', async () => {
+    const setup = makeWorker({ needsAttention: true });
+    setup.listPending.mockResolvedValue({
+      items: [{
+        ...intent(),
+        request: {
+          operation: 'detach_volume',
+          attachmentId: '00000000-0000-4000-8000-000000000009',
+          despiteAttention: true,
+        },
+      }],
+      nextCursor: null,
+    });
+    await setup.worker.runOnce();
+    expect(setup.claims.claim).toHaveBeenCalled();
+    expect(setup.reconciler.reconcile).toHaveBeenCalled();
+    expect(setup.reconciler.markSucceeded).toHaveBeenCalledWith(resourceId, 1);
+  });
+
   it.each(['SSH_DAEMON_PENDING', 'GUEST_NOT_READY'] as const)(
     'does not count %s as Incus lock busy strikes',
     async (code) => {
@@ -336,7 +357,12 @@ describe('ReconcileWorkerService', () => {
   );
 
   it('records a reconcile success through the owning reconciler', async () => {
-    const setup = makeWorker();
+    const setup = makeWorker({
+      reconcile: vi.fn(async (context: { client: { getResources: () => Promise<unknown> } }) => {
+        await context.client.getResources();
+        return { outcome: 'succeeded', observedRevision: 1 };
+      }) as never,
+    });
     await setup.worker.runOnce();
     expect(setup.reconciler.markSucceeded).toHaveBeenCalledWith(resourceId, 1);
     expect(setup.serverHealth.markServer).toHaveBeenCalledWith(
@@ -345,6 +371,196 @@ describe('ReconcileWorkerService', () => {
       undefined,
       undefined,
     );
+  });
+
+  it('never marks a server online from a pass that made no Incus call', async () => {
+    const quiet = makeWorker();
+    await quiet.worker.runOnce();
+    expect(quiet.reconciler.markSucceeded).toHaveBeenCalledWith(resourceId, 1);
+    expect(quiet.serverHealth.markServer).not.toHaveBeenCalled();
+
+    const stale = makeWorker({
+      reconcile: vi.fn().mockResolvedValue({ outcome: 'succeeded', observedRevision: 1, stale: true }),
+    });
+    await stale.worker.runOnce();
+    expect(stale.reconciler.markSucceeded).not.toHaveBeenCalled();
+    expect(stale.intents.settleForObservedRevision).toHaveBeenCalled();
+    expect(stale.serverHealth.markServer).not.toHaveBeenCalled();
+
+    const unreachable = makeWorker({
+      reconcile: vi.fn(async (context: { client: { getResources: () => Promise<unknown> } }) => {
+        await context.client.getResources().catch(() => undefined);
+        return { outcome: 'succeeded', observedRevision: 1 };
+      }) as never,
+      clients: {
+        get: vi.fn().mockResolvedValue(stubIncusClient({
+          getResources: vi.fn().mockRejectedValue(new IncusError('SERVER_UNREACHABLE', 'retry')),
+        })),
+        listServerIds: vi.fn().mockResolvedValue([]),
+      },
+    });
+    await unreachable.worker.runOnce();
+    expect(unreachable.serverHealth.markServer).not.toHaveBeenCalled();
+  });
+
+  it('settles a stale failed outcome as failed without recording a resource failure', async () => {
+    const failure = { code: 'RESTART_SUPERSEDED', message: 'superseded', details: {} };
+    const setup = makeWorker({
+      reconcile: vi.fn().mockResolvedValue({ outcome: 'failed', failure, stale: true }),
+    });
+    await setup.worker.runOnce();
+    expect(setup.reconciler.markFailure).not.toHaveBeenCalled();
+    expect(setup.intents.settleForObservedRevision).toHaveBeenCalledWith(
+      'container',
+      resourceId,
+      1,
+      expect.objectContaining({ outcome: 'failed', failure }),
+    );
+  });
+
+  it('reruns a pass requested while one is in flight instead of dropping it', async () => {
+    const gate = deferred<void>();
+    const setup = makeWorker({
+      reconcile: vi.fn(async () => {
+        await gate.promise;
+        return { outcome: 'succeeded', observedRevision: 1 };
+      }),
+    });
+    const first = setup.worker.runOnce();
+    await vi.waitFor(() => expect(setup.listPending).toHaveBeenCalledTimes(1));
+    const second = setup.worker.runOnce();
+    // The pass waiting on the slow intent lists the queue again at once.
+    await vi.waitFor(() => expect(setup.listPending).toHaveBeenCalledTimes(2));
+    gate.resolve();
+    await Promise.all([first, second]);
+    expect(setup.listPending.mock.calls.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('pages past a full page, excluding intents it already handled', async () => {
+    const setup = makeWorker();
+    const page = (offset: number, count: number) => Array.from({ length: count }, (_, index) => ({
+      ...intent(),
+      id: `00000000-0000-4000-8000-${String(offset + index).padStart(12, '0')}`,
+    }));
+    setup.listPending
+      .mockResolvedValueOnce({ items: page(0, 100), nextCursor: null })
+      .mockResolvedValueOnce({ items: page(100, 3), nextCursor: null })
+      .mockResolvedValue({ items: [], nextCursor: null });
+    await setup.worker.runOnce();
+    const second = setup.listPending.mock.calls[1]![0] as { excludeIds: string[] };
+    expect(second.excludeIds).toHaveLength(100);
+    // One more look once the resource's chain went idle.
+    expect(setup.listPending).toHaveBeenCalledTimes(3);
+    expect(setup.claims.claim).toHaveBeenCalledTimes(103);
+  });
+
+  it('runs other resources while one intent is slow, but never one resource twice at once', async () => {
+    const gate = deferred<void>();
+    const running = new Map<string, number>();
+    let overlap = false;
+    const order: string[] = [];
+    const reconcile = vi.fn(async ({ intent: current }: { intent: { id: string; resourceId: string } }) => {
+      const active = (running.get(current.resourceId) ?? 0) + 1;
+      running.set(current.resourceId, active);
+      if (active > 1) overlap = true;
+      order.push(current.id);
+      if (current.id === 'slow-1') await gate.promise;
+      running.set(current.resourceId, active - 1);
+      return { outcome: 'succeeded', observedRevision: 1 };
+    });
+    const setup = makeWorker({ reconcile: reconcile as never });
+    const other = '00000000-0000-4000-8000-0000000000aa';
+    setup.listPending
+      .mockResolvedValueOnce({
+        items: [
+          { ...intent(), id: 'slow-1' },
+          { ...intent(), id: 'slow-2' },
+          { ...intent(), id: 'fast-1', resourceId: other },
+        ],
+        nextCursor: null,
+      })
+      .mockResolvedValue({ items: [], nextCursor: null });
+
+    const pass = setup.worker.runOnce();
+    await vi.waitFor(() => expect(order).toEqual(['slow-1', 'fast-1']));
+    gate.resolve();
+    await pass;
+
+    expect(order).toEqual(['slow-1', 'fast-1', 'slow-2']);
+    expect(overlap).toBe(false);
+  });
+
+  it('caps how many resources of one server reconcile at once', async () => {
+    const gate = deferred<void>();
+    let active = 0;
+    let peak = 0;
+    const reconcile = vi.fn(async () => {
+      active += 1;
+      peak = Math.max(peak, active);
+      await gate.promise;
+      active -= 1;
+      return { outcome: 'succeeded', observedRevision: 1 };
+    });
+    const setup = makeWorker({ reconcile });
+    const items = Array.from({ length: 6 }, (_, index) => ({
+      ...intent(),
+      id: `intent-${index}`,
+      resourceId: `00000000-0000-4000-8000-00000000010${index}`,
+    }));
+    let listed = false;
+    setup.listPending.mockImplementation(async ({ excludeIds }: { excludeIds: string[] }) => {
+      if (!listed) {
+        listed = true;
+        return { items, nextCursor: null };
+      }
+      return { items: items.filter((item) => !excludeIds.includes(item.id)), nextCursor: null };
+    });
+
+    const pass = setup.worker.runOnce();
+    await vi.waitFor(() => expect(active).toBe(4));
+    gate.resolve();
+    await pass;
+
+    expect(peak).toBe(4);
+    expect(reconcile).toHaveBeenCalledTimes(6);
+  });
+
+  it('does not spin on an intent that stays pending after it was tried', async () => {
+    const setup = makeWorker({ needsAttention: true });
+    await setup.worker.runOnce();
+    // Listed, tried (parked resource: left pending), then one look after its chain went idle.
+    expect(setup.listPending).toHaveBeenCalledTimes(2);
+    expect(setup.claims.claim).not.toHaveBeenCalled();
+  });
+
+  it('arms a timer for the earliest scheduled retry', async () => {
+    vi.useFakeTimers();
+    try {
+      const setup = makeWorker();
+      setup.listPending.mockResolvedValue({ items: [], nextCursor: null });
+      setup.intents.nextRetryAt.mockResolvedValueOnce(new Date(Date.now() + 2_000));
+      await setup.worker.runOnce();
+      expect(setup.listPending).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(2_100);
+      expect(setup.listPending).toHaveBeenCalledTimes(2);
+      await setup.worker.onModuleDestroy();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('starts an event watcher for a server that connects after bootstrap', async () => {
+    const clients = {
+      get: vi.fn().mockResolvedValue(stubIncusClient()),
+      listServerIds: vi.fn().mockResolvedValue([]),
+    };
+    const serverHealth = serverHealthFake({ isServerOnline: false });
+    const setup = makeWorker({ clients, serverHealth });
+    setup.worker.onApplicationBootstrap();
+    await vi.waitFor(() => expect(clients.listServerIds).toHaveBeenCalled());
+    for (const listener of setup.wakeListeners) listener({ reason: 'reconnect', serverId } as never);
+    await vi.waitFor(() => expect(serverHealth.isServerOnline).toHaveBeenCalledWith(serverId));
+    await setup.worker.onModuleDestroy();
   });
 
   it('records a managed failure through the owning reconciler without parking the resource', async () => {

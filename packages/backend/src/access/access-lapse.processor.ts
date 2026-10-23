@@ -31,11 +31,20 @@ const MAX_PAIRS_PER_PASS = 128;
  *
  *  - no ledger row yet: open it (`lapsed_at` = the detection time; never
  *    moved afterwards);
- *  - in grace and not stopped, or with a container running again (an
- *    administrator started it during the grace): stop the user's running
- *    containers there (`stopped_at` keeps the first stop time);
- *  - grace over and not purged: purge the user's containers and volumes there;
- *  - coverage back: delete the row (stopped containers are not restarted).
+ *  - in grace and not yet enforced, or exposed again (an administrator
+ *    started a container or re-attached a volume during the grace): on a
+ *    server, stop the user's running containers there; on a storage pool or
+ *    shared backend, detach the user's volumes there from their containers,
+ *    which keep running and are never deleted for it (`stopped_at` keeps the
+ *    first enforcement time);
+ *  - grace over and not purged: on a server, purge the user's containers and
+ *    local volumes there; on a pool or backend, destroy the user's volumes there;
+ *  - purged pool or backend whose volumes are still attached (a detach whose
+ *    re-drive was not due at the purge): detach them again, with the re-drive
+ *    backoff, until the attachments are gone and the destroys can run;
+ *  - coverage back: delete the row (nothing is restarted or re-attached);
+ *    volumes the purge already marked deleting are still detached, with the
+ *    same backoff and without the row, until their destroys can run.
  *
  * Runs every minute and right after IAM writes commit (`AccessChangeNotifier`).
  * Each pair is leased through `ReconcileClaimRepository` (resource_type
@@ -152,9 +161,11 @@ export class AccessLapseProcessor implements OnModuleInit, OnModuleDestroy {
         case 'lapse':
           return await this.lapseAndAct(current, actor, lease.assertOwned.bind(lease));
         case 'stop':
-          return await this.stopContainers(current, actor, lease.assertOwned.bind(lease));
+          return await this.enforce(current, actor, lease.assertOwned.bind(lease));
         case 'purge':
           return await this.purgeResources(current, actor, lease.assertOwned.bind(lease));
+        case 'detach':
+          return await this.detachAfterPurge(current, actor);
         case 'none':
           return false;
       }
@@ -189,16 +200,22 @@ export class AccessLapseProcessor implements OnModuleInit, OnModuleDestroy {
     assertOwned();
     const opened = { ...candidate, lapse };
     const work = lapseWork(opened);
-    if (work === 'stop') return this.stopContainers(opened, actor, assertOwned);
+    if (work === 'stop') return this.enforce(opened, actor, assertOwned);
     if (work === 'purge') return this.purgeResources(opened, actor, assertOwned);
+    if (work === 'detach') return this.detachAfterPurge(opened, actor);
     return true;
   }
 
-  private async stopContainers(
+  /**
+   * Server: stop the containers. Pool or backend: detach the volumes. A grant
+   * committed since the scan cancels the grace instead.
+   */
+  private async enforce(
     candidate: LapseCandidate,
     actor: Actor,
     assertOwned: () => void,
   ): Promise<boolean> {
+    if (await this.lapses.isCoveredNow(candidate)) return this.lapses.clear(candidate);
     switch (candidate.kind) {
       case 'server':
         await this.purge.stopRunningContainersForGraceEntry(
@@ -208,20 +225,8 @@ export class AccessLapseProcessor implements OnModuleInit, OnModuleDestroy {
         );
         break;
       case 'storage_pool':
-        await this.purge.stopRunningContainersForStoragePool(
-          actor,
-          candidate.userId,
-          candidate.resourceId,
-          this.workerId,
-        );
-        break;
       case 'shared_backend':
-        await this.purge.stopRunningContainersForSharedBackend(
-          actor,
-          candidate.userId,
-          candidate.resourceId,
-          this.workerId,
-        );
+        await this.detachVolumes(candidate, actor);
         break;
     }
     assertOwned();
@@ -244,19 +249,61 @@ export class AccessLapseProcessor implements OnModuleInit, OnModuleDestroy {
     actor: Actor,
     assertOwned: () => void,
   ): Promise<boolean> {
-    switch (candidate.kind) {
-      case 'server':
-        await this.purge.purge(actor, candidate.userId, candidate.resourceId);
-        break;
-      case 'storage_pool':
-        await this.purge.purgeStoragePoolVolumes(actor, candidate.userId, candidate.resourceId);
-        break;
-      case 'shared_backend':
-        await this.purge.purgeSharedBackendVolumes(actor, candidate.userId, candidate.resourceId);
-        break;
+    // Volumes re-attached during the grace (or whose detach failed) are
+    // detached first; that is reversible and goes through its own
+    // transactions, so only a lock-free look at coverage guards it.
+    if (candidate.kind !== 'server' && await this.lapses.isCoveredNow(candidate)) {
+      return this.lapses.clear(candidate);
     }
+    if (candidate.kind !== 'server') await this.detachVolumes(candidate, actor);
     assertOwned();
-    // The purge audit rows are written by the purge itself.
-    return this.lapses.markPurged(candidate, async () => undefined);
+    // Deleting is irreversible: every delete is queued in the transaction that
+    // re-read coverage under the IAM lock, so a grant committed since the scan
+    // still saves the data. The purge audit rows are written by the purge itself.
+    return this.lapses.purgeIfUncovered(candidate, async (transaction) => {
+      const { userId, resourceId } = candidate;
+      switch (candidate.kind) {
+        case 'server':
+          await this.purge.purgeServerInTransaction(transaction, actor, userId, resourceId);
+          break;
+        case 'storage_pool':
+          await this.purge.purgeStoragePoolVolumes(transaction, actor, userId, resourceId);
+          break;
+        case 'shared_backend':
+          await this.purge.purgeSharedBackendVolumes(transaction, actor, userId, resourceId);
+          break;
+      }
+      assertOwned();
+    });
+  }
+
+  /**
+   * After the purge of a pool or backend: the deleting volumes still attached
+   * are detached again (`forceDetach` follows the re-drive backoff), so their
+   * destroys are not left waiting on an attachment no intent will remove.
+   * Reversible, so only the lock-free look at coverage guards it. A covered
+   * user's ledger row is cleared first; without the row (coverage came back)
+   * only the volumes already being destroyed are detached (the purge is not
+   * undone), never the ones the user uses again.
+   */
+  private async detachAfterPurge(candidate: LapseCandidate, actor: Actor): Promise<boolean> {
+    if (candidate.lapse && await this.lapses.isCoveredNow(candidate)) {
+      return this.lapses.clear(candidate);
+    }
+    const { intentIds } = await this.detachVolumes(candidate, actor, {
+      deletingOnly: candidate.lapse === null,
+    });
+    return intentIds.length > 0;
+  }
+
+  /** Pool or backend: detach the user's volumes there from their containers. */
+  private detachVolumes(
+    candidate: LapseCandidate,
+    actor: Actor,
+    options: { readonly deletingOnly?: boolean } = {},
+  ): Promise<{ intentIds: string[] }> {
+    return candidate.kind === 'shared_backend'
+      ? this.purge.detachVolumesForSharedBackend(actor, candidate.userId, candidate.resourceId, options)
+      : this.purge.detachVolumesForStoragePool(actor, candidate.userId, candidate.resourceId, options);
   }
 }

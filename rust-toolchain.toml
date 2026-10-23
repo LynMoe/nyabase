@@ -1,0 +1,9 @@
+# The Rust toolchain the SSH and HTTP proxies (tools/) are built and tested
+# with. rustup looks for this file from the working directory upward, not
+# from --manifest-path, so run cargo from inside the checkout (as
+# scripts/check-rust-proxies.sh does); rustup installs the toolchain on first
+# use. Bump it deliberately, together with a full proxy test run.
+[toolchain]
+channel = "1.95.0"
+profile = "minimal"
+components = ["rustfmt", "clippy"]

@@ -228,6 +228,37 @@ export function checkVolumeResize(
   return null;
 }
 
+export interface ShrinkReservation {
+  /** The reservation to store with the new size; null when the new size covers it. */
+  reservedBytes: number | null;
+  /** How much the committed bytes (`max(size, reservation)`) grow; never negative. */
+  committedDeltaBytes: number;
+}
+
+/**
+ * A resize writes the requested size at once, but a shrink only frees space
+ * when the reconciler applies it, and a shrink the usage turns out to block is
+ * reverted to the size Incus still holds. Until a reconcile verifies the size,
+ * Incus may hold any size the row had since then, so the row keeps the largest
+ * of them reserved and quota / capacity count `max(size, reservation)`
+ * (`committedVolumeBytesSql`, `committedRootBytesSql`). Admission checks only
+ * the growth of that committed figure: re-growing within a pending shrink
+ * costs nothing, and the revert never exceeds what was admitted. Shared by
+ * custom volumes and container root disks.
+ */
+export function shrinkReservation(input: {
+  currentBytes: number;
+  reservedBytes: number | null;
+  requestedBytes: number;
+}): ShrinkReservation {
+  const committedBefore = Math.max(input.currentBytes, input.reservedBytes ?? 0);
+  const reservedBytes = committedBefore > input.requestedBytes ? committedBefore : null;
+  return {
+    reservedBytes,
+    committedDeltaBytes: Math.max(0, input.requestedBytes - committedBefore),
+  };
+}
+
 /** The `nyv-<uuid>` name of every custom volume nyabase creates in Incus. */
 export const MANAGED_VOLUME_NAME = /^nyv-[0-9a-f]{32}$/;
 

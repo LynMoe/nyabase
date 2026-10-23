@@ -24,6 +24,12 @@ export interface ContainerControlTable {
   root_pool_id: string;
   root_size_bytes: ContainerBigInt;
   root_size_pending_bytes: ContainerBigInt | null;
+  /** Largest root size Incus may still hold until a requested shrink is applied (000002). */
+  root_shrink_reserved_bytes: ColumnType<
+    string | null,
+    string | number | bigint | null | undefined,
+    string | number | bigint | null
+  >;
   root_used_bytes: ColumnType<string | null, string | number | bigint | null | undefined, string | number | bigint | null>;
   mem_bytes: ContainerBigInt;
   cpu_set: ColumnType<number[] | null, number[] | null | undefined, number[] | null>;
@@ -72,6 +78,14 @@ export interface ContainerNetworkClaimTable {
   owner_kind: 'container' | 'runtime_cleanup';
   owner_id: string;
   cleanup_payload_json: ContainerJson<Record<string, unknown>> | null;
+}
+
+export interface OrphanSightingTable {
+  server_id: string;
+  kind: 'instance' | 'volume';
+  pool_name: string;
+  name: string;
+  first_seen_at: ContainerGeneratedTimestamp;
 }
 
 export interface ContainerSshRouteTable {
@@ -123,6 +137,7 @@ export interface ContainerControlDatabase {
   'control.user_cpu_sets': UserCpuSetTable;
   'control.container_network_claims': ContainerNetworkClaimTable;
   'control.container_ssh_routes': ContainerSshRouteTable;
+  'control.orphan_sightings': OrphanSightingTable;
   'control.intents': IntentTable;
   'control.reconcile_claims': ReconcileClaimTable;
 }

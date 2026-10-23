@@ -116,12 +116,17 @@ export class ServersController {
     @Param('id') id: string,
     @CurrentActor() actor: Actor,
     @Query('expectedRevision') expectedRevision?: string,
+    @Query('force') force?: string,
   ) {
-    if (expectedRevision === undefined) return this.servers.delete(requireUserId(actor), id);
+    if (force !== undefined && force !== 'true' && force !== 'false') {
+      throw new BadRequestException('force must be true or false');
+    }
+    const forced = force === 'true';
+    if (expectedRevision === undefined) return this.servers.delete(requireUserId(actor), id, undefined, forced);
     const revision = Number(expectedRevision);
     if (!Number.isSafeInteger(revision) || revision < 1) {
       throw new BadRequestException('expectedRevision must be a positive integer');
     }
-    return this.servers.delete(requireUserId(actor), id, revision);
+    return this.servers.delete(requireUserId(actor), id, revision, forced);
   }
 }

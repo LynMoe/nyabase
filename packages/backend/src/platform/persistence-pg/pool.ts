@@ -67,3 +67,26 @@ export function createPgPool(
   attachPgPoolErrorPolicy(pool, logger);
   return pool;
 }
+
+/**
+ * The Backend should connect as the role that owns its database and nothing
+ * more (deploy/OPERATIONS.md, "Database roles"): as a superuser one SQL
+ * injection reaches the host shell (`COPY … TO PROGRAM`) and every other
+ * database. Returns whether the session is a superuser, warning if it is.
+ */
+export async function warnIfSuperuserConnection(
+  pool: Pick<Pool, 'query'>,
+  logger: Pick<PgPoolLogger, 'warn'>,
+): Promise<boolean> {
+  const result = await pool.query<{ superuser: boolean }>(
+    `SELECT current_setting('is_superuser') = 'on' AS superuser`,
+  );
+  const superuser = result.rows[0]?.superuser === true;
+  if (superuser) {
+    logger.warn?.(
+      'Connected to PostgreSQL as a superuser; connect as the non-superuser role '
+      + 'that owns the database instead (see "Database roles" in deploy/OPERATIONS.md)',
+    );
+  }
+  return superuser;
+}

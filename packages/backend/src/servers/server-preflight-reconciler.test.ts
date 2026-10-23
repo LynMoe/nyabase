@@ -1,6 +1,5 @@
-import { createHash } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
-import { deriveInstanceHwaddr, IncusError } from '../incus/index.js';
+import { deriveGuestHwaddr, IncusError } from '../incus/index.js';
 import { ServerConnector } from './server-connector.js';
 import { ServerPreflightStore } from './server-preflight.store.js';
 import { ServerPreflightReconciler } from './server-preflight-reconciler.service.js';
@@ -305,12 +304,7 @@ describe('ServerPreflightReconciler', () => {
     });
 
     const probeName = `nyabase-preflight-${serverId.replaceAll('-', '')}`;
-    const probeHwaddr = deriveInstanceHwaddr(
-      createHash('sha256')
-        .update(`nyabase-preflight:${serverId.replaceAll('-', '').toLowerCase()}`, 'utf8')
-        .digest('hex')
-        .slice(0, 32),
-    );
+    const probeHwaddr = deriveGuestHwaddr('169.254.255.254');
     const probe = {
       config: {
         'user.nyabase.preflight': 'true',
@@ -459,6 +453,7 @@ describe('ServerPreflightReconciler', () => {
             'ipv4.address': '169.254.255.254',
             'security.ipv4_filtering': 'true',
             'security.mac_filtering': 'true',
+            'security.port_isolation': 'true',
           },
         },
         start: false,

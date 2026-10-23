@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { createHash } from 'crypto';
 import { sql, type Transaction } from 'kysely';
 import {
@@ -18,6 +18,7 @@ import { decryptPrivateKey, poolHasSafeTlsLease } from './http-proxy-certificate
 import {
   routeMatchesContainer,
   runSerializable,
+  type DomainPoolRow,
   type HttpExecutor,
 } from './http-proxy-state.js';
 
@@ -162,10 +163,25 @@ export function routableBindings(inputs: SnapshotInputs) {
 /** Builds the versioned routing snapshot the HTTP proxy process consumes. */
 @Injectable()
 export class HttpProxySnapshotService {
+  private readonly logger = new Logger(HttpProxySnapshotService.name);
+
   constructor(
     private readonly transactions: PgTransactionManager,
     private readonly config: NyabaseConfigService,
   ) {}
+
+  private decryptPoolKey(pool: DomainPoolRow): string | null {
+    try {
+      return decryptPrivateKey(this.config.keyEncryptionSecret(), pool.encrypted_private_key_pem!);
+    } catch (error) {
+      this.logger.error(
+        `HTTP domain pool ${pool.id} (${pool.wildcard_domain}) TLS key cannot be decrypted; `
+        + 'serving it without HTTPS until its certificate is uploaded again '
+        + `(${error instanceof Error ? error.message : String(error)})`,
+      );
+      return null;
+    }
+  }
 
   buildSnapshot(): Promise<HttpProxySnapshot> {
     return runSerializable(this.transactions, async (transaction) => {
@@ -190,16 +206,21 @@ export class HttpProxySnapshotService {
             pool.enabled
             && pool.https_enabled
             && poolHasSafeTlsLease(pool, createdAtMs))
-          .map((pool) => ({
-            id: pool.id,
-            wildcardDomain: pool.wildcard_domain,
-            enabled: pool.enabled,
-            httpsEnabled: pool.https_enabled,
-            certificatePem: pool.certificate_pem,
-            privateKeyPem: decryptPrivateKey(this.config.keyEncryptionSecret(), pool.encrypted_private_key_pem!),
-            certificateFingerprint: pool.certificate_fingerprint,
-            certificateNotAfter: pool.certificate_not_after?.toISOString() ?? null,
-          })),
+          .flatMap((pool) => {
+            // One pool whose key no longer decrypts (lost or changed
+            // ssh.keyEncryptionSecret) must not take every route offline.
+            const privateKeyPem = this.decryptPoolKey(pool);
+            return privateKeyPem === null ? [] : [{
+              id: pool.id,
+              wildcardDomain: pool.wildcard_domain,
+              enabled: pool.enabled,
+              httpsEnabled: pool.https_enabled,
+              certificatePem: pool.certificate_pem,
+              privateKeyPem,
+              certificateFingerprint: pool.certificate_fingerprint,
+              certificateNotAfter: pool.certificate_not_after?.toISOString() ?? null,
+            }];
+          }),
       });
       const wireEnvelope = JSON.stringify({
         ts: Number.MAX_SAFE_INTEGER,

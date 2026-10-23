@@ -3,10 +3,20 @@ import { randomUUID } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
 import { testActor } from '../iam/actor.test-helper.js';
 import {
+  days,
+  grantPool,
+  grantServer,
+  seedServer,
+  seedUser,
+  seedVolume,
+} from '../iam/access.pg-test-helper.js';
+import {
   ContainerPowerIntent,
   FailureCode,
   IntentKind,
   IntentResourceType,
+  Role,
+  UserStatus,
 } from '@nyabase/common';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 import { withPostgresTestDatabase } from '../platform/persistence-pg/postgres-test-harness.js';
@@ -677,6 +687,7 @@ describePg('volume capacity locking and scope exclusions', () => {
         poolsRepository,
         transactionManager,
         new StoragePoolDiscoveryService(poolsRepository, transactionManager, {} as never),
+        { append: vi.fn().mockResolvedValue(undefined), log: vi.fn() } as never,
       );
 
       const results = await Promise.allSettled([
@@ -685,7 +696,7 @@ describePg('volume capacity locking and scope exclusions', () => {
           sizeBytes: 600,
           scope: { kind: 'shared', sharedBackendId: backendId },
         }),
-        storageService.patchExecutor(backendId, poolId, {
+        storageService.patchExecutor(userId, backendId, poolId, {
           expectedRevision: 1,
           registered: true,
         }),
@@ -728,6 +739,170 @@ describePg('volume capacity locking and scope exclusions', () => {
         .where('pool_id', '=', poolId)
         .execute();
       expect(rows).toEqual([]);
+    });
+  });
+
+  it('growing a local volume needs the pool grant now; an administrator override does not', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const ownerId = await seedUser(database);
+      const adminId = await seedUser(database, undefined, UserStatus.Active, Role.Admin);
+      const serverId = await seedServer(database);
+      const poolId = await insertLocalPool(database, serverId);
+      await grantServer(database, { user: ownerId }, serverId);
+      // The pool grant lapsed: the owner keeps the server but no longer the pool.
+      await grantPool(database, { user: ownerId }, poolId, days(-1));
+      const volumeId = await seedVolume(database, { ownerId, poolId, serverId });
+      await database.insertInto('control.volume_placements').values({
+        volume_id: volumeId,
+        server_id: serverId,
+        pool_id: poolId,
+        catalog_state: 'present',
+        observed_revision: 1,
+      }).execute();
+      const service = makeService(database);
+
+      await expect(service.patch(testActor(ownerId), volumeId, { expectedRevision: 1, sizeBytes: 200 }))
+        .rejects.toThrow(/Storage pool access is not granted/);
+      expect(await database.selectFrom('control.volumes').select('size_bytes')
+        .where('id', '=', volumeId).executeTakeFirstOrThrow()).toMatchObject({ size_bytes: '100' });
+
+      await service.patch(testActor(adminId, Role.Admin), volumeId, { expectedRevision: 1, sizeBytes: 200 }, 'all');
+      expect(await database.selectFrom('control.volumes').select('size_bytes')
+        .where('id', '=', volumeId).executeTakeFirstOrThrow()).toMatchObject({ size_bytes: '200' });
+    });
+  });
+});
+
+describePg('volume shrink reservations', () => {
+  async function reservationOf(database: Kysely<NyabaseDatabase>, volumeId: string) {
+    return database.selectFrom('control.volumes')
+      .select(['size_bytes', 'shrink_reserved_bytes', 'revision', 'needs_attention'])
+      .where('id', '=', volumeId)
+      .executeTakeFirstOrThrow();
+  }
+
+  it('counts an unverified shrink at the old size, and a revert never exceeds the grant', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const ownerId = await seedUser(database);
+      const serverId = await seedServer(database);
+      const poolId = await insertLocalPool(database, serverId, 10_000);
+      await grantServer(database, { user: ownerId }, serverId, { diskBytes: 1_000 });
+      await grantPool(database, { user: ownerId }, poolId);
+      const volumeId = await seedVolume(database, { ownerId, poolId, serverId });
+      // 1000 bytes, last scanned at 100 used: the floor the API sees is stale.
+      await database.updateTable('control.volumes').set({ size_bytes: 1_000, used_bytes: 100 })
+        .where('id', '=', volumeId).execute();
+      await database.insertInto('control.volume_placements').values({
+        volume_id: volumeId,
+        server_id: serverId,
+        pool_id: poolId,
+        catalog_state: 'present',
+        observed_revision: 1,
+      }).execute();
+      const service = makeService(database);
+      const store = new VolumeReconcileStore(database, new IntentRepository(database, noopWake()));
+      const createRest = (name: string) => service.create(testActor(ownerId), {
+        name,
+        sizeBytes: 800,
+        scope: { kind: 'local', serverId, poolId },
+      });
+
+      await service.patch(testActor(ownerId), volumeId, { expectedRevision: 1, sizeBytes: 200 });
+      expect(await reservationOf(database, volumeId))
+        .toMatchObject({ size_bytes: '200', shrink_reserved_bytes: '1000', revision: 2 });
+      // Incus still holds 1000 bytes: the freed 800 is not spendable yet.
+      await expect(createRest('rest-1')).rejects.toMatchObject({
+        response: { code: FailureCode.StorageGrantExceeded },
+      });
+
+      // Growing back within the reservation costs nothing, although the grant is full.
+      await service.patch(testActor(ownerId), volumeId, { expectedRevision: 2, sizeBytes: 600 });
+      expect(await reservationOf(database, volumeId))
+        .toMatchObject({ size_bytes: '600', shrink_reserved_bytes: '1000', revision: 3 });
+
+      // The worker found revision 2's shrink below usage, but revision 3 replaced it.
+      expect(await store.revertImpossibleShrink(
+        { id: volumeId, revision: 2 },
+        1_000n,
+        900n,
+        'VOLUME_SHRINK_BELOW_USAGE',
+      )).toBe(false);
+      expect(await reservationOf(database, volumeId))
+        .toMatchObject({ size_bytes: '600', shrink_reserved_bytes: '1000', needs_attention: false });
+
+      // Reverting the current revision restores what Incus holds, within the reservation.
+      expect(await store.revertImpossibleShrink(
+        { id: volumeId, revision: 3 },
+        1_000n,
+        900n,
+        'VOLUME_SHRINK_BELOW_USAGE',
+      )).toBe(true);
+      expect(await reservationOf(database, volumeId))
+        .toMatchObject({ size_bytes: '1000', shrink_reserved_bytes: null, needs_attention: true });
+      await expect(createRest('rest-2')).rejects.toMatchObject({
+        response: { code: FailureCode.StorageGrantExceeded },
+      });
+
+      // Once a shrink is verified the space is free.
+      await database.updateTable('control.volumes').set({ used_bytes: 100, needs_attention: false })
+        .where('id', '=', volumeId).execute();
+      await service.patch(testActor(ownerId), volumeId, { expectedRevision: 3, sizeBytes: 200 });
+      await store.recordVerified((await store.readVolume(volumeId, serverId))!, 100n);
+      expect(await reservationOf(database, volumeId))
+        .toMatchObject({ size_bytes: '200', shrink_reserved_bytes: null });
+      await expect(createRest('rest-3')).resolves.toMatchObject({ resourceId: expect.any(String) });
+
+      // Incus holding more than the row ever committed never grows the row:
+      // the volume is only parked.
+      await database.updateTable('control.volumes').set({ revision: 5 }).where('id', '=', volumeId).execute();
+      expect(await store.revertImpossibleShrink(
+        { id: volumeId, revision: 5 },
+        900n,
+        800n,
+        'VOLUME_SHRINK_BELOW_USAGE',
+      )).toBe(true);
+      expect(await reservationOf(database, volumeId))
+        .toMatchObject({ size_bytes: '200', shrink_reserved_bytes: null });
+    });
+  });
+
+  it('growing back within a pending shrink still needs current server and pool coverage', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const ownerId = await seedUser(database);
+      const serverId = await seedServer(database);
+      const poolId = await insertLocalPool(database, serverId, 10_000);
+      await grantServer(database, { user: ownerId }, serverId, { diskBytes: 1_000 });
+      await grantPool(database, { user: ownerId }, poolId);
+      const volumeId = await seedVolume(database, { ownerId, poolId, serverId });
+      await database.updateTable('control.volumes').set({ size_bytes: 1_000, used_bytes: 100 })
+        .where('id', '=', volumeId).execute();
+      await database.insertInto('control.volume_placements').values({
+        volume_id: volumeId,
+        server_id: serverId,
+        pool_id: poolId,
+        catalog_state: 'present',
+        observed_revision: 1,
+      }).execute();
+      const service = makeService(database);
+      await service.patch(testActor(ownerId), volumeId, { expectedRevision: 1, sizeBytes: 200 });
+      expect(await reservationOf(database, volumeId))
+        .toMatchObject({ size_bytes: '200', shrink_reserved_bytes: '1000', revision: 2 });
+
+      // The pool grant is revoked: the grow commits no new bytes, but the
+      // owner is no longer covered.
+      await database.deleteFrom('iam.storage_pool_grants').where('pool_id', '=', poolId).execute();
+      await expect(service.patch(testActor(ownerId), volumeId, { expectedRevision: 2, sizeBytes: 600 }))
+        .rejects.toThrow(/Storage pool access is not granted/);
+      await grantPool(database, { user: ownerId }, poolId);
+      await database.deleteFrom('iam.server_grants').where('server_id', '=', serverId).execute();
+      await expect(service.patch(testActor(ownerId), volumeId, { expectedRevision: 2, sizeBytes: 600 }))
+        .rejects.toThrow(/Server storage access is not granted/);
+      expect(await reservationOf(database, volumeId)).toMatchObject({ size_bytes: '200', revision: 2 });
+
+      // Shrinking further needs no coverage.
+      await service.patch(testActor(ownerId), volumeId, { expectedRevision: 2, sizeBytes: 150 });
+      expect(await reservationOf(database, volumeId))
+        .toMatchObject({ size_bytes: '150', shrink_reserved_bytes: '1000', revision: 3 });
     });
   });
 });

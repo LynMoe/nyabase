@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { IntentKind, IntentResourceType, IntentStatus } from '@nyabase/common';
-import { IntentRepository, isUserRetryIntent } from './intent.repository.js';
+import { IntentRepository, isUserRetryIntent, runsDespiteAttention } from './intent.repository.js';
 import { noopWake } from './reconcile-wake.test-helper.js';
 
 const volumeId = '11111111-1111-4111-8111-111111111111';
@@ -16,6 +16,16 @@ describe('isUserRetryIntent', () => {
     expect(isUserRetryIntent({ operation: 'resize' })).toBe(false);
     expect(isUserRetryIntent({ retryOf: '' })).toBe(false);
     expect(isUserRetryIntent(null)).toBe(false);
+  });
+});
+
+describe('runsDespiteAttention', () => {
+  it('accepts an explicit retry or the despiteAttention marker, nothing else', () => {
+    expect(runsDespiteAttention({ retryOf: retryId })).toBe(true);
+    expect(runsDespiteAttention({ operation: 'detach_volume', despiteAttention: true })).toBe(true);
+    expect(runsDespiteAttention({ operation: 'detach_volume', despiteAttention: 'yes' })).toBe(false);
+    expect(runsDespiteAttention({ operation: 'detach_volume' })).toBe(false);
+    expect(runsDespiteAttention(null)).toBe(false);
   });
 });
 

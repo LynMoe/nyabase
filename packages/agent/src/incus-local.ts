@@ -31,6 +31,8 @@ export class LocalIncusError extends Error {
   constructor(
     readonly code: 'incus_unavailable' | 'timeout' | 'cancelled' | 'too_large',
     message: string,
+    /** The HTTP status Incus answered with, when it answered at all. */
+    readonly status?: number,
   ) {
     super(message);
   }
@@ -114,7 +116,7 @@ export class LocalIncus {
     const response = await this.request({ method, path, timeoutMs });
     const parsed = JSON.parse(response.body.toString('utf8')) as { metadata?: T; error?: string };
     if (response.status < 200 || response.status >= 300) {
-      throw new LocalIncusError('incus_unavailable', parsed.error ?? `Incus returned ${response.status}`);
+      throw new LocalIncusError('incus_unavailable', parsed.error ?? `Incus returned ${response.status}`, response.status);
     }
     return parsed.metadata as T;
   }

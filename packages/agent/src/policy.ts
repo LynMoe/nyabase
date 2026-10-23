@@ -1,5 +1,7 @@
 import {
   GUEST_IPV6_DISABLE_SYSCTLS,
+  imageSourceServerProblem,
+  isForbiddenContainerMountPath,
   MANAGED_ATTACHMENT_DEVICE_PATTERN,
   MANAGED_INSTANCE_NAME_PATTERN,
   MANAGED_NIC_HOST_NAME_PATTERN,
@@ -24,12 +26,18 @@ import {
   serialize,
   type FieldSchema,
 } from './policy-body.js';
+import type { OperationLookup } from './operation-ledger.js';
 
 /*
  * What the Backend may ask the local Incus to do. The agent is the boundary:
  * even a compromised Backend can only manage nyabase instances and volumes as
  * unprivileged, uid-isolated, profile-free containers without host paths,
  * raw LXC config or IPv6. Anything not listed here is refused.
+ *
+ * The policy restricts what the Backend may change: on an update, a config
+ * key echoed with the value Incus holds right now passes as it is (Incus and
+ * the host's pool defaults put keys there the Backend never sets, and a
+ * read-modify-write sends them back). New or changed keys must be allowed.
  */
 
 export type PolicyVerdict =
@@ -41,8 +49,19 @@ export type PolicyVerdict =
      * volatile.* keys forced back to what Incus holds.
      */
     readonly body?: Buffer;
+    /**
+     * The request brings a guest NIC up (a start, or a NIC added or changed on
+     * an instance that is not stopped): the agent forwards it only while the
+     * IPv6 guard is verified in place.
+     */
+    readonly needsIpv6Guard?: boolean;
   }
-  | { readonly allowed: false; readonly reason: string };
+  | {
+    readonly allowed: false;
+    readonly reason: string;
+    /** Answer as Incus answers a resource that does not exist (an operation the agent did not start). */
+    readonly notFound?: boolean;
+  };
 
 export interface PolicyRequest {
   readonly method: AgentIncusHttpMethod;
@@ -53,15 +72,28 @@ export interface PolicyRequest {
 /** Reads the current Incus document (instance, volume) for volatile-key comparison. */
 export type CurrentDocumentReader = (path: string) => Promise<Record<string, unknown> | undefined>;
 
+/** What the policy needs besides the request itself. */
+export interface PolicyContext {
+  readonly readCurrent: CurrentDocumentReader;
+  /** Operations started through this policy (operation-ledger.ts); no other operation is reachable. */
+  readonly operations: OperationLookup;
+}
+
 const ALLOW: PolicyVerdict = { allowed: true };
 const deny = (reason: string): PolicyVerdict => ({ allowed: false, reason });
-const forward = (body: Record<string, unknown>): PolicyVerdict => ({ allowed: true, body: serialize(body) });
+const forward = (body: Record<string, unknown>, needsIpv6Guard = false): PolicyVerdict => (
+  needsIpv6Guard
+    ? { allowed: true, body: serialize(body), needsIpv6Guard }
+    : { allowed: true, body: serialize(body) }
+);
 
 const PROBE_INSTANCE_PATTERN = /^nyabase-preflight-[0-9a-f]{32}$/;
 const IMAGE_FINGERPRINT_PATTERN = /^[0-9a-f]{64}$/;
 const OPERATION_ID_PATTERN = /^[0-9a-f-]{36}$/;
 const ALLOWED_QUERY_KEYS = new Set(['recursion', 'path', 'timeout', 'secret', 'project']);
 const POWER_ACTIONS = new Set(['start', 'stop', 'restart', 'freeze', 'unfreeze']);
+/** Power actions after which guest NICs pass traffic again. */
+const NIC_UP_ACTIONS = new Set(['start', 'restart', 'unfreeze']);
 const CPUSET_PATTERN = /^\d+-\d+(?:,\d+-\d+)*$|^\d+(?:-\d+)?(?:,\d+(?:-\d+)?)+$/;
 const BOOLEAN_VALUES = new Set(['true', 'false']);
 
@@ -105,10 +137,8 @@ function isManagedInstance(name: string | undefined): boolean {
   return name !== undefined && (MANAGED_INSTANCE_NAME_PATTERN.test(name) || PROBE_INSTANCE_PATTERN.test(name));
 }
 
-export async function checkIncusHttp(
-  request: PolicyRequest,
-  readCurrent: CurrentDocumentReader,
-): Promise<PolicyVerdict> {
+export async function checkIncusHttp(request: PolicyRequest, context: PolicyContext): Promise<PolicyVerdict> {
+  const { readCurrent } = context;
   const parsed = parseIncusPath(request.path);
   if (!parsed) return deny('path is malformed or uses a refused query parameter');
   const [, collection, ...rest] = parsed.segments;
@@ -130,19 +160,30 @@ export async function checkIncusHttp(
     case 'images':
       return checkImages(request, rest);
     case 'operations':
-      return checkOperations(request.method, rest);
+      return checkOperations(request.method, rest, context.operations);
     default:
       return deny(`/1.0/${collection} is not reachable through the agent`);
   }
 }
 
-/** Incus WebSockets the Backend may open: the event stream and operation channels. */
-export function checkIncusWebSocket(path: string): PolicyVerdict {
+export type WebSocketVerdict =
+  /** `events`: the agent dials EVENTS_DIAL_PATH and relays only what filterIncusEvent keeps. */
+  | { readonly allowed: true; readonly kind: 'events' | 'operation' }
+  | { readonly allowed: false; readonly reason: string };
+
+/** The only event stream the agent opens: lifecycle events (filtered), never logging or operations. */
+export const EVENTS_DIAL_PATH = '/1.0/events?type=lifecycle';
+
+/**
+ * Incus WebSockets the Backend may open: the (filtered) event stream and the
+ * channels of an operation this agent started (an exec or console it allowed).
+ */
+export function checkIncusWebSocket(path: string, operations: OperationLookup): WebSocketVerdict {
   const parsed = parseIncusPath(path);
-  if (!parsed) return deny('path is malformed');
+  if (!parsed) return { allowed: false, reason: 'path is malformed' };
   const [version, collection, id, leaf] = parsed.segments;
-  if (version !== '1.0') return deny('only the 1.0 API is reachable');
-  if (collection === 'events' && parsed.segments.length === 2) return ALLOW;
+  if (version !== '1.0') return { allowed: false, reason: 'only the 1.0 API is reachable' };
+  if (collection === 'events' && parsed.segments.length === 2) return { allowed: true, kind: 'events' };
   if (
     collection === 'operations'
     && OPERATION_ID_PATTERN.test(id ?? '')
@@ -150,9 +191,44 @@ export function checkIncusWebSocket(path: string): PolicyVerdict {
     && parsed.segments.length === 4
     && parsed.query.has('secret')
   ) {
-    return ALLOW;
+    return operations.knows(id!)
+      ? { allowed: true, kind: 'operation' }
+      : { allowed: false, reason: 'operation was not started through the agent' };
   }
-  return deny('only events and operation websockets are reachable');
+  return { allowed: false, reason: 'only events and operation websockets are reachable' };
+}
+
+/**
+ * The event the Backend may see, or undefined to drop it: lifecycle events of
+ * nyabase instances and volumes only, reduced to what identifies them (the
+ * Backend only wakes on them). Requestor, context and every event about the
+ * host's other workloads stay on the host.
+ */
+export function filterIncusEvent(text: string): string | undefined {
+  let event: unknown;
+  try {
+    event = JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+  if (!isRecord(event) || event.type !== 'lifecycle' || !isRecord(event.metadata)) return undefined;
+  const { action, source } = event.metadata;
+  if (typeof action !== 'string' || typeof source !== 'string' || !isManagedSource(source)) return undefined;
+  return JSON.stringify({
+    type: 'lifecycle',
+    timestamp: typeof event.timestamp === 'string' ? event.timestamp : undefined,
+    metadata: { action, source },
+  });
+}
+
+function isManagedSource(source: string): boolean {
+  const segments = parseIncusPath(source)?.segments;
+  if (!segments || segments[0] !== '1.0') return false;
+  if (segments[1] === 'instances') return isManagedInstance(segments[2]);
+  return segments[1] === 'storage-pools'
+    && segments[3] === 'volumes'
+    && segments[4] === 'custom'
+    && MANAGED_VOLUME_NAME_PATTERN.test(segments[5] ?? '');
 }
 
 async function checkInstances(
@@ -184,16 +260,19 @@ async function checkInstances(
     if (problem) return deny(problem);
     const current = await readCurrent(instancePath);
     if (!current) return deny('instance to update does not exist');
-    const verdict = checkInstanceDocument(body, { full: method === 'PUT' });
+    const currentConfig = stringMap(current.config);
+    const verdict = checkInstanceDocument(body, { full: method === 'PUT', current: currentConfig });
     if (!verdict.allowed) return verdict;
-    return withCurrentVolatile(body, stringMap(current.config));
+    return withCurrentVolatile(body, currentConfig, bringsNicUp(body, current));
   }
   switch (leaf) {
     case 'state':
       if (method === 'GET') return ALLOW;
       if (method !== 'PUT') return deny('instance state only supports read and change');
-      return checkJson(request.body, INSTANCE_STATE_FIELDS, 'instance state', (body) =>
-        POWER_ACTIONS.has(String(body.action)) ? forward(body) : deny('unknown power action'));
+      return checkJson(request.body, INSTANCE_STATE_FIELDS, 'instance state', (body) => {
+        const action = String(body.action);
+        return POWER_ACTIONS.has(action) ? forward(body, NIC_UP_ACTIONS.has(action)) : deny('unknown power action');
+      });
     case 'exec':
       if (method !== 'POST') return deny('exec only supports POST');
       return checkJson(request.body, INSTANCE_EXEC_FIELDS, 'exec', (body) =>
@@ -218,13 +297,30 @@ function checkInstanceCreate(raw: Buffer | undefined): PolicyVerdict {
   if (body.type !== undefined && body.type !== 'container') return deny('only containers may be created');
   const source = body.source;
   if (!isRecord(source) || source.type !== 'image') return deny('instances may only be created from an image');
-  const sourceProblem = fieldsProblem(source, INSTANCE_SOURCE_FIELDS, 'instance source');
+  const sourceProblem = fieldsProblem(source, INSTANCE_SOURCE_FIELDS, 'instance source') ?? imageServerProblem(source);
   if (sourceProblem) return deny(sourceProblem);
   if (isRecord(body.config) && Object.keys(body.config).some((key) => key.startsWith('volatile.'))) {
     return deny('volatile keys may not be set on create');
   }
   const verdict = checkInstanceDocument(body, { full: true });
-  return verdict.allowed ? forward(body) : verdict;
+  return verdict.allowed ? forward(body, body.start === true) : verdict;
+}
+
+/**
+ * Does an instance update plug a NIC into a live guest? Any NIC device that
+ * differs from what the instance has now counts unless it is stopped.
+ */
+function bringsNicUp(body: Record<string, unknown>, current: Record<string, unknown>): boolean {
+  if (!isRecord(body.devices) || String(current.status).toLowerCase() === 'stopped') return false;
+  const before = isRecord(current.devices) ? current.devices : {};
+  return Object.entries(body.devices).some(([name, device]) =>
+    isRecord(device) && device.type === 'nic' && !sameStringMap(device, before[name]));
+}
+
+function sameStringMap(left: Record<string, unknown>, right: unknown): boolean {
+  if (!isRecord(right)) return false;
+  const keys = Object.keys(left);
+  return keys.length === Object.keys(right).length && keys.every((key) => right[key] === left[key]);
 }
 
 /** Parse a JSON body, hold it to `schema`, then let `check` decide on the parsed object. */
@@ -243,6 +339,13 @@ function checkJson(
 interface DocumentCheckOptions {
   /** POST / PUT carry the whole document; PATCH carries a fragment. */
   readonly full: boolean;
+  /** The config Incus holds now (updates only): a key echoed with its current value is not a change. */
+  readonly current?: Readonly<Record<string, string>>;
+}
+
+/** The key is echoed with exactly the value Incus holds now. */
+function unchanged(current: Readonly<Record<string, string>> | undefined, key: string, value: string): boolean {
+  return current !== undefined && Object.hasOwn(current, key) && current[key] === value;
 }
 
 /**
@@ -253,15 +356,16 @@ interface DocumentCheckOptions {
 function withCurrentVolatile(
   body: Record<string, unknown>,
   current: Readonly<Record<string, string>>,
+  needsIpv6Guard = false,
 ): PolicyVerdict {
-  if (!isRecord(body.config)) return forward(body);
+  if (!isRecord(body.config)) return forward(body, needsIpv6Guard);
   const config = Object.fromEntries(
     Object.entries(body.config).flatMap(([key, value]): [string, unknown][] => {
       if (!key.startsWith('volatile.')) return [[key, value]];
       return Object.hasOwn(current, key) ? [[key, current[key]]] : [];
     }),
   );
-  return forward({ ...body, config });
+  return forward({ ...body, config }, needsIpv6Guard);
 }
 
 export function checkInstanceDocument(
@@ -296,9 +400,11 @@ function checkInstanceConfig(
 ): PolicyVerdict {
   for (const [key, value] of Object.entries(config)) {
     if (typeof value !== 'string') return deny(`config ${key} must be a string`);
+    if (unchanged(options.current, key, value)) continue;
     const verdict = checkConfigEntry(key, value);
     if (!verdict.allowed) return verdict;
   }
+  // Whole documents must state these whatever the instance holds now.
   if (options.full) {
     if (config['security.idmap.isolated'] !== 'true') return deny('security.idmap.isolated must be true');
     if (config['security.privileged'] !== undefined && config['security.privileged'] !== 'false') {
@@ -372,7 +478,17 @@ function checkDisk(name: string, device: Readonly<Record<string, string>>): Poli
   }
   if (!MANAGED_ATTACHMENT_DEVICE_PATTERN.test(name)) return deny(`disk ${name} is not a nyabase attachment`);
   if (!MANAGED_VOLUME_NAME_PATTERN.test(device.source ?? '')) return deny(`disk ${name} must mount a nyabase volume`);
-  if (!device.path?.startsWith('/') || device.path === '/') return deny(`disk ${name} path is malformed`);
+  const path = device.path ?? '';
+  if (
+    !path.startsWith('/')
+    || path === '/'
+    || /[\u0000-\u001f\u007f]/.test(path)
+    || path.split('/').some((segment) => segment === '.' || segment === '..')
+  ) {
+    return deny(`disk ${name} path is malformed`);
+  }
+  // A writable volume over a kernel pseudo-filesystem is a runtime escape vector.
+  if (isForbiddenContainerMountPath(path)) return deny(`disk ${name} must not be mounted under /proc, /sys or /dev`);
   return ALLOW;
 }
 
@@ -380,6 +496,7 @@ function checkNic(name: string, device: Readonly<Record<string, string>>): Polic
   if (name !== 'eth0') return deny('the only NIC is eth0');
   if (!onlyKeys(device, NIC_KEYS)) return deny('eth0 has refused keys');
   if (device.nictype !== 'bridged' || !device.parent) return deny('eth0 must be a bridged NIC');
+  if (device['security.port_isolation'] !== 'true') return deny('eth0 must be port-isolated from other guests');
   if (!MANAGED_NIC_HOST_NAME_PATTERN.test(device.host_name ?? '')) {
     return deny('eth0 host_name must carry the IPv6 guard prefix');
   }
@@ -429,12 +546,22 @@ async function checkStoragePools(
     `/1.0/storage-pools/${encodeURIComponent(pool)}/volumes/custom/${encodeURIComponent(name!)}`,
   );
   if (!current) return deny('volume to update does not exist');
-  const verdict = checkVolumeConfig(body.config ?? {});
+  // PUT replaces the whole config: leaving security.shifted out would drop it.
+  if (method === 'PUT' && (!isRecord(body.config) || body.config['security.shifted'] !== 'true')) {
+    return deny('volumes must stay shifted');
+  }
+  const currentConfig = stringMap(current.config);
+  const verdict = checkVolumeConfig(body.config ?? {}, currentConfig);
   if (!verdict.allowed) return verdict;
-  return withCurrentVolatile(body, stringMap(current.config));
+  return withCurrentVolatile(body, currentConfig);
 }
 
-function checkVolumeConfig(config: unknown): PolicyVerdict {
+/**
+ * `current` is the volume's config on an update: driver and snapshot keys the
+ * pool's `volume.*` defaults put there (zfs.*, snapshots.*, ...) are echoed
+ * back unchanged, and only new or changed keys must be on this list.
+ */
+function checkVolumeConfig(config: unknown, current?: Readonly<Record<string, string>>): PolicyVerdict {
   if (!isRecord(config)) return deny('volume config must be an object');
   for (const [key, value] of Object.entries(config)) {
     if (typeof value !== 'string') return deny(`volume config ${key} must be a string`);
@@ -443,7 +570,10 @@ function checkVolumeConfig(config: unknown): PolicyVerdict {
       if (value !== 'true') return deny('volumes must stay shifted');
       continue;
     }
+    if (unchanged(current, key, value)) continue;
     if (key === 'size' || key.startsWith('block.') || key.startsWith('initial.')) continue;
+    // Ownership labels: inert to Incus, they let the Backend tell its volumes apart.
+    if (key.startsWith('user.nyabase.')) continue;
     return deny(`volume config ${key} is not allowed`);
   }
   return ALLOW;
@@ -468,7 +598,7 @@ function checkImages(request: PolicyRequest, rest: readonly string[]): PolicyVer
       if (!isRecord(source) || source.type !== 'image' || typeof source.server !== 'string') {
         return deny('images may only be pulled from a remote image server');
       }
-      const problem = fieldsProblem(source, IMAGE_SOURCE_FIELDS, 'image source');
+      const problem = fieldsProblem(source, IMAGE_SOURCE_FIELDS, 'image source') ?? imageServerProblem(source);
       return problem ? deny(problem) : forward(body);
     });
   }
@@ -476,18 +606,38 @@ function checkImages(request: PolicyRequest, rest: readonly string[]): PolicyVer
   return method === 'DELETE' ? ALLOW : deny('images support read and delete');
 }
 
-function checkOperations(method: AgentIncusHttpMethod, rest: readonly string[]): PolicyVerdict {
+/**
+ * Incus fetches from a remote image server itself, from the host's network.
+ * Only simplestreams over https is allowed, by the same rule the image source
+ * settings are saved with (imageSourceServerProblem in @nyabase/common), so a
+ * source an operator could save is never refused here. In-house mirrors by IP
+ * or internal name are allowed: the host is dedicated to nyabase.
+ */
+export function imageServerProblem(source: Record<string, unknown>): string | undefined {
+  if (source.server === undefined) return undefined;
+  if (typeof source.server !== 'string') return 'image source server must be a string';
+  if (source.protocol !== 'simplestreams') return 'remote images must use the simplestreams protocol';
+  return imageSourceServerProblem(source.server);
+}
+
+/**
+ * Only operations this agent started are reachable, and only to read and wait
+ * on them (the Backend never lists or cancels operations). Any other id is
+ * answered as Incus answers one that does not exist.
+ */
+function checkOperations(
+  method: AgentIncusHttpMethod,
+  rest: readonly string[],
+  operations: OperationLookup,
+): PolicyVerdict {
   const [id, leaf, ...tail] = rest;
-  if (method === 'GET') {
-    if (id === undefined) return ALLOW;
-    return OPERATION_ID_PATTERN.test(id) && (leaf === undefined || leaf === 'wait') && tail.length === 0
-      ? ALLOW
-      : deny('operation path is malformed');
+  if (method !== 'GET' || id === undefined) return deny('operations support read and wait');
+  if (!OPERATION_ID_PATTERN.test(id) || (leaf !== undefined && leaf !== 'wait') || tail.length > 0) {
+    return deny('operation path is malformed');
   }
-  if (method === 'DELETE' && id !== undefined && OPERATION_ID_PATTERN.test(id) && leaf === undefined) {
-    return ALLOW;
-  }
-  return deny('operations support read, wait and cancel');
+  return operations.knows(id)
+    ? ALLOW
+    : { allowed: false, reason: 'operation was not started through the agent', notFound: true };
 }
 
 function stringField(record: Record<string, unknown>, key: string): string | undefined {

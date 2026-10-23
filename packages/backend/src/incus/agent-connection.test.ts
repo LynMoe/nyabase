@@ -1,17 +1,24 @@
-import { EventEmitter } from 'node:events';
+import { EventEmitter, getEventListeners } from 'node:events';
 import { describe, expect, it, vi } from 'vitest';
 import WebSocket from 'ws';
-import type { AgentHello } from '@nyabase/common';
-import { AgentConnection, AgentStreamBroker } from './agent-connection.js';
+import { AGENT_PROTOCOL_VERSION, type AgentHello } from '@nyabase/common';
+import {
+  AGENT_STREAM_REPLY_TIMEOUT_MS,
+  AGENT_STREAM_WAIT_TIMEOUT_MS,
+  AgentConnection,
+  AgentStreamBroker,
+} from './agent-connection.js';
 import { AGENT_CLOSE_REPLACED, AgentRegistry } from './agent-registry.service.js';
+import { BufferedStreamSocket } from './agent-stream-socket.js';
 
 const SERVER_ID = '11111111-1111-4111-8111-111111111111';
 const HELLO: AgentHello = {
   type: 'hello',
-  protocol: 1,
+  protocol: AGENT_PROTOCOL_VERSION,
   agentVersion: '0.1.0',
   hostname: 'worker-1',
   incus: { serverVersion: '7.4', apiExtensions: [] },
+  status: { ipv6Guard: { present: true, error: null } },
 };
 
 class FakeSocket extends EventEmitter {
@@ -122,6 +129,35 @@ describe('agent connection RPC', () => {
     expect(agent.handleFrame({ type: 'hello' })).toBe(false);
   });
 
+  it('takes large frames and replies only for requests it is waiting on or gave up on', async () => {
+    const { socket, agent } = connection();
+    const reply = (id: string) => ({ type: 'response', id, ok: true, result: { status: 200, headers: {}, body: '' } });
+    expect(agent.admits(4 * 1024)).toBe(true);
+    expect(agent.admits(64 * 1024)).toBe(false);
+    // A reply nobody asked for ends the connection.
+    expect(agent.handleFrame(reply('0b6b2f5e-2f8f-4b64-8a8e-5f4c4c4c4c4c'))).toBe(false);
+
+    const controller = new AbortController();
+    const aborted = agent.request({ method: 'GET', path: '/1.0', headers: {}, timeoutMs: 60_000, signal: controller.signal })
+      .catch(() => undefined);
+    const abortedId = socket.lastRequest().id;
+    expect(agent.admits(16 * 1024 * 1024)).toBe(true);
+    controller.abort();
+    await aborted;
+    // Its late reply may still be large, once.
+    expect(agent.admits(16 * 1024 * 1024)).toBe(true);
+    expect(agent.handleFrame(reply(abortedId))).toBe(true);
+    expect(agent.admits(16 * 1024 * 1024)).toBe(false);
+    expect(agent.handleFrame(reply(abortedId))).toBe(false);
+  });
+
+  it('closes on a flood of status frames', () => {
+    const { agent } = connection();
+    const status = { type: 'status', status: { ipv6Guard: { present: true, error: null } } };
+    for (let index = 0; index < 30; index += 1) expect(agent.handleFrame(status)).toBe(true);
+    expect(agent.handleFrame(status)).toBe(false);
+  });
+
   it('pairs the agent-opened stream socket and replays frames sent before anyone listened', async () => {
     const { socket, broker, agent } = connection();
     const opening = agent.openWebSocket('/1.0/events');
@@ -184,6 +220,83 @@ describe('agent connection RPC', () => {
       .toBe(false);
   });
 
+  it('leaves no listener on a long-lived abort signal once each stream settles', async () => {
+    const { socket, broker, agent } = connection();
+    const lifetime = new AbortController();
+    for (let index = 0; index < 20; index += 1) {
+      const opening = agent.openWebSocket('/1.0/events', lifetime.signal);
+      const request = socket.lastRequest();
+      broker.accept(String(request.params.streamId), SERVER_ID, new FakeSocket() as unknown as WebSocket);
+      agent.handleFrame({ type: 'response', id: request.id, ok: true, result: {} });
+      await opening;
+    }
+    const failing = agent.openWebSocket('/1.0/events', lifetime.signal).catch((error) => error);
+    agent.handleFrame({ type: 'response', id: socket.lastRequest().id, ok: false, error: { code: 'internal', message: 'x' } });
+    await failing;
+    expect(getEventListeners(lifetime.signal, 'abort')).toHaveLength(0);
+    expect(broker.pendingCount).toBe(0);
+  });
+
+  it('fails a stream at once when its signal is already aborted', async () => {
+    const broker = new AgentStreamBroker();
+    const aborted = AbortSignal.abort();
+    const { socket } = broker.expect({ serverId: SERVER_ID, isOpen: true, adopt: vi.fn() }, aborted);
+    await expect(socket).rejects.toMatchObject({ code: 'INCUS_TIMEOUT' });
+    expect(broker.pendingCount).toBe(0);
+  });
+
+  it('leaves no stream rejection unhandled when the agent never answers incus.ws', async () => {
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown): void => {
+      unhandled.push(reason);
+    };
+    process.on('unhandledRejection', onUnhandled);
+    // Only timeouts are faked: Node reports unhandled rejections between real macrotasks.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const realTurn = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
+    try {
+      const { socket, broker, agent } = connection();
+      const opening = agent.openWebSocket('/1.0/events').catch((error: unknown) => error);
+      const request = socket.lastRequest();
+      for (let elapsed = 0; elapsed <= AGENT_STREAM_WAIT_TIMEOUT_MS; elapsed += 1_000) {
+        await vi.advanceTimersByTimeAsync(1_000);
+        await realTurn();
+        await realTurn();
+      }
+      await expect(opening).resolves.toMatchObject({
+        code: 'INCUS_TIMEOUT',
+        details: { reason: 'agent_response_timeout' },
+      });
+      expect(socket.sent).toContainEqual({ type: 'cancel', id: request.id });
+      expect(broker.pendingCount).toBe(0);
+      // A stream the agent connects late finds nobody waiting and is refused.
+      expect(broker.accept(String(request.params.streamId), SERVER_ID, new FakeSocket() as unknown as WebSocket))
+        .toBe(false);
+      expect(unhandled).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+      process.off('unhandledRejection', onUnhandled);
+    }
+  });
+
+  it('times the stream out after the reply wait when the agent answers without connecting it', async () => {
+    expect(AGENT_STREAM_WAIT_TIMEOUT_MS).toBeGreaterThan(AGENT_STREAM_REPLY_TIMEOUT_MS);
+    vi.useFakeTimers();
+    try {
+      const { socket, broker, agent } = connection();
+      const opening = agent.openWebSocket('/1.0/events').catch((error: unknown) => error);
+      agent.handleFrame({ type: 'response', id: socket.lastRequest().id, ok: true, result: {} });
+      await vi.advanceTimersByTimeAsync(AGENT_STREAM_WAIT_TIMEOUT_MS);
+      await expect(opening).resolves.toMatchObject({
+        code: 'INCUS_TIMEOUT',
+        details: { phase: 'connect', reason: 'agent_stream_timeout' },
+      });
+      expect(broker.pendingCount).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('treats an agent-side failure as retryable without calling the server unreachable', async () => {
     const { socket, agent } = connection();
     const pending = agent.request({ method: 'GET', path: '/1.0', headers: {}, timeoutMs: 1_000 });
@@ -194,6 +307,82 @@ describe('agent connection RPC', () => {
       error: { code: 'internal', message: 'agent is at its concurrent request limit' },
     });
     await expect(pending).rejects.toMatchObject({ code: 'AGENT_REQUEST_FAILED', disposition: 'retry' });
+  });
+
+  it('retries a start the agent held back for its IPv6 guard', async () => {
+    const { socket, agent } = connection();
+    const pending = agent.request({ method: 'PUT', path: '/1.0/instances/nyc-0/state', headers: {}, timeoutMs: 1_000 });
+    agent.handleFrame({
+      type: 'response',
+      id: socket.lastRequest().id,
+      ok: false,
+      error: { code: 'ipv6_guard_missing', message: 'the IPv6 guard is not in place' },
+    });
+    await expect(pending).rejects.toMatchObject({ code: 'AGENT_IPV6_GUARD_MISSING', disposition: 'retry' });
+  });
+
+  it('tracks the host status the agent reports after hello', () => {
+    const onStatus = vi.fn();
+    const agent = new AgentConnection(
+      SERVER_ID,
+      HELLO,
+      new FakeSocket() as unknown as WebSocket,
+      new AgentStreamBroker(),
+      onStatus,
+    );
+    expect(agent.status.ipv6Guard.present).toBe(true);
+    const lost = { ipv6Guard: { present: false, error: 'nft: table vanished' } };
+    expect(agent.handleFrame({ type: 'status', status: lost })).toBe(true);
+    expect(agent.status).toEqual(lost);
+    expect(onStatus).toHaveBeenCalledWith(agent);
+    expect(agent.handleFrame({ type: 'status', status: { ipv6Guard: { present: 'yes' } } })).toBe(false);
+  });
+});
+
+describe('buffered stream socket', () => {
+  function buffered(maxBytes: number, maxFrames: number) {
+    const raw = Object.assign(new FakeSocket(), { terminate: vi.fn() });
+    return { raw, stream: new BufferedStreamSocket(raw as unknown as WebSocket, maxBytes, maxFrames) };
+  }
+
+  async function listen(stream: BufferedStreamSocket): Promise<string[]> {
+    const events: string[] = [];
+    stream.on('message', (data) => events.push(`message:${String(data)}`));
+    stream.on('error', (error) => events.push(`error:${(error as Error).message.split(' ').slice(0, 3).join(' ')}`));
+    stream.on('close', (code) => events.push(`close:${String(code)}`));
+    await new Promise((resolve) => setImmediate(resolve));
+    return events;
+  }
+
+  it('holds frames up to its limits', async () => {
+    const { raw, stream } = buffered(8, 2);
+    raw.emit('message', Buffer.from('1234'), true);
+    raw.emit('message', Buffer.from('5678'), true);
+    expect(stream.bufferedCount).toBe(2);
+    expect(raw.terminate).not.toHaveBeenCalled();
+    expect(await listen(stream)).toEqual(['message:1234', 'message:5678']);
+  });
+
+  it('terminates with an error once unconsumed bytes exceed the cap', async () => {
+    const { raw, stream } = buffered(8, 100);
+    raw.emit('message', Buffer.from('12345'), true);
+    raw.emit('message', [Buffer.from('67'), Buffer.from('89')], true);
+    expect(raw.terminate).toHaveBeenCalledOnce();
+    expect(stream.bufferedCount).toBe(0);
+    // Whatever the dying socket still reports is dropped; the overflow is what callers see.
+    raw.emit('message', Buffer.from('late'), true);
+    raw.emit('close', 1006, Buffer.alloc(0));
+    expect(await listen(stream)).toEqual(['error:agent stream buffered', 'close:1009']);
+  });
+
+  it('terminates once too many frames are held, telling a close-only listener', async () => {
+    const { raw, stream } = buffered(1_000, 2);
+    const closes: unknown[] = [];
+    stream.once('close', (code) => closes.push(code));
+    for (const frame of ['a', 'b', 'c']) raw.emit('message', Buffer.from(frame), false);
+    expect(raw.terminate).toHaveBeenCalledOnce();
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(closes).toEqual([1009]);
   });
 });
 
@@ -228,5 +417,17 @@ describe('agent registry', () => {
     expect(registry.isConnected(SERVER_ID)).toBe(false);
     await new Promise((resolve) => setImmediate(resolve));
     expect(events).toEqual([`up:${SERVER_ID}`, `up:${SERVER_ID}`, `down:${SERVER_ID}`]);
+  });
+
+  it('closes sockets that have not registered yet on disconnect', () => {
+    const registry = new AgentRegistry();
+    const early = { close: vi.fn() };
+    const left = { close: vi.fn() };
+    registry.trackPending(SERVER_ID, early);
+    const untrack = registry.trackPending(SERVER_ID, left);
+    untrack();
+    registry.disconnect(SERVER_ID, 4401, 'credential revoked');
+    expect(early.close).toHaveBeenCalledWith(4401, 'credential revoked');
+    expect(left.close).not.toHaveBeenCalled();
   });
 });

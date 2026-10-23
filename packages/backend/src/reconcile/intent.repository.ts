@@ -26,6 +26,7 @@ import {
   intentIdempotencyKey,
   mapRow,
   objectValue,
+  RETRY_OF_FIELD,
   type CreatePendingIntentInput,
   type EnsurePendingIntentInput,
   type IntentExecutor,
@@ -91,8 +92,13 @@ export class IntentRepository {
     return mapRow(row);
   }
 
+  /**
+   * A fresh pending copy of a failed intent, attributed to whoever retries it
+   * (`null` for the system), not to the original requester.
+   */
   async retry(
     sourceIntentId: string,
+    requestedBy: string | null,
     executor: IntentExecutor = this.database,
   ): Promise<IntentRecord> {
     assertUuidLike(sourceIntentId, 'Source intent id');
@@ -115,16 +121,25 @@ export class IntentRepository {
       resourceType: source.resource_type,
       resourceId: source.resource_id,
       serverId: source.server_id,
-      requestedBy: source.requested_by,
+      requestedBy,
       request: {
         ...request,
-        retryOf: sourceIntentId,
+        [RETRY_OF_FIELD]: sourceIntentId,
       },
       targetRevision,
       baseline: objectValue(source.baseline_json),
     }, executor);
   }
 
+  /**
+   * A shrink the volume's usage blocked was reverted to the actual size
+   * (`revertImpossibleShrink`); retrying it asks for the smaller size again.
+   * Only ever downwards: a failed grow already left the row at its size, and
+   * raising the row here would skip every grant and capacity check (it may
+   * have been shrunk and the quota spent since). Any other retry reconciles
+   * toward the row as it is now. Like any shrink, the size it leaves stays
+   * reserved until the worker verifies it (`shrinkReservation` in volumes).
+   */
   private async restoreVolumeResizeSize(
     kind: string,
     resourceId: string,
@@ -138,8 +153,12 @@ export class IntentRepository {
     }
     await executor
       .updateTable('control.volumes')
-      .set({ size_bytes: sizeBytes })
+      .set({
+        size_bytes: sizeBytes,
+        shrink_reserved_bytes: sql<string>`greatest(size_bytes, coalesce(shrink_reserved_bytes, 0))`,
+      })
       .where('id', '=', resourceId)
+      .where('size_bytes', '>', String(sizeBytes))
       .where('lifecycle_phase', 'not in', ['deleting', 'failed'])
       .execute();
   }
@@ -279,7 +298,7 @@ export class IntentRepository {
   }
 
   async listPending(
-    options: Omit<IntentListOptions, 'status'> = {},
+    options: Omit<IntentListOptions, 'status'> & { readonly excludeIds?: readonly string[] } = {},
     executor: IntentExecutor = this.database,
   ): Promise<IntentPage> {
     if (options.resourceType) assertResourceType(options.resourceType);
@@ -319,6 +338,9 @@ export class IntentRepository {
         expression('next_attempt_at', 'is', null),
         expression('next_attempt_at', '<=', options.readyAt!),
       ]));
+    }
+    if (options.excludeIds && options.excludeIds.length > 0) {
+      query = query.where('id', 'not in', [...options.excludeIds]);
     }
     const rows = await query.execute();
     const pageRows = rows.slice(0, limit);
@@ -374,10 +396,54 @@ export class IntentRepository {
         ? matches.find((row) => row.status === IntentStatus.Succeeded)
         : undefined)
       ?? (reuseFailed
-        ? matches.find((row) => row.status === IntentStatus.Failed)
+        ? matches.find((row) => row.status === IntentStatus.Failed
+          && (!input.reuseFailedSettledAfter
+            || (asDate(row.settled_at)?.getTime() ?? 0) >= input.reuseFailedSettledAfter.getTime()))
         : undefined);
     if (existing) return mapRow(existing);
     return this.createPending(input, executor);
+  }
+
+  /**
+   * Retention: delete one batch of settled intents created before `olderThan`.
+   * The newest intent of each resource is always kept (its status and retry
+   * button stay visible); pending intents are never touched.
+   */
+  async pruneSettled(
+    olderThan: Date,
+    batchSize = 500,
+    executor: IntentExecutor = this.database,
+  ): Promise<number> {
+    const result = await sql<{ id: string }>`
+      DELETE FROM control.intents
+      WHERE id IN (
+        SELECT old.id
+        FROM control.intents AS old
+        WHERE old.status <> ${IntentStatus.Pending}
+          AND old.created_at < ${olderThan}
+          AND EXISTS (
+            SELECT 1 FROM control.intents AS newer
+            WHERE newer.resource_type = old.resource_type
+              AND newer.resource_id = old.resource_id
+              AND (newer.created_at, newer.id) > (old.created_at, old.id)
+          )
+        ORDER BY old.created_at, old.id
+        LIMIT ${batchSize}
+      )
+      RETURNING id
+    `.execute(executor);
+    return result.rows.length;
+  }
+
+  /** The earliest future retry time among pending intents, for the worker's retry timer. */
+  async nextRetryAt(executor: IntentExecutor = this.database): Promise<Date | null> {
+    const row = await executor
+      .selectFrom('control.intents')
+      .select((eb) => eb.fn.min('next_attempt_at').as('next'))
+      .where('status', '=', IntentStatus.Pending)
+      .where('next_attempt_at', '>', sql<Date>`clock_timestamp()`)
+      .executeTakeFirst();
+    return asDate(row?.next as Date | string | null | undefined);
   }
 
   async scheduleRetry(

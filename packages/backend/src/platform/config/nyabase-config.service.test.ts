@@ -153,6 +153,18 @@ describe('NyabaseConfigService production secrets and config file mode', () => {
       .toThrow(/ssh\.keyEncryptionSecret/);
   });
 
+  it('rejects a short or JWT-reused ssh.keyEncryptionSecret in production', () => {
+    vi.stubEnv('NYABASE_CONFIG_FILE', '/tmp/nyabase-config-missing.yaml');
+    vi.stubEnv('NODE_ENV', 'production');
+    vi.stubEnv('JWT_SECRET', jwtSecret);
+    vi.stubEnv('SSH_KEY_ENCRYPTION_SECRET', 'short');
+    expect(() => new NyabaseConfigService().validateProductionSecrets())
+      .toThrow(/at least 32 characters/);
+    vi.stubEnv('SSH_KEY_ENCRYPTION_SECRET', jwtSecret);
+    expect(() => new NyabaseConfigService().validateProductionSecrets())
+      .toThrow(/must differ from auth\.jwtSecret/);
+  });
+
   it('never returns auth.jwtSecret from keyEncryptionSecret in production', () => {
     const dir = tempDir();
     const configFile = writeProductionConfig(dir, jwtSecret, keySecret, 0o400);

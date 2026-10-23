@@ -19,6 +19,7 @@ smoke_project="nyabase-smoke-$$"
 smoke_env="$smoke_root/smoke.env"
 smoke_config="$smoke_root/config.yaml"
 smoke_override="$smoke_root/override.yaml"
+smoke_app_role="$smoke_root/postgres-app-role.sh"
 smoke_image="${NYABASE_SMOKE_IMAGE:-nyabase-backend:ci}"
 
 cleanup_smoke() {
@@ -49,9 +50,9 @@ cleanup_smoke() {
 trap cleanup_smoke EXIT
 
 {
-  echo 'POSTGRES_DB=nyabase'
-  echo 'POSTGRES_USER=nyabase'
-  echo 'POSTGRES_PASSWORD=smoke-postgres-password'
+  echo 'NYABASE_VERSION=smoke'
+  echo 'POSTGRES_PASSWORD=smoke-postgres-superuser-password'
+  echo 'NYABASE_DB_PASSWORD=smoke-postgres-password'
   echo 'DATABASE_URL=postgresql://nyabase:smoke-postgres-password@postgres:5432/nyabase'
   echo 'DB_POOL_MAX=4'
   echo 'PG_CONNECTION_TIMEOUT_MS=30000'
@@ -65,6 +66,7 @@ trap cleanup_smoke EXIT
   echo 'VM_MIN_FREE_DISK_SPACE_BYTES=16MiB'
   echo "SMOKE_CONFIG_PATH=$smoke_config"
   echo "NYABASE_SMOKE_IMAGE=$smoke_image"
+  echo "SMOKE_APP_ROLE_PATH=$smoke_app_role"
 } >"$smoke_env"
 chmod 0600 "$smoke_env"
 
@@ -114,8 +116,15 @@ if ! chown 10001:10001 "$smoke_config" 2>/dev/null; then
 fi
 [[ "$(stat -c '%u:%g:%a' "$smoke_config")" == '10001:10001:400' ]]
 
+# A checkout made with umask 077: the role script is readable by its owner
+# only, never by the postgres image's own user.
+install -m 0600 deploy/postgres-app-role.sh "$smoke_app_role"
+
 cat >"$smoke_override" <<'YAML'
 services:
+  postgres-app-role:
+    volumes: !override
+      - ${SMOKE_APP_ROLE_PATH}:/opt/nyabase/postgres-app-role.sh:ro
   backend:
     image: ${NYABASE_SMOKE_IMAGE}
     build: !reset null
@@ -123,9 +132,6 @@ services:
       - "127.0.0.1::3001"
     volumes: !override
       - ${SMOKE_CONFIG_PATH}:/etc/nyabase/config.yaml:ro
-  victoriametrics:
-    ports: !override
-      - "127.0.0.1::8428"
 YAML
 
 compose=(
@@ -168,6 +174,40 @@ process.stdin.on("end", () => {
   const tmp = host.Tmpfs?.["/tmp"] ?? "";
   for (const expected of ["rw", "nosuid", "nodev", "noexec", "uid=10001", "gid=10001"]) {
     if (!tmp.includes(expected)) throw new Error(`/tmp tmpfs is missing ${expected}`);
+  }
+});'
+
+# The Backend's role owns its database and its schemas but is no superuser.
+[[ "$(
+  "${compose[@]}" exec -T postgres \
+    psql -U postgres -d nyabase --no-psqlrc --tuples-only --no-align --set=ON_ERROR_STOP=1 \
+    --command="SELECT
+      NOT role.rolsuper AND NOT role.rolcreatedb AND NOT role.rolcreaterole
+      AND NOT role.rolreplication AND NOT role.rolbypassrls
+      AND (SELECT pg_get_userbyid(datdba) FROM pg_database WHERE datname = 'nyabase') = 'nyabase'
+      AND NOT EXISTS (
+        SELECT 1 FROM pg_namespace
+        WHERE nspname IN ('audit', 'control', 'iam', 'infra', 'interaction', 'system')
+          AND pg_get_userbyid(nspowner) <> 'nyabase'
+      )
+      FROM pg_roles AS role WHERE role.rolname = 'nyabase'"
+)" == t ]]
+
+# Provisioning is idempotent: run again, it checks and changes nothing.
+app_role_output="$("${compose[@]}" run --rm --no-TTY postgres-app-role)"
+[[ "$app_role_output" == *'role nyabase (not a superuser) owns database nyabase'* ]]
+[[ "$app_role_output" != *created* ]]
+
+docker inspect "$("${compose[@]}" ps -q victoriametrics)" | node -e '
+let input = "";
+process.stdin.on("data", (chunk) => { input += chunk; });
+process.stdin.on("end", () => {
+  const [container] = JSON.parse(input);
+  const host = container.HostConfig;
+  if (host.ReadonlyRootfs !== true) throw new Error("VictoriaMetrics root filesystem is writable");
+  if (!host.CapDrop?.includes("ALL")) throw new Error("VictoriaMetrics capabilities were not dropped");
+  if (Object.keys(host.PortBindings ?? {}).length !== 0) {
+    throw new Error("VictoriaMetrics publishes a host port");
   }
 });'
 

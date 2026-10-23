@@ -105,6 +105,7 @@ describePg('ServerHealthService PostgreSQL inventory and status', () => {
           new PgTransactionManager(database),
           database,
           {} as never,
+          { append: vi.fn(), log: vi.fn() } as never,
         ),
         { registerServerHealth: vi.fn() } as never,
         { watch: vi.fn() } as never,

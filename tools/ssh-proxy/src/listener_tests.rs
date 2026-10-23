@@ -144,6 +144,7 @@ async fn auth_deadline_only_fires_for_unauthenticated_sessions() {
         std::future::pending::<Result<()>>(),
         &pending_connection,
         Duration::from_millis(20),
+        None,
     )
     .await
     .unwrap_err();
@@ -159,6 +160,7 @@ async fn auth_deadline_only_fires_for_unauthenticated_sessions() {
             std::future::pending::<Result<()>>(),
             &authenticated,
             Duration::from_millis(20),
+            None,
         ),
     )
     .await;
@@ -277,4 +279,99 @@ async fn one_client_ip_cannot_exhaust_pre_auth_slots() {
         "closing a connection did not free its slot"
     );
     listener.task.abort();
+}
+
+#[tokio::test]
+async fn pre_auth_sockets_cannot_fill_the_whole_pool() {
+    let mut config = test_config();
+    config.max_connections = 8;
+    config.max_preauth_connections = 2;
+    let listener = start_public_listener(config).await;
+
+    // Different addresses, so only the pre-auth cap can refuse the third.
+    let mut first = connect_from("127.0.0.1", listener.address).await;
+    let mut second = connect_from("127.0.0.2", listener.address).await;
+    assert!(read_banner(&mut first).await.is_some());
+    assert!(read_banner(&mut second).await.is_some());
+    let mut third = connect_from("127.0.0.3", listener.address).await;
+    assert!(read_banner(&mut third).await.is_none());
+    listener.task.abort();
+}
+
+#[tokio::test]
+async fn one_office_ip_may_hold_its_whole_per_ip_total_in_pre_auth() {
+    // `ssh -J` / ansible fan-out from one NAT: every handshake is pre-auth at
+    // once, and only the per-IP total limits it while the pool has room.
+    let mut config = test_config();
+    config.max_connections = 32;
+    config.max_connections_per_ip = 16;
+    config.max_connections_per_ipv6_48 = 32;
+    config.max_preauth_connections = 24;
+    let listener = start_public_listener(config).await;
+
+    let mut clients = Vec::new();
+    for _ in 0..16 {
+        let mut client = connect_from("127.0.0.1", listener.address).await;
+        assert!(read_banner(&mut client).await.is_some());
+        clients.push(client);
+    }
+    let mut seventeenth = connect_from("127.0.0.1", listener.address).await;
+    assert!(read_banner(&mut seventeenth).await.is_none());
+    listener.task.abort();
+}
+
+#[tokio::test]
+async fn a_full_pre_auth_pool_evicts_the_heaviest_source_for_a_fresh_one() {
+    let mut config = test_config();
+    config.max_connections = 8;
+    config.max_preauth_connections = 2;
+    let listener = start_public_listener(config).await;
+
+    let mut oldest = connect_from("127.0.0.1", listener.address).await;
+    let mut newer = connect_from("127.0.0.1", listener.address).await;
+    assert!(read_banner(&mut oldest).await.is_some());
+    assert!(read_banner(&mut newer).await.is_some());
+    // The pool is full of one source; a fresh source still gets in and the
+    // heavy source's oldest unauthenticated connection is closed for it.
+    let mut fresh = connect_from("127.0.0.2", listener.address).await;
+    assert!(read_banner(&mut fresh).await.is_some());
+    let mut buffer = [0_u8; 256];
+    let closed = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            match oldest.read(&mut buffer).await {
+                Ok(0) | Err(_) => break,
+                Ok(_) => continue,
+            }
+        }
+    })
+    .await;
+    assert!(
+        closed.is_ok(),
+        "the evicted pre-auth connection stayed open"
+    );
+    listener.task.abort();
+}
+
+#[test]
+fn authentication_releases_the_pre_auth_slot_but_not_the_connection_slot() {
+    use proxy_common::conn_limit::{ConnectionLimiter, LimitSettings};
+    let limiter = ConnectionLimiter::new(LimitSettings {
+        global: 4,
+        per_client: 4,
+        per_site: 4,
+        pending: 1,
+    });
+    let peer: std::net::SocketAddr = "127.0.0.1:2700".parse().unwrap();
+    let mut permit = limiter.try_acquire(peer.ip()).unwrap();
+    let (connection, _) = ConnectionState::new(1, peer);
+    connection.hold_pending(permit.take_pending());
+    assert_eq!(limiter.pending_available(), 0);
+    assert!(limiter.try_acquire(peer.ip()).is_err());
+
+    let public_key = crate::snapshot::parse_authorized_key(ALICE_KEY).unwrap();
+    connection.set_authenticated("alice", &public_key, "user-a", "alice", None);
+    assert_eq!(limiter.pending_available(), 1);
+    assert_eq!(limiter.active_for(peer.ip()), 1);
+    drop(permit);
+    assert_eq!(limiter.active_for(peer.ip()), 0);
 }

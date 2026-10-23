@@ -3,6 +3,7 @@ use crate::session::OwnedResolvedRoute;
 use crate::snapshot::RoutingSnapshot;
 use futures_util::future::{AbortHandle, AbortRegistration, Abortable};
 use proxy_common::clock::now_ms;
+use proxy_common::conn_limit::PendingPermit;
 use russh::keys::PublicKey;
 use serde::Serialize;
 use std::collections::HashMap;
@@ -16,6 +17,14 @@ use tracing::debug;
 pub(crate) const MAX_CHANNELS_PER_CONNECTION: usize = 16;
 
 pub(crate) const MAX_CHILD_TASKS_PER_CONNECTION: usize = 64;
+
+/// Upper bound on the serialized per-connection details in one status frame.
+/// The Backend closes control frames over 1 MiB (code 1009); the rest of the
+/// report is a few hundred bytes, so this leaves ample headroom.
+pub(crate) const MAX_STATUS_CONNECTION_DETAIL_BYTES: usize = 512 * 1024;
+
+/// Mirrors `MAX_SSH_PROXY_STATUS_CONNECTIONS` in `@nyabase/common`.
+pub(crate) const MAX_STATUS_CONNECTION_DETAILS: usize = 1024;
 
 pub(crate) struct ProxyRuntime {
     pub(crate) proxy_id: String,
@@ -54,7 +63,15 @@ pub(crate) struct ConnectionState {
     pub(crate) authenticated_public_key: Mutex<Option<PublicKey>>,
     pub(crate) authenticated_user_id: Mutex<Option<String>>,
     pub(crate) authenticated_username: Mutex<Option<String>>,
+    /// Most recent route (login-pinned or last bridged), for status display only.
     pub(crate) route: Mutex<Option<ConnectionRouteInfo>>,
+    /// Route bound by a jump-format login; revoking it ends the connection.
+    pub(crate) pinned_route: Mutex<Option<ConnectionRouteInfo>>,
+    /// Route of every live direct-tcpip bridge, keyed by its child task id.
+    /// Each is revalidated on every snapshot and closed on its own.
+    pub(crate) bridge_routes: Mutex<HashMap<u64, ConnectionRouteInfo>>,
+    /// Pre-authentication slot from the listener; released on authentication.
+    pub(crate) pending_permit: Mutex<Option<PendingPermit>>,
     pub(crate) abort_handle: AbortHandle,
     pub(crate) revoked: AtomicBool,
     pub(crate) next_child_id: AtomicU64,
@@ -79,6 +96,15 @@ impl Drop for ChildTaskCleanup {
 }
 
 impl ChildTaskPermit {
+    /// Records the route this child bridges to, so snapshot revalidation can
+    /// close this child alone when that route is revoked. Done before the
+    /// caller's final authorization check, so no snapshot can slip between.
+    pub(crate) fn bind_route(&self, route: &OwnedResolvedRoute) {
+        if let Some(id) = self.id {
+            lock(&self.connection.bridge_routes).insert(id, ConnectionRouteInfo::from(route));
+        }
+    }
+
     pub(crate) fn spawn<F>(mut self, future: F)
     where
         F: Future<Output = ()> + Send + 'static,
@@ -116,7 +142,28 @@ pub(crate) struct ConnectionRouteInfo {
     pub(crate) routed_ip: String,
 }
 
+impl From<&OwnedResolvedRoute> for ConnectionRouteInfo {
+    fn from(route: &OwnedResolvedRoute) -> Self {
+        Self {
+            user_id: route.user_id.clone(),
+            username: route.username.clone(),
+            server_id: route.server_id.clone(),
+            server_slug: route.server_slug.clone(),
+            container_id: route.container_id.clone(),
+            container_name: route.container_name.clone(),
+            instance_name: route.instance_name.clone(),
+            routed_ip: route.routed_ip.clone(),
+        }
+    }
+}
+
 impl ConnectionRouteInfo {
+    pub(crate) fn still_authorized(&self, snapshot: &RoutingSnapshot) -> bool {
+        snapshot
+            .resolve_owned_route_for_user_ip(&self.user_id, &self.routed_ip)
+            .is_ok_and(|current| self.matches(&current))
+    }
+
     pub(crate) fn matches(&self, route: &OwnedResolvedRoute) -> bool {
         self.user_id == route.user_id
             && self.username == route.username
@@ -140,6 +187,9 @@ pub(crate) struct SshProxyStatusReport {
     pub(crate) last_snapshot_generation: Option<u64>,
     pub(crate) last_snapshot_at: Option<u64>,
     pub(crate) active_connections: usize,
+    /// Connections counted in `active_connections` but left out of
+    /// `connections` to keep the frame bounded.
+    pub(crate) omitted_connections: usize,
     pub(crate) total_connections: u64,
     pub(crate) total_rejected_connections: u64,
     pub(crate) total_closed_connections: u64,
@@ -307,7 +357,20 @@ impl ProxyRuntime {
             .into_iter()
             .filter(|connection| connection.abort())
             .count();
-        debug!(disconnected, %reason, "aborted revoked SSH proxy connections");
+        let closed_bridges = match snapshot {
+            Some(snapshot) => {
+                let survivors = lock(&self.connections)
+                    .values()
+                    .cloned()
+                    .collect::<Vec<_>>();
+                survivors
+                    .iter()
+                    .map(|connection| connection.abort_revoked_bridges(snapshot))
+                    .sum::<usize>()
+            }
+            None => 0,
+        };
+        debug!(disconnected, closed_bridges, %reason, "aborted revoked SSH proxy connections");
         disconnected
     }
 
@@ -320,6 +383,7 @@ impl ProxyRuntime {
                 .collect::<Vec<_>>()
         };
         connections.sort_by_key(|connection| connection.connected_at);
+        let active_connections = connections.len();
         let total_bytes_from_client = connections
             .iter()
             .map(|connection| connection.bytes_from_client)
@@ -343,7 +407,8 @@ impl ProxyRuntime {
             connected_at: self.backend_connected_at.load(Ordering::Relaxed),
             last_snapshot_generation,
             last_snapshot_at,
-            active_connections: connections.len(),
+            active_connections,
+            omitted_connections: 0,
             total_connections: self.total_connections.load(Ordering::Relaxed),
             total_rejected_connections: self.total_rejected_connections.load(Ordering::Relaxed),
             total_closed_connections: self.total_closed_connections.load(Ordering::Relaxed),
@@ -353,6 +418,10 @@ impl ProxyRuntime {
             bandwidth_out_bps,
             connections,
         }
+        .bounded(
+            MAX_STATUS_CONNECTION_DETAILS,
+            MAX_STATUS_CONNECTION_DETAIL_BYTES,
+        )
     }
 
     pub(crate) fn bandwidth(&self, total_in: u64, total_out: u64) -> (f64, f64) {
@@ -369,6 +438,29 @@ impl ProxyRuntime {
             state.last_out = total_out;
         }
         (state.in_bps, state.out_bps)
+    }
+}
+
+impl SshProxyStatusReport {
+    /// Keeps the oldest connection details that fit both bounds and counts
+    /// the rest in `omitted_connections`, so no number or size of client
+    /// connections can push the status frame over the Backend's limit.
+    pub(crate) fn bounded(mut self, max_entries: usize, max_bytes: usize) -> Self {
+        let mut used = 0_usize;
+        let mut kept = 0_usize;
+        for connection in self.connections.iter().take(max_entries) {
+            let size = serde_json::to_vec(connection)
+                .map(|encoded| encoded.len() + 1)
+                .unwrap_or(usize::MAX);
+            if size > max_bytes.saturating_sub(used) {
+                break;
+            }
+            used += size;
+            kept += 1;
+        }
+        self.connections.truncate(kept);
+        self.omitted_connections = self.active_connections - kept;
+        self
     }
 }
 
@@ -400,6 +492,9 @@ impl ConnectionState {
                 authenticated_user_id: Mutex::new(None),
                 authenticated_username: Mutex::new(None),
                 route: Mutex::new(None),
+                pinned_route: Mutex::new(None),
+                bridge_routes: Mutex::new(HashMap::new()),
+                pending_permit: Mutex::new(None),
                 abort_handle,
                 revoked: AtomicBool::new(false),
                 next_child_id: AtomicU64::new(1),
@@ -459,6 +554,29 @@ impl ConnectionState {
 
     pub(crate) fn unregister_child_abort(&self, id: u64) {
         lock(&self.child_abort_handles).remove(&id);
+        lock(&self.bridge_routes).remove(&id);
+    }
+
+    /// Holds the listener's pre-authentication slot until authentication.
+    pub(crate) fn hold_pending(&self, permit: Option<PendingPermit>) {
+        *lock(&self.pending_permit) = permit;
+    }
+
+    /// Closes every bridge whose container route is no longer authorized by
+    /// `snapshot`, leaving the connection and its other bridges open.
+    pub(crate) fn abort_revoked_bridges(&self, snapshot: &RoutingSnapshot) -> usize {
+        let revoked = lock(&self.bridge_routes)
+            .iter()
+            .filter(|(_, route)| !route.still_authorized(snapshot))
+            .map(|(id, _)| *id)
+            .collect::<Vec<_>>();
+        for id in &revoked {
+            lock(&self.bridge_routes).remove(id);
+            if let Some(handle) = lock(&self.child_abort_handles).remove(id) {
+                handle.abort();
+            }
+        }
+        revoked.len()
     }
 
     pub(crate) fn set_authenticated(
@@ -473,30 +591,17 @@ impl ConnectionState {
         *lock(&self.authenticated_public_key) = Some(public_key.clone());
         *lock(&self.authenticated_user_id) = Some(user_id.to_string());
         *lock(&self.authenticated_username) = Some(username.to_string());
-        *lock(&self.route) = route.map(|route| ConnectionRouteInfo {
-            user_id: route.user_id.clone(),
-            username: route.username.clone(),
-            server_id: route.server_id.clone(),
-            server_slug: route.server_slug.clone(),
-            container_id: route.container_id.clone(),
-            container_name: route.container_name.clone(),
-            instance_name: route.instance_name.clone(),
-            routed_ip: route.routed_ip.clone(),
-        });
+        let route = route.map(ConnectionRouteInfo::from);
+        *lock(&self.pinned_route) = route.clone();
+        *lock(&self.route) = route;
         self.authenticated_at.store(now_ms(), Ordering::Relaxed);
+        lock(&self.pending_permit).take();
     }
 
-    pub(crate) fn set_route(&self, route: &OwnedResolvedRoute) {
-        *lock(&self.route) = Some(ConnectionRouteInfo {
-            user_id: route.user_id.clone(),
-            username: route.username.clone(),
-            server_id: route.server_id.clone(),
-            server_slug: route.server_slug.clone(),
-            container_id: route.container_id.clone(),
-            container_name: route.container_name.clone(),
-            instance_name: route.instance_name.clone(),
-            routed_ip: route.routed_ip.clone(),
-        });
+    /// Updates the route shown in status reports; authorization of bridged
+    /// routes is tracked per bridge (`ChildTaskPermit::bind_route`).
+    pub(crate) fn set_display_route(&self, route: &OwnedResolvedRoute) {
+        *lock(&self.route) = Some(ConnectionRouteInfo::from(route));
     }
 
     pub(crate) fn authorization_matches(&self, snapshot: Option<&RoutingSnapshot>) -> bool {
@@ -521,10 +626,8 @@ impl ConnectionState {
         if user.id != user_id {
             return false;
         }
-        if let Some(expected) = lock(&self.route).clone() {
-            return snapshot
-                .resolve_owned_route_for_user_ip(&user_id, &expected.routed_ip)
-                .is_ok_and(|current| expected.matches(&current));
+        if let Some(expected) = lock(&self.pinned_route).clone() {
+            return expected.user_id == user_id && expected.still_authorized(snapshot);
         }
         true
     }

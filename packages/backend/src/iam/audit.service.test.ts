@@ -12,8 +12,7 @@ function makeHarness(options: {
   const clock = { now };
   const repository = {
     append: vi.fn().mockResolvedValue(undefined),
-    enforceRetention: vi.fn().mockResolvedValue(undefined),
-    enforceRetentionInTransaction: vi.fn().mockResolvedValue(undefined),
+    enforceRetention: vi.fn().mockResolvedValue(0),
   };
   const transactions = {
     run: vi.fn(async (work: (value: unknown) => Promise<unknown>) =>
@@ -46,7 +45,7 @@ function makeHarness(options: {
 }
 
 describe('AuditService retention paths', () => {
-  it('enforces configured retention inside append transaction and sanitizes payloads', async () => {
+  it('schedules retention after the append transaction and sanitizes payloads', async () => {
     const harness = makeHarness();
 
     await harness.service.append(
@@ -76,14 +75,13 @@ describe('AuditService retention paths', () => {
         },
       }),
     );
-    expect(harness.repository.enforceRetentionInTransaction)
-      .toHaveBeenCalledWith(harness.transaction, {
-        retentionDays: 180,
-        maxEntries: 100_000,
-        enforceAge: true,
-        enforceCount: true,
-      });
-    expect(harness.repository.enforceRetention).not.toHaveBeenCalled();
+    // The fake transaction is not a Kysely transaction, so afterCommit runs at once.
+    await vi.waitFor(() => expect(harness.repository.enforceRetention).toHaveBeenCalledWith({
+      retentionDays: 180,
+      maxEntries: 100_000,
+      enforceAge: true,
+      enforceCount: true,
+    }));
   });
 
   it('keeps log retention post-commit without recursively invoking append retention', async () => {
@@ -104,7 +102,6 @@ describe('AuditService retention paths', () => {
       enforceAge: true,
       enforceCount: true,
     });
-    expect(harness.repository.enforceRetentionInTransaction).not.toHaveBeenCalled();
     expect(harness.repository.append).toHaveBeenCalledWith(
       harness.transaction,
       expect.objectContaining({
@@ -113,37 +110,22 @@ describe('AuditService retention paths', () => {
     );
   });
 
-  it('checks count and age on every caller-owned append transaction', async () => {
+  it('rate limits cleanup and keeps draining full batches', async () => {
     const harness = makeHarness();
+    harness.repository.enforceRetention
+      .mockResolvedValueOnce(1_000)
+      .mockResolvedValueOnce(10);
     harness.clock.now
       .mockReturnValueOnce(0)
-      .mockReturnValueOnce(30_000);
+      .mockReturnValueOnce(30_000)
+      .mockReturnValueOnce(61_000);
 
-    await harness.service.append(
-      harness.transaction as never,
-      null,
-      AuditAction.CreateGroup,
-      null,
-      null,
-    );
-    await harness.service.append(
-      harness.transaction as never,
-      null,
-      AuditAction.CreateGroup,
-      null,
-      null,
-    );
+    for (let index = 0; index < 3; index += 1) {
+      await harness.service.log(null, AuditAction.CreateGroup, null, null);
+    }
 
-    expect(harness.repository.enforceRetentionInTransaction).toHaveBeenNthCalledWith(
-      2,
-      harness.transaction,
-      {
-        retentionDays: 180,
-        maxEntries: 100_000,
-        enforceAge: true,
-        enforceCount: true,
-      },
-    );
+    // 0 ms: two batches (the first was full); 30 s: cooling down; 61 s: one more.
+    expect(harness.repository.enforceRetention).toHaveBeenCalledTimes(3);
   });
 
   it('does not start cleanup when both retention limits are disabled', async () => {
@@ -163,7 +145,6 @@ describe('AuditService retention paths', () => {
       null,
     );
 
-    expect(harness.repository.enforceRetentionInTransaction).not.toHaveBeenCalled();
     expect(harness.repository.enforceRetention).not.toHaveBeenCalled();
   });
 });

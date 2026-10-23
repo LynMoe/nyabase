@@ -185,12 +185,6 @@ export const zRotateRefreshTokenRequest = z.object({
   requestId: z.string().length(64).regex(SHA256_RE),
 }).strict();
 
-/** Minting a long-lived token re-checks the current password (browser sessions only). */
-export const zCreateApiTokenRequest = z.object({
-  name: z.string().trim().min(1).max(128),
-  currentPassword: z.string().min(1).max(1024),
-}).strict();
-
 export const zCreateUserRequest = z.object({
   username: z.string().min(2).max(64).regex(USERNAME_RE),
   password: z.string().min(8).max(256),
@@ -222,6 +216,9 @@ export const zAddSshKeyRequest = z.object({
     }
     return normalized;
   }),
+  // A key is a lasting credential into every container: minting one needs the
+  // password, like an API token, so a leaked short-lived session cannot.
+  currentPassword: z.string().min(1).max(1024),
 }).strict();
 
 // Server registration, connection, and bootstrap.
@@ -378,6 +375,24 @@ export const zCreateSharedVolumeRequest = z.object({
  */
 export const zListScope = z.enum(['mine', 'all']).default('mine');
 
+/**
+ * Refinement for list queries: administrator-only filters (the ones that pick
+ * other people's or server-wide rows) are refused with 400 unless `scope=all`.
+ */
+export function onlyWithScopeAll<K extends string>(...keys: readonly K[]) {
+  return (value: { scope: 'mine' | 'all' } & Partial<Record<K, unknown>>, ctx: z.RefinementCtx): void => {
+    if (value.scope === 'all') return;
+    for (const key of keys) {
+      if (value[key] === undefined) continue;
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `${key} is only available with scope=all`,
+        path: [key],
+      });
+    }
+  };
+}
+
 export const zListSharedVolumesQuery = z.object({
   scope: zListScope,
   attachableOnServerId: zResourceIdentity.optional(),
@@ -386,10 +401,7 @@ export const zListSharedVolumesQuery = z.object({
 export const zListVolumesQuery = z.object({
   scope: zListScope,
   serverId: zResourceIdentity.optional(),
-}).strict().refine(
-  (value) => value.serverId === undefined || value.scope === 'all',
-  { message: 'serverId is only available with scope=all', path: ['serverId'] },
-);
+}).strict().superRefine(onlyWithScopeAll('serverId'));
 
 export const zListContainersQuery = z.object({
   scope: zListScope,
@@ -405,6 +417,20 @@ export const zPatchVolumeRequest = z.object({
   'At least one volume field is required',
 );
 
+/**
+ * Kernel pseudo-filesystems a tenant-writable volume must never shadow: a
+ * volume mounted over /proc (or /sys, /dev) lets the tenant plant files the
+ * runtime trusts (CVE-2019-16884 class). The Agent policy and a DB CHECK
+ * refuse the same roots.
+ */
+export const FORBIDDEN_CONTAINER_MOUNT_ROOTS = ['/proc', '/sys', '/dev'] as const;
+
+/** True for a container path equal to or under a forbidden root (repeated slashes and `.` ignored). */
+export function isForbiddenContainerMountPath(path: string): boolean {
+  const normalized = `/${path.split('/').filter((part) => part !== '' && part !== '.').join('/')}`;
+  return FORBIDDEN_CONTAINER_MOUNT_ROOTS.some((root) => normalized === root || normalized.startsWith(`${root}/`));
+}
+
 export const zAttachVolumeRequest = z.object({
   volumeId: zResourceIdentity,
   containerPath: z.string().trim().min(2).max(4_096)
@@ -412,7 +438,8 @@ export const zAttachVolumeRequest = z.object({
     .refine((value) => value !== '/', 'Container path must not be root')
     .refine((value) => !value.split('/').some((part) => part === '.' || part === '..'),
       'Container path must not contain dot segments')
-    .refine((value) => !/[\0\r\n]/.test(value), 'Container path contains invalid control characters'),
+    .refine((value) => !/[\0\r\n]/.test(value), 'Container path contains invalid control characters')
+    .refine((value) => !isForbiddenContainerMountPath(value), 'Container path must not be under /proc, /sys or /dev'),
   readOnly: z.boolean(),
 }).strict();
 
@@ -619,7 +646,6 @@ export const zPatchSystemSettingsRequest = z.object({
 
 export type LoginRequest = z.infer<typeof zLoginRequest>;
 export type RotateRefreshTokenRequest = z.infer<typeof zRotateRefreshTokenRequest>;
-export type CreateApiTokenRequest = z.infer<typeof zCreateApiTokenRequest>;
 export type CreateUserRequest = z.infer<typeof zCreateUserRequest>;
 export type UpdateUserRequest = z.infer<typeof zUpdateUserRequest>;
 export type AddSshKeyRequest = z.infer<typeof zAddSshKeyRequest>;

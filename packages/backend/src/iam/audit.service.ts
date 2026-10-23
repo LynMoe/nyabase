@@ -11,6 +11,7 @@ import { PgTransactionManager } from '../platform/persistence-pg/transaction.js'
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 import {
   AuditRepository,
+  RETENTION_BATCH_SIZE,
   type AuditRetentionOptions,
 } from './audit.repository.js';
 import {
@@ -19,8 +20,11 @@ import {
   normalizeResourceType,
 } from './audit-snapshot.resolver.js';
 import { isRecord } from '../platform/domain-utils.js';
+import { afterCommit } from '../platform/post-commit.js';
 
 const CLEANUP_INTERVAL_MS = 60_000;
+/** Upper bound on back-to-back cleanup batches in one pass. */
+const MAX_CLEANUP_BATCHES = 20;
 const SENSITIVE_KEY_PATTERN =
   /(password|passwd|token|secret|private.?key|encrypted|credential|authorization|cookie)/i;
 
@@ -61,8 +65,10 @@ export class AuditService {
   }
 
   /**
-   * Appends audit evidence and enforces retention in a caller-owned business
-   * transaction. A rollback removes the domain mutation, event, and cleanup.
+   * Appends audit evidence in a caller-owned business transaction. Retention
+   * never runs inside it: a shared cleanup lock plus `count(*)` there would
+   * serialize every audited write on the platform. Cleanup is scheduled after
+   * the commit and rate limited instead.
    */
   async append(
     transaction: Transaction<NyabaseDatabase>,
@@ -80,7 +86,9 @@ export class AuditService {
       targetType,
       payload,
     );
-    await this.maybeEnforceRetentionInTransaction(transaction);
+    afterCommit(transaction, () => {
+      void this.maybeEnforceRetention();
+    });
   }
 
   private async appendEvent(
@@ -147,30 +155,13 @@ export class AuditService {
     });
   }
 
-  private async maybeEnforceRetentionInTransaction(
-    transaction: Transaction<NyabaseDatabase>,
-  ): Promise<void> {
-    // The caller may roll back after append(), so do not advance shared
-    // cooldown state from work that is not known to have committed.
-    const retention = this.retentionRequest(true);
-    if (!retention) return;
-    await this.repository.enforceRetentionInTransaction(
-      transaction,
-      retention.options,
-    );
-  }
-
   private async maybeEnforceRetention(): Promise<void> {
     if (this.cleanupPromise) return this.cleanupPromise;
     const retention = this.retentionRequest();
     if (!retention) return;
 
-    this.cleanupPromise = this.repository.enforceRetention(retention.options)
-      .then(() => {
-        if (retention.options.enforceAge) {
-          this.nextCleanupAt = retention.now + CLEANUP_INTERVAL_MS;
-        }
-      })
+    this.nextCleanupAt = retention.now + CLEANUP_INTERVAL_MS;
+    this.cleanupPromise = this.drainRetention(retention.options)
       .catch((error: unknown) => {
         this.logger.warn(
           `Audit retention cleanup failed: ${
@@ -184,15 +175,22 @@ export class AuditService {
     await this.cleanupPromise;
   }
 
-  private retentionRequest(forceAge = false): {
+  private async drainRetention(options: AuditRetentionOptions): Promise<void> {
+    for (let batch = 0; batch < MAX_CLEANUP_BATCHES; batch += 1) {
+      const deleted = await this.repository.enforceRetention(options);
+      if (deleted < RETENTION_BATCH_SIZE) return;
+    }
+  }
+
+  private retentionRequest(): {
     now: number;
     options: AuditRetentionOptions;
   } | null {
     const retentionDays = this.config.get<number>('audit.retentionDays');
     const maxEntries = this.config.get<number>('audit.retentionMaxEntries');
     const now = this.clock.now();
-    const enforceAge = retentionDays > 0
-      && (forceAge || now >= this.nextCleanupAt);
+    if (now < this.nextCleanupAt) return null;
+    const enforceAge = retentionDays > 0;
     const enforceCount = maxEntries > 0;
     if (!enforceAge && !enforceCount) return null;
     return {

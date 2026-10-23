@@ -11,6 +11,8 @@ import {
   resolveServerAccess,
   resolveSharedBackendAccess,
 } from '../iam/effective-access.js';
+import { lapseStopRedriveDue } from '../containers/container-control.repository.js';
+import { detachRedriveDue } from '../volumes/detach-redrive.js';
 
 export const ACCESS_LAPSE_GRACE_MS = GRANT_EXPIRY_GRACE_DAYS * 24 * 60 * 60 * 1000;
 
@@ -24,8 +26,20 @@ export interface LapseKey {
 export interface LapseCandidate extends LapseKey {
   /** The user currently holds grant coverage of the resource (effective_*: active user, current grant). */
   covered: boolean;
-  /** The user has an active container with running power intent behind the resource (server: on it; pool/backend: attached to a volume there). */
-  hasRunning: boolean;
+  /**
+   * The lapse is not (or no longer) enforced: on a server, a container of the
+   * user there is meant to run, or still runs although its stop was queued
+   * (and is due to be stopped again); on a pool or backend, a volume of the
+   * user there is still attached to a container.
+   */
+  exposed: boolean;
+  /**
+   * Pool or backend: a volume of the user there is being destroyed and its
+   * destroy waits for an attachment that is due to be detached (again).
+   * Independent of coverage and of the ledger: a purge is not undone when
+   * coverage returns, so its destroys must still be able to finish.
+   */
+  destroyBlocked: boolean;
   /** The ledger row, when the pair is in grace. */
   lapse: { lapsedAt: Date; stoppedAt: Date | null; purgedAt: Date | null } | null;
   /** Database clock at the time of the scan. */
@@ -37,16 +51,29 @@ export function purgeDeadline(lapsedAt: Date): Date {
 }
 
 /** What the processor still has to do for a candidate, in order of urgency. */
-export type LapseWork = 'clear' | 'lapse' | 'stop' | 'purge' | 'none';
+export type LapseWork = 'clear' | 'lapse' | 'stop' | 'purge' | 'detach' | 'none';
 
 export function lapseWork(candidate: LapseCandidate): LapseWork {
-  if (candidate.covered) return candidate.lapse ? 'clear' : 'none';
+  if (candidate.covered) {
+    if (candidate.lapse) return 'clear';
+    // Coverage came back after the purge: the volumes it destroys are still
+    // detached (only those) until the attachments are gone.
+    return candidate.destroyBlocked ? 'detach' : 'none';
+  }
   if (!candidate.lapse) return 'lapse';
   const due = candidate.now.getTime() >= purgeDeadline(candidate.lapse.lapsedAt).getTime();
-  if (due) return candidate.lapse.purgedAt === null ? 'purge' : 'none';
-  // Stop again whenever something runs: a container started during the grace
-  // (an administrator override) must not survive until the purge.
-  return candidate.lapse.stoppedAt === null || candidate.hasRunning ? 'stop' : 'none';
+  if (due) {
+    if (candidate.lapse.purgedAt === null) return 'purge';
+    // Purged pool or backend: its volumes are deleting and each destroy waits
+    // for the volume's attachments. One still attached, or detaching with its
+    // re-drive due (the purge's own detach may have been backed off), is
+    // detached again until it is gone.
+    return candidate.kind !== 'server' && candidate.exposed ? 'detach' : 'none';
+  }
+  // Enforce again whenever it is exposed: a container started, or a volume
+  // re-attached, during the grace (an administrator override) must not
+  // survive until the purge.
+  return candidate.lapse.stoppedAt === null || candidate.exposed ? 'stop' : 'none';
 }
 
 /**
@@ -74,7 +101,8 @@ interface CandidateRow {
   kind: AccessLapseResourceKind;
   resource_id: string;
   covered: boolean;
-  has_running: boolean;
+  exposed: boolean;
+  destroy_blocked: boolean;
   lapsed_at: Date | null;
   stopped_at: Date | null;
   purged_at: Date | null;
@@ -107,9 +135,14 @@ export class AccessLapseRepository {
     return Number(result.numAffectedRows ?? 0);
   }
 
-  /** Pairs that are uncovered or already in grace, most overdue first. */
+  /**
+   * Pairs that are uncovered, already in grace, or have a blocked destroy,
+   * most overdue first.
+   */
   async scan(): Promise<LapseCandidate[]> {
-    return this.candidates(sql`WHERE NOT candidate.covered OR candidate.lapsed_at IS NOT NULL`);
+    return this.candidates(sql`
+      WHERE NOT candidate.covered OR candidate.lapsed_at IS NOT NULL OR candidate.destroy_blocked
+    `);
   }
 
   /** Fresh state of one pair, or null when the user no longer owns anything on it. */
@@ -134,39 +167,60 @@ export class AccessLapseRepository {
         UNION ALL
         SELECT user_id, 'shared_backend', shared_backend_id
         FROM iam.effective_shared_backend_access
-      ), running AS (
-        -- Pairs behind which an active container is meant to run.
-        SELECT owner_id AS user_id, 'server' AS kind, server_id AS resource_id
-        FROM control.containers
-        WHERE power_intent = 'running' AND lifecycle_phase = 'active'
-        UNION
-        SELECT volume.owner_id, CASE WHEN volume.shared_backend_id IS NULL THEN 'storage_pool' ELSE 'shared_backend' END,
-               coalesce(volume.shared_backend_id, volume.pool_id)
+      ), exposed_attachment AS (
+        -- Pools and backends: a volume is attached to a container, running or
+        -- not, or is still detaching from one with no intent left to unplug it
+        -- (its detach failed: the reconciler deletes the row once it is gone),
+        -- once the re-drive backoff has passed (detachRedriveDue).
+        SELECT volume.owner_id AS user_id,
+               CASE WHEN volume.shared_backend_id IS NULL THEN 'storage_pool' ELSE 'shared_backend' END AS kind,
+               coalesce(volume.shared_backend_id, volume.pool_id) AS resource_id,
+               volume.lifecycle_phase = 'deleting' AS volume_deleting
         FROM control.volume_attachments AS attachment
         JOIN control.volumes AS volume ON volume.id = attachment.volume_id
         JOIN control.containers AS container ON container.id = attachment.container_id
-        WHERE container.power_intent = 'running' AND container.lifecycle_phase = 'active'
+        WHERE container.lifecycle_phase <> 'deleting'
+          AND (attachment.bind_state <> 'detaching'
+            OR ${detachRedriveDue(sql.ref('attachment.id'), sql.ref('container.id'))})
+      ), exposed AS (
+        -- Servers: a container (also one still provisioning) is meant to run,
+        -- or is meant to be stopped but was last observed running with no
+        -- intent left to stop it (the stop failed or parked the container),
+        -- once the re-drive backoff has passed (lapseStopRedriveDue).
+        SELECT owner_id AS user_id, 'server' AS kind, server_id AS resource_id
+        FROM control.containers AS container
+        WHERE lifecycle_phase IN ('active', 'provisioning')
+          AND (power_intent = 'running' OR ${lapseStopRedriveDue(sql.ref('container.id'))})
+        UNION
+        SELECT user_id, kind, resource_id FROM exposed_attachment
+      ), destroy_blocked AS (
+        SELECT DISTINCT user_id, kind, resource_id FROM exposed_attachment WHERE volume_deleting
       ), candidate AS (
         SELECT owned.user_id, owned.kind, owned.resource_id,
                (coverage.user_id IS NOT NULL) AS covered,
-               (running.user_id IS NOT NULL) AS has_running,
+               (exposed.user_id IS NOT NULL) AS exposed,
+               (destroy_blocked.user_id IS NOT NULL) AS destroy_blocked,
                lapse.lapsed_at, lapse.stopped_at, lapse.purged_at
         FROM (${OWNED}) AS owned
         LEFT JOIN coverage
           ON coverage.user_id = owned.user_id
          AND coverage.kind = owned.kind
          AND coverage.resource_id = owned.resource_id
-        LEFT JOIN running
-          ON running.user_id = owned.user_id
-         AND running.kind = owned.kind
-         AND running.resource_id = owned.resource_id
+        LEFT JOIN exposed
+          ON exposed.user_id = owned.user_id
+         AND exposed.kind = owned.kind
+         AND exposed.resource_id = owned.resource_id
+        LEFT JOIN destroy_blocked
+          ON destroy_blocked.user_id = owned.user_id
+         AND destroy_blocked.kind = owned.kind
+         AND destroy_blocked.resource_id = owned.resource_id
         LEFT JOIN control.access_lapses AS lapse
           ON lapse.user_id = owned.user_id
          AND lapse.resource_kind = owned.kind
          AND lapse.resource_id = owned.resource_id
       )
       SELECT candidate.user_id::text AS user_id, candidate.kind, candidate.resource_id::text AS resource_id,
-             candidate.covered, candidate.has_running, candidate.lapsed_at,
+             candidate.covered, candidate.exposed, candidate.destroy_blocked, candidate.lapsed_at,
              candidate.stopped_at, candidate.purged_at, clock_timestamp() AS now
       FROM candidate
       ${filter}
@@ -178,7 +232,8 @@ export class AccessLapseRepository {
       kind: row.kind,
       resourceId: row.resource_id,
       covered: row.covered,
-      hasRunning: row.has_running,
+      exposed: row.exposed,
+      destroyBlocked: row.destroy_blocked,
       lapse: row.lapsed_at
         ? { lapsedAt: row.lapsed_at, stoppedAt: row.stopped_at, purgedAt: row.purged_at }
         : null,
@@ -215,6 +270,29 @@ export class AccessLapseRepository {
     });
   }
 
+  /**
+   * Runs `purge` (which must only queue its deletes in the given transaction)
+   * and records `purged_at`, both in one transaction that first takes the IAM
+   * lock and re-reads coverage. A grant committed before the lock is seen and
+   * cancels the purge; one committed later waits until every delete is queued
+   * (queued deletes cannot be taken back, so the lock must span them). Read
+   * committed on purpose: under a snapshot isolation the snapshot would date
+   * from before the lock wait and miss a grant committed during it. Returns
+   * false when the pair is covered or already purged.
+   */
+  async purgeIfUncovered(
+    key: LapseKey,
+    purge: (transaction: Transaction<NyabaseDatabase>) => Promise<void>,
+  ): Promise<boolean> {
+    return this.transactions.run(async (transaction) => {
+      await lockIamPolicy(transaction);
+      if (await this.isCovered(transaction, key)) return false;
+      if (!await this.markIn(transaction, key, 'purged_at')) return false;
+      await purge(transaction);
+      return true;
+    }, { isolationLevel: 'read committed' });
+  }
+
   /** Coverage returned: cancel the grace. Containers stay as they are (not auto-started). */
   async clear(key: LapseKey): Promise<boolean> {
     return this.transactions.run(async (transaction) => {
@@ -234,37 +312,44 @@ export class AccessLapseRepository {
     key: LapseKey,
     after: (transaction: Transaction<NyabaseDatabase>) => Promise<void>,
   ): Promise<boolean> {
-    return this.mark(key, 'stopped_at', after);
-  }
-
-  markPurged(
-    key: LapseKey,
-    after: (transaction: Transaction<NyabaseDatabase>) => Promise<void>,
-  ): Promise<boolean> {
-    return this.mark(key, 'purged_at', after);
-  }
-
-  private mark(
-    key: LapseKey,
-    column: 'stopped_at' | 'purged_at',
-    after: (transaction: Transaction<NyabaseDatabase>) => Promise<void>,
-  ): Promise<boolean> {
     return this.transactions.run(async (transaction) => {
-      const result = await transaction.updateTable('control.access_lapses')
-        .set({ [column]: sql`clock_timestamp()` })
-        .where('user_id', '=', key.userId)
-        .where('resource_kind', '=', key.kind)
-        .where('resource_id', '=', key.resourceId)
-        .where(column, 'is', null)
-        .executeTakeFirst();
-      if (Number(result.numUpdatedRows) === 0) return false;
+      if (!await this.markIn(transaction, key, 'stopped_at')) return false;
       await after(transaction);
       return true;
     });
   }
 
+  /** Sets the ledger timestamp once; false when the row is gone or already set. */
+  private async markIn(
+    transaction: Transaction<NyabaseDatabase>,
+    key: LapseKey,
+    column: 'stopped_at' | 'purged_at',
+  ): Promise<boolean> {
+    const result = await transaction.updateTable('control.access_lapses')
+      .set({ [column]: sql`clock_timestamp()` })
+      .where('user_id', '=', key.userId)
+      .where('resource_kind', '=', key.kind)
+      .where('resource_id', '=', key.resourceId)
+      .where(column, 'is', null)
+      .executeTakeFirst();
+    return Number(result.numUpdatedRows) > 0;
+  }
+
+  /**
+   * Coverage right now, read without the IAM lock: a cheap last look before a
+   * reversible enforcement (a stop, a detach), so a grant committed since the
+   * scan does not hit the user's containers. Irreversible steps re-check under
+   * the lock instead (`purgeIfUncovered`).
+   */
+  isCoveredNow(key: LapseKey): Promise<boolean> {
+    return this.isCovered(this.database, key);
+  }
+
   /** Current coverage of the pair (active user holding a current grant). */
-  private async isCovered(transaction: Transaction<NyabaseDatabase>, key: LapseKey): Promise<boolean> {
+  private async isCovered(
+    transaction: Kysely<NyabaseDatabase> | Transaction<NyabaseDatabase>,
+    key: LapseKey,
+  ): Promise<boolean> {
     const access = key.kind === 'server'
       ? await resolveServerAccess(transaction, key.userId, key.resourceId)
       : key.kind === 'storage_pool'

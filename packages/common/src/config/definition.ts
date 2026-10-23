@@ -4,6 +4,7 @@ import {
   SSH_PROXY_SNAPSHOT_STALE_MAX_MS,
   SSH_PROXY_SNAPSHOT_STALE_MIN_MS,
 } from '../constants.js';
+import { imageSourceServerProblem } from '../protocol/agent.js';
 
 export const DEFAULT_NYABASE_CONFIG_FILE = '/etc/nyabase/config.yaml';
 
@@ -21,6 +22,8 @@ export interface ConfigFieldDefinition<T = unknown> {
   sourceOrder: ConfigSourceOrder;
   secret: boolean;
   editable: boolean;
+  /** Only admins may change it online (operators see it read-only). */
+  adminOnly?: boolean;
   restartRequired: boolean;
   public: boolean;
   label: string;
@@ -28,6 +31,12 @@ export interface ConfigFieldDefinition<T = unknown> {
 }
 
 const sourceOrder = ['default', 'yaml', 'env'] as const;
+
+/** The agent pulls only from what this accepts (protocol/agent.ts), so a saved source never fails at pull time. */
+function imageSourceServerIssue(value: string, context: z.RefinementCtx): void {
+  const problem = imageSourceServerProblem(value);
+  if (problem) context.addIssue({ code: z.ZodIssueCode.custom, message: `Expected an HTTPS simplestreams source URL: ${problem}` });
+}
 const nonEmptyString = z.string().trim().min(1);
 const optionalString = z.string().trim();
 const developmentJwtSecret = 'change-me-in-production';
@@ -35,11 +44,19 @@ const jwtSecret = z.string().trim().refine(
   (value) => value === developmentJwtSecret || value.length >= 32,
   'Expected at least 32 characters',
 );
+export const MIN_JWT_LIFETIME_MS = 60_000;
+export const MAX_JWT_LIFETIME_MS = 24 * 60 * 60_000;
+/** `auth.jwtExpiresIn` (`<n>s|m|h|d`) in milliseconds; null when malformed. */
+export function jwtLifetimeMs(value: unknown): number | null {
+  if (typeof value !== 'string') return null;
+  const match = /^(\d+)(s|m|h|d)$/.exec(value.trim());
+  if (!match) return null;
+  const unitMs = { s: 1_000, m: 60_000, h: 3_600_000, d: 86_400_000 }[match[2] as 's' | 'm' | 'h' | 'd'];
+  return Number.parseInt(match[1]!, 10) * unitMs;
+}
 const jwtLifetime = z.string().trim().regex(/^\d+(?:s|m|h|d)$/).refine((value) => {
-  const amount = Number.parseInt(value, 10);
-  const unit = value.at(-1);
-  const milliseconds = amount * ({ s: 1_000, m: 60_000, h: 3_600_000, d: 86_400_000 }[unit!] ?? 0);
-  return milliseconds >= 60_000 && milliseconds <= 24 * 60 * 60_000;
+  const milliseconds = jwtLifetimeMs(value) ?? 0;
+  return milliseconds >= MIN_JWT_LIFETIME_MS && milliseconds <= MAX_JWT_LIFETIME_MS;
 }, 'Expected a duration between 1 minute and 24 hours');
 const adminInitialPassword = z.string().refine(
   (value) => value === '' || (value.length >= 8 && value.length <= 256),
@@ -61,9 +78,18 @@ const trustedProxies = z.string().trim().refine(
   'Expected comma-separated IP addresses, CIDRs, or loopback/linklocal/uniquelocal',
 );
 const port = z.coerce.number().int().min(1).max(65_535);
+/** One or more lower-case DNS labels, not an IPv4 address or a single number. */
+const sshHostSuffix = z.string().trim().toLowerCase().max(200)
+  .regex(/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)*[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/)
+  .refine((value) => !/^[0-9.]+$/.test(value), 'The suffix must not look like an address');
 const positiveInt = z.coerce.number().int().positive();
 const positiveDays = z.coerce.number().int().positive();
 const nonNegativeInt = z.coerce.number().int().nonnegative();
+/** 0 disables the limit; otherwise at least `minimum`, so one edit cannot wipe the audit log. */
+const disabledOrAtLeast = (minimum: number) => nonNegativeInt.refine(
+  (value) => value === 0 || value >= minimum,
+  `Expected 0 (disabled) or at least ${minimum}`,
+);
 const postgresUrl = z.string().trim().refine(
   (value) => /^postgres(?:ql)?:\/\/[^/\s]+\/[^?\s]+(?:\?.*)?$/.test(value),
   'Expected a PostgreSQL connection URL',
@@ -125,7 +151,8 @@ export const controlPlaneConfigDefinitions = [
     key: 'server.listenAddress',
     yamlPath: 'server.listenAddress',
     env: 'LISTEN_ADDRESS',
-    defaultValue: '',
+    // Fail closed: the Backend speaks plain HTTP and belongs behind a TLS edge on the same host.
+    defaultValue: '127.0.0.1',
     schema: optionalString,
     valueKind: 'string',
     secret: false,
@@ -133,7 +160,7 @@ export const controlPlaneConfigDefinitions = [
     restartRequired: true,
     public: false,
     label: 'HTTP listen address',
-    description: 'Address the backend binds. Empty listens on all interfaces. Lab should use 127.0.0.1 so the panel is only the edge proxy.',
+    description: 'Address the backend binds (default 127.0.0.1, behind the TLS edge). Use 0.0.0.0 to listen on all interfaces, as the Compose container does.',
   }),
   field({
     key: 'server.corsOrigin',
@@ -242,10 +269,26 @@ export const controlPlaneConfigDefinitions = [
     valueKind: 'number',
     secret: false,
     editable: true,
+    adminOnly: true,
     restartRequired: false,
     public: false,
     label: 'Refresh token days',
-    description: 'Number of days before refresh tokens expire.',
+    description: 'Idle timeout in days: a browser session that is not refreshed within this window expires. Each refresh extends it, up to auth.sessionMaxLifetimeDays. Admin only.',
+  }),
+  field({
+    key: 'auth.sessionMaxLifetimeDays',
+    yamlPath: 'auth.sessionMaxLifetimeDays',
+    env: 'SESSION_MAX_LIFETIME_DAYS',
+    defaultValue: 30,
+    schema: positiveDays.max(365),
+    valueKind: 'number',
+    secret: false,
+    editable: true,
+    adminOnly: true,
+    restartRequired: false,
+    public: false,
+    label: 'Session max lifetime days',
+    description: 'Absolute lifetime of a browser session in days, counted from login. Refreshing never extends a session past it; the user signs in again. Applies to existing sessions on their next refresh. Admin only.',
   }),
   field({
     key: 'auth.cookieSecure',
@@ -325,44 +368,30 @@ export const controlPlaneConfigDefinitions = [
     yamlPath: 'incus.preflightSourceServer',
     env: 'INCUS_PREFLIGHT_SOURCE_SERVER',
     defaultValue: DEFAULT_IMAGE_SOURCE_SERVER,
-    schema: z.string().trim().url().refine((value) => {
-      try {
-        return new URL(value).protocol === 'https:';
-      } catch {
-        return false;
-      }
-    }, 'Expected an HTTPS simplestreams source URL'),
+    schema: z.string().trim().max(2_048).superRefine(imageSourceServerIssue),
     valueKind: 'string',
     secret: false,
     editable: true,
     restartRequired: false,
     public: false,
     label: 'Incus preflight image source',
-    description: 'HTTPS simplestreams source used for preflight probe images.',
+    description: 'HTTPS simplestreams source used for preflight probe images (an internal mirror by IP or internal name is fine).',
   }),
   field({
     key: 'incus.imageSourceServer',
     yamlPath: 'incus.imageSourceServer',
     env: 'INCUS_IMAGE_SOURCE_URL',
     defaultValue: DEFAULT_IMAGE_SOURCE_SERVER,
-    schema: optionalString.max(2_048).refine(
-      (value) => {
-        if (value === '') return true;
-        try {
-          return new URL(value).protocol === 'https:';
-        } catch {
-          return false;
-        }
-      },
-      'Expected an empty value or an HTTPS simplestreams source URL',
-    ),
+    schema: optionalString.max(2_048).superRefine((value, context) => {
+      if (value !== '') imageSourceServerIssue(value, context);
+    }),
     valueKind: 'string',
     secret: false,
     editable: true,
     restartRequired: false,
     public: false,
     label: 'Incus image assignment source',
-    description: 'HTTPS simplestreams source used for managed image pulls. Empty falls back to the preflight source.',
+    description: 'HTTPS simplestreams source used for managed image pulls (an internal mirror by IP or internal name is fine). Empty falls back to the preflight source.',
   }),
   field({
     key: 'containers.processLimit',
@@ -537,28 +566,30 @@ export const controlPlaneConfigDefinitions = [
     yamlPath: 'audit.retentionDays',
     env: 'AUDIT_RETENTION_DAYS',
     defaultValue: 180,
-    schema: nonNegativeInt,
+    schema: disabledOrAtLeast(30),
     valueKind: 'number',
     secret: false,
     editable: true,
+    adminOnly: true,
     restartRequired: false,
     public: false,
     label: 'Audit retention days',
-    description: 'Number of days to keep audit logs. Set to 0 to disable age-based cleanup.',
+    description: 'Number of days to keep audit logs (at least 30). Set to 0 to disable age-based cleanup. Admin only.',
   }),
   field({
     key: 'audit.retentionMaxEntries',
     yamlPath: 'audit.retentionMaxEntries',
     env: 'AUDIT_RETENTION_MAX_ENTRIES',
     defaultValue: 100_000,
-    schema: nonNegativeInt,
+    schema: disabledOrAtLeast(10_000),
     valueKind: 'number',
     secret: false,
     editable: true,
+    adminOnly: true,
     restartRequired: false,
     public: false,
     label: 'Audit max entries',
-    description: 'Maximum number of audit logs to keep. Set to 0 to disable count-based cleanup.',
+    description: 'Maximum number of audit logs to keep (at least 10000). Set to 0 to disable count-based cleanup. Admin only.',
   }),
   field({
     key: 'metrics.victoriaMetricsUrl',
@@ -659,6 +690,21 @@ export const controlPlaneConfigDefinitions = [
     description: 'Port users should use when connecting through the SSH proxy.',
   }),
   field({
+    key: 'ssh.proxyHostSuffix',
+    yamlPath: 'ssh.proxyHostSuffix',
+    env: 'SSH_PROXY_HOST_SUFFIX',
+    defaultValue: 'nya',
+    schema: sshHostSuffix,
+    valueKind: 'string',
+    secret: false,
+    editable: true,
+    restartRequired: false,
+    public: true,
+    label: 'SSH container host suffix',
+    description:
+      'Containers are reached as <name>.<suffix> through the SSH proxy and carry host certificates for that name. Changing it breaks the ssh_config and known_hosts lines users already copied.',
+  }),
+  field({
     key: 'ssh.proxySnapshotStaleMs',
     yamlPath: 'ssh.proxySnapshotStaleMs',
     env: 'SSH_PROXY_SNAPSHOT_STALE_MS',
@@ -687,6 +733,7 @@ export const controlPlaneConfigManifest = controlPlaneConfigDefinitions.map((def
   sourceOrder: [...definition.sourceOrder],
   secret: definition.secret,
   editable: definition.editable,
+  adminOnly: definition.adminOnly === true,
   restartRequired: definition.restartRequired,
   public: definition.public,
   label: definition.label,

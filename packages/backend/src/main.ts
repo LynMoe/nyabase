@@ -7,12 +7,18 @@ import { join } from 'path';
 import { AGENT_CONTROL_PATH, AGENT_STREAM_PATH } from '@nyabase/common';
 import { AppModule } from './app.module.js';
 import { NyabaseConfigService } from './platform/config/nyabase-config.service.js';
-import { RouteIdPipe, SpaFallbackFilter, ZodExceptionFilter } from './platform/http-filters.js';
-import { securityHeaders, trustProxySetting } from './platform/http-security.js';
+import {
+  PgTransactionConflictFilter,
+  RouteIdPipe,
+  serveBundledFrontend,
+  ZodExceptionFilter,
+} from './platform/http-filters.js';
+import { securityHeaders, trustProxySetting, warnOnUntrustedForwarding } from './platform/http-security.js';
 import { RuntimeLifecycleService } from './health/runtime-lifecycle.service.js';
 import { ConsoleBridgeGateway } from './containers/console-bridge.gateway.js';
 import { SshProxyGateway } from './ssh/ssh-proxy-gateway.js';
 import { HttpProxyGateway } from './http-proxy/http-proxy-gateway.js';
+import type { TrustProxy } from './incus/agent-credentials.js';
 import { AgentGateway } from './incus/agent-gateway.js';
 
 const LOG_LEVELS_BY_VERBOSITY: readonly LogLevel[] = ['fatal', 'error', 'warn', 'log', 'debug', 'verbose'];
@@ -35,9 +41,11 @@ async function bootstrap() {
   app.useLogger(logLevelsUpTo(config.get<LogLevel>('server.logLevel')));
 
   app.setGlobalPrefix('api');
-  app.set('trust proxy', trustProxySetting(config.get<string>('server.trustedProxies')));
+  const trustedProxies = trustProxySetting(config.get<string>('server.trustedProxies'));
+  app.set('trust proxy', trustedProxies);
+  app.use(warnOnUntrustedForwarding(trustedProxies, (message) => logger.warn(message)));
   app.use(securityHeaders());
-  app.useGlobalFilters(new ZodExceptionFilter());
+  app.useGlobalFilters(new ZodExceptionFilter(), new PgTransactionConflictFilter(app.getHttpAdapter()));
   // forbidNonWhitelisted: throw 400 on extra properties so clients learn
   // about typos / dropped fields instead of silently having them ignored.
   // Note: most request DTOs are validated via zod (see Body() handlers); the
@@ -67,10 +75,10 @@ async function bootstrap() {
   const indexPath = join(publicDir, 'index.html');
   const hasStaticFrontend = existsSync(indexPath);
   if (hasStaticFrontend) {
-    app.useStaticAssets(publicDir);
-    // Intercept NestJS 404s so that SPA client-side routes (e.g. /dashboard) receive
-    // index.html instead of a JSON 404. API paths still get the standard JSON response.
-    app.useGlobalFilters(new SpaFallbackFilter(indexPath));
+    // Hashed /assets/* are cached for a year, index.html is revalidated, and
+    // NestJS 404s on client-side routes (e.g. /dashboard) receive index.html.
+    // API paths still get the standard JSON response.
+    serveBundledFrontend(app, publicDir);
     logger.log(`Serving frontend static files from ${publicDir} with SPA fallback`);
   }
 
@@ -84,7 +92,9 @@ async function bootstrap() {
   app.get(ConsoleBridgeGateway).attachToHttpServer(httpServer);
   app.get(SshProxyGateway).attachToHttpServer(httpServer);
   app.get(HttpProxyGateway).attachToHttpServer(httpServer);
-  app.get(AgentGateway).attachToHttpServer(httpServer);
+  app.get(AgentGateway).attachToHttpServer(httpServer, {
+    trustProxy: app.getHttpAdapter().getInstance().get('trust proxy fn') as TrustProxy,
+  });
   const websocketPaths = new Set([
     '/ws/console',
     '/ws/ssh-proxy',

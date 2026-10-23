@@ -6,6 +6,7 @@ use crate::session::OwnedResolvedRoute;
 use anyhow::{Context, Result};
 use arc_swap::ArcSwapOption;
 use proxy_common::clock::{absolute_snapshot_remaining, now_ms};
+use russh::keys::ssh_key::public::KeyData;
 use russh::keys::{decode_secret_key, parse_public_key_base64, PrivateKey, PublicKey};
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
@@ -106,6 +107,10 @@ pub(crate) struct RoutingSnapshot {
     pub(crate) deadline: Instant,
     pub(crate) host_private_key: PrivateKey,
     pub(crate) users: Vec<RoutingUser>,
+    /// Active users by the key data of each authorized key (comments ignored).
+    pub(crate) active_users_by_key: HashMap<KeyData, Vec<usize>>,
+    /// Lower-cased hostname suffix (`nya` for `work.nya`); empty accepts bare names only.
+    pub(crate) host_suffix: String,
     pub(crate) servers_by_id: HashMap<String, ProxyServer>,
     pub(crate) images_by_id: HashMap<String, ProxyImage>,
     pub(crate) containers: Vec<ProxyContainer>,
@@ -154,12 +159,30 @@ impl RoutingSnapshot {
             .into_iter()
             .map(RoutingUser::from_proxy)
             .collect::<Vec<_>>();
+        let mut active_users_by_key: HashMap<KeyData, Vec<usize>> = HashMap::new();
+        for (index, user) in users.iter().enumerate() {
+            if user.status != "active" {
+                continue;
+            }
+            for key in &user.public_keys {
+                if let Some(parsed) = parse_authorized_key(key) {
+                    let holders = active_users_by_key
+                        .entry(parsed.key_data().clone())
+                        .or_default();
+                    if !holders.contains(&index) {
+                        holders.push(index);
+                    }
+                }
+            }
+        }
         Ok(Self {
             epoch,
             generation: snapshot.generation,
             deadline,
             host_private_key,
             users,
+            active_users_by_key,
+            host_suffix: snapshot.host_suffix.trim_matches('.').to_ascii_lowercase(),
             servers_by_id: snapshot
                 .servers
                 .into_iter()
@@ -272,21 +295,67 @@ impl RoutingSnapshot {
         &'a self,
         public_key: &PublicKey,
     ) -> Result<&'a RoutingUser, RejectReason> {
-        let mut matches = self
-            .users
-            .iter()
-            .filter(|user| {
-                user.status == "active"
-                    && user.public_keys.iter().any(|key| {
-                        parse_authorized_key(key).is_some_and(|allowed| allowed == *public_key)
-                    })
-            })
-            .collect::<Vec<_>>();
-        match matches.len() {
-            0 => Err(RejectReason::PublicKeyRejected),
-            1 => Ok(matches.remove(0)),
-            _ => Err(RejectReason::AmbiguousUser),
+        match self
+            .active_users_by_key
+            .get(public_key.key_data())
+            .map(Vec::as_slice)
+        {
+            None | Some([]) => Err(RejectReason::PublicKeyRejected),
+            Some([index]) => Ok(&self.users[*index]),
+            Some(_) => Err(RejectReason::AmbiguousUser),
         }
+    }
+
+    /// Resolves a `direct-tcpip` target: a routed IPv4 address, or one of the
+    /// user's container names, bare (`work`) or with the host suffix
+    /// (`work.nya`). Name lookup never crosses owners.
+    pub(crate) fn resolve_owned_route_for_user_target(
+        &self,
+        user_id: &str,
+        target: &str,
+    ) -> Result<OwnedResolvedRoute, RejectReason> {
+        if target.parse::<Ipv4Addr>().is_ok() {
+            return self.resolve_owned_route_for_user_ip(user_id, target);
+        }
+        let name = self
+            .container_name_for_host(target)
+            .ok_or(RejectReason::InvalidTarget)?;
+        let mut resolved = self
+            .containers
+            .iter()
+            .filter(|container| {
+                container.owner_id == user_id && container.name.eq_ignore_ascii_case(&name)
+            })
+            .filter_map(|container| self.routes_by_container_id.get(&container.id))
+            .filter_map(|route| route.routed_ip.as_deref())
+            .filter_map(|address| self.resolve_owned_route_for_user_ip(user_id, address).ok())
+            .filter(|route| route.container_name.eq_ignore_ascii_case(&name));
+        let Some(route) = resolved.next() else {
+            return Err(RejectReason::RouteNotFound);
+        };
+        if resolved.next().is_some() {
+            return Err(RejectReason::AmbiguousContainer);
+        }
+        Ok(route)
+    }
+
+    /// The container name a hostname target names, or `None` for anything
+    /// that is not one DNS label, optionally followed by the host suffix.
+    pub(crate) fn container_name_for_host(&self, target: &str) -> Option<String> {
+        let host = target.trim_end_matches('.').to_ascii_lowercase();
+        let label = if self.host_suffix.is_empty() {
+            host.as_str()
+        } else {
+            host.strip_suffix(self.host_suffix.as_str())
+                .and_then(|rest| rest.strip_suffix('.'))
+                .unwrap_or(host.as_str())
+        };
+        let valid = (1..=63).contains(&label.len())
+            && label
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+            && label.as_bytes()[0].is_ascii_alphanumeric();
+        valid.then(|| label.to_string())
     }
 
     pub(crate) fn resolve_owned_route_for_user_ip(
@@ -436,6 +505,8 @@ pub(crate) enum RejectReason {
     PublicKeyRejected,
     #[error("ambiguous user")]
     AmbiguousUser,
+    #[error("invalid target")]
+    InvalidTarget,
 }
 
 impl RejectReason {
@@ -449,6 +520,7 @@ impl RejectReason {
             Self::AmbiguousContainer => "ambiguous_container",
             Self::PublicKeyRejected => "public_key_rejected",
             Self::AmbiguousUser => "ambiguous_user",
+            Self::InvalidTarget => "invalid_target",
         }
     }
 }

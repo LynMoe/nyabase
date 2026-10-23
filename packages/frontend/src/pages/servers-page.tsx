@@ -20,6 +20,7 @@ import { SectionCard } from '../components/layout/section-card.js';
 import { TechnicalId } from '../components/refs/technical-id.js';
 import { AgentStateBadge } from '../components/servers/agent-card.js';
 import { nodeMetricsBadgeVariant } from '../components/servers/node-metrics-card.js';
+import { RejectedAgentsNotice } from './servers-page/rejected-agents-notice.js';
 import { ServerOnboardingDialog } from './servers-page/server-onboarding-dialog.js';
 import { nodeMetricsStatusZh, serverStatusLabel } from '../lib/display-labels.js';
 import { preflightPending } from '../lib/in-progress.js';
@@ -65,6 +66,7 @@ export default function ServersPage() {
           </>
         }
       />
+      <RejectedAgentsNotice servers={serversQuery.data} />
       <QueryView
         query={serversQuery}
         resourceName="服务器目录"

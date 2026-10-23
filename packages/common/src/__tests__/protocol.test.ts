@@ -12,7 +12,10 @@ import {
   ResourceLifecyclePhase,
   ServerStatus,
   zBrowserToConsole,
+  zConsoleToBrowser,
   zCreateContainerRequest,
+  zAttachVolumeRequest,
+  isForbiddenContainerMountPath,
   zAddCatalogImageRequest,
   zCreateImageRequest,
   zCreateIpPoolRequest,
@@ -33,7 +36,10 @@ import {
   zPutServerGrantRequest,
   zSshProxyInstanceRouteSnapshot,
   zSshProxyPauseAdmitCommand,
-  formatSshProxyJumpLogin,
+  formatSshClientConfig,
+  formatSshKnownHosts,
+  formatSshProxyJump,
+  sshContainerHostName,
   zSharedVolumeScope,
   zVolumeScope,
   ADMIN_INTENT_LIST_MAX,
@@ -153,6 +159,21 @@ describe('canonical container and volume contracts', () => {
     }).volumes).toEqual([{ volumeId: id, containerPath: '/data', readOnly: false }]);
   });
 
+  it('refuses volume mounts over kernel pseudo-filesystems', () => {
+    const attach = (containerPath: string) => zAttachVolumeRequest.safeParse({
+      volumeId: '11111111-1111-4111-8111-111111111111',
+      containerPath,
+      readOnly: false,
+    }).success;
+    for (const path of ['/proc', '/proc/self', '/sys', '/sys/fs/cgroup', '/dev', '/dev/shm', '//proc', '/dev/', '/sys//kernel']) {
+      expect(attach(path), path).toBe(false);
+    }
+    for (const path of ['/data', '/procfs', '/srv/proc', '/device', '/system']) {
+      expect(attach(path), path).toBe(true);
+    }
+    expect(isForbiddenContainerMountPath('/./proc')).toBe(true);
+  });
+
   it('canonicalizes GPU PCI addresses on grants and defaults to none', () => {
     expect(zPutServerGrantRequest.parse({
       cpuCores: null,
@@ -201,16 +222,19 @@ describe('canonical container and volume contracts', () => {
     }).success).toBe(false);
   });
 
-  it('formats the jump login', () => {
-    expect(formatSshProxyJumpLogin({
-      username: 'Alice',
-      containerName: 'Work',
-    })).toBe('alice.work');
-    expect(formatSshProxyJumpLogin({
-      username: 'alice',
-      containerName: 'work',
-      serverSlug: 'cpu-a',
-    })).toBe('alice.cpu-a.work');
+  it('formats container host names and client configuration', () => {
+    expect(sshContainerHostName('Work', 'nya')).toBe('work.nya');
+    expect(formatSshProxyJump({ username: 'alice', host: 'ssh.example.com', port: 22 }))
+      .toBe('alice@ssh.example.com');
+    expect(formatSshClientConfig({ username: 'alice', host: 'ssh.example.com', port: 2222, hostSuffix: 'nya' }))
+      .toBe('Host *.nya\n  ProxyJump alice@ssh.example.com:2222');
+    expect(formatSshKnownHosts({
+      host: 'ssh.example.com',
+      port: 2222,
+      hostSuffix: 'nya',
+      proxyHostKey: 'ssh-ed25519 AAAAproxy nyabase-ssh-proxy',
+      hostCertificateAuthority: 'ssh-ed25519 AAAAca alice',
+    })).toBe('[ssh.example.com]:2222 ssh-ed25519 AAAAproxy\n@cert-authority *.nya ssh-ed25519 AAAAca');
   });
 
   it('uses local or shared storage scopes without source aliases', () => {
@@ -421,6 +445,8 @@ describe('preflight and console contracts', () => {
       token: 'browser-token',
       serverId,
     }).success).toBe(false);
+    expect(zConsoleToBrowser.parse({ type: 'reauthenticate' })).toEqual({ type: 'reauthenticate' });
+    expect(zConsoleToBrowser.safeParse({ type: 'reauthenticate', token: 'x' }).success).toBe(false);
   });
 });
 
@@ -502,6 +528,7 @@ describe('canonical DTO shapes', () => {
         hostname: null,
         connectedAt: null,
         enrollmentExpiresAt: null,
+        ipv6Guard: null,
       },
       metricsHealth: {
         status: NodeMetricsStatus.Unknown,
@@ -552,6 +579,7 @@ describe('canonical DTO shapes', () => {
         status: 'running',
         ready: true,
         loginUser: 'root',
+        hostName: 'work.nya',
         proxyHost: null,
         proxyPort: null,
         observedAt: null,
@@ -692,6 +720,8 @@ describe('local volume list query', () => {
     expect(zListVolumesQuery.parse({ scope: 'all', serverId })).toEqual({ scope: 'all', serverId });
     expect(zListVolumesQuery.safeParse({ serverId: 'srv-1' }).success).toBe(false);
     expect(zListVolumesQuery.safeParse({ scope: 'mine', serverId }).success).toBe(false);
+    expect(zListVolumesQuery.safeParse({ scope: 'mine', serverId }).error?.issues)
+      .toEqual([expect.objectContaining({ path: ['serverId'], message: 'serverId is only available with scope=all' })]);
   });
 
   it('rejects extra keys, an unknown scope and empty serverId', () => {

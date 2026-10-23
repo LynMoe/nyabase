@@ -12,6 +12,7 @@ import {
 } from '../../platform/persistence-pg/postgres-test-harness.js';
 import { userRow, usersPgFixture } from '../users.pg-test-helper.js';
 import { SSH_KEY_IN_USE } from '../user-ssh-keys.service.js';
+import { testActor } from '../../iam/actor.test-helper.js';
 
 const describePostgres = process.env.NYABASE_TEST_DATABASE_URL ? describe : describe.skip;
 const VALID_ED25519_KEY =
@@ -23,10 +24,10 @@ describePostgres('UsersService PostgreSQL SSH key durable hooks', () => {
       const context = await usersPgFixture(fixture, { seedActor: false });
       context.convergence.reconcileUser.mockRejectedValueOnce(new Error('queue unavailable'));
       const saved = await context.sshKeys.addSshKey(
-        context.userId,
+        testActor(context.userId),
         'laptop',
         ` \t ${VALID_ED25519_KEY.replaceAll(' ', '\t  ')} \t `,
-        context.userId,
+        'current-password',
       );
       expect(saved).toMatchObject({
         id: expect.any(String),
@@ -60,10 +61,10 @@ describePostgres('UsersService PostgreSQL SSH key durable hooks', () => {
     await withPostgresTestDatabase(async (fixture) => {
       const context = await usersPgFixture(fixture, { seedActor: false });
       await expect(context.sshKeys.addSshKey(
-        context.userId,
+        testActor(context.userId),
         'bogus',
         'not-an-ssh-public-key',
-        context.userId,
+        'current-password',
       )).rejects.toBeInstanceOf(BadRequestException);
       expect(await fixture.database.selectFrom('iam.ssh_public_keys').select('id')
         .execute()).toEqual([]);
@@ -77,10 +78,10 @@ describePostgres('UsersService PostgreSQL SSH key durable hooks', () => {
       const context = await usersPgFixture(fixture, { seedActor: false });
       await seedSshKeys(fixture, context.userId, MAX_SSH_PUBLIC_KEYS_PER_USER);
       await expect(context.sshKeys.addSshKey(
-        context.userId,
+        testActor(context.userId),
         'overflow',
         VALID_ED25519_KEY,
-        context.userId,
+        'current-password',
       )).rejects.toBeInstanceOf(ConflictException);
       expect(context.audit.log).not.toHaveBeenCalled();
     });
@@ -93,10 +94,10 @@ describePostgres('UsersService PostgreSQL SSH key durable hooks', () => {
         targetStatus: UserStatus.Deleting,
       });
       await expect(context.sshKeys.addSshKey(
-        context.userId,
+        testActor(context.userId),
         'late-key',
         VALID_ED25519_KEY,
-        context.userId,
+        'current-password',
       )).rejects.toBeInstanceOf(ConflictException);
       expect(context.audit.log).not.toHaveBeenCalled();
     });
@@ -163,10 +164,10 @@ describePostgres('UsersService PostgreSQL SSH key durable hooks', () => {
       const context = await usersPgFixture(fixture, { seedActor: false });
       context.audit.log.mockRejectedValueOnce(new Error('audit unavailable'));
       await expect(context.sshKeys.addSshKey(
-        context.userId,
+        testActor(context.userId),
         'laptop',
         VALID_ED25519_KEY,
-        context.userId,
+        'current-password',
       )).rejects.toThrow('audit unavailable');
       expect(await fixture.database.selectFrom('iam.ssh_public_keys').select('id')
         .where('user_id', '=', context.userId).execute()).toEqual([]);
@@ -178,18 +179,18 @@ describePostgres('UsersService PostgreSQL SSH key durable hooks', () => {
     await withPostgresTestDatabase(async (fixture) => {
       const context = await usersPgFixture(fixture, { seedActor: false });
       await context.sshKeys.addSshKey(
-        context.userId,
+        testActor(context.userId),
         'first',
         VALID_ED25519_KEY,
-        context.userId,
+        'current-password',
       );
       context.audit.log.mockClear();
       context.proxySnapshots.notify.mockClear();
       await expect(context.sshKeys.addSshKey(
-        context.userId,
+        testActor(context.userId),
         'duplicate',
         VALID_ED25519_KEY,
-        context.userId,
+        'current-password',
       )).rejects.toMatchObject({ status: 409, response: { code: SSH_KEY_IN_USE } });
       expect(context.audit.log).not.toHaveBeenCalled();
       expect(context.proxySnapshots.notify).not.toHaveBeenCalled();
@@ -202,11 +203,11 @@ describePostgres('UsersService PostgreSQL SSH key durable hooks', () => {
       const otherId = randomUUID();
       await fixture.database.insertInto('iam.users')
         .values(userRow(otherId, 1003, 'other', UserStatus.Active)).execute();
-      await context.sshKeys.addSshKey(context.userId, 'mine', `${VALID_ED25519_KEY} victim@host`, context.userId);
+      await context.sshKeys.addSshKey(testActor(context.userId), 'mine', `${VALID_ED25519_KEY} victim@host`, 'current-password');
       context.audit.log.mockClear();
       context.proxySnapshots.notify.mockClear();
 
-      const attempt = context.sshKeys.addSshKey(otherId, 'stolen', `${VALID_ED25519_KEY} attacker`, otherId);
+      const attempt = context.sshKeys.addSshKey(testActor(otherId), 'stolen', `${VALID_ED25519_KEY} attacker`, 'current-password');
       await expect(attempt).rejects.toMatchObject({ status: 409, response: { code: SSH_KEY_IN_USE } });
       // The conflict does not say who holds the key.
       const response = JSON.stringify(await attempt.catch((error: ConflictException) => error.getResponse()));

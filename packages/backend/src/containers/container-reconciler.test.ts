@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { AuditAction, IntentKind, IntentResourceType, IntentStatus } from '@nyabase/common';
+import { AuditAction, FailureCode, IntentKind, IntentResourceType, IntentStatus } from '@nyabase/common';
 import {
   buildDesiredInstanceSpec,
   deriveAttachmentDeviceName,
@@ -8,7 +8,7 @@ import {
   IncusError,
   type DesiredInstanceSpec,
 } from '../incus/index.js';
-import { ContainerReconciler } from './container-reconciler.service.js';
+import { ContainerReconciler, rootQuotaRetryDelay } from './container-reconciler.service.js';
 import { ContainerReconcileStore } from './container-reconcile.store.js';
 import {
   managedContainerIdentity,
@@ -18,12 +18,17 @@ import {
 } from './container-instance-ops.js';
 import { decideRootShrink } from './container-rules.js';
 import type { IntentRecord } from '../reconcile/intent.repository.js';
+import { VOLUME_ADOPT_FAIL_AFTER_ATTEMPTS } from '../volumes/shared-volume-catalog.service.js';
 import type { ReconcileRunContext } from '../reconcile/managed-reconciler.js';
 import {
   IncusContainerSshStateAdapter,
+  MANAGED_KEYS_BEGIN,
+  MANAGED_KEYS_END,
+  reconcileSshFile,
   sshFileMetadataMatches,
   sshFileNeedsReconcile,
   sshObservation,
+  withManagedKeys,
 } from './container-ssh.js';
 
 /** The reconciler's private SQL store, where the tests intercept data access. */
@@ -111,6 +116,59 @@ describe('container reconciliation identity and power policy', () => {
       { ...desiredMetadata, uid: 1001 },
       desiredMetadata,
     )).toBe(false);
+  });
+
+  it('rewrites only the managed authorized_keys block and keeps the user lines', () => {
+    const platform = 'ssh-ed25519 AAAAplatform alice';
+    const block = `${MANAGED_KEYS_BEGIN}\n${platform}\n${MANAGED_KEYS_END}\n`;
+    expect(withManagedKeys('', platform)).toBe(block);
+    const user = 'ssh-ed25519 AAAAdeploy ci\n';
+    const written = withManagedKeys(user, platform);
+    expect(written).toBe(`ssh-ed25519 AAAAdeploy ci\n${block}`);
+    expect(withManagedKeys(written, platform)).toBe(written);
+    // Keys removed: the block goes, the user's key stays.
+    expect(withManagedKeys(written, null)).toBe(user);
+    // The block moves to the end; a missing end marker drops everything after the start.
+    expect(withManagedKeys(`${block}ssh-rsa AAAAlater\n`, 'ssh-ed25519 AAAAnew'))
+      .toBe(`ssh-rsa AAAAlater\n${MANAGED_KEYS_BEGIN}\nssh-ed25519 AAAAnew\n${MANAGED_KEYS_END}\n`);
+    expect(withManagedKeys(`ssh-rsa AAAAkeep\n${MANAGED_KEYS_BEGIN}\nssh-ed25519 AAAAstale\n`, null))
+      .toBe('ssh-rsa AAAAkeep\n');
+    expect(withManagedKeys('', null)).toBe('');
+  });
+
+  it('removes revoked platform keys from the guest and creates no file without keys', async () => {
+    const sshState = new IncusContainerSshStateAdapter();
+    const files = new Map<string, string>();
+    vi.spyOn(sshState, 'readAuthorizedKeys').mockImplementation(async (_client, _name, path) => {
+      const body = files.get(path);
+      if (path === '/home/dev/.ssh/authorized_keys') return { body: Buffer.from('/home/dev/dotfiles/keys'), type: 'symlink' } as never;
+      return body === undefined ? null : { body: Buffer.from(body, 'latin1'), uid: 0, gid: 0, mode: 0o600, type: 'file' } as never;
+    });
+    const write = vi.spyOn(sshState, 'writeAuthorizedKeys')
+      .mockImplementation(async (_client, _name, path, content) => { files.set(path, Buffer.from(content).toString('latin1')); });
+    const row = { login_user: 'root', ssh_public_key: null } as never;
+    const signal = new AbortController().signal;
+    await expect(reconcileSshFile(sshState, {} as never, row, 'nyc-x', false, signal))
+      .resolves.toEqual({ status: 'disabled', lastError: null });
+    expect(write).not.toHaveBeenCalled();
+
+    files.set('/root/.ssh/authorized_keys', `ssh-rsa AAAAmine\n${withManagedKeys('', 'ssh-ed25519 AAAAold')}`);
+    await expect(reconcileSshFile(sshState, {} as never, row, 'nyc-x', false, signal))
+      .resolves.toEqual({ status: 'disabled', lastError: null });
+    expect(files.get('/root/.ssh/authorized_keys')).toBe('ssh-rsa AAAAmine\n');
+
+    // Bytes that are not UTF-8 in a user line survive the rewrite unchanged.
+    files.set('/root/.ssh/authorized_keys', 'ssh-rsa AAAAmine caf\xe9\n');
+    const withKey = { login_user: 'root', ssh_public_key: 'ssh-ed25519 AAAAnew' } as never;
+    await reconcileSshFile(sshState, {} as never, withKey, 'nyc-x', false, signal);
+    expect(files.get('/root/.ssh/authorized_keys')).toBe(`ssh-rsa AAAAmine caf\xe9\n${withManagedKeys('', 'ssh-ed25519 AAAAnew')}`);
+
+    // A symlinked authorized_keys is never written through.
+    write.mockClear();
+    const linked = { login_user: 'dev', ssh_public_key: 'ssh-ed25519 AAAAnew' } as never;
+    await expect(reconcileSshFile(sshState, {} as never, linked, 'nyc-x', false, signal))
+      .resolves.toEqual({ status: 'error', lastError: 'authorized_keys_not_a_file' });
+    expect(write).not.toHaveBeenCalled();
   });
 
   it('records a visible error when sshd is missing after key convergence', () => {
@@ -375,7 +433,7 @@ describe('container reconciler §15.1 fixture-driven Incus mocks', () => {
       attachments: [attachment(ATTACH_ADD, VOLUME_ADD, '/data/add', 'attaching')],
     });
     const outcome = await reconciler.reconcile(context(client, { targetRevision: 2 }));
-    expect(outcome).toEqual({ outcome: 'succeeded', observedRevision: 2 });
+    expect(outcome).toEqual({ outcome: 'succeeded', observedRevision: 2, stale: true });
     expect(client.readModifyWriteInstance).not.toHaveBeenCalled();
     expect(client.getStorageVolume).not.toHaveBeenCalled();
   });
@@ -404,12 +462,15 @@ describe('container reconciler §15.1 fixture-driven Incus mocks', () => {
 
     const outcome = await reconciler.reconcile(context(client));
     expect(outcome).toEqual({ outcome: 'succeeded', observedRevision: 3 });
-    expect(putBodies[0]!.devices[addName]).toMatchObject({
+    // The detaching device is unplugged on its own first, then the spec is applied.
+    expect(putBodies).toHaveLength(2);
+    expect(putBodies[0]!.devices[removeName]).toBeUndefined();
+    expect(putBodies[1]!.devices[addName]).toMatchObject({
       type: 'disk',
       path: '/data/add',
       source: deriveVolumeName(VOLUME_ADD),
     });
-    expect(putBodies[0]!.devices[removeName]).toBeUndefined();
+    expect(putBodies[1]!.devices[removeName]).toBeUndefined();
     expect(binds.updated).toContain(ATTACH_ADD);
     expect(binds.deleted).toContain(ATTACH_REMOVE);
   });
@@ -687,6 +748,61 @@ describe('container reconciler full scan', () => {
     expect(cpuSets.releaseIdle).toHaveBeenCalledWith(SERVER_ID);
   });
 
+  it('stops an orphan instance at once and deletes it only when its quarantine is over', async () => {
+    const orphanId = '99999999-9999-4999-8999-999999999999';
+    const orphanName = deriveInstanceName(orphanId);
+    const orphan = {
+      name: orphanName,
+      config: {
+        'user.nyabase.managed': 'true',
+        'user.nyabase.container_id': orphanId,
+        'user.nyabase.server_id': SERVER_ID,
+      },
+      devices: {},
+      state: { status: 'Running', status_code: 101 },
+    };
+    const run = async (due: boolean) => {
+      const { reconciler, client } = scanHarness({
+        needsAttention: false,
+        lifecyclePhase: 'active',
+        powerIntent: 'running',
+        status: 'Running',
+      });
+      const listed = (await client.listInstances()).metadata;
+      const mocks = client as unknown as Record<string, ReturnType<typeof vi.fn>>;
+      mocks.listInstances!.mockResolvedValue(syncResponse([...listed, orphan]));
+      mocks.getInstanceState!.mockImplementation(async (name?: string) =>
+        syncResponse(name === orphanName ? orphan.state : listed[0]!.state));
+      mocks.getInstanceFull!.mockImplementation(async (name?: string) => {
+        if (name === orphanName) throw new IncusError('INCUS_NOT_FOUND', 'managed_failure');
+        return syncResponse(listed[0]);
+      });
+      const orphans = {
+        sight: vi.fn().mockResolvedValue({
+          fresh: [],
+          due: due ? [{ poolName: '', name: orphanName }] : [],
+        }),
+        forget: vi.fn().mockResolvedValue(undefined),
+      };
+      Object.assign((reconciler as unknown as { store: object }).store, { orphans });
+      await reconciler.scan(SERVER_ID, client as never, new AbortController().signal);
+      return { client, orphans };
+    };
+
+    const quarantined = await run(false);
+    expect(quarantined.orphans.sight).toHaveBeenCalledWith(SERVER_ID, 'instance', [{ poolName: '', name: orphanName }]);
+    expect(quarantined.client.updateInstanceState).toHaveBeenCalledWith(
+      orphanName,
+      { action: 'stop', force: true },
+      expect.anything(),
+    );
+    expect(quarantined.client.deleteInstance).not.toHaveBeenCalled();
+
+    const overdue = await run(true);
+    expect(overdue.client.deleteInstance).toHaveBeenCalledWith(orphanName, expect.anything());
+    expect(overdue.orphans.forget).toHaveBeenCalledWith(SERVER_ID, 'instance', { poolName: '', name: orphanName });
+  });
+
   it('skips needs_attention rows during scan enqueue', async () => {
     const { reconciler, client, ensurePending } = scanHarness({
       needsAttention: true,
@@ -794,7 +910,7 @@ const TEST_LIMITS = {
 };
 
 /** CPU sets, limits and the IAM change bus the reconciler needs beyond its store. */
-function runtimeDeps(): [never, never, never, never] {
+function runtimeDeps(): [never, never, never, never, never] {
   const configValues: Record<string, number> = {
     'containers.processLimit': TEST_LIMITS.processes,
     'containers.networkIngressMbit': TEST_LIMITS.networkIngressMbit,
@@ -811,7 +927,8 @@ function runtimeDeps(): [never, never, never, never] {
     { get: (key: string) => configValues[key] },
     { onChange: vi.fn() },
     { wake: vi.fn() },
-  ] as [never, never, never, never];
+    { certify: vi.fn().mockResolvedValue(null) },
+  ] as [never, never, never, never, never];
 }
 
 function desiredFrom(options: HarnessOptions): DesiredInstanceSpec {
@@ -986,6 +1103,8 @@ async function harness(options: HarnessOptions) {
     renameInstance: vi.fn(async () => syncResponse({})),
     deleteInstance: vi.fn(async () => syncResponse({})),
     execInstance: vi.fn(async () => syncResponse({ return: 0 })),
+    // A guest without authorized_keys: the SSH step has nothing to manage.
+    getFile: vi.fn(async () => { throw new IncusError('INCUS_NOT_FOUND', 'managed_failure'); }),
     getStorageVolume: vi.fn(async () => syncResponse({ name: 'volume' })),
     createStorageVolume: vi.fn(async () => syncResponse({})),
     getStorageVolumeState: vi.fn(async () => syncResponse({ usage: {} })),
@@ -1152,6 +1271,431 @@ function context(client: unknown, intentOverrides: Partial<IntentRecord> = {}): 
   };
 }
 
+/** Make the harness instance follow start/stop/restart like Incus would. */
+function followPower(setup: Awaited<ReturnType<typeof harness>>) {
+  let boots = 0;
+  const actions: string[] = [];
+  (setup.client.updateInstanceState as ReturnType<typeof vi.fn>).mockImplementation(async (
+    _name: string,
+    body: { action: string },
+  ) => {
+    actions.push(body.action);
+    const state = setup.store.document.state as Record<string, unknown>;
+    if (body.action === 'stop') {
+      setup.store.document.state = { ...state, status: 'Stopped', status_code: 102 } as never;
+    } else {
+      boots += 1;
+      setup.store.document.state = {
+        ...state,
+        status: 'Running',
+        status_code: 101,
+        started_at: `2026-08-07T16:00:0${boots}.000Z`,
+      } as never;
+    }
+    return syncResponse({});
+  });
+  return actions;
+}
+
+function mockRow(setup: Awaited<ReturnType<typeof harness>>, overrides: Record<string, unknown>) {
+  (storeOf(setup.reconciler) as unknown as { readContainer: ReturnType<typeof vi.fn> })
+    .readContainer.mockResolvedValue({
+      ...containerRow({ status: 'Running', powerIntent: 'running' }),
+      ...overrides,
+    });
+}
+
+describe('container reconciler: changes that need a stopped instance never block power-off', () => {
+  const gpuDrift = { config: { 'nvidia.runtime': 'true' } };
+
+  it('stops first, then removes leftover GPU config, when the container should be stopped', async () => {
+    const setup = await harness({ status: 'Running', powerIntent: 'stopped', documentExtras: gpuDrift });
+    const actions = followPower(setup);
+    const outcome = await setup.reconciler.reconcile(context(setup.client, {
+      kind: IntentKind.ContainerPower,
+      request: { action: 'stop', operation: 'stop' },
+    }));
+    expect(outcome).toEqual({ outcome: 'succeeded', observedRevision: 3 });
+    expect(actions).toEqual(['stop']);
+    expect(setup.putBodies).toHaveLength(1);
+    expect(setup.putBodies[0]!.config['nvidia.runtime']).toBeUndefined();
+  });
+
+  it('still refuses a GPU change on a container that should keep running', async () => {
+    const setup = await harness({ status: 'Running', powerIntent: 'running', documentExtras: gpuDrift });
+    const actions = followPower(setup);
+    const outcome = await setup.reconciler.reconcile(context(setup.client));
+    expect(outcome).toMatchObject({ outcome: 'failed', failure: { code: 'GPU_MUTATION_REQUIRES_STOP' } });
+    expect(actions).toEqual([]);
+    expect(setup.putBodies).toHaveLength(0);
+  });
+
+  it('applies a GPU change during a restart: stop, PUT, start, proven by started_at', async () => {
+    const setup = await harness({ status: 'Running', powerIntent: 'running', documentExtras: gpuDrift });
+    (setup.store.document.state as Record<string, unknown>).started_at = '2026-08-07T15:00:00.000Z';
+    const actions = followPower(setup);
+    const outcome = await setup.reconciler.reconcile(context(setup.client, {
+      kind: IntentKind.ContainerPower,
+      request: { action: 'restart', operation: 'restart' },
+      baseline: { startedAt: '2026-08-07T15:00:00.000Z' },
+    }));
+    expect(outcome).toEqual({ outcome: 'succeeded', observedRevision: 3 });
+    expect(actions).toEqual(['stop', 'start']);
+    expect(setup.putBodies).toHaveLength(1);
+  });
+
+  it('stops before an accepted block-backed root shrink instead of failing the stop', async () => {
+    const setup = await harness({
+      status: 'Running',
+      powerIntent: 'stopped',
+      rootResizeFamily: 'block_backed',
+      rootSizeBytes: 5_000_000_000,
+      documentExtras: {
+        devices: { root: { type: 'disk', path: '/', pool: ROOT_POOL, size: '10000000000' } },
+      },
+    });
+    const actions = followPower(setup);
+    const outcome = await setup.reconciler.reconcile(context(setup.client));
+    expect(outcome).toEqual({ outcome: 'succeeded', observedRevision: 3 });
+    expect(actions).toEqual(['stop']);
+    expect(setup.putBodies[0]!.devices.root!.size).toBe('5000000000');
+  });
+
+  it('stops the instance even while an attached volume is not ready on the server', async () => {
+    // A local volume whose create failed: it never appears in the Incus catalog.
+    const setup = await harness({
+      status: 'Running',
+      powerIntent: 'stopped',
+      attachments: [attachment(ATTACH_ADD, VOLUME_ADD, '/data/add', 'attaching')],
+    });
+    const actions = followPower(setup);
+    setup.client.getStorageVolume.mockRejectedValue(new IncusError('INCUS_NOT_FOUND', 'managed_failure'));
+    const stop = context(setup.client, {
+      kind: IntentKind.ContainerPower,
+      request: { action: 'stop', operation: 'stop' },
+    });
+
+    await expect(setup.reconciler.reconcile(stop)).rejects.toMatchObject({
+      code: 'VOLUME_PLACEMENT_PENDING',
+      disposition: 'retry',
+    });
+    expect(actions).toEqual(['stop']);
+    expect(setup.client.readModifyWriteInstance).not.toHaveBeenCalled();
+
+    // Retried, the stopped instance is left alone.
+    await expect(setup.reconciler.reconcile(stop)).rejects.toMatchObject({ code: 'VOLUME_PLACEMENT_PENDING' });
+    expect(actions).toEqual(['stop']);
+  });
+
+  it('stops the instance even while a shared volume has no placement on the server', async () => {
+    const setup = await harness({ status: 'Running', powerIntent: 'stopped' });
+    const actions = followPower(setup);
+    (storeOf(setup.reconciler) as unknown as { readAttachments: ReturnType<typeof vi.fn> })
+      .readAttachments.mockRejectedValue(new IncusError('VOLUME_PLACEMENT_PENDING', 'retry', {
+        volumeId: VOLUME_ADD,
+        serverId: SERVER_ID,
+      }));
+
+    await expect(setup.reconciler.reconcile(context(setup.client))).rejects.toMatchObject({
+      code: 'VOLUME_PLACEMENT_PENDING',
+    });
+    expect(actions).toEqual(['stop']);
+  });
+
+  it('fails visibly instead of retrying forever once a volume stays not ready', async () => {
+    const setup = await harness({
+      status: 'Stopped',
+      powerIntent: 'running',
+      attachments: [attachment(ATTACH_ADD, VOLUME_ADD, '/data/add', 'attaching')],
+    });
+    const actions = followPower(setup);
+    setup.client.getStorageVolume.mockRejectedValue(new IncusError('INCUS_NOT_FOUND', 'managed_failure'));
+
+    // Only not-ready passes count: an intent whose attempts piled up while the
+    // agent was away (unreachable retries) still gets every one of them.
+    const pass = context(setup.client, { attemptCount: 40 });
+    for (let attempt = 0; attempt < VOLUME_ADOPT_FAIL_AFTER_ATTEMPTS; attempt += 1) {
+      await expect(setup.reconciler.reconcile(pass)).rejects.toMatchObject({ code: 'VOLUME_PLACEMENT_PENDING' });
+    }
+    const outcome = await setup.reconciler.reconcile(pass);
+
+    expect(outcome).toMatchObject({
+      outcome: 'failed',
+      failure: {
+        code: FailureCode.VolumePlacementFailed,
+        details: { volumeId: VOLUME_ADD, serverId: SERVER_ID },
+      },
+    });
+    // It never starts without the volume, and never writes the instance.
+    expect(actions).toEqual([]);
+    expect(setup.client.readModifyWriteInstance).not.toHaveBeenCalled();
+  });
+
+  it('counts consecutive not-ready passes per intent and starts over once the volume was ready', async () => {
+    const setup = await harness({
+      status: 'Stopped',
+      powerIntent: 'stopped',
+      attachments: [attachment(ATTACH_ADD, VOLUME_ADD, '/data/add', 'attaching')],
+    });
+    setup.client.getStorageVolume.mockRejectedValue(new IncusError('INCUS_NOT_FOUND', 'managed_failure'));
+    const first = context(setup.client);
+    for (let attempt = 0; attempt < VOLUME_ADOPT_FAIL_AFTER_ATTEMPTS; attempt += 1) {
+      await expect(setup.reconciler.reconcile(first)).rejects.toMatchObject({ code: 'VOLUME_PLACEMENT_PENDING' });
+    }
+    // Another intent of the same container has its own count.
+    const other = context(setup.client, { id: '66666666-6666-4666-8666-666666666666' });
+    await expect(setup.reconciler.reconcile(other)).rejects.toMatchObject({ code: 'VOLUME_PLACEMENT_PENDING' });
+    // One ready pass (failing later, reading the instance) resets the first intent's count.
+    setup.client.getStorageVolume.mockResolvedValueOnce(syncResponse({ name: 'volume' }));
+    setup.client.getInstanceState.mockRejectedValueOnce(new IncusError('INCUS_TIMEOUT', 'retry'));
+    await expect(setup.reconciler.reconcile(first)).rejects.toMatchObject({ code: 'INCUS_TIMEOUT' });
+    for (let attempt = 0; attempt < VOLUME_ADOPT_FAIL_AFTER_ATTEMPTS; attempt += 1) {
+      await expect(setup.reconciler.reconcile(first)).rejects.toMatchObject({ code: 'VOLUME_PLACEMENT_PENDING' });
+    }
+    await expect(setup.reconciler.reconcile(first)).resolves.toMatchObject({
+      outcome: 'failed',
+      failure: { code: FailureCode.VolumePlacementFailed },
+    });
+  });
+});
+
+describe('container reconciler: detaching never waits for the other attachments', () => {
+  async function detachingSetup(options: { readonly status: 'Running' | 'Stopped'; readonly missingInstance?: boolean }) {
+    const removeName = deriveAttachmentDeviceName(ATTACH_REMOVE);
+    const setup = await harness({
+      status: options.status,
+      powerIntent: 'running',
+      missingInstance: options.missingInstance,
+      // The attachment kept on the container is local and was never created on this server.
+      attachments: [attachment(ATTACH_KEEP, VOLUME_KEEP, '/data/keep')],
+      documentExtras: {
+        devices: {
+          [deriveAttachmentDeviceName(ATTACH_KEEP)]: diskDevice(VOLUME_KEEP, '/data/keep'),
+          [removeName]: diskDevice(VOLUME_REMOVE, '/data/remove'),
+        },
+      },
+    });
+    const store = storeOf(setup.reconciler) as unknown as {
+      readDetachingDevices: () => Promise<string[]>;
+      settleVolumeBinds: () => Promise<void>;
+    };
+    vi.spyOn(store, 'readDetachingDevices').mockResolvedValue([removeName]);
+    const settle = vi.spyOn(store, 'settleVolumeBinds').mockResolvedValue(undefined);
+    setup.client.getStorageVolume.mockRejectedValue(new IncusError('INCUS_NOT_FOUND', 'managed_failure'));
+    return { ...setup, removeName, settle };
+  }
+
+  it('unplugs a detaching volume from the running instance while another volume is not ready', async () => {
+    const setup = await detachingSetup({ status: 'Running' });
+    const actions = followPower(setup);
+
+    const detach = context(setup.client, {
+      request: { operation: 'detach_volume', attachmentId: ATTACH_REMOVE },
+    });
+    await expect(setup.reconciler.reconcile(detach)).rejects.toMatchObject({ code: 'VOLUME_PLACEMENT_PENDING' });
+
+    // Only the detaching device left; the instance, its other devices and its power stay.
+    expect(setup.putBodies).toHaveLength(1);
+    expect(setup.putBodies[0]!.devices[setup.removeName]).toBeUndefined();
+    expect(setup.putBodies[0]!.devices[deriveAttachmentDeviceName(ATTACH_KEEP)]).toBeDefined();
+    expect(setup.putBodies[0]!.devices.root).toBeDefined();
+    expect(actions).toEqual([]);
+    // The detach is settled at once: its row goes although the pass fails.
+    const settled = setup.settle.mock.calls[0] as unknown as [string, { devices: Record<string, unknown> }, boolean];
+    expect(settled[0]).toBe(CONTAINER_ID);
+    expect(settled[1].devices[setup.removeName]).toBeUndefined();
+    expect(settled[2]).toBe(true);
+
+    // The pass still ends (and at last fails) on the volume that is not ready,
+    // without touching the instance again.
+    for (let attempt = 0; attempt < VOLUME_ADOPT_FAIL_AFTER_ATTEMPTS - 1; attempt += 1) {
+      await expect(setup.reconciler.reconcile(detach)).rejects.toMatchObject({ code: 'VOLUME_PLACEMENT_PENDING' });
+    }
+    await expect(setup.reconciler.reconcile(detach)).resolves.toMatchObject({
+      outcome: 'failed',
+      failure: { code: FailureCode.VolumePlacementFailed },
+    });
+    expect(setup.putBodies).toHaveLength(1);
+  });
+
+  it('settles a detach at once when the container has no instance on the server', async () => {
+    const setup = await detachingSetup({ status: 'Stopped', missingInstance: true });
+
+    await expect(setup.reconciler.reconcile(context(setup.client))).rejects.toMatchObject({
+      code: 'VOLUME_PLACEMENT_PENDING',
+    });
+
+    expect(setup.client.readModifyWriteInstance).not.toHaveBeenCalled();
+    expect(setup.settle).toHaveBeenCalledWith(CONTAINER_ID, { devices: {} }, true);
+  });
+
+  it('falls back to the full managed document when the agent refuses the unplug over host drift', async () => {
+    const removeName = deriveAttachmentDeviceName(ATTACH_REMOVE);
+    const binds = volumeBindDb([{ id: ATTACH_REMOVE, bind_state: 'detaching', device_name: removeName }]);
+    const setup = await harness({
+      status: 'Running',
+      powerIntent: 'running',
+      database: binds.db,
+      attachments: [attachment(ATTACH_REMOVE, VOLUME_REMOVE, '/data/remove', 'detaching')],
+      documentExtras: {
+        // Host-side drift the agent policy refuses to write back.
+        config: { 'raw.lxc': 'lxc.apparmor.profile=unconfined' },
+        devices: { [removeName]: diskDevice(VOLUME_REMOVE, '/data/remove') },
+      },
+    });
+    const write = setup.client.readModifyWriteInstance.getMockImplementation()!;
+    const refused: unknown[] = [];
+    setup.client.readModifyWriteInstance.mockImplementation(async (name, mutate, ...rest) => {
+      const probe = structuredClone({ ...setup.store.document, state: undefined });
+      mutate(probe as never);
+      if (probe.config['raw.lxc'] !== undefined) {
+        const error = new IncusError('AGENT_POLICY_DENIED', 'managed_failure', { message: 'raw.lxc' });
+        refused.push(error);
+        throw error;
+      }
+      return write(name, mutate, ...rest);
+    });
+    const actions = followPower(setup);
+
+    const outcome = await setup.reconciler.reconcile(context(setup.client, {
+      request: { operation: 'detach_volume', attachmentId: ATTACH_REMOVE },
+    }));
+
+    expect(outcome).toEqual({ outcome: 'succeeded', observedRevision: 3 });
+    expect(refused).toHaveLength(1);
+    // One write: the whole managed document, drift and detaching device gone.
+    expect(setup.putBodies).toHaveLength(1);
+    expect(setup.putBodies[0]!.config['raw.lxc']).toBeUndefined();
+    expect(setup.putBodies[0]!.devices[removeName]).toBeUndefined();
+    expect(setup.putBodies[0]!.devices.root).toBeDefined();
+    expect(actions).toEqual([]);
+    expect(binds.deleted).toContain(ATTACH_REMOVE);
+  });
+
+  it('still fails the pass when the unplug fails for another reason', async () => {
+    const setup = await detachingSetup({ status: 'Running' });
+    setup.client.readModifyWriteInstance.mockRejectedValue(
+      new IncusError('OPERATION_FAILED', 'managed_failure'),
+    );
+
+    await expect(setup.reconciler.reconcile(context(setup.client))).rejects.toMatchObject({
+      code: 'OPERATION_FAILED',
+    });
+    expect(setup.client.readModifyWriteInstance).toHaveBeenCalledTimes(1);
+    expect(setup.settle).not.toHaveBeenCalled();
+  });
+});
+
+describe('container reconciler: superseded intents', () => {
+  it('carries a superseded restart forward onto the current revision', async () => {
+    const setup = await harness({ status: 'Running', powerIntent: 'running' });
+    (setup.store.document.state as Record<string, unknown>).started_at = '2026-08-07T15:00:00.000Z';
+    const actions = followPower(setup);
+    const outcome = await setup.reconciler.reconcile(context(setup.client, {
+      kind: IntentKind.ContainerPower,
+      targetRevision: 2,
+      request: { action: 'restart', operation: 'restart' },
+      baseline: { startedAt: '2026-08-07T15:00:00.000Z' },
+    }));
+    expect(outcome).toEqual({ outcome: 'succeeded', observedRevision: 3 });
+    expect(actions).toEqual(['restart']);
+  });
+
+  it('settles a restart replaced by a later stop as failed, never as succeeded', async () => {
+    const setup = await harness({ status: 'Stopped', powerIntent: 'stopped' });
+    const outcome = await setup.reconciler.reconcile(context(setup.client, {
+      kind: IntentKind.ContainerPower,
+      targetRevision: 2,
+      request: { action: 'restart', operation: 'restart' },
+      baseline: { startedAt: null },
+    }));
+    expect(outcome).toMatchObject({ outcome: 'failed', stale: true, failure: { code: 'RESTART_SUPERSEDED' } });
+    expect(setup.client.updateInstanceState).not.toHaveBeenCalled();
+  });
+
+  it('deletes a deleting container even from an intent older than its revision', async () => {
+    const setup = await harness({ status: 'Stopped', powerIntent: 'stopped' });
+    mockRow(setup, { lifecycle_phase: 'deleting', power_intent: 'stopped' });
+    const release = vi.spyOn(
+      storeOf(setup.reconciler) as unknown as { releaseContainerState: () => Promise<void> },
+      'releaseContainerState',
+    ).mockResolvedValue(undefined);
+    let present = true;
+    setup.client.deleteInstance.mockImplementation(async () => {
+      present = false;
+      return syncResponse({});
+    });
+    setup.client.getInstanceFull.mockImplementation(async () => {
+      if (!present) throw new IncusError('INCUS_NOT_FOUND', 'managed_failure');
+      return syncResponse(setup.store.document);
+    });
+    const outcome = await setup.reconciler.reconcile(context(setup.client, { targetRevision: 1 }));
+    expect(outcome).toEqual({ outcome: 'succeeded', observedRevision: 3 });
+    expect(setup.client.deleteInstance).toHaveBeenCalledOnce();
+    expect(release).toHaveBeenCalledOnce();
+  });
+
+  it('treats a delete whose row is already gone as done (lease lost after the delete)', async () => {
+    const setup = await harness({ status: 'Stopped', powerIntent: 'stopped' });
+    (storeOf(setup.reconciler) as unknown as { readContainer: ReturnType<typeof vi.fn> })
+      .readContainer.mockResolvedValue(undefined);
+    const outcome = await setup.reconciler.reconcile(context(setup.client, { kind: IntentKind.ContainerDelete }));
+    expect(outcome).toEqual({ outcome: 'succeeded', observedRevision: 3, stale: true });
+    expect(setup.client.getInstanceFull).not.toHaveBeenCalled();
+  });
+});
+
+describe('container reconciler: bounded SSH readiness wait', () => {
+  const key = 'ssh-ed25519 AAAA fixture';
+
+  async function sshHarness() {
+    const setup = await harness({ status: 'Running', powerIntent: 'running' });
+    mockRow(setup, { ssh_public_key: key });
+    const sshState = (setup.reconciler as unknown as { sshState: IncusContainerSshStateAdapter }).sshState;
+    vi.spyOn(sshState, 'readAuthorizedKeys').mockResolvedValue({
+      body: Buffer.from(withManagedKeys('', key)),
+      uid: 0,
+      gid: 0,
+      mode: 0o600,
+      type: 'file',
+    } as never);
+    vi.spyOn(sshState, 'probeSshd').mockResolvedValue('unknown');
+    return setup;
+  }
+
+  it('lets only a fresh create wait for sshd', async () => {
+    const setup = await sshHarness();
+    const outcome = await setup.reconciler.reconcile(context(setup.client, {
+      kind: IntentKind.ContainerCreate,
+      createdAt: new Date().toISOString(),
+    }));
+    expect(outcome).toMatchObject({ outcome: 'retry', failure: { code: 'SSH_DAEMON_PENDING' } });
+  });
+
+  it('settles a create after the wait, and any other intent at once, with sshd still not listening', async () => {
+    const setup = await sshHarness();
+    const persist = (setup.reconciler as unknown as { persistObservation: ReturnType<typeof vi.fn> })
+      .persistObservation;
+    const old = await setup.reconciler.reconcile(context(setup.client, {
+      kind: IntentKind.ContainerCreate,
+      createdAt: new Date(Date.now() - 10 * 60_000).toISOString(),
+    }));
+    expect(old).toEqual({ outcome: 'succeeded', observedRevision: 3 });
+    const update = await setup.reconciler.reconcile(context(setup.client, {
+      createdAt: new Date().toISOString(),
+    }));
+    expect(update).toEqual({ outcome: 'succeeded', observedRevision: 3 });
+    expect(persist).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      expect.anything(),
+      false,
+      { status: 'unknown', lastError: 'sshd_not_listening' },
+      expect.anything(),
+    );
+  });
+});
+
 describe('ContainerReconciler resource status', () => {
   function statusReconciler(sets: Record<string, unknown>[]) {
     return new ContainerReconciler(new ContainerReconcileStore({
@@ -1183,10 +1727,11 @@ describe('ContainerReconciler resource status', () => {
     expect(sets[0]).not.toHaveProperty('lifecycle_phase');
   });
 
-  it('records a non-parking failure without needs_attention', async () => {
+  it('records a non-parking failure without touching needs_attention (a park survives it)', async () => {
     const sets: Record<string, unknown>[] = [];
     await statusReconciler(sets).markFailure(CONTAINER_ID, { code: 'X', message: 'm' }, false);
-    expect(sets[0]).toMatchObject({ needs_attention: false, failure_code: 'X' });
+    expect(sets[0]).toMatchObject({ failure_code: 'X' });
+    expect(sets[0]).not.toHaveProperty('needs_attention');
   });
 });
 
@@ -1215,5 +1760,12 @@ describe('ContainerReconciler settlement', () => {
       keep: (candidate: { kind: string; request: Record<string, unknown> | null }) => boolean;
     };
     expect(options.keep({ kind: IntentKind.ContainerPower, request: { action: 'restart' } })).toBe(true);
+  });
+});
+
+describe('root quota polling', () => {
+  it('backs off from 5 s to a minute', () => {
+    expect([1, 2, 3, 4, 5, 6, 40].map(rootQuotaRetryDelay))
+      .toEqual([5_000, 10_000, 20_000, 40_000, 60_000, 60_000, 60_000]);
   });
 });

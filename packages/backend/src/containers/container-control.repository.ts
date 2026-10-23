@@ -1,15 +1,58 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
-import { sql, type Kysely, type Selectable, type Transaction } from 'kysely';
+import { sql, type Kysely, type RawBuilder, type Selectable, type Transaction } from 'kysely';
 import { ContainerPhase, ContainerPowerIntent, type GpuContainerState } from '@nyabase/common';
 import type { ContainerControlTable } from '../platform/persistence-pg/container-control-database.types.js';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
+import { committedRootBytesSql } from '../platform/persistence-pg/committed-bytes.js';
 import { deriveInstanceName } from '../incus/instance-spec.js';
 import { numberValue } from '../platform/domain-utils.js';
+import { containerRedriveDue } from '../volumes/detach-redrive.js';
 
 export type ContainerExecutor = Kysely<NyabaseDatabase> | Transaction<NyabaseDatabase>;
 export type ContainerRow = Selectable<ContainerControlTable>;
+
+/** Request `reason` of the stops an access lapse enforces (`ContainerControlService.enforceStop`). */
+export const ACCESS_LAPSE_STOP_REASON = 'access_lapse';
+
+/**
+ * Whether an access-lapse stop did not take effect and is due to be queued
+ * again: the container is desired stopped, its instance was last observed
+ * running (the stop failed, or hit the busy-strike limit and parked the
+ * container, and nothing else stops it), and `containerRedriveDue` holds,
+ * counting for the backoff the lapse stops of the current lapse only: those
+ * queued since the ledger row of the owner's lapse on the container's server
+ * was opened (`lapsed_at`). Stops of an earlier lapse (the container was
+ * started again once coverage came back) say nothing about this one. Shared
+ * by the access-lapse scan (`exposed`) and `enforceStop`, so both agree on
+ * when a re-drive is due.
+ */
+export function lapseStopRedriveDue(containerId: RawBuilder<unknown>): RawBuilder<boolean> {
+  return sql<boolean>`(
+    EXISTS (
+      SELECT 1 FROM control.containers AS stopping
+      WHERE stopping.id = ${containerId} AND stopping.power_intent = 'stopped'
+    )
+    AND EXISTS (
+      SELECT 1 FROM control.container_ssh_routes AS observed
+      WHERE observed.container_id = ${containerId} AND observed.instance_status = 'running'
+    )
+    AND ${containerRedriveDue(containerId, sql<boolean>`(
+      enforcement_intent.request_json ->> 'operation' = 'stop'
+      AND enforcement_intent.request_json ->> 'reason' = ${ACCESS_LAPSE_STOP_REASON}
+      AND enforcement_intent.created_at >= coalesce((
+        SELECT lapse.lapsed_at
+        FROM control.containers AS lapsed_container
+        JOIN control.access_lapses AS lapse
+          ON lapse.user_id = lapsed_container.owner_id
+         AND lapse.resource_kind = 'server'
+         AND lapse.resource_id = lapsed_container.server_id
+        WHERE lapsed_container.id = ${containerId}
+      ), '-infinity'::timestamptz)
+    )`)}
+  )`;
+}
 
 export interface ImageRow {
   id: string;
@@ -95,18 +138,26 @@ export class ContainerControlRepository {
       .executeTakeFirst();
   }
 
-  async nameTaken(
+  /** Which name rule a new container would break: unique per server, and per owner ignoring case. */
+  async nameConflict(
     serverId: string,
+    ownerId: string,
     name: string,
     executor: ContainerExecutor = this.database,
-  ): Promise<boolean> {
-    const row = await executor
+  ): Promise<'server' | 'owner' | null> {
+    const rows = await executor
       .selectFrom('control.containers')
-      .select('id')
-      .where('server_id', '=', serverId)
-      .where('name', '=', name)
-      .executeTakeFirst();
-    return Boolean(row);
+      .select(['server_id', 'name'])
+      .where((where) => where.or([
+        where.and([where('server_id', '=', serverId), where('name', '=', name)]),
+        where.and([
+          where('owner_id', '=', ownerId),
+          where(sql`lower(name)`, '=', name.toLowerCase()),
+        ]),
+      ]))
+      .execute();
+    if (rows.some((row) => row.server_id === serverId && row.name === name)) return 'server';
+    return rows.length > 0 ? 'owner' : null;
   }
 
   /**
@@ -131,7 +182,8 @@ export class ContainerControlRepository {
 
   /**
    * Root-disk bytes committed by containers that are neither failed nor being
-   * deleted; a pending quota change counts at its larger size.
+   * deleted; a pending quota change or an unapplied shrink counts at its
+   * larger size (`committedRootBytesSql`).
    */
   async sumLiveRootBytes(
     filter: { ownerId?: string; serverId?: string; poolId?: string },
@@ -139,18 +191,20 @@ export class ContainerControlRepository {
   ): Promise<number> {
     let query = executor
       .selectFrom('control.containers')
-      .select(sql<string>`coalesce(sum(
-        case when root_size_pending_bytes is null
-          then root_size_bytes
-          else greatest(root_size_bytes, root_size_pending_bytes)
-        end
-      ), 0)`.as('bytes'))
+      .select(sql<string>`coalesce(sum(${committedRootBytesSql()}), 0)`.as('bytes'))
       .where('lifecycle_phase', 'not in', ['failed', 'deleting']);
     if (filter.ownerId !== undefined) query = query.where('owner_id', '=', filter.ownerId);
     if (filter.serverId !== undefined) query = query.where('server_id', '=', filter.serverId);
     if (filter.poolId !== undefined) query = query.where('root_pool_id', '=', filter.poolId);
     const row = await query.executeTakeFirstOrThrow();
     return numberValue(row.bytes);
+  }
+
+  async lapseStopRedriveDue(id: string, executor: ContainerExecutor): Promise<boolean> {
+    const { rows } = await sql<{ due: boolean }>`
+      SELECT ${lapseStopRedriveDue(sql`${id}::uuid`)} AS due
+    `.execute(executor);
+    return rows[0]?.due === true;
   }
 
   lock(id: string, executor: Transaction<NyabaseDatabase>) {
@@ -244,6 +298,7 @@ export class ContainerControlRepository {
       mem_bytes?: number;
       root_size_bytes?: number;
       root_size_pending_bytes?: number | null;
+      root_shrink_reserved_bytes?: number | null;
       gpu_state?: GpuContainerState | null;
       power_intent?: 'running' | 'stopped';
       lifecycle_phase?: 'provisioning' | 'active' | 'deleting' | 'failed';
@@ -258,7 +313,9 @@ export class ContainerControlRepository {
         ...values,
         revision: revision + 1,
         last_transition_at: sql`clock_timestamp()`,
-        needs_attention: false,
+        // A desired-state change releases a parked container, unless the caller
+        // keeps it parked (an enforcement re-drive, `enforceStop`).
+        needs_attention: values.needs_attention ?? false,
       })
       .where('id', '=', id)
       .where('revision', '=', revision)

@@ -9,15 +9,35 @@ fn http_limits_and_status_interval_are_hard_bounded() {
         assert!(DEFAULT_MAX_CONNECTIONS == 4_096);
         assert!(DEFAULT_MAX_CONNECTIONS_PER_IP == 64);
         assert!(DEFAULT_MAX_CONNECTIONS <= MAX_CONNECTIONS_LIMIT);
-        assert!(DEFAULT_BODY_DEADLINE_MS < REQUEST_LIFETIME_DEADLINE.as_millis() as u64);
+        assert!(DEFAULT_BODY_DEADLINE_MS <= MAX_BODY_DEADLINE_MS);
+        assert!(DEFAULT_IDLE_TIMEOUT_MS >= MIN_IDLE_TIMEOUT_MS);
+        assert!(DEFAULT_IDLE_TIMEOUT_MS <= MAX_IDLE_TIMEOUT_MS);
+        // The pending pool must leave room for established connections.
+        assert!(DEFAULT_MAX_PENDING_CONNECTIONS < DEFAULT_MAX_CONNECTIONS);
+        // One source may have its whole per-IP / per-/48 total pending at
+        // once without filling the pending pool.
+        assert!(DEFAULT_MAX_CONNECTIONS_PER_IP < DEFAULT_MAX_PENDING_CONNECTIONS);
+        assert!(DEFAULT_MAX_CONNECTIONS_PER_IPV6_48 < DEFAULT_MAX_PENDING_CONNECTIONS);
+        assert!(DEFAULT_MAX_CONNECTIONS_PER_IPV6_48 <= MAX_CONNECTIONS_LIMIT);
         assert!(DEFAULT_CONTROL_HOLD_MS <= MAX_CONTROL_HOLD_MS);
+        // One container must not be able to take the whole pool.
+        assert!(DEFAULT_MAX_CONNECTIONS_PER_CONTAINER < DEFAULT_MAX_CONNECTIONS);
+        // Nor one client one container (the per-client-per-container cap
+        // defaults to the per-IP total), nor one owner the pool.
+        assert!(DEFAULT_MAX_CONNECTIONS_PER_IP * 8 <= DEFAULT_MAX_CONNECTIONS_PER_CONTAINER);
+        assert!(DEFAULT_MAX_CONNECTIONS_PER_OWNER >= DEFAULT_MAX_CONNECTIONS_PER_CONTAINER);
+        assert!(DEFAULT_MAX_CONNECTIONS_PER_OWNER * 4 <= DEFAULT_MAX_CONNECTIONS);
+        assert!(DEFAULT_RESPONSE_LIFETIME_MS >= MIN_RESPONSE_LIFETIME_MS);
+        assert!(DEFAULT_RESPONSE_LIFETIME_MS <= MAX_RESPONSE_LIFETIME_MS);
+        // Long downloads and SSE outlive many idle periods.
+        assert!(DEFAULT_RESPONSE_LIFETIME_MS >= 10 * DEFAULT_IDLE_TIMEOUT_MS);
     }
     assert!(validate_ms("NYABASE_HTTP_CONTROL_HOLD_MS", 0, 0, MAX_CONTROL_HOLD_MS).is_ok());
     let error = validate_ms(
         "NYABASE_HTTP_BODY_DEADLINE_MS",
-        REQUEST_LIFETIME_DEADLINE.as_millis() as u64 + 1,
+        MAX_BODY_DEADLINE_MS + 1,
         MIN_BODY_DEADLINE_MS,
-        REQUEST_LIFETIME_DEADLINE.as_millis() as u64,
+        MAX_BODY_DEADLINE_MS,
     )
     .unwrap_err();
     assert!(error.to_string().contains("NYABASE_HTTP_BODY_DEADLINE_MS"));

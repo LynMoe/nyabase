@@ -8,7 +8,7 @@ import {
 } from '@nestjs/common';
 import type { Kysely } from 'kysely';
 import { sql } from 'kysely';
-import type { AgentHello } from '@nyabase/common';
+import type { AgentHello, AgentHostStatus } from '@nyabase/common';
 import { AgentRegistry } from '../incus/agent-registry.service.js';
 import { INCUS_CLIENT_FACTORY, type IncusClientFactory } from '../incus/incus-client.factory.js';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
@@ -42,6 +42,8 @@ export class AgentPresenceService implements OnModuleInit, OnApplicationBootstra
     this.unsubscribe = this.agents.onPresence({
       connected: (serverId, hello) => this.serialize(serverId, () => this.connected(serverId, hello)),
       disconnected: (serverId) => this.serialize(serverId, () => this.disconnected(serverId)),
+      refused: (serverId, reason) => this.serialize(serverId, () => this.refused(serverId, reason)),
+      status: (serverId, status) => this.serialize(serverId, async () => this.statusChanged(serverId, status)),
     });
   }
 
@@ -102,6 +104,30 @@ export class AgentPresenceService implements OnModuleInit, OnApplicationBootstra
     }
     this.wake.wake({ serverId, reason: 'reconnect' });
     this.wake.wake({ reason: 'scan' });
+  }
+
+  /**
+   * The agent enforces its IPv6 guard itself (it refuses to bring guest NICs
+   * up without it, and the server page shows the live status). Once it is
+   * back, whatever was waiting to start on that server is retried now.
+   */
+  private statusChanged(serverId: string, status: AgentHostStatus): void {
+    if (!status.ipv6Guard.present) {
+      this.logger.warn(`Server ${serverId} lost its IPv6 guard: ${status.ipv6Guard.error ?? 'unknown'}`);
+      return;
+    }
+    this.logger.log(`Server ${serverId} has its IPv6 guard back`);
+    this.wake.wake({ serverId, reason: 'reconnect' });
+  }
+
+  /** An agent that cannot be served (other protocol) leaves the server unreachable, saying why. */
+  private async refused(serverId: string, reason: string): Promise<void> {
+    if (this.agents.isConnected(serverId)) return;
+    await this.database
+      .updateTable('infra.servers')
+      .set({ status: 'unreachable', last_error: reason.slice(0, 4096) })
+      .where('id', '=', serverId)
+      .execute();
   }
 
   private async disconnected(serverId: string): Promise<void> {

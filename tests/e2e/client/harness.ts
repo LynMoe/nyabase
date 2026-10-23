@@ -13,6 +13,7 @@ import {
   type IntentAcceptedDto,
   type PutServerGrantRequest,
   type Role,
+  type SshClientConfigDto,
   type SshPublicKeyDto,
   type UserDto,
 } from '@nyabase/common';
@@ -124,12 +125,13 @@ export class Harness {
   }
 
   async addSshKey(user: TestUser): Promise<SshPublicKeyDto> {
-    const keyFile = join(this.dir, `key-${user.username}`);
+    const keyFile = join(this.dir, `key-${user.username}-${randomBytes(3).toString('hex')}`);
     execFileSync('ssh-keygen', ['-q', '-t', 'ed25519', '-N', '', '-C', user.username, '-f', keyFile]);
     user.keyFile = keyFile;
     return user.session.api.post<SshPublicKeyDto>(`/users/${user.id}/ssh-keys`, {
       name: 'e2e',
       keyText: readFileSync(`${keyFile}.pub`, 'utf8').trim(),
+      currentPassword: user.password,
     });
   }
 
@@ -272,36 +274,57 @@ export class Harness {
   }
 
   /**
-   * Runs `command` in the guest through the ssh-proxy jump host, as the
-   * container owner. Resolves with stdout; rejects when ssh fails.
+   * Runs `command` in the guest through the ssh-proxy jump host, as `user`,
+   * the way a user would after the one-time setup: the ssh_config block and
+   * known_hosts lines from their profile, strict host key checking, and the
+   * container's host name (`<name>.<suffix>`). `target` overrides the host
+   * (e.g. the routed IP, which known_hosts does not cover: pass
+   * `strictHostKeys: false`); `jumpLogin` overrides the jump login;
+   * `knownHostsFrom` trusts another user's known_hosts lines instead.
+   * Resolves with stdout; rejects when ssh fails.
    */
   async ssh(
     user: TestUser,
     container: ContainerDto,
     command: string,
-    jumpLogin = `${user.username}.${container.name}`,
+    options: { target?: string; jumpLogin?: string; strictHostKeys?: boolean; knownHostsFrom?: TestUser } = {},
   ): Promise<string> {
     if (!user.keyFile) throw new Error('user has no ssh key');
-    const ip = container.routedIp ?? container.actual.routedIp;
-    if (!ip) throw new Error('container has no routed ip');
-    const { host, port } = this.state.sshProxy;
-    const common = [
-      `IdentityFile ${user.keyFile}`,
-      'IdentitiesOnly yes',
-      'BatchMode yes',
-      'StrictHostKeyChecking no',
-      'UserKnownHostsFile /dev/null',
-      'LogLevel ERROR',
-      'ConnectTimeout 20',
-    ];
-    const config = join(this.dir, `ssh-${randomBytes(4).toString('hex')}.conf`);
+    const client = await user.session.api.get<SshClientConfigDto>(`/users/${user.id}/ssh-client-config`);
+    if (!client.proxy || !client.sshConfig || !client.knownHosts) {
+      throw new Error('the SSH proxy has no public address');
+    }
+    const trusted = options.knownHostsFrom
+      ? await options.knownHostsFrom.session.api.get<SshClientConfigDto>(
+        `/users/${options.knownHostsFrom.id}/ssh-client-config`,
+      )
+      : client;
+    const tag = randomBytes(4).toString('hex');
+    const knownHosts = join(this.dir, `known-hosts-${tag}`);
+    writeFileSync(knownHosts, `${trusted.knownHosts}\n`);
+    const config = join(this.dir, `ssh-${tag}.conf`);
     writeFileSync(config, [
-      'Host jump', `  HostName ${host}`, `  Port ${port}`, `  User ${jumpLogin}`,
-      ...common.map((line) => `  ${line}`),
-      'Host guest', `  HostName ${ip}`, `  User ${container.ssh.loginUser}`, '  ProxyJump jump',
-      ...common.map((line) => `  ${line}`),
+      client.sshConfig,
+      'Host *',
+      `  IdentityFile ${user.keyFile}`,
+      '  IdentitiesOnly yes',
+      '  BatchMode yes',
+      `  StrictHostKeyChecking ${options.strictHostKeys === false ? 'no' : 'yes'}`,
+      `  UserKnownHostsFile ${options.strictHostKeys === false ? '/dev/null' : knownHosts}`,
+      '  LogLevel ERROR',
+      '  ConnectTimeout 20',
     ].join('\n'));
-    const { stdout } = await execFileAsync('ssh', ['-F', config, 'guest', command], { timeout: 60_000 });
+    const target = options.target ?? container.ssh.hostName;
+    const { host, port } = client.proxy;
+    // A target outside `*.<suffix>` gets no ProxyJump from the config.
+    const jump = options.jumpLogin || !target.endsWith(`.${client.hostSuffix}`)
+      ? ['-o', `ProxyJump=${options.jumpLogin ?? user.username}@${host}:${port}`]
+      : [];
+    const { stdout } = await execFileAsync(
+      'ssh',
+      ['-F', config, ...jump, `${container.ssh.loginUser}@${target}`, command],
+      { timeout: 60_000 },
+    );
     return stdout;
   }
 }

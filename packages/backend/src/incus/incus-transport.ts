@@ -1,5 +1,5 @@
 import type { IncomingHttpHeaders } from 'node:http';
-import { MAX_AGENT_INCUS_BODY_BYTES } from '@nyabase/common';
+import { MAX_AGENT_INCUS_BODY_BYTES, MAX_AGENT_INCUS_REQUEST_BODY_BYTES } from '@nyabase/common';
 import { IncusError } from './incus-errors.js';
 import type {
   IncusClientOptions,
@@ -214,7 +214,7 @@ export class IncusTransport {
       }
       headers['content-type'] ??= 'application/json';
     }
-    if (body.byteLength > this.maxBodyBytes) {
+    if (body.byteLength > Math.min(this.maxBodyBytes, MAX_AGENT_INCUS_REQUEST_BODY_BYTES)) {
       throw new IncusError('INCUS_BAD_REQUEST', 'managed_failure', {
         reason: 'request_body_too_large',
       });

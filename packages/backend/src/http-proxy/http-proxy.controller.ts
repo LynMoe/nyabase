@@ -46,8 +46,8 @@ export class HttpProxyController {
 
   @Delete(':id')
   @HttpCode(204)
-  async delete(@CurrentActor() actor: Actor, @Param('id') id: string) {
-    await this.service.deleteBinding(actor, id);
+  async delete(@CurrentActor() actor: Actor, @Param('id') id: string, @Query('scope') scope?: string) {
+    await this.service.deleteBinding(actor, id, zListScope.parse(scope));
     this.gateway.scheduleBroadcast('binding_deleted');
   }
 }

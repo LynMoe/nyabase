@@ -270,7 +270,7 @@ function ResetPasswordDialog({
             <DialogHeader>
               <DialogTitle>重置密码？</DialogTitle>
               <DialogDescription>
-                将为「{displayName}」生成一次性新密码。原密码立即失效。
+                将为「{displayName}」生成一次性新密码。原密码立即失效，该用户的登录会话会全部被吊销；SSH 公钥不受影响（如怀疑账号泄露，可先禁用该用户，禁用后其公钥不再可用）。
               </DialogDescription>
             </DialogHeader>
             <DialogFooter>

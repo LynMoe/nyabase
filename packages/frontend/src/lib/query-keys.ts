@@ -11,7 +11,7 @@ export const queryKeys = {
   systemSettings: ['system-settings'] as const,
   catalog: { users: ['catalog', 'users'] as const },
   sshKeys: (userId: string) => ['ssh-keys', userId] as const,
-  apiTokens: (userId: string) => ['api-tokens', userId] as const,
+  sshClientConfig: (userId: string) => ['ssh-client-config', userId] as const,
   audit: {
     list: (pageSize: number, offset: number, filter: { action?: string; targetType?: string } = {}) =>
       ['audit', pageSize, offset, filter.action ?? null, filter.targetType ?? null] as const,
@@ -24,6 +24,7 @@ export const queryKeys = {
   servers: {
     admin: ['servers', 'admin'] as const,
     user: ['servers', 'user'] as const,
+    rejectedAgents: ['servers', 'rejected-agents'] as const,
     detail: (serverId: string) => ['server', serverId] as const,
     pools: (serverId: string, scope: ListScope) => ['storage-pools', scope, serverId] as const,
     preflight: (serverId: string) => ['server-preflight', serverId] as const,

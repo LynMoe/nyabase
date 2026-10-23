@@ -17,6 +17,12 @@ export interface VolumeTable {
   incus_name: string;
   size_bytes: StorageBigInt;
   used_bytes: StorageBigInt | null;
+  /** Largest size Incus may still hold until a requested shrink is verified (000002). */
+  shrink_reserved_bytes: ColumnType<
+    string | null,
+    string | number | bigint | null | undefined,
+    string | number | bigint | null
+  >;
   revision: number;
   observed_revision: number | null;
   lifecycle_phase: 'provisioning' | 'active' | 'deleting' | 'failed';

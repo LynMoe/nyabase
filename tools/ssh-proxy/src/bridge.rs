@@ -123,17 +123,32 @@ pub(crate) fn spawn_tcp_bridge(
     stream: TcpStream,
     connection: Arc<ConnectionState>,
 ) {
-    connection.channel_opened();
-    let task_connection = connection.clone();
+    // The guard lives in the future, so the channel count is released even
+    // when the bridge is aborted (route revoked) before or while it runs.
+    let open_channel = OpenChannel::new(connection.clone());
     permit.spawn(async move {
-        let mut channel_stream =
-            MeteredChannelStream::new(channel.into_stream(), task_connection.clone());
+        let _open_channel = open_channel;
+        let mut channel_stream = MeteredChannelStream::new(channel.into_stream(), connection);
         let mut tcp_stream = stream;
         if let Err(error) = io::copy_bidirectional(&mut channel_stream, &mut tcp_stream).await {
             debug!(%peer, %error, "SSH direct-tcpip bridge ended with error");
         }
-        task_connection.channel_closed();
     });
+}
+
+pub(crate) struct OpenChannel(Arc<ConnectionState>);
+
+impl OpenChannel {
+    pub(crate) fn new(connection: Arc<ConnectionState>) -> Self {
+        connection.channel_opened();
+        Self(connection)
+    }
+}
+
+impl Drop for OpenChannel {
+    fn drop(&mut self) {
+        self.0.channel_closed();
+    }
 }
 
 #[cfg(test)]

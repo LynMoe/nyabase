@@ -31,8 +31,11 @@ const bob: UserDto = { ...alice, id: 'u2', username: 'bob', displayName: 'Bob' }
 let storage: MemoryStorage;
 let lockRequests: string[];
 
-function json(body: unknown, status = 200) {
-  return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
+function json(body: unknown, status = 200, extraHeaders: Record<string, string> = {}) {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { 'Content-Type': 'application/json', ...extraHeaders },
+  });
 }
 
 function stubBrowser() {
@@ -85,7 +88,7 @@ function signIn(user = alice, accessToken = 'A1') {
   app.useAuthStore.getState().setAuth(accessToken, user);
 }
 
-type RefreshResult = { status?: number; body?: unknown } | Error;
+type RefreshResult = { status?: number; body?: unknown; headers?: Record<string, string> } | Error;
 
 /**
  * A fake backend: /auth/refresh answers from a queue and any other path is 401
@@ -100,7 +103,7 @@ function authServer(refreshResults: RefreshResult[]) {
       if (next instanceof Error) throw next;
       const accessToken = (next.body as { accessToken?: string } | undefined)?.accessToken;
       if ((next.status ?? 200) === 200 && accessToken) validToken = accessToken;
-      return json(next.body ?? {}, next.status ?? 200);
+      return json(next.body ?? {}, next.status ?? 200, next.headers);
     }
     const authorization = (init?.headers as Record<string, string> | undefined)?.Authorization;
     return authorization === `Bearer ${validToken}`
@@ -137,6 +140,7 @@ describe('cookie-backed auth session', () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
     app.queryClient.clear();
@@ -241,6 +245,128 @@ describe('cookie-backed auth session', () => {
     expect(app.useAuthStore.getState()).toMatchObject({ accessToken: null, user: null, status: 'anonymous' });
     expect(app.takePendingLoginReason()).toBe('session-expired');
     expect(pendingRefreshRequestId()).toBeNull();
+  });
+
+  it('rotates again with a new request id after losing a concurrent rotation', async () => {
+    signIn();
+    const server = authServer([
+      { status: 401, body: { code: 'REFRESH_SUPERSEDED', message: 'Refresh token was already rotated' } },
+      { body: { accessToken: 'A2', user: alice } },
+    ]);
+    vi.stubGlobal('fetch', server.fetchMock);
+
+    await expect(app.api.get('/ping')).resolves.toEqual({ ok: true });
+
+    const [lost, retried] = server.refreshCalls().map((call) => body(call).requestId);
+    expect(retried).not.toBe(lost);
+    expect(app.useAuthStore.getState()).toMatchObject({ accessToken: 'A2', status: 'authenticated' });
+    expect(app.takePendingLoginReason()).toBeUndefined();
+    expect(pendingRefreshRequestId()).toBeNull();
+  });
+
+  it('retries a superseded refresh only once and keeps the session', async () => {
+    signIn();
+    const superseded = { status: 401, body: { code: 'REFRESH_SUPERSEDED', message: 'Refresh token was already rotated' } };
+    const server = authServer([superseded, superseded]);
+    vi.stubGlobal('fetch', server.fetchMock);
+
+    await expect(app.api.get('/ping')).rejects.toMatchObject({ code: 'REFRESH_SUPERSEDED' });
+
+    expect(server.refreshCalls()).toHaveLength(2);
+    expect(app.useAuthStore.getState()).toMatchObject({ accessToken: 'A1', user: alice, status: 'error' });
+    expect(app.takePendingLoginReason()).toBeUndefined();
+  });
+
+  describe('throttled refresh (429)', () => {
+    const throttled = (headers?: Record<string, string>) => ({
+      status: 429, body: { code: 'AUTH_RATE_LIMITED', message: 'Too many session refreshes' }, headers,
+    });
+
+    beforeEach(() => {
+      vi.useFakeTimers();
+      vi.spyOn(Math, 'random').mockReturnValue(0);
+    });
+
+    it('waits for Retry-After outside the lock and retries with the same request id', async () => {
+      app.initializeAuthSync({ onPeerLogin: vi.fn() });
+      signIn();
+      const server = authServer([throttled({ 'Retry-After': '2' }), { body: { accessToken: 'A2', user: alice } }]);
+      vi.stubGlobal('fetch', server.fetchMock);
+
+      const ping = app.api.get('/ping');
+      await vi.advanceTimersByTimeAsync(1_999);
+      expect(server.refreshCalls()).toHaveLength(1);
+      expect(app.useAuthStore.getState()).toMatchObject({ accessToken: 'A1', status: 'authenticated' });
+      await vi.advanceTimersByTimeAsync(1);
+      await expect(ping).resolves.toEqual({ ok: true });
+
+      const [first, retry] = server.refreshCalls().map((call) => body(call).requestId);
+      expect(retry).toBe(first);
+      // One lock per request: nothing was held while waiting.
+      expect(lockRequests).toEqual(['nyabase-auth-refresh', 'nyabase-auth-refresh']);
+      expect(app.useAuthStore.getState()).toMatchObject({ accessToken: 'A2', status: 'authenticated' });
+      expect(FakeChannel.instances[0].posted).toEqual([]);
+    });
+
+    it('gives up after a bounded number of requests without leaving the page or signing out', async () => {
+      signIn();
+      const server = authServer([
+        throttled(), throttled(), throttled(), { body: { accessToken: 'A2', user: alice } },
+      ]);
+      vi.stubGlobal('fetch', server.fetchMock);
+
+      const ping = app.api.get('/ping');
+      const outcome = expect(ping).rejects.toMatchObject({ status: 429, code: 'AUTH_RATE_LIMITED' });
+      // Exponential backoff without Retry-After: 1 s, then 2 s.
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(server.refreshCalls()).toHaveLength(2);
+      await vi.advanceTimersByTimeAsync(2_000);
+      await outcome;
+      expect(server.refreshCalls()).toHaveLength(3);
+      expect(app.useAuthStore.getState()).toMatchObject({
+        accessToken: 'A1', user: alice, status: 'authenticated', authError: null,
+      });
+      expect(app.takePendingLoginReason()).toBeUndefined();
+
+      // Cooling down: further 401s fail fast without another refresh request.
+      await expect(app.api.get('/ping')).rejects.toMatchObject({ code: 'AUTH_RATE_LIMITED' });
+      expect(server.refreshCalls()).toHaveLength(3);
+      await vi.advanceTimersByTimeAsync(4_000);
+      await expect(app.api.get('/ping')).resolves.toEqual({ ok: true });
+      expect(server.refreshCalls()).toHaveLength(4);
+    });
+
+    it('shows a wait screen on a cold load instead of the session-check error', async () => {
+      const server = authServer([throttled({ 'Retry-After': '600' }), { body: { accessToken: 'A2', user: alice } }]);
+      vi.stubGlobal('fetch', server.fetchMock);
+
+      // A long Retry-After is not waited out in place.
+      await app.bootstrapAuthSession();
+      expect(server.refreshCalls()).toHaveLength(1);
+      expect(app.useAuthStore.getState()).toMatchObject({ status: 'throttled', user: null });
+      expect(app.useAuthStore.getState().authError).toContain('600 秒');
+
+      // Retrying (button or focus) inside the wait sends nothing.
+      await vi.advanceTimersByTimeAsync(60_000);
+      await app.bootstrapAuthSession();
+      expect(server.refreshCalls()).toHaveLength(1);
+      expect(app.useAuthStore.getState()).toMatchObject({ status: 'throttled' });
+      expect(app.useAuthStore.getState().authError).toContain('540 秒');
+
+      await vi.advanceTimersByTimeAsync(540_000);
+      await app.bootstrapAuthSession();
+      expect(app.useAuthStore.getState()).toMatchObject({ accessToken: 'A2', status: 'authenticated' });
+    });
+
+    it('parses Retry-After as seconds or an HTTP date', async () => {
+      const { parseRetryAfterMs } = await import('./api.js');
+      const now = Date.parse('2026-01-01T00:00:00Z');
+      expect(parseRetryAfterMs('42', now)).toBe(42_000);
+      expect(parseRetryAfterMs('Thu, 01 Jan 2026 00:00:30 GMT', now)).toBe(30_000);
+      expect(parseRetryAfterMs('Wed, 31 Dec 2025 23:00:00 GMT', now)).toBe(0);
+      expect(parseRetryAfterMs(null, now)).toBeNull();
+      expect(parseRetryAfterMs('soon', now)).toBeNull();
+    });
   });
 
   it('treats a cold load without a cookie as anonymous, not expired', async () => {

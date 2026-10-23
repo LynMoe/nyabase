@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest';
-import { securityHeaders, trustProxySetting } from './http-security.js';
+import { describe, expect, it, vi } from 'vitest';
+import { securityHeaders, trustProxySetting, warnOnUntrustedForwarding } from './http-security.js';
 
 describe('trustProxySetting', () => {
   it('trusts no proxy when unset', () => {
@@ -39,5 +39,24 @@ describe('securityHeaders', () => {
     const headers = headersFor();
     expect(headers.has('strict-transport-security')).toBe(false);
     expect(headers.get('x-content-type-options')).toBe('nosniff');
+  });
+});
+
+describe('warnOnUntrustedForwarding', () => {
+  it('warns once when forwarded requests arrive without trusted proxies', () => {
+    const warn = vi.fn();
+    const next = vi.fn();
+    const middleware = warnOnUntrustedForwarding(false, warn);
+    middleware({ headers: {} }, {}, next);
+    middleware({ headers: { 'x-forwarded-for': '198.51.100.7' } }, {}, next);
+    middleware({ headers: { 'x-forwarded-for': '198.51.100.8' } }, {}, next);
+    expect(warn).toHaveBeenCalledOnce();
+    expect(next).toHaveBeenCalledTimes(3);
+  });
+
+  it('stays quiet when a proxy is trusted', () => {
+    const warn = vi.fn();
+    warnOnUntrustedForwarding(['loopback'], warn)({ headers: { 'x-forwarded-for': '198.51.100.7' } }, {}, () => {});
+    expect(warn).not.toHaveBeenCalled();
   });
 });

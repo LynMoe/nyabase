@@ -2,7 +2,12 @@ import { Inject, Injectable, Logger } from '@nestjs/common';
 import { sql, type Kysely } from 'kysely';
 import { IncusError } from '../incus/index.js';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
+import {
+  committedVolumeBytesSql,
+  releaseSettledShrinkReservations,
+} from '../platform/persistence-pg/committed-bytes.js';
 import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
+import { OrphanSightingsStore } from '../reconcile/orphan-sightings.store.js';
 import { IntentRepository, type IntentFailure } from '../reconcile/intent.repository.js';
 import type { ResourceAuthority } from '../reconcile/managed-reconciler.js';
 import type { VolumeDriver } from './volume-rules.js';
@@ -52,11 +57,15 @@ export interface CatalogRow {
 @Injectable()
 export class VolumeReconcileStore {
   private readonly logger = new Logger(VolumeReconcileStore.name);
+  /** Quarantine ledger of volumes no row owns (full scan). */
+  readonly orphans: OrphanSightingsStore;
 
   constructor(
     @Inject(PG_DATABASE) private readonly database: Kysely<NyabaseDatabase>,
     private readonly intents: IntentRepository,
-  ) {}
+  ) {
+    this.orphans = new OrphanSightingsStore(database);
+  }
 
   // --- ManagedReconciler state -------------------------------------------------
 
@@ -69,7 +78,17 @@ export class VolumeReconcileStore {
     return row?.needs_attention === true && row.lifecycle_phase !== 'deleting';
   }
 
+  /**
+   * One placement's success clears the volume's failure only once the volume
+   * is reconciled as a whole, as `recordVerified` decides: this is still its
+   * revision and every placement has observed it. Otherwise an intent that
+   * finishes on one server would hide a failure another placement just
+   * recorded. A parked volume is released by a retry or the next edit anyway.
+   * A settled resize may also be what lets the shrink reservation go
+   * (`releaseSettledShrinkReservations`).
+   */
   async markSucceeded(volumeId: string, revision: number): Promise<void> {
+    await releaseSettledShrinkReservations(this.database, [volumeId]);
     await this.database
       .updateTable('control.volumes')
       .set({
@@ -78,11 +97,22 @@ export class VolumeReconcileStore {
         failure_code: null,
       })
       .where('id', '=', volumeId)
+      .where('revision', '=', revision)
       .where('lifecycle_phase', '!=', 'deleting')
+      .where(({ exists, not, selectFrom }) => not(exists(
+        selectFrom('control.volume_placements')
+          .select('server_id')
+          .where('volume_id', '=', volumeId)
+          .where((expression) => expression.or([
+            expression('catalog_state', '!=', 'present'),
+            expression('observed_revision', 'is', null),
+            expression('observed_revision', '!=', revision),
+          ])),
+      )))
       .execute();
   }
 
-  async markFailure(volumeId: string, failure: IntentFailure, attention: boolean): Promise<void> {
+  async markFailure(volumeId: string, failure: IntentFailure, _attention: boolean): Promise<void> {
     const code = failure.code.slice(0, 128);
     const current = await this.database
       .selectFrom('control.volumes')
@@ -99,15 +129,12 @@ export class VolumeReconcileStore {
       return;
     }
     // A failed shrink/ensure must surface on the volume card too, so the
-    // resource is flagged either way; only a parked failure also fails the phase.
-    const values = {
-      needs_attention: true,
-      failure_code: code,
-      ...(attention ? { lifecycle_phase: 'failed' as const } : {}),
-    };
+    // resource is flagged either way. Parking never changes the phase: the
+    // volume still exists (and stays attached), so it keeps counting against
+    // quota, and a user retry or the next desired-state edit releases it.
     await this.database
       .updateTable('control.volumes')
-      .set(values)
+      .set({ needs_attention: true, failure_code: code })
       .where('id', '=', volumeId)
       .where('lifecycle_phase', '!=', 'deleting')
       .execute();
@@ -123,13 +150,8 @@ export class VolumeReconcileStore {
         .select(['id', 'owner_id'])
         .where('id', 'in', volumeIds)
         .execute();
-    const byId = new Map(rows.map((row) => [row.id, row]));
-    return new Map(volumeIds.map((id) => {
-      const row = byId.get(id);
-      return [id, {
-        ownerId: row?.owner_id ?? null,
-      }];
-    }));
+    // A deleted volume has no entry (see ResourceAuthority).
+    return new Map(rows.map((row) => [row.id, { ownerId: row.owner_id }]));
   }
 
   // --- full scan ---------------------------------------------------------------
@@ -156,6 +178,7 @@ export class VolumeReconcileStore {
         'v.needs_attention as needs_attention',
         'v.incus_name as incus_name',
         'v.size_bytes as size_bytes',
+        'v.shrink_reserved_bytes as shrink_reserved_bytes',
         'v.pool_id as pool_id',
       ])
       .where((expression) => {
@@ -312,28 +335,55 @@ export class VolumeReconcileStore {
       .execute();
   }
 
+  /**
+   * Undo a shrink the volume's usage blocks: the desired size goes back to
+   * what Incus holds (within the reservation the shrink kept, so no grant or
+   * capacity is exceeded) and the volume is parked. Only for the revision the
+   * pass reconciled: a resize accepted meanwhile is never overwritten. Returns
+   * false when that revision is no longer current. Should Incus hold more than
+   * the row commits (a catalog created at a size read before the reservation
+   * was released), the desired size is left alone and the volume is only
+   * parked: a revert never grows the committed bytes past what was admitted.
+   */
   async revertImpossibleShrink(
-    volumeId: string,
+    row: Pick<VolumeRecord, 'id' | 'revision'>,
     actualSizeBytes: bigint,
     usedBytes: bigint | null,
     failureCode: string,
-  ): Promise<void> {
-    await this.database
+  ): Promise<boolean> {
+    const result = await this.database
       .updateTable('control.volumes')
       .set({
         size_bytes: actualSizeBytes.toString(),
+        shrink_reserved_bytes: null,
         used_bytes: usedBytes === null ? null : usedBytes.toString(),
         needs_attention: true,
         failure_code: failureCode.slice(0, 128),
       })
-      .where('id', '=', volumeId)
+      .where('id', '=', row.id)
+      .where('revision', '=', row.revision)
       .where('lifecycle_phase', 'not in', ['deleting', 'failed'])
-      .execute();
+      .where(sql<boolean>`${committedVolumeBytesSql()} >= ${actualSizeBytes.toString()}::bigint`)
+      .executeTakeFirst();
+    return result.numUpdatedRows > 0n || this.isCurrentRevision(row.id, row.revision);
+  }
+
+  /** Whether `revision` is still the volume's desired revision. */
+  async isCurrentRevision(volumeId: string, revision: number): Promise<boolean> {
+    const row = await this.database
+      .selectFrom('control.volumes')
+      .select('id')
+      .where('id', '=', volumeId)
+      .where('revision', '=', revision)
+      .executeTakeFirst();
+    return row !== undefined;
   }
 
   /**
    * The placement on the intent's server is now verified. When every placement
-   * has caught up the volume itself becomes observed (and active).
+   * has caught up the volume itself becomes observed (and active). The shrink
+   * reservation goes once no placement can still hold more than the desired
+   * size (`releaseSettledShrinkReservations`).
    */
   async recordVerified(row: VolumeRow, usedBytes: bigint | null): Promise<void> {
     await this.database
@@ -390,6 +440,39 @@ export class VolumeReconcileStore {
         .where('lifecycle_phase', 'not in', ['deleting', 'failed'])
         .execute();
     }
+    await releaseSettledShrinkReservations(this.database, [row.id]);
+  }
+
+  /**
+   * The placement's catalog does not exist on the intent's server (a shared
+   * volume's catalog never adopted there, or gone since): it holds no size,
+   * so it no longer counts as `present` and has caught up with the pass's
+   * revision as far as the shrink reservation goes
+   * (`releaseSettledShrinkReservations`). Whoever creates the catalog later
+   * marks it present again without an observed revision. Only if the
+   * placement is still in the catalog state the pass read: false when a
+   * container pass marked it present meanwhile, whose catalog this pass did
+   * not see and must not count as missing.
+   */
+  async recordCatalogMissing(row: VolumeRow): Promise<boolean> {
+    const updated = await this.database
+      .updateTable('control.volume_placements')
+      .set({ catalog_state: 'ensuring', observed_revision: row.revision })
+      .where('volume_id', '=', row.id)
+      .where('server_id', '=', row.target_server_id)
+      .where('catalog_state', '=', row.catalog_state)
+      .executeTakeFirst();
+    if (Number(updated.numUpdatedRows) === 0) return false;
+    await releaseSettledShrinkReservations(this.database, [row.id]);
+    return true;
+  }
+
+  /**
+   * The full scan's backstop for the reservation rule: any transition that
+   * did not re-evaluate it (an attachment that went away) converges here.
+   */
+  async releaseSettledShrinkReservations(volumeIds: readonly string[]): Promise<void> {
+    await releaseSettledShrinkReservations(this.database, volumeIds);
   }
 
   // --- destroy -----------------------------------------------------------------

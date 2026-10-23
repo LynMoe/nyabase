@@ -2,11 +2,19 @@ import {
   ExceptionFilter,
   Catch,
   ArgumentsHost,
+  ConflictException,
+  Logger,
   NotFoundException,
   type ArgumentMetadata,
   type PipeTransform,
 } from '@nestjs/common';
+import { BaseExceptionFilter } from '@nestjs/core';
+import type { NestExpressApplication } from '@nestjs/platform-express';
+import { join, sep } from 'node:path';
+import { DatabaseError } from 'pg';
 import { ZodError } from 'zod';
+import { FailureCode } from '@nyabase/common';
+import { isRetryablePgTransactionError } from './persistence-pg/transaction.js';
 
 /**
  * Converts ZodError thrown by z.parse() in controllers into a 400 response.
@@ -41,9 +49,64 @@ export class ZodExceptionFilter implements ExceptionFilter {
 }
 
 /**
+ * A serialization failure (40001) or deadlock (40P01) that outlasted the
+ * transaction's own retries lost to concurrent writes; nothing is wrong with
+ * the server or the request. It answers 409 TRANSACTION_CONFLICT, which the
+ * client may simply send again, instead of a 500. Any other database error
+ * keeps Nest's default handling (500, logged). Construct it with the HTTP
+ * adapter (`app.getHttpAdapter()`), which the default handling replies through.
+ */
+@Catch(DatabaseError)
+export class PgTransactionConflictFilter extends BaseExceptionFilter {
+  private readonly logger = new Logger(PgTransactionConflictFilter.name);
+
+  catch(exception: DatabaseError, host: ArgumentsHost): void {
+    if (!isRetryablePgTransactionError(exception)) {
+      super.catch(exception, host);
+      return;
+    }
+    this.logger.warn(`Request lost to concurrent writes (sqlstate=${exception.code}); answered 409`);
+    super.catch(new ConflictException({
+      code: FailureCode.TransactionConflict,
+      message: '与其他同时进行的修改冲突，请重试',
+    }), host);
+  }
+}
+
+/** Vite content-hashes everything under /assets/, so a URL there never changes meaning. */
+export const IMMUTABLE_ASSET_CACHE_CONTROL = 'public, max-age=31536000, immutable';
+/** index.html names the current hashed chunks; browsers must revalidate it on every load. */
+export const REVALIDATE_CACHE_CONTROL = 'no-cache';
+
+/**
+ * Paths that name a file rather than a client-side route: everything under
+ * /assets/ and any path whose last segment has a file extension (SPA routes
+ * never do; their parameters are UUIDs).
+ */
+export function isStaticFilePath(path: string): boolean {
+  return path.startsWith('/assets/') || /\/[^/]*\.[A-Za-z0-9]+$/.test(path);
+}
+
+/** serve-static options for the bundled frontend directory. */
+function frontendStaticOptions(publicDir: string) {
+  const assetsDir = join(publicDir, 'assets') + sep;
+  return {
+    setHeaders(response: { setHeader(name: string, value: string): void }, filePath: string) {
+      response.setHeader(
+        'Cache-Control',
+        filePath.startsWith(assetsDir) ? IMMUTABLE_ASSET_CACHE_CONTROL : REVALIDATE_CACHE_CONTROL,
+      );
+    },
+  };
+}
+
+/**
  * Intercepts NestJS 404 (NotFoundException) responses:
  * - API paths (/api/*) → standard JSON 404
- * - All other paths → serve the SPA index.html for client-side routing
+ * - static file paths (/assets/*, anything with an extension) → plain 404.
+ *   After a redeploy replaces the hashed chunks, an open tab importing an old
+ *   one must see the failure (and reload) instead of parsing index.html as JS.
+ * - other GET/HEAD paths → the SPA index.html for client-side routing
  */
 @Catch(NotFoundException)
 export class SpaFallbackFilter implements ExceptionFilter {
@@ -51,7 +114,7 @@ export class SpaFallbackFilter implements ExceptionFilter {
 
   catch(exception: NotFoundException, host: ArgumentsHost): void {
     const ctx = host.switchToHttp();
-    const request = ctx.getRequest<{ path: string }>();
+    const request = ctx.getRequest<{ path: string; method: string }>();
     // Use any for the response to avoid requiring @types/express as a prod dep
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const response = ctx.getResponse<any>();
@@ -62,10 +125,23 @@ export class SpaFallbackFilter implements ExceptionFilter {
         message: exception.message,
         error: 'Not Found',
       });
+    } else if (isStaticFilePath(request.path) || (request.method !== 'GET' && request.method !== 'HEAD')) {
+      response.status(404).type('text/plain').send('Not Found');
     } else {
+      response.setHeader('Cache-Control', REVALIDATE_CACHE_CONTROL);
       response.sendFile(this.indexPath);
     }
   }
+}
+
+/**
+ * Serve the bundled frontend from `publicDir` with long-lived caching for the
+ * hashed assets and the SPA fallback for client-side routes. Middleware
+ * registered before this (security headers) still applies to every response.
+ */
+export function serveBundledFrontend(app: NestExpressApplication, publicDir: string): void {
+  app.useStaticAssets(publicDir, frontendStaticOptions(publicDir));
+  app.useGlobalFilters(new SpaFallbackFilter(join(publicDir, 'index.html')));
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;

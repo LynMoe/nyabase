@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
 import { Role, ServerStatus, UserStatus, parseAgentSecret } from '@nyabase/common';
+import { AgentCredentialRejections } from '../incus/agent-credentials.js';
 import { AgentCredentialVerifier, agentSecretDigest } from '../incus/agent-credentials.js';
 import { withPostgresTestDatabase } from '../platform/persistence-pg/postgres-test-harness.js';
 import { seedUser } from '../iam/access.pg-test-helper.js';
@@ -17,7 +18,7 @@ describePg('server agent onboarding and removal', () => {
       const transactions = new PgTransactionManager(database);
       const access = {};
       const audit = { append: vi.fn() };
-      const agents = { disconnect: vi.fn(), isConnected: vi.fn(() => false) };
+      const agents = { disconnect: vi.fn(), isConnected: vi.fn(() => false), current: vi.fn(() => undefined) };
       const enrollment = new AgentEnrollmentService(
         database,
         transactions,
@@ -54,12 +55,17 @@ describePg('server agent onboarding and removal', () => {
       expect(stored.agent_enrollment_token_hash).toBe(agentSecretDigest(token));
       expect(stored.agent_credential_hash).toBeNull();
 
+      const rejections = new AgentCredentialRejections();
+      const verifier = new AgentCredentialVerifier(database, rejections);
       const enrolled = await enrollment.enroll({ enrollmentToken: token, hostname: 'worker-1' });
       expect(enrolled.serverId).toBe(created.id);
-      await expect(new AgentCredentialVerifier(database).authenticate(`Bearer ${enrolled.credential}`))
+      await expect(verifier.authenticate(`Bearer ${enrolled.credential}`))
         .resolves.toBe(created.id);
-      await expect(new AgentCredentialVerifier(database).authenticate('Bearer nyak.x.y')).resolves.toBeUndefined();
+      await expect(verifier.authenticate('Bearer nyak.x.y')).resolves.toBeUndefined();
       expect(agents.disconnect).toHaveBeenCalledWith(created.id);
+      // The token is spent by the agent's first control authentication.
+      await expect(verifier.confirmControl(created.id, `Bearer ${enrolled.credential}`))
+        .resolves.toBe(true);
       await expect(enrollment.enroll({ enrollmentToken: token, hostname: 'worker-1' }))
         .rejects.toMatchObject({ status: 401 });
 
@@ -72,7 +78,7 @@ describePg('server agent onboarding and removal', () => {
       await expect(enrollment.enroll({ enrollmentToken: rotated.enrollmentToken, hostname: 'worker-1' }))
         .rejects.toMatchObject({ status: 401 });
       // The running agent's credential survives an unused rotation.
-      await expect(new AgentCredentialVerifier(database).authenticate(`Bearer ${enrolled.credential}`))
+      await expect(verifier.authenticate(`Bearer ${enrolled.credential}`))
         .resolves.toBe(created.id);
     });
   });
@@ -135,7 +141,7 @@ describePg('server agent onboarding and removal', () => {
         {} as never,
         { append: vi.fn() } as never,
         { invalidate: vi.fn() } as never,
-        { disconnect: vi.fn(), isConnected: vi.fn(() => false) } as never,
+        { disconnect: vi.fn(), isConnected: vi.fn(() => false), current: vi.fn(() => undefined) } as never,
         {} as never,
         { wake: vi.fn() } as never,
       );
@@ -161,7 +167,7 @@ describePg('server agent onboarding and removal', () => {
     });
   });
 
-  it('control-plane-cascades a referenced server without Incus and preserves peer shared catalogs', async () => {
+  it('refuses a server that still holds resources, then force-cascades it without Incus and keeps shared volumes a peer reaches', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const actor = await seedUser(database, undefined, UserStatus.Active, Role.Operator);
       const ownerId = randomUUID();
@@ -497,12 +503,17 @@ describePg('server agent onboarding and removal', () => {
         {} as never,
         { append: vi.fn() } as never,
         { invalidate } as never,
-        { disconnect: vi.fn(), isConnected: vi.fn(() => false) } as never,
+        { disconnect: vi.fn(), isConnected: vi.fn(() => false), current: vi.fn(() => undefined) } as never,
         {} as never,
         { wake: vi.fn() } as never,
       );
 
-      await expect(service.delete(actor, serverS, 4)).resolves.toBeUndefined();
+      // Its instances would keep running with addresses handed out again: refused unless forced.
+      await expect(service.delete(actor, serverS, 4)).rejects.toMatchObject({
+        response: { code: 'SERVER_NOT_EMPTY', details: { containers: 1, localVolumes: 1 } },
+      });
+      expect(invalidate).not.toHaveBeenCalled();
+      await expect(service.delete(actor, serverS, 4, true)).resolves.toBeUndefined();
       expect(invalidate).toHaveBeenCalledWith('server_deleted');
       expect(
         await database.selectFrom('infra.servers').select('id').where('id', '=', serverS).executeTakeFirst(),
@@ -516,9 +527,14 @@ describePg('server agent onboarding and removal', () => {
       expect(
         await database.selectFrom('control.volumes').select('id').where('id', '=', localVolumeId).executeTakeFirst(),
       ).toBeUndefined();
+      // Placed only on S, but T still reaches the backend: the volume stays tracked.
       expect(
         await database.selectFrom('control.volumes').select('id').where('id', '=', sharedOnlySId).executeTakeFirst(),
-      ).toBeUndefined();
+      ).toMatchObject({ id: sharedOnlySId });
+      expect(
+        await database.selectFrom('control.volume_placements').select('server_id')
+          .where('volume_id', '=', sharedOnlySId).execute(),
+      ).toEqual([]);
       expect(
         await database.selectFrom('control.volumes').select(['id', 'remove_all_committed'])
           .where('id', '=', sharedClaimedId).executeTakeFirst(),
@@ -675,7 +691,7 @@ describePg('server agent onboarding and removal', () => {
         {} as never,
         { append: vi.fn() } as never,
         { invalidate: vi.fn() } as never,
-        { disconnect: vi.fn(), isConnected: vi.fn(() => false) } as never,
+        { disconnect: vi.fn(), isConnected: vi.fn(() => false), current: vi.fn(() => undefined) } as never,
         {} as never,
         { wake: vi.fn() } as never,
       );

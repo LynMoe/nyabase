@@ -1,4 +1,4 @@
-import { ForbiddenException, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, NotFoundException } from '@nestjs/common';
 import { Role } from '@nyabase/common';
 import { describe, expect, it, vi } from 'vitest';
 import { assertListScope, isSystemActor, SYSTEM_ACTOR } from './iam/actor.js';
@@ -8,6 +8,7 @@ import { HttpDomainPoolsService } from './http-proxy/http-domain-pools.service.j
 import { HttpProxyBindingsService } from './http-proxy/http-proxy-bindings.service.js';
 import { ImagesService } from './images/images.service.js';
 import { PerformanceQueryService } from './metrics/performance-query.service.js';
+import { zSeriesQuery, zUsageQuery } from './metrics/performance.controller.js';
 import { ServersService } from './servers/servers.service.js';
 import { StoragePoolsService } from './storage-pools/storage-pools.service.js';
 import { LocalVolumesService } from './volumes/local-volumes.service.js';
@@ -76,9 +77,20 @@ describe('scope=all needs the resource role', () => {
     const performance = bare(PerformanceQueryService, 4);
     await expect(performance.usage(user, {}, 'all')).rejects.toBeInstanceOf(ForbiddenException);
     await expect(performance.series(user, {}, 'all')).rejects.toBeInstanceOf(ForbiddenException);
+    // `userId` picks another person's usage: an administrator filter, never under scope=mine.
+    await expect(performance.usage(user, { userId: 'u2' }, 'mine')).rejects.toBeInstanceOf(BadRequestException);
+    await expect(performance.usage(user, { userId: 'u2', containerId: 'c1' }, 'mine'))
+      .rejects.toBeInstanceOf(BadRequestException);
+    await expect(performance.series(user, { userId: 'u2', metrics: 'cpu' }, 'mine'))
+      .rejects.toBeInstanceOf(BadRequestException);
+    expect(zUsageQuery.safeParse({ userId: 'u2' }).success).toBe(false);
+    expect(zSeriesQuery.safeParse({ scope: 'mine', userId: 'u2', range: '1h' }).success).toBe(false);
+    expect(zSeriesQuery.parse({ scope: 'all', userId: 'u2', range: '1h' })).toMatchObject({ userId: 'u2' });
+    expect(zUsageQuery.parse({ serverId: 's1', containerId: 'c1' })).toMatchObject({ scope: 'mine' });
     const bindings = bare(HttpProxyBindingsService, 3);
     const pools = bare(HttpDomainPoolsService, 4);
     await expect(bindings.listBindings(user, 'all', true)).rejects.toBeInstanceOf(ForbiddenException);
+    await expect(bindings.deleteBinding(user, 'b1', 'all')).rejects.toBeInstanceOf(ForbiddenException);
     await expect(pools.listPools(user, 'all')).rejects.toBeInstanceOf(ForbiddenException);
   });
 

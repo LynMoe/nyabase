@@ -1,4 +1,4 @@
-import { Injectable, CanActivate, ExecutionContext, ForbiddenException, UnauthorizedException } from '@nestjs/common';
+import { Injectable, CanActivate, ExecutionContext, ForbiddenException } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import { AuthGuard, PassportStrategy } from '@nestjs/passport';
 import { ExtractJwt, Strategy } from 'passport-jwt';
@@ -11,10 +11,7 @@ import { AuthService, type JwtPayload } from './auth.service.js';
 
 @Injectable()
 export class JwtAuthGuard extends AuthGuard('jwt') {
-  constructor(
-    private authService: AuthService,
-    private readonly reflector: Reflector,
-  ) {
+  constructor(private readonly reflector: Reflector) {
     super();
   }
 
@@ -25,43 +22,19 @@ export class JwtAuthGuard extends AuthGuard('jwt') {
     ])) {
       return true;
     }
+    // The only credential is the browser session's short-lived access JWT.
     const request = context.switchToHttp().getRequest();
-    const authHeader: string | undefined = request.headers['authorization'];
-    // Bearer-token format dispatch:
-    //   - API tokens are emitted as 64-char lowercase hex (32 random bytes,
-    //     see AuthService.createApiToken). They never contain '.' so they
-    //     can never be mistaken for a 3-segment JWT.
-    //   - Everything else (including any future token format with non-hex
-    //     characters) falls through to passport-jwt below.
-    // Anchored regex is intentional: a partial match would let a JWT-shaped
-    // token whose body happens to contain hex be misrouted.
-    if (authHeader?.startsWith('Bearer ')) {
-      const raw = authHeader.slice(7);
-      if (/^[0-9a-f]{64}$/.test(raw)) {
-        const user = await this.authService.validateApiToken(raw);
-        if (user) {
-          request.user = user;
-          request.authContext = { kind: 'api-token' as const };
-          return true;
-        }
-        throw new UnauthorizedException();
-      }
-    }
-
     const allowed = await (super.canActivate(context) as Promise<boolean>);
     if (allowed) {
-      request.authContext = {
-        kind: 'jwt' as const,
-        authVersion: request.user.authVersion,
-      };
+      request.authContext = { authVersion: request.user.authVersion };
     }
     return allowed;
   }
 }
 
-export type RequestAuthContext =
-  | { kind: 'jwt'; authVersion: number }
-  | { kind: 'api-token' };
+export interface RequestAuthContext {
+  authVersion: number;
+}
 
 @Injectable()
 export class RolesGuard implements CanActivate {
@@ -94,8 +67,8 @@ export class RolesGuard implements CanActivate {
     const actor: Actor = {
       userId: user.id,
       role: user.role,
-      authKind: authContext?.kind === 'api-token' ? 'api-token' : 'jwt',
-      authVersion: authContext?.kind === 'jwt' ? authContext.authVersion : user.authVersion,
+      authKind: 'jwt',
+      authVersion: authContext?.authVersion ?? user.authVersion,
     };
     request.actor = actor;
 
@@ -105,7 +78,8 @@ export class RolesGuard implements CanActivate {
 }
 
 function isAdminNamespace(request: { originalUrl?: string; url?: string }): boolean {
-  const path = (request.originalUrl ?? request.url ?? '').split('?')[0];
+  // Express routes match case-insensitively, so `/api/Admin/...` reaches the same handlers.
+  const path = (request.originalUrl ?? request.url ?? '').split('?')[0].toLowerCase();
   return path === '/admin' || path.startsWith('/admin/')
     || path === '/api/admin' || path.startsWith('/api/admin/');
 }

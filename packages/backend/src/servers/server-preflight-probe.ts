@@ -1,8 +1,7 @@
 import { createHash } from 'node:crypto';
 import {
   IncusError,
-  deriveInstanceHwaddr,
-  deriveNicHostName,
+  buildGuestNicDevice,
   GUEST_IPV6_SYSCTL_CONFIG,
   isOperationWaitNotFound,
   readAfterTimeout,
@@ -217,17 +216,11 @@ function createProbe(run: ProbeRun) {
               pool: options.probePoolName,
               size: '1073741824',
             },
-            eth0: {
-              type: 'nic',
-              nictype: 'bridged',
-              name: 'eth0',
-              parent: run.parentInterface,
-              hwaddr: deriveInstanceHwaddr(probeHardwareId(run.server.id)),
-              host_name: deriveNicHostName(probeHardwareId(run.server.id)),
-              'ipv4.address': options.probeAddress,
-              'security.ipv4_filtering': 'true',
-              'security.mac_filtering': 'true',
-            },
+            eth0: buildGuestNicDevice({
+              parentInterface: run.parentInterface,
+              hardwareId: probeHardwareId(run.server.id),
+              ipv4Address: options.probeAddress,
+            }),
           },
           start: false,
         },

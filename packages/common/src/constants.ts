@@ -19,8 +19,10 @@ export const MAX_SSH_PUBLIC_KEY_TEXT_LENGTH = 1_024;
 
 export const MAX_SSH_PROXY_CONTAINERS =
   MAX_PLATFORM_SERVERS * MAX_MANAGED_CONTAINERS_PER_SERVER;
+/** Same as the SSH proxy's hard NYABASE_SSH_MAX_CONNECTIONS ceiling (tools/ssh-proxy config.rs). */
 export const MAX_SSH_PROXY_STATUS_CONNECTIONS = 1_024;
-export const MAX_HTTP_PROXY_ACTIVE_CONNECTIONS = 32;
+/** Same as the HTTP proxy's hard NYABASE_HTTP_MAX_CONNECTIONS ceiling (tools/http-proxy config.rs). */
+export const MAX_HTTP_PROXY_ACTIVE_CONNECTIONS = 65_536;
 export const MAX_SSH_PROXY_SNAPSHOT_BYTES = 4 * 1024 * 1024;
 export const MAX_HTTP_PROXY_ROUTES = MAX_SSH_PROXY_CONTAINERS;
 export const MAX_HTTP_PROXY_DOMAIN_POOLS = 16;

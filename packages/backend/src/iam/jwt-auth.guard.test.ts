@@ -9,7 +9,7 @@ describe('JwtAuthGuard query token handling', () => {
       .spyOn(Object.getPrototypeOf(JwtAuthGuard.prototype), 'canActivate')
       .mockReturnValue(false);
     const reflector = { getAllAndOverride: vi.fn((key: string) => key === IS_PUBLIC_KEY) };
-    const guard = new JwtAuthGuard({ validateApiToken: vi.fn() } as never, reflector as never);
+    const guard = new JwtAuthGuard(reflector as never);
 
     await expect(guard.canActivate(makeContext(makeRequest({})))).resolves.toBe(true);
 
@@ -28,41 +28,27 @@ describe('JwtAuthGuard query token handling', () => {
     await expect(guard.canActivate(makeContext(request))).resolves.toBe(true);
 
     expect(request.headers.authorization).toBeUndefined();
-    expect(request.authContext).toEqual({ kind: 'jwt', authVersion: 7 });
+    expect(request.authContext).toEqual({ authVersion: 7 });
     expect(baseCanActivate).toHaveBeenCalled();
     baseCanActivate.mockRestore();
   });
 
-  it('still accepts normal API tokens in Authorization headers', async () => {
+  it('hands every bearer token to the JWT strategy; there are no API tokens', async () => {
     const baseCanActivate = vi
       .spyOn(Object.getPrototypeOf(JwtAuthGuard.prototype), 'canActivate')
-      .mockReturnValue(true);
-    const rawToken = 'a'.repeat(64);
-    const request = makeRequest({ authHeader: `Bearer ${rawToken}` });
-    const authService = {
-      validateApiToken: vi.fn().mockResolvedValue({ id: 'user-a' }),
-    };
-    const guard = makeGuard(authService);
+      .mockResolvedValue(false);
+    const request = makeRequest({ authHeader: `Bearer ${'a'.repeat(64)}` });
 
-    await expect(guard.canActivate(makeContext(request))).resolves.toBe(true);
+    await expect(makeGuard().canActivate(makeContext(request))).resolves.toBe(false);
 
-    expect(authService.validateApiToken).toHaveBeenCalledWith(rawToken);
-    expect(request.user).toEqual({ id: 'user-a' });
-    expect(request.authContext).toEqual({ kind: 'api-token' });
-    expect(baseCanActivate).not.toHaveBeenCalled();
+    expect(baseCanActivate).toHaveBeenCalled();
+    expect(request.user).toBeUndefined();
     baseCanActivate.mockRestore();
   });
 });
 
-function makeGuard(
-  authService: {
-    validateApiToken?: ReturnType<typeof vi.fn>;
-  } = {},
-): JwtAuthGuard {
-  return new JwtAuthGuard({
-    validateApiToken: vi.fn(),
-    ...authService,
-  } as never, new Reflector());
+function makeGuard(): JwtAuthGuard {
+  return new JwtAuthGuard(new Reflector());
 }
 
 function makeRequest(input: {

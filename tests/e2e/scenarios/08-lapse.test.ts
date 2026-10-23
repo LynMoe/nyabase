@@ -1,5 +1,6 @@
 // Revoking a grant starts the 14-day grace at once and stops the user's
-// containers; only after the grace are the resources purged. The purge is
+// containers (a pool or shared backend instead unplugs the user's volumes
+// there); only after the grace are the resources purged. The purge is
 // driven by moving `lapsed_at` into the past in the run's database, so the
 // production code carries no test switch. Disabling a user is a loss of
 // coverage like a revocation: same grace, stop and purge.
@@ -12,10 +13,11 @@ import {
   type ContainerDto,
   type EffectiveAccessDto,
   type IntentAcceptedDto,
+  type VolumeDto,
 } from '@nyabase/common';
 import { psql, uuid } from '../client/db.js';
 import { GIB, Harness, type TestUser } from '../client/harness.js';
-import { pollUntil } from '../client/poll.js';
+import { pollUntil, waitIntent } from '../client/poll.js';
 
 describe('lapse: revoke, grace, purge and disable', () => {
   let h: Harness;
@@ -83,6 +85,55 @@ describe('lapse: revoke, grace, purge and disable', () => {
     await pollUntil(async () => (await h.api.status('GET', `/volumes/${volume.resourceId}?scope=all`)) === 404 ? true : undefined,
       { what: 'the volume to be purged', timeoutMs: 300_000, intervalMs: 5_000 });
     assert.equal((await h.api.get<{ id: string }>(`/users/${user.id}`)).id, user.id, 'the account itself stays');
+  });
+
+  it('a lapsed pool unplugs its volumes from the running container, then deletes only the volumes', async () => {
+    const user = await h.newUser('pool-lapse');
+    await h.addSshKey(user);
+    await h.grantServer(user, h.server);
+    await h.grantPool(user, h.server.poolId);
+    const container = await h.createContainer(user, h.server);
+    const accepted = await user.session.api.post<IntentAcceptedDto>('/volumes', {
+      name: h.name('lapsing'),
+      sizeBytes: GIB,
+      scope: { kind: 'local', serverId: serverId(), poolId: h.server.poolId },
+    });
+    h.defer('delete lapsing volume', () => h.deleteVolume(h.api, accepted.resourceId));
+    await waitIntent(user.session.api, accepted);
+    await waitIntent(user.session.api, await user.session.api.post<IntentAcceptedDto>(
+      `/containers/${container.id}/volumes`,
+      { volumeId: accepted.resourceId, containerPath: '/mnt/lapsing', readOnly: false },
+    ));
+    assert.match(await h.ssh(user, container, 'mountpoint -q /mnt/lapsing && echo mounted'), /mounted/);
+    const poolLapse = () => psql(h.state.databaseUrl, `
+      SELECT stopped_at IS NOT NULL FROM control.access_lapses
+      WHERE user_id = '${uuid(user.id)}' AND resource_kind = 'storage_pool'
+        AND resource_id = '${uuid(h.server.poolId)}'
+    `)[0];
+
+    await h.api.delete(`/users/${user.id}/storage-pool-grants/${h.server.poolId}`);
+    await pollUntil(async () => (poolLapse()?.[0] === 't' ? true : undefined),
+      { what: 'the pool grace to open', timeoutMs: 240_000, intervalMs: 3_000 });
+    // Unplugged live: the container keeps running, the guest no longer sees the mount.
+    await pollUntil(async () => {
+      const current = await h.api.get<VolumeDto>(`/volumes/${accepted.resourceId}`, { scope: 'all' });
+      return current.attachments.length === 0 ? true : undefined;
+    }, { what: 'the lapsed volume to be detached', timeoutMs: 240_000, intervalMs: 3_000 });
+    const running = await asAdmin(container.id);
+    assert.equal(running.actual.status, ContainerStatus.Running);
+    assert.equal(running.powerIntent, ContainerPowerIntent.Running);
+    assert.match(await h.ssh(user, container, 'mountpoint -q /mnt/lapsing || echo unmounted'), /unmounted/);
+
+    // After the grace only the volume goes.
+    psql(h.state.databaseUrl, `
+      UPDATE control.access_lapses SET lapsed_at = now() - interval '15 days'
+      WHERE user_id = '${uuid(user.id)}' AND resource_kind = 'storage_pool'
+        AND resource_id = '${uuid(h.server.poolId)}'
+    `);
+    // The processor's minute timer picks it up.
+    await pollUntil(async () => (await h.api.status('GET', `/volumes/${accepted.resourceId}?scope=all`)) === 404 ? true : undefined,
+      { what: 'the lapsed volume to be deleted', timeoutMs: 420_000, intervalMs: 5_000 });
+    assert.equal((await asAdmin(container.id)).actual.status, ContainerStatus.Running, 'the container stays');
   });
 
   it('disabling a user opens the grace like a revocation; re-enabling cancels it, then the purge follows', async () => {

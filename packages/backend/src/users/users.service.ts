@@ -65,6 +65,25 @@ export interface IamUser {
   updatedAt: Date;
 }
 
+/**
+ * The generated password is written straight to stderr, not through the Nest
+ * logger: `server.logLevel=error` would drop a warn, and no later boot
+ * generates another one (an active admin then exists), so a filtered line
+ * locks the operator out. Development/test runtimes never generate one, and
+ * tests that force production stub `process.stderr.write`.
+ */
+function announceGeneratedAdminPassword(password: string): void {
+  process.stderr.write([
+    '',
+    '[nyabase] Created the administrator account "admin" with a generated password:',
+    `[nyabase]     ${password}`,
+    '[nyabase] It is shown only this once and never logged again. Sign in and change it now',
+    '[nyabase] (set auth.adminInitPassword / ADMIN_INIT_PASSWORD to choose it yourself).',
+    '',
+    '',
+  ].join('\n'));
+}
+
 @Injectable()
 export class UsersService {
   private readonly logger = new Logger(UsersService.name);
@@ -293,11 +312,8 @@ export class UsersService {
       }
       const securityChanged = passwordHash !== undefined
         || (dto.status !== undefined && dto.status !== user.status);
-      // A reset password ends every credential, API tokens included; a status
-      // change ends browser sessions (a disabled user's API tokens are inert).
-      if (passwordHash !== undefined) {
-        await this.authService.revokeAllCredentialsInTransaction(transaction, id);
-      } else if (securityChanged) {
+      // A reset password or a status change ends every browser session.
+      if (securityChanged) {
         await this.authService.revokeBrowserSessionsInTransaction(transaction, id);
       }
       if (securityChanged || demoting) {
@@ -380,7 +396,6 @@ export class UsersService {
         });
       }
       await transaction.deleteFrom('iam.refresh_tokens').where('user_id', '=', userId).execute();
-      await transaction.deleteFrom('iam.api_tokens').where('user_id', '=', userId).execute();
       await transaction.deleteFrom('iam.ssh_public_keys').where('user_id', '=', userId).execute();
       await transaction.deleteFrom('iam.group_members').where('user_id', '=', userId).execute();
       await transaction.deleteFrom('iam.server_grants').where('user_id', '=', userId).execute();
@@ -442,7 +457,7 @@ export class UsersService {
         || user.status !== snapshot.status
       )) throw new UnauthorizedException('Credentials changed while the request was being processed');
       if (passwordHash !== undefined) {
-        await this.authService.revokeAllCredentialsInTransaction(transaction, id);
+        await this.authService.revokeBrowserSessionsInTransaction(transaction, id);
         afterCommit(transaction, () => this.sessions.revoke(id));
       }
       const updated = await transaction.updateTable('iam.users').set({
@@ -514,9 +529,7 @@ export class UsersService {
         displayName: 'Administrator',
         role: Role.Admin,
       }, { actorId: null });
-      if (generatedInitPassword) {
-        this.logger.warn(`Generated one-time admin password: ${initPassword}`);
-      }
+      if (generatedInitPassword) announceGeneratedAdminPassword(initPassword);
       return;
     } catch (error) {
       if (!this.isUniqueViolation(error) && !this.isUsernameConflict(error)) throw error;

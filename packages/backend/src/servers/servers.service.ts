@@ -29,8 +29,8 @@ import { AuditService } from '../iam/audit.service.js';
 import { assertListScope, type Actor, requireUserId } from '../iam/actor.js';
 import { numberValue, isoDate, poolLabel } from '../platform/domain-utils.js';
 import { lockServerOnboarding } from '../platform/persistence-pg/advisory-locks.js';
+import { releaseSettledShrinkReservations } from '../platform/persistence-pg/committed-bytes.js';
 import { ProxySnapshotNotifierService } from '../proxy-snapshots/proxy-snapshot-notifier.service.js';
-import { VOLUME_DESTROY_PLACEMENT_ID } from '../reconcile/reconcile-claim.repository.js';
 import { listEligibleDestroyExecutors } from '../volumes/volumes.repository.js';
 import { assertActorRole } from '../iam/administration.js';
 
@@ -218,16 +218,39 @@ export class ServersService {
     return (await this.toDtos([row]))[0]!;
   }
 
-  async delete(actorId: string, id: string, expectedRevision?: number): Promise<void> {
+  /**
+   * Removes the server from the control plane only; nothing on its Incus is
+   * deleted. While the server still holds containers or local volumes this is
+   * refused: their instances would keep running with addresses the platform
+   * hands out again, and no later scan would ever see them. It is refused as
+   * well while the server is the last executor of a shared backend that still
+   * holds volumes (the same rule as deregistering that executor pool): nothing
+   * could reach or destroy their data any more. `force` is for a host that is
+   * gone for good (or wiped); those shared volumes then stay tracked until
+   * another executor is registered, and only their pending destroys finish.
+   */
+  async delete(actorId: string, id: string, expectedRevision?: number, force = false): Promise<void> {
     await this.transactions.run(async (transaction) => {
       await assertActorRole(transaction, actorId, Role.Operator);
       const server = await this.findById(id, transaction);
       if (expectedRevision !== undefined && Number(server.revision) !== expectedRevision) {
         throw new ConflictException({ code: 'REVISION_CONFLICT' });
       }
-      await purgeServerControlPlane(transaction, this.audit, id);
+      const strandedBackendIds = await lockBackendsLosingLastExecutor(transaction, id);
+      const held = await countServerResources(transaction, id, strandedBackendIds);
+      if (!force && (held.containers > 0 || held.localVolumes > 0 || held.strandedSharedVolumes > 0)) {
+        throw new ConflictException({
+          code: 'SERVER_NOT_EMPTY',
+          message: 'Delete the containers and local volumes on this server first '
+            + '(and register another executor for the shared backends it alone can reach), '
+            + 'or force the removal if the host is gone for good',
+          details: held,
+        });
+      }
+      await purgeServerControlPlane(transaction, this.audit, id, strandedBackendIds);
       await this.audit.append(transaction, actorId, AuditAction.DeleteServer, id, 'server', {
         name: server.name,
+        ...(force ? { force: true, ...held } : {}),
       });
     });
     this.agents.disconnect(id, undefined, 'server deleted');
@@ -288,6 +311,7 @@ export class ServersService {
         hostname: row.agent_hostname,
         connectedAt: isoDate(row.agent_connected_at),
         enrollmentExpiresAt: isoDate(row.agent_enrollment_expires_at),
+        ipv6Guard: this.agents.current(row.id)?.status.ipv6Guard ?? null,
       },
       metricsHealth: {
         status: row.node_metrics_status as NodeMetricsStatus,
@@ -343,7 +367,7 @@ function assertReservedCpus(server: ServerRow, reserved: readonly number[]): voi
 type Tx = Transaction<NyabaseDatabase>;
 
 /** Drop the server's claims, intents, containers and their volume attachments. */
-async function purgeContainers(transaction: Tx, serverId: string): Promise<Set<string>> {
+async function purgeContainers(transaction: Tx, serverId: string): Promise<void> {
   await transaction
     .deleteFrom('control.reconcile_claims')
     .where((expression) => expression.or([
@@ -352,15 +376,6 @@ async function purgeContainers(transaction: Tx, serverId: string): Promise<Set<s
     ]))
     .execute();
   await transaction.deleteFrom('control.intents').where('server_id', '=', serverId).execute();
-  const attachmentsOnS = await transaction
-    .selectFrom('control.volume_attachments')
-    .select('volume_id')
-    .where('container_id', 'in', transaction
-      .selectFrom('control.containers')
-      .select('id')
-      .where('server_id', '=', serverId))
-    .execute();
-  const volumeIdsLostAttachment = new Set(attachmentsOnS.map((row) => row.volume_id));
   await transaction
     .deleteFrom('control.volume_attachments')
     .where('container_id', 'in', transaction
@@ -369,7 +384,6 @@ async function purgeContainers(transaction: Tx, serverId: string): Promise<Set<s
       .where('server_id', '=', serverId))
     .execute();
   await transaction.deleteFrom('control.containers').where('server_id', '=', serverId).execute();
-  return volumeIdsLostAttachment;
 }
 
 /** Local volumes live on one server and go with it. */
@@ -385,92 +399,71 @@ async function purgeLocalVolumes(transaction: Tx, serverId: string): Promise<voi
   }
 }
 
-/** Remove the server's placements of shared volumes; returns the volumes that lost one. */
-async function dropSharedPlacements(transaction: Tx, serverId: string): Promise<Set<string>> {
-  const placementsOnS = await transaction
-    .selectFrom('control.volume_placements as pl')
-    .innerJoin('control.volumes as v', 'v.id', 'pl.volume_id')
-    .select('pl.volume_id as volume_id')
-    .where('pl.server_id', '=', serverId)
-    .where('v.shared_backend_id', 'is not', null)
+/**
+ * Shared backends this server is a registered executor of while no other
+ * server (online or not) is, locked so no shared volume is created on them
+ * meanwhile. Removing the server leaves nothing able to reach their data.
+ */
+async function lockBackendsLosingLastExecutor(transaction: Tx, serverId: string): Promise<string[]> {
+  // Capacity mutations lock the server before its shared backends.
+  await transaction.selectFrom('infra.servers').select('id').where('id', '=', serverId).forUpdate().execute();
+  const pools = await transaction
+    .selectFrom('infra.storage_pools')
+    .select('shared_backend_id')
+    .where('server_id', '=', serverId)
+    .where('driver', '=', 'cephfs')
+    .where('shareable', '=', true)
+    .where('registered', '=', true)
     .execute();
-  const volumeIdsLostPlacement = new Set(placementsOnS.map((row) => row.volume_id));
-  await transaction.deleteFrom('control.volume_placements').where('server_id', '=', serverId).execute();
-  return volumeIdsLostPlacement;
+  const backendIds = [...new Set(pools
+    .map((pool) => pool.shared_backend_id)
+    .filter((id): id is string => typeof id === 'string'))].sort();
+  if (backendIds.length === 0) return [];
+  await transaction
+    .selectFrom('infra.shared_backends')
+    .select('id')
+    .where('id', 'in', backendIds)
+    .orderBy('id')
+    .forUpdate()
+    .execute();
+  const stranded: string[] = [];
+  for (const backendId of backendIds) {
+    const others = await listEligibleDestroyExecutors(transaction, backendId, {
+      excludeServerId: serverId,
+      includeOffline: true,
+    });
+    if (others.length === 0) stranded.push(backendId);
+  }
+  return stranded;
 }
 
 /**
- * Shared volumes with no placement left: when this server was the last way to
- * reach them, drop their tracking (and any pending destroy) with the server.
+ * A shared volume outlives the server's placements while any other executor
+ * of its backend exists: attaching it there brings it back. Only on a backend
+ * this server was the last executor of (a forced delete) can a pending destroy
+ * never run, so it finishes here as `destroy_executor_gone`, as the reconciler
+ * would; live volumes there keep their rows (and quota) until another
+ * executor is registered, so their data is never left untracked.
  */
-async function dropEmptiedSharedVolumes(
+async function finishStrandedDestroys(
   transaction: Tx,
   audit: AuditService,
-  serverId: string,
-  volumeIdsLostPlacement: ReadonlySet<string>,
-  volumeIdsLostAttachment: ReadonlySet<string>,
+  strandedBackendIds: readonly string[],
 ): Promise<void> {
-  const emptyShared = await transaction
+  if (strandedBackendIds.length === 0) return;
+  const deleting = await transaction
     .selectFrom('control.volumes')
-    .select(['id', 'shared_backend_id', 'server_id', 'pool_id', 'dir_ensured'])
-    .where('server_id', 'is', null)
-    .where('shared_backend_id', 'is not', null)
+    .select(['id', 'dir_ensured'])
+    .where('shared_backend_id', 'in', strandedBackendIds)
+    .where('lifecycle_phase', '=', 'deleting')
     .execute();
-  for (const volume of emptyShared) {
+  for (const volume of deleting) {
     const attachment = await transaction
       .selectFrom('control.volume_attachments')
       .select('id')
       .where('volume_id', '=', volume.id)
       .executeTakeFirst();
-    const placement = await transaction
-      .selectFrom('control.volume_placements')
-      .select('server_id')
-      .where('volume_id', '=', volume.id)
-      .executeTakeFirst();
-    const eligible = volume.shared_backend_id
-      ? await listEligibleDestroyExecutors(transaction, volume.shared_backend_id, {
-        excludeServerId: serverId,
-        // An unreachable server is still a way to reach the data later.
-        includeOffline: true,
-      })
-      : [];
-    const claimed = await transaction
-      .selectFrom('control.reconcile_claims')
-      .select('resource_id')
-      .where('resource_type', '=', 'volume')
-      .where('resource_id', '=', volume.id)
-      .where('placement_server_id', '=', VOLUME_DESTROY_PLACEMENT_ID)
-      .where('lease_expires_at', '>', sql<Date>`clock_timestamp()`)
-      .executeTakeFirst();
-    const sWasEligible = volume.shared_backend_id
-      ? Boolean(await transaction
-        .selectFrom('infra.storage_pools')
-        .select('id')
-        .where('server_id', '=', serverId)
-        .where('shared_backend_id', '=', volume.shared_backend_id)
-        .where('driver', '=', 'cephfs')
-        .where('shareable', '=', true)
-        .where('registered', '=', true)
-        .executeTakeFirst())
-      : false;
-    const touchedByS = volumeIdsLostPlacement.has(volume.id)
-      || volumeIdsLostAttachment.has(volume.id);
-    const executorGone = eligible.length === 0 && sWasEligible;
-    if (!touchedByS && !(executorGone && (claimed || volume.dir_ensured))) continue;
     if (attachment) continue;
-    if (placement && eligible.length > 0) continue;
-    if (claimed && eligible.length > 0) continue;
-    const reason = claimed && eligible.length === 0
-      ? 'destroy_executor_gone'
-      : 'server_cascade_empty_tracking';
-    if (volume.shared_backend_id) {
-      await transaction
-        .selectFrom('infra.shared_backends')
-        .select('id')
-        .where('id', '=', volume.shared_backend_id)
-        .forUpdate()
-        .execute();
-    }
     await transaction
       .deleteFrom('control.reconcile_claims')
       .where('resource_type', '=', 'volume')
@@ -484,7 +477,7 @@ async function dropEmptiedSharedVolumes(
     await transaction.deleteFrom('control.volume_placements').where('volume_id', '=', volume.id).execute();
     await transaction.deleteFrom('control.volumes').where('id', '=', volume.id).execute();
     await audit.append(transaction, null, AuditAction.DeleteVolume, volume.id, 'volume', {
-      reason,
+      reason: volume.dir_ensured ? 'destroy_executor_gone' : 'never_mounted',
     });
   }
 }
@@ -527,21 +520,49 @@ async function purgeGrantsAndInventory(transaction: Tx, serverId: string): Promi
   await transaction.deleteFrom('infra.servers').where('id', '=', serverId).execute();
 }
 
+async function countServerResources(
+  transaction: Tx,
+  serverId: string,
+  strandedBackendIds: readonly string[],
+): Promise<{ containers: number; localVolumes: number; strandedSharedVolumes: number }> {
+  const [containers, localVolumes, strandedSharedVolumes] = await Promise.all([
+    transaction.selectFrom('control.containers')
+      .select(sql<number>`count(*)::integer`.as('count'))
+      .where('server_id', '=', serverId)
+      .executeTakeFirstOrThrow(),
+    transaction.selectFrom('control.volumes')
+      .select(sql<number>`count(*)::integer`.as('count'))
+      .where('server_id', '=', serverId)
+      .executeTakeFirstOrThrow(),
+    strandedBackendIds.length === 0
+      ? { count: 0 }
+      : transaction.selectFrom('control.volumes')
+        .select(sql<number>`count(*)::integer`.as('count'))
+        .where('shared_backend_id', 'in', strandedBackendIds)
+        .executeTakeFirstOrThrow(),
+  ]);
+  return {
+    containers: containers.count,
+    localVolumes: localVolumes.count,
+    strandedSharedVolumes: strandedSharedVolumes.count,
+  };
+}
+
 /** Remove every control-plane row that depends on a server, in dependency order. */
 async function purgeServerControlPlane(
   transaction: Tx,
   audit: AuditService,
   serverId: string,
+  strandedBackendIds: readonly string[],
 ): Promise<void> {
-  const volumeIdsLostAttachment = await purgeContainers(transaction, serverId);
+  await purgeContainers(transaction, serverId);
   await purgeLocalVolumes(transaction, serverId);
-  const volumeIdsLostPlacement = await dropSharedPlacements(transaction, serverId);
-  await dropEmptiedSharedVolumes(
-    transaction,
-    audit,
-    serverId,
-    volumeIdsLostPlacement,
-    volumeIdsLostAttachment,
-  );
+  const dropped = await transaction.deleteFrom('control.volume_placements')
+    .where('server_id', '=', serverId)
+    .returning('volume_id')
+    .execute();
+  // A shrink no longer waits for a catalog that went with the server.
+  await releaseSettledShrinkReservations(transaction, dropped.map((row) => row.volume_id));
+  await finishStrandedDestroys(transaction, audit, strandedBackendIds);
   await purgeGrantsAndInventory(transaction, serverId);
 }

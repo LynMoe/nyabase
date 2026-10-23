@@ -1,7 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { AuditAction } from '@nyabase/common';
 import type { Kysely } from 'kysely';
-import { describe, expect, it } from 'vitest';
+import { sql } from 'kysely';
+import { describe, expect, it, vi } from 'vitest';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 import { withPostgresTestDatabase } from '../platform/persistence-pg/postgres-test-harness.js';
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
@@ -86,7 +87,7 @@ describePg('Audit retention PostgreSQL boundaries', () => {
     });
   });
 
-  it('keeps append cleanup in the caller transaction rollback boundary', async () => {
+  it('runs append cleanup only after the caller transaction commits', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const transactions = new PgTransactionManager(database);
       const repository = new AuditRepository(database, transactions);
@@ -121,12 +122,44 @@ describePg('Audit retention PostgreSQL boundaries', () => {
         { secret: 'committed-secret' },
       ));
 
+      await vi.waitFor(async () => {
+        expect((await repository.list(10, 0)).total).toBe(1);
+      });
       const committed = await repository.list(10, 0);
-      expect(committed.total).toBe(1);
       expect(committed.items[0]?.id).not.toBe(retainedId);
       expect(committed.items[0]?.payload).toEqual({
         secret: '[REDACTED]',
       });
+    });
+  });
+
+  it('does not hold the shared retention lock inside business transactions', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const transactions = new PgTransactionManager(database);
+      const repository = new AuditRepository(database, transactions);
+      const service = auditService(repository, transactions, 0, 100);
+      let release!: () => void;
+      const released = new Promise<void>((resolve) => { release = resolve; });
+      let locked!: () => void;
+      const lockTaken = new Promise<void>((resolve) => { locked = resolve; });
+      const holder = transactions.run(async (transaction) => {
+        await sql`select pg_advisory_xact_lock(1856214885, 4)`.execute(transaction);
+        locked();
+        await released;
+      });
+      await lockTaken;
+
+      // Would block until `release()` if append still enforced retention in-transaction.
+      await transactions.run((transaction) => service.append(
+        transaction,
+        null,
+        AuditAction.CreateGroup,
+        null,
+        null,
+      ));
+      expect((await repository.list(10, 0)).total).toBe(1);
+      release();
+      await holder;
     });
   });
 

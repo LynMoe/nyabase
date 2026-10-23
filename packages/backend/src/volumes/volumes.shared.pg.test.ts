@@ -230,6 +230,34 @@ describePg('shared volume quota reservations', () => {
     });
   });
 
+  it('keeps no shrink reservation for a shared volume no server holds a catalog of', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const { userId, backendId } = await seedSharedBackend(database, { grantLimit: 1_000 });
+      const service = makeService(database);
+      const scope = { kind: 'shared' as const, sharedBackendId: backendId };
+      const created = await service.createShared(testActor(userId), { name: 'unplaced', sizeBytes: 1_000, scope });
+      // Its usage is known (the server it was placed on has been removed since),
+      // but no placement is left that could hold the old size.
+      await database.updateTable('control.volumes').set({ used_bytes: 100 })
+        .where('id', '=', created.id).execute();
+
+      const patched = await service.patchShared(testActor(userId), created.id, {
+        expectedRevision: created.revision,
+        sizeBytes: 200,
+      });
+
+      expect('intentId' in patched).toBe(false);
+      expect(await database.selectFrom('control.volumes').select(['size_bytes', 'shrink_reserved_bytes'])
+        .where('id', '=', created.id).executeTakeFirstOrThrow())
+        .toEqual({ size_bytes: '200', shrink_reserved_bytes: null });
+      expect(await database.selectFrom('control.intents').select('id')
+        .where('resource_id', '=', created.id).execute()).toHaveLength(0);
+      // The 800 bytes the shrink gave back are spendable at once.
+      await expect(service.createShared(testActor(userId), { name: 'rest', sizeBytes: 800, scope }))
+        .resolves.toMatchObject({ sizeBytes: 800 });
+    });
+  });
+
   it('requires a live shared-backend grant to create and ignores disk_bytes-only grants', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const userId = randomUUID();

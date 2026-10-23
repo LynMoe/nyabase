@@ -1,7 +1,6 @@
 import {
   Body,
   Controller,
-  ForbiddenException,
   Get,
   Param,
   Patch,
@@ -168,10 +167,6 @@ export class ContainersController {
     @CurrentActor() actor: Actor,
     @Query('scope') scope?: string,
   ) {
-    // Refuse API tokens before looking at the body, as the console always did.
-    if (actor.authKind !== 'jwt') {
-      throw new ForbiddenException('Container console admission requires a browser JWT');
-    }
     return this.containers.createExecSession(actor, id, zCreateExecSessionRequest.parse(body), zListScope.parse(scope));
   }
 }

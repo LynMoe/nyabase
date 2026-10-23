@@ -37,7 +37,10 @@ auth:
   #   openssl rand -hex 32
   jwtSecret: ""
   jwtExpiresIn: 15m
+  # Idle timeout: each refresh extends the session by this many days...
   refreshTokenExpiresDays: 7
+  # ...but never past this many days after login.
+  sessionMaxLifetimeDays: 30
   # The refresh session is an HttpOnly, SameSite=Strict cookie scoped to
   # /api/auth. Keep Secure on; disable only for plain-HTTP development on a
   # host other than localhost.
@@ -74,4 +77,6 @@ ssh:
   proxyToken: ""
   proxyPublicHost: ""
   proxyPublicPort: 2222
+  # Containers are reached as <name>.<suffix> (e.g. `ssh root@work.nya`).
+  proxyHostSuffix: nya
   proxySnapshotStaleMs: 300000

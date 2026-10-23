@@ -11,7 +11,8 @@ import {
   type SystemSettingsDto,
   Role,
 } from '@nyabase/common';
-import { Public, RequireRole, CurrentUser } from '../iam/decorators.js';
+import { Public, RequireRole, CurrentUser, CurrentActor } from '../iam/decorators.js';
+import { hasRole, type Actor } from '../iam/actor.js';
 import { NyabaseConfigService } from '../platform/config/nyabase-config.service.js';
 import type { UserRecord } from '../iam/auth-persistence.js';
 import { AccessResolverService } from '../iam/access-resolver.service.js';
@@ -36,14 +37,15 @@ export class SystemSettingsController {
 
   @Get('admin/system-settings')
   @RequireRole(Role.Operator)
-  getSettings(): SystemSettingsDto {
-    return this.systemSettingsDto();
+  getSettings(@CurrentActor() actor: Actor): SystemSettingsDto {
+    return this.systemSettingsDto(actor);
   }
 
   @Patch('admin/system-settings')
   @RequireRole(Role.Operator)
   async patchSettings(
     @CurrentUser() actor: UserRecord,
+    @CurrentActor() caller: Actor,
     @Body() body: unknown,
   ): Promise<SystemSettingsDto> {
     const { values, expectedRevision } = zPatchSystemSettingsRequest.parse(body);
@@ -65,16 +67,18 @@ export class SystemSettingsController {
         throw new ConflictException({
           code: 'SYSTEM_SETTINGS_REVISION_CONFLICT',
           message: 'System settings changed; reload and resolve the conflicting fields',
-          current: this.systemSettingsDto(),
+          current: this.systemSettingsDto(caller),
         });
       }
       throw error;
     }
-    return this.systemSettingsDto();
+    return this.systemSettingsDto(caller);
   }
 
-  private systemSettingsDto(): SystemSettingsDto {
-    const fields = this.config.allFields();
+  private systemSettingsDto(caller: Actor): SystemSettingsDto {
+    const admin = hasRole(caller, Role.Admin);
+    const fields = this.config.allFields().map((field) =>
+      field.adminOnly && !admin ? { ...field, editable: false } : field);
     return {
       revision: this.config.revision(),
       configFile: this.config.configFile(),

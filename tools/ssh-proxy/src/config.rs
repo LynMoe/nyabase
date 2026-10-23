@@ -1,6 +1,7 @@
 use anyhow::Result;
 use proxy_common::backend_tls::{backend_tls_config_from_env, validate_backend_ws_url};
-use proxy_common::conn_limit::validate_limit;
+use proxy_common::conn_limit::{validate_limit, LimitSettings};
+use proxy_common::control_link::ControlLiveness;
 use proxy_common::control_token::required_control_token;
 use proxy_common::env::{env_u64, env_usize, validate_status_interval_ms};
 use std::sync::Arc;
@@ -13,6 +14,14 @@ pub(crate) const SSH_PROXY_SNAPSHOT_STALE_MAX_MS: u64 = 300_000;
 pub(crate) const MAX_PROXY_CONNECTIONS: usize = 1024;
 
 pub(crate) const DEFAULT_MAX_CONNECTIONS_PER_IP: usize = 16;
+
+pub(crate) const DEFAULT_MAX_CONNECTIONS_PER_IPV6_48: usize = 64;
+
+/// Connections that have not authenticated yet; a quarter of the default pool.
+/// A source may use its whole per-IP total of it while there is room; a full
+/// pool admits a fresh source by evicting the heaviest source's oldest
+/// unauthenticated connection.
+pub(crate) const DEFAULT_MAX_PREAUTH_CONNECTIONS: usize = 128;
 
 pub(crate) const DEFAULT_AUTH_TIMEOUT_MS: u64 = 30_000;
 
@@ -38,12 +47,17 @@ pub(crate) struct ProxyConfig {
     pub(crate) listen: String,
     pub(crate) max_connections: usize,
     pub(crate) max_connections_per_ip: usize,
+    pub(crate) max_connections_per_ipv6_48: usize,
+    /// Accepted but not yet authenticated; bounded separately so pre-auth
+    /// sockets cannot occupy the whole pool.
+    pub(crate) max_preauth_connections: usize,
     /// From accept to successful public-key authentication.
     pub(crate) auth_timeout: Duration,
     pub(crate) reconnect_delay: Duration,
     pub(crate) route_connect_timeout: Duration,
     pub(crate) status_interval: Duration,
     pub(crate) control_hold: Duration,
+    pub(crate) control_liveness: ControlLiveness,
 }
 
 impl ProxyConfig {
@@ -65,6 +79,24 @@ impl ProxyConfig {
             )?,
             1,
             MAX_PROXY_CONNECTIONS,
+        )?;
+        let max_connections_per_ipv6_48 = validate_limit(
+            "NYABASE_SSH_MAX_CONNECTIONS_PER_IPV6_48",
+            env_usize(
+                "NYABASE_SSH_MAX_CONNECTIONS_PER_IPV6_48",
+                DEFAULT_MAX_CONNECTIONS_PER_IPV6_48,
+            )?,
+            1,
+            MAX_PROXY_CONNECTIONS,
+        )?;
+        let max_preauth_connections = validate_limit(
+            "NYABASE_SSH_MAX_PREAUTH_CONNECTIONS",
+            env_usize(
+                "NYABASE_SSH_MAX_PREAUTH_CONNECTIONS",
+                DEFAULT_MAX_PREAUTH_CONNECTIONS.min(max_connections),
+            )?,
+            1,
+            max_connections,
         )?;
         let auth_timeout_ms = validate_auth_timeout(env_u64(
             "NYABASE_SSH_AUTH_TIMEOUT_MS",
@@ -88,12 +120,26 @@ impl ProxyConfig {
             listen,
             max_connections,
             max_connections_per_ip,
+            max_connections_per_ipv6_48,
+            max_preauth_connections,
             auth_timeout: Duration::from_millis(auth_timeout_ms),
             reconnect_delay: Duration::from_millis(reconnect_delay_ms),
             route_connect_timeout: Duration::from_millis(route_connect_timeout_ms),
             status_interval: Duration::from_millis(status_interval_ms),
             control_hold: Duration::from_millis(control_hold_ms),
+            control_liveness: ControlLiveness::default(),
         })
+    }
+}
+
+impl ProxyConfig {
+    pub(crate) fn connection_limits(&self) -> LimitSettings {
+        LimitSettings {
+            global: self.max_connections,
+            per_client: self.max_connections_per_ip,
+            per_site: self.max_connections_per_ipv6_48,
+            pending: self.max_preauth_connections,
+        }
     }
 }
 

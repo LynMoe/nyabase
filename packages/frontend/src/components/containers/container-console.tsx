@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { Loader2, RotateCw, Terminal as TerminalIcon } from 'lucide-react';
 import type { IDisposable } from '@xterm/xterm';
 import { zConsoleToBrowser, type ContainerDto, type ExecSessionResponse, type ListScope } from '@nyabase/common';
-import { api } from '../../lib/api.js';
+import { api, freshAccessTokenWithRetry } from '../../lib/api.js';
 import { consoleCloseMessage, consoleErrorMessage } from '../../lib/console-errors.js';
 import { scopedPath } from '../../lib/scoped-paths.js';
 import { useAuthStore } from '../../store/auth.js';
@@ -10,6 +10,60 @@ import { Button } from '../ui/button.js';
 import { Badge } from '../ui/badge.js';
 
 type ConsoleStatus = 'idle' | 'connecting' | 'connected' | 'closed' | 'error';
+
+/** xterm is loaded on demand; `open` mounts a fitted terminal. */
+async function loadTerminal() {
+  const [{ Terminal }, { FitAddon }, { WebLinksAddon }] = await Promise.all([
+    import('@xterm/xterm'),
+    import('@xterm/addon-fit'),
+    import('@xterm/addon-web-links'),
+    import('@xterm/xterm/css/xterm.css'),
+  ]);
+  return {
+    open(mount: HTMLElement) {
+      const terminal = new Terminal({
+        cursorBlink: true,
+        convertEol: true,
+        fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
+        fontSize: 13,
+        theme: { background: '#09090b', foreground: '#f4f4f5', cursor: '#f4f4f5' },
+      });
+      const fit = new FitAddon();
+      terminal.loadAddon(fit);
+      terminal.loadAddon(new WebLinksAddon());
+      terminal.open(mount);
+      fit.fit();
+      return { terminal, fit };
+    },
+  };
+}
+
+/**
+ * The answer to the bridge's `reauthenticate` prompts: a fresh access token of
+ * the same browser session (`auth.sentToken` is the last one sent), one prompt
+ * at a time, retried until it is sent, the socket closes or the console is
+ * torn down.
+ */
+function consoleReauthenticator(
+  socket: WebSocket,
+  auth: { sentToken: string | null },
+  cancelled: () => boolean,
+): () => Promise<void> {
+  let answering = false;
+  const open = () => !cancelled() && socket.readyState === WebSocket.OPEN;
+  return async () => {
+    if (answering) return;
+    answering = true;
+    try {
+      const token = await freshAccessTokenWithRetry(auth.sentToken, open);
+      if (!token || !open()) return;
+      auth.sentToken = token;
+      socket.send(JSON.stringify({ type: 'auth', token }));
+    } finally {
+      answering = false;
+    }
+  };
+}
 
 export function ContainerConsole({ container, scope }: { container: ContainerDto; scope: ListScope }) {
   const mountRef = useRef<HTMLDivElement | null>(null);
@@ -20,7 +74,10 @@ export function ContainerConsole({ container, scope }: { container: ContainerDto
   const [status, setStatus] = useState<ConsoleStatus>('idle');
   const [error, setError] = useState<string | null>(null);
   const [reload, setReload] = useState(0);
-  const token = useAuthStore((state) => state.accessToken);
+  // Subscribe only to signed-in-ness: a token refresh must not tear down a live shell.
+  const signedIn = useAuthStore((state) => state.accessToken !== null);
+  const consoleEnabled = container.actions.console.enabled;
+  const consoleMessage = container.actions.console.message;
 
   const cleanup = useCallback(() => {
     disposablesRef.current.forEach((disposable) => disposable.dispose());
@@ -38,31 +95,15 @@ export function ContainerConsole({ container, scope }: { container: ContainerDto
       cleanup();
       setStatus('connecting');
       setError(null);
-      if (!token || !container.actions.console.enabled || !mountRef.current) {
+      if (!signedIn || !consoleEnabled || !mountRef.current) {
         setStatus('error');
-        setError(!token ? '登录已失效，请重新登录。' : container.actions.console.message ?? '当前容器不能打开控制台。');
+        setError(!signedIn ? '登录已失效，请重新登录。' : consoleMessage ?? '当前容器不能打开控制台。');
         return;
       }
       try {
-        const [{ Terminal }, { FitAddon }, { WebLinksAddon }] = await Promise.all([
-          import('@xterm/xterm'),
-          import('@xterm/addon-fit'),
-          import('@xterm/addon-web-links'),
-          import('@xterm/xterm/css/xterm.css'),
-        ]);
+        const loaded = await loadTerminal();
         if (cancelled || !mountRef.current) return;
-        const terminal = new Terminal({
-          cursorBlink: true,
-          convertEol: true,
-          fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
-          fontSize: 13,
-          theme: { background: '#09090b', foreground: '#f4f4f5', cursor: '#f4f4f5' },
-        });
-        const fit = new FitAddon();
-        terminal.loadAddon(fit);
-        terminal.loadAddon(new WebLinksAddon());
-        terminal.open(mountRef.current);
-        fit.fit();
+        const { terminal, fit } = loaded.open(mountRef.current);
         terminalRef.current = terminal;
         fitRef.current = fit;
         terminal.writeln('\x1b[90m正在连接控制台...\x1b[0m');
@@ -74,8 +115,13 @@ export function ContainerConsole({ container, scope }: { container: ContainerDto
         if (resolved.protocol !== 'ws:' && resolved.protocol !== 'wss:') throw new Error('控制台地址无效。');
         const socket = new WebSocket(resolved.toString());
         socketRef.current = socket;
+        // The console is bound to this browser session and must be re-authenticated
+        // with a fresh access token before the last one expires.
+        const auth = { sentToken: null as string | null };
+        const reauthenticate = consoleReauthenticator(socket, auth, () => cancelled);
         socket.addEventListener('open', () => {
-          socket.send(JSON.stringify({ type: 'auth', token }));
+          auth.sentToken = useAuthStore.getState().accessToken;
+          socket.send(JSON.stringify({ type: 'auth', token: auth.sentToken }));
         });
         socket.addEventListener('message', (event) => {
           try {
@@ -91,6 +137,10 @@ export function ContainerConsole({ container, scope }: { container: ContainerDto
               }
               setStatus('connected');
               terminal.writeln('\x1b[90m已连接。\x1b[0m');
+              return;
+            }
+            if (message.type === 'reauthenticate') {
+              void reauthenticate();
               return;
             }
             if (message.type === 'error') {
@@ -133,7 +183,7 @@ export function ContainerConsole({ container, scope }: { container: ContainerDto
     };
     void connect();
     return () => { cancelled = true; cleanup(); };
-  }, [cleanup, container.actions.console, container.id, reload, token]);
+  }, [cleanup, consoleEnabled, consoleMessage, container.id, reload, signedIn]);
 
   const statusLabel: Record<ConsoleStatus, string> = {
     idle: '未连接',

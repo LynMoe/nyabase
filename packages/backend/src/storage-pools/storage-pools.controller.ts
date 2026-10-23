@@ -36,8 +36,8 @@ export class StoragePoolsController {
   @Post('discover')
   @RequireRole(Role.Operator)
   @HttpCode(HttpStatus.OK)
-  discover(@Param('serverId') serverId: string) {
-    return this.service.discover(serverId);
+  discover(@Param('serverId') serverId: string, @CurrentActor() actor: Actor) {
+    return this.service.discover(requireUserId(actor), serverId);
   }
 
   @Get(':id')
@@ -54,8 +54,9 @@ export class StoragePoolsController {
   patch(
     @Param('serverId') serverId: string,
     @Param('id') id: string,
+    @CurrentActor() actor: Actor,
     @Body() body: unknown,
   ) {
-    return this.service.patch(id, zPatchStoragePoolRequest.parse(body), serverId);
+    return this.service.patch(requireUserId(actor), id, zPatchStoragePoolRequest.parse(body), serverId);
   }
 }

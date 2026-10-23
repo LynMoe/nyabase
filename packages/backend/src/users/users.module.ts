@@ -6,6 +6,8 @@ import { UsersController } from './users.controller.js';
 import { ContainersModule } from '../containers/containers.module.js';
 import { GroupsModule } from '../groups/groups.module.js';
 import { SshModule } from '../ssh/ssh.module.js';
+import { SshHostCaModule } from '../ssh-host-ca/ssh-host-ca.module.js';
+import { SshClientConfigService } from './ssh-client-config.service.js';
 import { ProxySnapshotNotifierModule } from '../proxy-snapshots/proxy-snapshot-notifier.module.js';
 
 @Module({
@@ -13,9 +15,10 @@ import { ProxySnapshotNotifierModule } from '../proxy-snapshots/proxy-snapshot-n
     GroupsModule,
     ContainersModule,
     SshModule,
+    SshHostCaModule,
     ProxySnapshotNotifierModule,
   ],
-  providers: [UsersService, UserSshKeysService, IamBootstrapService],
+  providers: [UsersService, UserSshKeysService, SshClientConfigService, IamBootstrapService],
   controllers: [UsersController],
   exports: [UsersService],
 })

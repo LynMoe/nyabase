@@ -21,7 +21,7 @@ import {
 } from '@nyabase/common';
 import { assertListScope, type Actor, requireUserId } from '../iam/actor.js';
 import { AuditService } from '../iam/audit.service.js';
-import { deterministicName, numberValue } from '../platform/domain-utils.js';
+import { deterministicName, nullableNumber, numberValue } from '../platform/domain-utils.js';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
 import { acceptedIntent } from '../reconcile/accepted-intent.js';
@@ -38,6 +38,7 @@ import {
   checkVolumeResize,
   isUniqueViolation,
   nameTakenConflict,
+  shrinkReservation,
   type VolumeAccess,
 } from './volume-rules.js';
 import { VolumesRepository, createVolumeIntent } from './volumes.repository.js';
@@ -292,14 +293,29 @@ export class LocalVolumesService {
       ),
     });
     if (lockedFailure) throw new ConflictException(lockedFailure);
-    if (lockedDelta > 0) {
+    const reservation = shrinkReservation({
+      currentBytes: numberValue(locked.size_bytes),
+      reservedBytes: nullableNumber(locked.shrink_reserved_bytes),
+      requestedBytes: input.sizeBytes,
+    });
+    // Coverage gates every grow by the owner; only bytes beyond the pending
+    // shrink's reservation are checked against grants and capacity.
+    if (access === 'owner' && input.sizeBytes > numberValue(locked.size_bytes)) {
+      await this.capacityRules.assertLocalCoverage(
+        transaction,
+        locked.owner_id,
+        locked.server_id!,
+        representativePoolId,
+      );
+    }
+    if (reservation.committedDeltaBytes > 0) {
       if (access === 'admin') {
         await this.capacityRules.assertCapacityPhysical(
           transaction,
           locked.server_id,
           representativePoolId,
           locked.shared_backend_id,
-          lockedDelta,
+          reservation.committedDeltaBytes,
         );
       } else {
         await this.capacityRules.assertCapacityWithinGrants(
@@ -308,13 +324,16 @@ export class LocalVolumesService {
           locked.server_id,
           representativePoolId,
           locked.shared_backend_id,
-          lockedDelta,
+          reservation.committedDeltaBytes,
         );
       }
     }
     const placements = await this.repository.listPlacements(id, transaction);
     if (placements.length === 0) throw noRegistration();
-    const { intents } = await this.lifecycle.applyResize(transaction, actorId, locked, input, placements);
+    const { intents } = await this.lifecycle.applyResize(transaction, actorId, locked, {
+      ...input,
+      shrinkReservedBytes: reservation.reservedBytes,
+    }, placements);
     return { intent: intents[0]! };
   }
 

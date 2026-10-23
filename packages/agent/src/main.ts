@@ -1,68 +1,77 @@
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { AGENT_PROTOCOL_VERSION } from '@nyabase/common';
 import { createAgentHandlers } from './agent.js';
 import { BackendConnection } from './backend-connection.js';
+import { readAgentBuild } from './build-info.js';
 import { LinuxNodeMetricsCollector } from './collector.js';
 import { controlUrl, loadAgentConfig, type AgentConfig } from './config.js';
 import { collectContainerCgroupMetrics } from './container-cgroup.js';
 import { CredentialStore } from './credential-store.js';
-import { EnrollmentRejectedError, enroll } from './enroll.js';
+import { enroll, enrollUntilAccepted } from './enroll.js';
 import { collectNvidiaGpuMetrics } from './gpu-collector.js';
 import { LocalIncus } from './incus-local.js';
+import { OperationLedger } from './operation-ledger.js';
 import { Ipv6Guard } from './ipv6-guard.js';
 
-const GUARD_INTERVAL_MS = 30_000;
-const ENROLL_RETRY_MS = 10_000;
+/** Backstop for `nft monitor` (which may be unavailable or restarting). */
+const GUARD_INTERVAL_MS = 10_000;
 
 function log(message: string): void {
   console.log(`[nyabase-agent] ${message}`);
 }
 
-function agentVersion(): string {
-  try {
-    const manifest = JSON.parse(readFileSync(join(__dirname, '..', 'package.json'), 'utf8')) as { version?: string };
-    return manifest.version ?? 'unknown';
-  } catch {
-    return 'unknown';
+/**
+ * `node dist/main.js ipv6-guard`: put the guard table in place once and exit
+ * (non-zero when it does not verify). The systemd unit runs it before Incus
+ * starts, so containers Incus restores at boot never come up without it.
+ */
+async function applyGuardOnce(): Promise<void> {
+  const guard = new Ipv6Guard();
+  if (await guard.ensure()) {
+    log('IPv6 guard is in place');
+    return;
   }
-}
-
-/** Exchange the enrollment token, retrying transport failures; a rejection is final. */
-async function enrollUntilAccepted(config: AgentConfig, store: CredentialStore, signal: AbortSignal): Promise<string> {
-  if (!config.enrollmentToken) {
-    throw new Error('No stored credential and NYABASE_AGENT_ENROLLMENT_TOKEN is not set');
-  }
-  while (!signal.aborted) {
-    try {
-      const result = await enroll(config, config.enrollmentToken);
-      await store.write(result.credential);
-      log(`enrolled as server ${result.serverId}`);
-      return result.credential;
-    } catch (error) {
-      if (error instanceof EnrollmentRejectedError) throw error;
-      log(`enrollment failed, retrying: ${error instanceof Error ? error.message : String(error)}`);
-      await new Promise((resolve) => setTimeout(resolve, ENROLL_RETRY_MS));
-    }
-  }
-  throw new Error('stopped before enrollment completed');
+  log(`IPv6 guard is not in place: ${guard.error ?? 'unknown error'}`);
+  process.exitCode = 1;
 }
 
 async function main(): Promise<void> {
   const config = await loadAgentConfig();
+  const build = readAgentBuild();
+  log(`nyabase-agent ${build.version} (protocol ${AGENT_PROTOCOL_VERSION}${build.commit ? `, commit ${build.commit}` : ''})`);
   const controller = new AbortController();
   const shutdown = (): void => controller.abort();
   process.once('SIGINT', shutdown);
   process.once('SIGTERM', shutdown);
 
-  const store = new CredentialStore(config.stateDir);
-  let credential = await store.read() ?? await enrollUntilAccepted(config, store, controller.signal);
-
+  // The guard protects guests whether or not the Backend is reachable: first.
   const guard = new Ipv6Guard();
-  const ensureGuard = async (): Promise<void> => {
-    if (!await guard.ensure()) log(`IPv6 guard is not in place: ${guard.error ?? 'unknown error'}`);
+  guard.onChange(({ ipv6Guard }) => {
+    log(ipv6Guard.present
+      ? 'IPv6 guard is in place'
+      : `IPv6 guard is not in place, guest NICs will not be brought up: ${ipv6Guard.error ?? 'unknown error'}`);
+  });
+  await guard.ensure();
+  const stopWatching = guard.watch();
+  const guardTimer = setInterval(() => void guard.ensure(), GUARD_INTERVAL_MS);
+  try {
+    await serve(config, build.version, guard, controller.signal);
+  } finally {
+    clearInterval(guardTimer);
+    stopWatching();
+  }
+}
+
+/** Enroll if needed, then hold the control connection until `signal` aborts. */
+async function serve(config: AgentConfig, version: string, guard: Ipv6Guard, signal: AbortSignal): Promise<void> {
+  const store = new CredentialStore(config.stateDir);
+  const exchange = (token: string): ReturnType<typeof enroll> => enroll(config, token);
+  const enrollFromEnvironment = (): Promise<string> => {
+    if (!config.enrollmentToken) {
+      throw new Error('No stored credential and NYABASE_AGENT_ENROLLMENT_TOKEN is not set');
+    }
+    return enrollUntilAccepted(config.enrollmentToken, signal, { exchange, store, log });
   };
-  await ensureGuard();
-  const guardTimer = setInterval(() => void ensureGuard(), GUARD_INTERVAL_MS);
+  let credential = await store.read() ?? await enrollFromEnvironment();
 
   const incus = new LocalIncus(config.incusSocket);
   const metrics = new LinuxNodeMetricsCollector({
@@ -73,20 +82,22 @@ async function main(): Promise<void> {
     ca: config.backendCa,
     credential: () => credential,
     log,
+    status: () => guard.status(),
     handlers: createAgentHandlers({
       config,
       incus,
       guard,
+      operations: new OperationLedger(),
       metrics,
       credential: () => credential,
-      version: agentVersion(),
+      version,
       log,
     }),
     // A rotated enrollment re-issues the credential; re-enroll when a fresh token was provided.
     onCredentialRejected: async () => {
       if (!config.enrollmentToken) return;
       try {
-        const result = await enroll(config, config.enrollmentToken);
+        const result = await exchange(config.enrollmentToken);
         await store.write(result.credential);
         credential = result.credential;
         log(`re-enrolled as server ${result.serverId}`);
@@ -95,12 +106,12 @@ async function main(): Promise<void> {
       }
     },
   });
+  guard.onChange(() => connection.publishStatus());
   log(`connecting to ${controlUrl(config)}`);
-  await connection.run(controller.signal);
-  clearInterval(guardTimer);
+  await connection.run(signal);
 }
 
-main().catch((error: unknown) => {
+(process.argv[2] === 'ipv6-guard' ? applyGuardOnce() : main()).catch((error: unknown) => {
   console.error('[nyabase-agent] fatal:', error instanceof Error ? error.message : String(error));
   process.exitCode = 1;
 });

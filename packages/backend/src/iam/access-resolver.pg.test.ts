@@ -148,11 +148,17 @@ describePg('AccessResolverService', () => {
       await seedVolume(database, {
         ownerId: userId, poolId: null, serverId: null, sharedBackendId: limited,
       });
+      const shrinking = await seedVolume(database, {
+        ownerId: userId, poolId: null, serverId: null, sharedBackendId: limited,
+      });
+      // A shrink not yet verified still books the larger size, as admission counts it.
+      await database.updateTable('control.volumes').set({ shrink_reserved_bytes: 400 })
+        .where('id', '=', shrinking).execute();
 
       const shared = await access.getEffectiveSharedAccess(userId);
       expect(shared.map((row) => row.sharedBackendId).sort()).toEqual([limited, unlimited].sort());
       expect(shared.find((row) => row.sharedBackendId === limited))
-        .toMatchObject({ limitBytes: 1_000, usedBytes: 100 });
+        .toMatchObject({ limitBytes: 1_000, usedBytes: 500 });
       expect(shared.find((row) => row.sharedBackendId === unlimited))
         .toMatchObject({ limitBytes: null, usedBytes: 0 });
     });

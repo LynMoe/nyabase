@@ -1,5 +1,6 @@
-import { Activity, Gauge, PlugZap, RefreshCw, RotateCcw, Wifi } from 'lucide-react';
-import type { SshProxyHostKeySummaryDto, SshProxyStatusReport } from '@nyabase/common';
+import { Activity, Gauge, PlugZap, RefreshCw, RotateCcw, ShieldAlert, Wifi } from 'lucide-react';
+import { Link } from '@tanstack/react-router';
+import type { SshProxyHostKeySummaryDto, SshProxySnapshotSummaryDto, SshProxyStatusReport } from '@nyabase/common';
 import type { UseQueryResult } from '@tanstack/react-query';
 import { formatBytes, formatRate } from '../../lib/utils.js';
 import { Badge } from '../../components/ui/badge.js';
@@ -20,8 +21,13 @@ export interface SshProxyAdminStatus {
   bandwidthInBps: number;
   bandwidthOutBps: number;
   updatedAt: string | null;
+  publicEndpoint: { host: string; port: number } | null;
+  snapshot: SshProxySnapshotSummaryDto | null;
   proxies: SshProxyStatusReport[];
 }
+
+/** Above this share of the cap the next growth could make every build fail. */
+const SNAPSHOT_WARN_RATIO = 0.75;
 
 export function SshStatusSections({ status }: { status: SshProxyAdminStatus }) {
   const proxies = status.proxies ?? [];
@@ -30,8 +36,10 @@ export function SshStatusSections({ status }: { status: SshProxyAdminStatus }) {
     proxyId: proxy.proxyId,
   })));
 
+  const latest = status.snapshot?.generation ?? null;
   return (
     <div className="space-y-6">
+      <SnapshotHealth status={status} />
       <section className="grid grid-cols-2 gap-3 xl:grid-cols-4">
         <MetricTile icon={Wifi} label="在线代理" value={status.connectedProxies.toString()} sub={`${proxies.length} 个实例上报`} />
         <MetricTile icon={Activity} label="活跃连接" value={status.activeConnections.toString()} sub={`累计 ${status.totalConnections} 次`} />
@@ -76,7 +84,12 @@ export function SshStatusSections({ status }: { status: SshProxyAdminStatus }) {
                   <TableCell>{proxy.activeConnections} / {proxy.totalConnections}</TableCell>
                   <TableCell>{formatRate(proxy.bandwidthInBps)} / {formatRate(proxy.bandwidthOutBps)}</TableCell>
                   <TableCell>{formatBytes(proxy.totalBytesFromClient + proxy.totalBytesToClient)}</TableCell>
-                  <TableCell>{proxy.lastSnapshotGeneration ?? '-'}</TableCell>
+                  <TableCell>
+                    {proxy.lastSnapshotGeneration ?? '-'}
+                    {latest !== null && proxy.lastSnapshotGeneration !== null && proxy.lastSnapshotGeneration < latest ? (
+                      <Badge variant="outline" className="ml-2">落后于 {latest}</Badge>
+                    ) : null}
+                  </TableCell>
                 </TableRow>
               ))}
             </TableBody>
@@ -143,6 +156,53 @@ export function SshStatusSections({ status }: { status: SshProxyAdminStatus }) {
   );
 }
 
+/** The facts an operator needs before users notice: no public address, a failing or nearly full snapshot. */
+function SnapshotHealth({ status }: { status: SshProxyAdminStatus }) {
+  const snapshot = status.snapshot;
+  const ratio = snapshot && snapshot.maxBytes > 0 ? snapshot.bytes / snapshot.maxBytes : 0;
+  return (
+    <div className="space-y-3">
+      {!status.publicEndpoint ? (
+        <Notice testId="ssh-proxy-no-endpoint">
+          尚未配置 SSH 代理的公网地址，用户的容器页面和个人资料页不会生成登录命令与配置。
+          在 <Link to="/system-settings" className="font-medium underline underline-offset-4">系统设置</Link> 填写「SSH 代理公网主机」。
+        </Notice>
+      ) : null}
+      {snapshot?.error ? (
+        <Notice testId="ssh-proxy-snapshot-error">
+          最近一次路由快照构建失败（{snapshot.failedAt ? formatTime(snapshot.failedAt) : '未知时间'}）：{snapshot.error}。
+          代理仍在使用上一份快照，新的容器和公钥不会生效。
+        </Notice>
+      ) : null}
+      {snapshot && ratio >= SNAPSHOT_WARN_RATIO ? (
+        <Notice testId="ssh-proxy-snapshot-large">
+          路由快照已用 {Math.round(ratio * 100)}% 的上限（{formatBytes(snapshot.bytes)} / {formatBytes(snapshot.maxBytes)}），超过上限后快照将无法更新。
+        </Notice>
+      ) : null}
+      {snapshot && snapshot.builtAt ? (
+        <div className="rounded-lg border border-border bg-card p-4 grid gap-3 sm:grid-cols-4" data-testid="ssh-proxy-snapshot">
+          <InfoCell label="快照版本" value={`${snapshot.generation}（${formatTime(snapshot.builtAt)}）`} />
+          <InfoCell label="快照大小" value={`${formatBytes(snapshot.bytes)} / ${formatBytes(snapshot.maxBytes)}`} />
+          <InfoCell label="可登录用户" value={snapshot.users.toString()} />
+          <InfoCell label="可达容器" value={snapshot.routes.toString()} />
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function Notice({ testId, children }: { testId: string; children: React.ReactNode }) {
+  return (
+    <p
+      className="flex items-start gap-2 rounded-md border border-warning/40 bg-warning/10 px-3 py-2 text-sm"
+      data-testid={testId}
+    >
+      <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0 text-warning" aria-hidden />
+      <span>{children}</span>
+    </p>
+  );
+}
+
 export function InfoCell({ label, value }: { label: string; value: string }) {
   return (
     <div className="min-w-0">
@@ -169,6 +229,8 @@ export const emptyStatus: SshProxyAdminStatus = {
   bandwidthInBps: 0,
   bandwidthOutBps: 0,
   updatedAt: null,
+  publicEndpoint: null,
+  snapshot: null,
   proxies: [],
 };
 
@@ -178,12 +240,16 @@ export function HostKeySection({
   rotating,
   onRefresh,
   onRotate,
+  resettingAuthorities,
+  onResetAuthorities,
 }: {
   query: UseQueryResult<SshProxyHostKeySummaryDto>;
   fetching: boolean;
   rotating: boolean;
   onRefresh: () => void;
   onRotate: () => void;
+  resettingAuthorities: boolean;
+  onResetAuthorities: () => void;
 }) {
   return (
       <section className="space-y-3">
@@ -202,6 +268,14 @@ export function HostKeySection({
               <RotateCcw className="h-4 w-4" />
               轮换
             </Button>
+            <Button
+              variant="outline-destructive"
+              size="sm"
+              disabled={resettingAuthorities}
+              onClick={() => onResetAuthorities()}
+            >
+              重置容器证书 CA
+            </Button>
           </div>
         </div>
         <QueryView query={query} resourceName="SSH 主机密钥" loadingLabel="加载 SSH 主机密钥...">
@@ -219,6 +293,12 @@ export function HostKeySection({
               </div>
               <InfoCell label="版本" value={hostKey.generation?.toString() ?? '未配置'} />
               <InfoCell label="轮换时间" value={hostKey.rotatedAt ? formatTime(hostKey.rotatedAt) : '从未轮换'} />
+              {hostKey.publicKey ? (
+                <div className="min-w-0 sm:col-span-3">
+                  <p className="text-xs text-muted-foreground">公钥（用户的 known_hosts 里是这一行）</p>
+                  <pre className="mt-1 overflow-x-auto rounded-md border bg-muted/50 px-3 py-2 font-mono text-xs">{hostKey.publicKey}</pre>
+                </div>
+              ) : null}
             </div>
           )}
         </QueryView>

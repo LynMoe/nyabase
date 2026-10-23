@@ -101,27 +101,34 @@ CREATE TABLE iam.refresh_tokens (
     hash character(64) NOT NULL,
     previous_hash character(64),
     previous_request_id_hash character(64),
+    rotated_at timestamp with time zone,
     expires_at timestamp with time zone NOT NULL,
     revoked boolean DEFAULT false NOT NULL,
     created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
     CONSTRAINT refresh_tokens_hash_check CHECK (hash ~ '^[0-9a-f]{64}$'),
     CONSTRAINT refresh_tokens_predecessor_shape_check
-        CHECK ((previous_hash IS NULL AND previous_request_id_hash IS NULL)
-            OR (previous_hash IS NOT NULL AND previous_request_id_hash IS NOT NULL))
+        CHECK ((previous_hash IS NULL AND previous_request_id_hash IS NULL AND rotated_at IS NULL)
+            OR (previous_hash IS NOT NULL AND previous_request_id_hash IS NOT NULL
+                AND rotated_at IS NOT NULL))
 );
 
 COMMENT ON COLUMN iam.refresh_tokens.previous_hash IS
   'One-step predecessor used only for exact response recovery and logout-after-rotation';
+COMMENT ON COLUMN iam.refresh_tokens.rotated_at IS
+  'When previous_hash was retired; bounds the concurrent-refresh grace window';
+COMMENT ON COLUMN iam.refresh_tokens.created_at IS
+  'Session start (login); rotation keeps it, auth.sessionMaxLifetimeDays counts from it';
 
-CREATE TABLE iam.api_tokens (
-    id uuid NOT NULL,
-    user_id uuid NOT NULL REFERENCES iam.users(id) ON DELETE CASCADE,
-    name text NOT NULL,
+-- The newest hashes a session has rotated away from (the repository keeps a
+-- bounded window per session, see REFRESH_RETAINED_ANCESTORS). Presenting one
+-- again (outside the immediate-predecessor recovery / grace paths) is
+-- refresh-token reuse: the whole session is deleted, and these rows go with it.
+CREATE TABLE iam.refresh_token_ancestors (
     hash character(64) NOT NULL,
-    last_used_at timestamp with time zone,
-    created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
-    CONSTRAINT api_tokens_hash_check CHECK (hash ~ '^[0-9a-f]{64}$'),
-    CONSTRAINT api_tokens_name_check CHECK (length(btrim(name)) BETWEEN 1 AND 128)
+    session_id uuid NOT NULL,
+    retired_at timestamp with time zone NOT NULL,
+    CONSTRAINT refresh_token_ancestors_hash_check CHECK (hash ~ '^[0-9a-f]{64}$'),
+    PRIMARY KEY (hash)
 );
 
 CREATE TABLE iam.ssh_public_keys (
@@ -179,6 +186,11 @@ CREATE TABLE infra.servers (
     agent_credential_hash text,
     agent_enrollment_token_hash text,
     agent_enrollment_expires_at timestamp with time zone,
+    -- The stored credential was minted from the outstanding enrollment token
+    -- and its agent has not authenticated with it yet: until then the token
+    -- stays usable (a lost enroll response is retried), and the first
+    -- successful control authentication clears both.
+    agent_credential_unconfirmed boolean DEFAULT false NOT NULL,
     agent_version text,
     agent_hostname text,
     agent_connected_at timestamp with time zone,
@@ -209,6 +221,9 @@ CREATE TABLE infra.servers (
         CHECK ((agent_enrollment_token_hash IS NULL AND agent_enrollment_expires_at IS NULL)
             OR (agent_enrollment_token_hash ~ '^[0-9a-f]{64}$'
                 AND agent_enrollment_expires_at IS NOT NULL)),
+    CONSTRAINT servers_agent_credential_unconfirmed_check
+        CHECK (NOT agent_credential_unconfirmed
+            OR (agent_credential_hash IS NOT NULL AND agent_enrollment_token_hash IS NOT NULL)),
     CONSTRAINT servers_reserved_cpus_check
         CHECK (array_position(reserved_cpus, NULL::integer) IS NULL
                AND 0 <= ALL (reserved_cpus)),
@@ -431,6 +446,7 @@ CREATE TABLE control.containers (
     root_pool_id uuid NOT NULL REFERENCES infra.storage_pools(id) ON DELETE RESTRICT,
     root_size_bytes bigint NOT NULL,
     root_size_pending_bytes bigint,
+    root_shrink_reserved_bytes bigint,
     mem_bytes bigint NOT NULL,
     -- The CPU set last applied to the instance (observed; NULL until reconciled).
     cpu_set integer[],
@@ -457,6 +473,8 @@ CREATE TABLE control.containers (
     CONSTRAINT containers_root_size_check CHECK (root_size_bytes > 0),
     CONSTRAINT containers_root_size_pending_check
         CHECK (root_size_pending_bytes IS NULL OR root_size_pending_bytes > 0),
+    CONSTRAINT containers_root_shrink_reserved_bytes_check
+        CHECK (root_shrink_reserved_bytes IS NULL OR root_shrink_reserved_bytes > 0),
     CONSTRAINT containers_mem_bytes_check CHECK (mem_bytes > 0),
     CONSTRAINT containers_cpu_set_check
         CHECK (cpu_set IS NULL OR (cardinality(cpu_set) > 0
@@ -486,6 +504,9 @@ COMMENT ON TABLE control.containers IS
 COMMENT ON COLUMN control.containers.root_used_bytes IS
   'Last observed Incus root disk usage; null until reconcile has seen instance state';
 
+COMMENT ON COLUMN control.containers.root_shrink_reserved_bytes IS
+  'Largest root size Incus may still hold until a requested root shrink is verified and applied';
+
 CREATE TABLE control.volumes (
     id uuid NOT NULL,
     owner_id uuid NOT NULL REFERENCES iam.users(id) ON DELETE RESTRICT,
@@ -495,6 +516,7 @@ CREATE TABLE control.volumes (
     name text NOT NULL,
     incus_name text NOT NULL,
     size_bytes bigint NOT NULL,
+    shrink_reserved_bytes bigint,
     used_bytes bigint,
     revision integer DEFAULT 1 NOT NULL,
     observed_revision integer,
@@ -509,6 +531,8 @@ CREATE TABLE control.volumes (
     CONSTRAINT volumes_name_check CHECK (length(btrim(name)) > 0),
     CONSTRAINT volumes_incus_name_check CHECK (incus_name ~ '^nyv-[0-9a-f]{32}$'),
     CONSTRAINT volumes_size_check CHECK (size_bytes > 0),
+    CONSTRAINT volumes_shrink_reserved_bytes_check
+        CHECK (shrink_reserved_bytes IS NULL OR shrink_reserved_bytes > 0),
     CONSTRAINT volumes_used_bytes_check CHECK (used_bytes IS NULL OR used_bytes >= 0),
     CONSTRAINT volumes_revision_check CHECK (revision > 0),
     CONSTRAINT volumes_observed_revision_check
@@ -528,6 +552,9 @@ CREATE TABLE control.volumes (
     PRIMARY KEY (id)
 );
 
+COMMENT ON COLUMN control.volumes.shrink_reserved_bytes IS
+  'Largest size Incus may still hold until a requested shrink is verified; committed bytes are greatest(size_bytes, shrink_reserved_bytes)';
+
 CREATE TABLE control.volume_attachments (
     id uuid NOT NULL,
     container_id uuid NOT NULL REFERENCES control.containers(id) ON DELETE CASCADE,
@@ -539,7 +566,8 @@ CREATE TABLE control.volume_attachments (
     created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
     updated_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
     CONSTRAINT volume_attachments_path_check
-        CHECK (container_path ~~ '/%' AND container_path <> '/' AND container_path !~ '[\000\r\n]'),
+        CHECK (container_path ~~ '/%' AND container_path <> '/' AND container_path !~ '[\000\r\n]'
+            AND container_path !~ '^/+(proc|sys|dev)(/|$)'),
     CONSTRAINT volume_attachments_device_name_check
         CHECK (device_name ~ '^nyd-[0-9a-f]{32}$'),
     CONSTRAINT volume_attachments_bind_state_check
@@ -662,6 +690,24 @@ CREATE TABLE control.access_lapses (
 COMMENT ON TABLE control.access_lapses IS
   'Grace ledger: a user owns resources on a server, pool or shared backend without current coverage. '
   'lapsed_at is fixed when the row is created; in-flight ownership is a reconcile_claims lease (resource_type access_lapse)';
+
+CREATE TABLE control.orphan_sightings (
+    server_id uuid NOT NULL REFERENCES infra.servers(id) ON DELETE CASCADE,
+    kind text NOT NULL,
+    pool_name text NOT NULL,
+    name text NOT NULL,
+    first_seen_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    CONSTRAINT orphan_sightings_kind_check
+        CHECK (kind = ANY (ARRAY['instance', 'volume'])),
+    CONSTRAINT orphan_sightings_pool_shape_check
+        CHECK ((kind = 'instance' AND pool_name = '') OR (kind = 'volume' AND pool_name <> '')),
+    PRIMARY KEY (server_id, kind, pool_name, name)
+);
+
+COMMENT ON TABLE control.orphan_sightings IS
+  'Orphan ledger: managed Incus instances/volumes that no row owns, keyed by the full scan that first saw them. '
+  'An orphan instance is stopped at once; either is deleted only after a holding period. '
+  'A database restored from a backup starts with no sightings, so nothing it does not know is deleted at once';
 
 CREATE TABLE control.intents (
     id uuid NOT NULL,
@@ -884,6 +930,16 @@ CREATE TABLE interaction.ssh_proxy_host_keys (
     PRIMARY KEY (id)
 );
 
+-- Each user's SSH host certificate authority: it signs the host keys of that
+-- user's containers, so a user's known_hosts trusts only their own containers.
+CREATE TABLE interaction.ssh_host_authorities (
+    user_id uuid NOT NULL REFERENCES iam.users(id) ON DELETE CASCADE,
+    encrypted_private_key text NOT NULL,
+    public_key text NOT NULL,
+    created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    PRIMARY KEY (user_id)
+);
+
 CREATE INDEX audit_events_action_idx
     ON audit.events (action, occurred_at DESC, id DESC);
 CREATE INDEX audit_events_actor_idx
@@ -906,8 +962,9 @@ ALTER TABLE iam.group_members ADD CONSTRAINT group_members_group_id_user_id_key
     UNIQUE (group_id, user_id);
 ALTER TABLE iam.refresh_tokens ADD CONSTRAINT refresh_tokens_pkey PRIMARY KEY (id);
 ALTER TABLE iam.refresh_tokens ADD CONSTRAINT refresh_tokens_hash_key UNIQUE (hash);
-ALTER TABLE iam.api_tokens ADD CONSTRAINT api_tokens_pkey PRIMARY KEY (id);
-ALTER TABLE iam.api_tokens ADD CONSTRAINT api_tokens_hash_key UNIQUE (hash);
+ALTER TABLE iam.refresh_token_ancestors
+    ADD CONSTRAINT refresh_token_ancestors_session_fkey
+    FOREIGN KEY (session_id) REFERENCES iam.refresh_tokens(id) ON DELETE CASCADE;
 ALTER TABLE iam.ssh_public_keys ADD CONSTRAINT ssh_public_keys_pkey PRIMARY KEY (id);
 -- A public key belongs to one user: the SSH proxy resolves the user from the key.
 ALTER TABLE iam.ssh_public_keys ADD CONSTRAINT ssh_public_keys_fingerprint_key
@@ -931,6 +988,9 @@ ALTER TABLE iam.shared_backend_grants ADD CONSTRAINT shared_backend_grants_pkey 
 
 ALTER TABLE control.containers ADD CONSTRAINT containers_server_id_name_key
     UNIQUE (server_id, name);
+-- Containers are reached by name through the SSH proxy (`ssh work.<suffix>`),
+-- which resolves names within the key holder's own containers.
+CREATE UNIQUE INDEX containers_owner_name_key ON control.containers (owner_id, lower(name));
 ALTER TABLE control.volumes ADD CONSTRAINT volumes_incus_name_key UNIQUE (incus_name);
 ALTER TABLE control.volume_attachments ADD CONSTRAINT volume_attachments_pkey PRIMARY KEY (id);
 ALTER TABLE control.container_network_claims ADD CONSTRAINT container_network_claims_pkey
@@ -1078,8 +1138,6 @@ CREATE INDEX access_lapses_resource_idx ON control.access_lapses (resource_kind,
 CREATE INDEX reconcile_claims_lease_idx ON control.reconcile_claims (lease_expires_at);
 CREATE INDEX reconcile_claims_server_idx ON control.reconcile_claims (server_id);
 
-CREATE INDEX iam_api_tokens_user_created_idx
-    ON iam.api_tokens (user_id, created_at DESC, id);
 CREATE INDEX iam_group_members_user_idx ON iam.group_members (user_id, group_id);
 CREATE INDEX refresh_tokens_expiry_idx ON iam.refresh_tokens (expires_at);
 CREATE INDEX refresh_tokens_revoked_idx ON iam.refresh_tokens (id) WHERE revoked;
@@ -1088,6 +1146,8 @@ CREATE INDEX iam_refresh_tokens_user_active_idx
 CREATE INDEX iam_refresh_tokens_user_idx ON iam.refresh_tokens (user_id);
 CREATE UNIQUE INDEX iam_refresh_tokens_previous_hash_unique
     ON iam.refresh_tokens (previous_hash) WHERE previous_hash IS NOT NULL;
+CREATE INDEX iam_refresh_token_ancestors_session_idx
+    ON iam.refresh_token_ancestors (session_id, retired_at, hash);
 CREATE INDEX iam_ssh_public_keys_user_idx
     ON iam.ssh_public_keys (user_id, created_at, id);
 CREATE INDEX iam_users_status_idx ON iam.users (status, username);
@@ -1228,11 +1288,13 @@ BEGIN
 END;
 $$;
 
+-- A deleting container keeps its claims: they go with the row (ON DELETE
+-- CASCADE) once the instance is gone, so a slow delete never shares a card.
 CREATE FUNCTION control.release_gpu_claims_on_terminal_phase() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
-  IF NEW.lifecycle_phase = ANY (ARRAY['failed', 'deleting'])
+  IF NEW.lifecycle_phase = 'failed'
      AND OLD.lifecycle_phase IS DISTINCT FROM NEW.lifecycle_phase THEN
     DELETE FROM control.container_gpu_claims WHERE container_id = NEW.id;
   END IF;
@@ -1245,8 +1307,19 @@ CREATE FUNCTION infra.reject_disable_gpu_with_claims() RETURNS trigger
     AS $$
 BEGIN
   IF NEW.gpu_enabled = false AND OLD.gpu_enabled IS DISTINCT FROM false THEN
+    -- GPU stays on while any live container holds a card or carries the NVIDIA
+    -- runtime in its instance spec (gpuStateOccupies in gpu/instance-spec.ts):
+    -- dropping that contribution from a running instance would be drift that
+    -- only a stop can apply. Writers of claims/gpu_state lock this server row.
     IF EXISTS (
       SELECT 1 FROM control.container_gpu_claims WHERE server_id = NEW.id
+    ) OR EXISTS (
+      SELECT 1 FROM control.containers AS c
+      WHERE c.server_id = NEW.id
+        AND c.lifecycle_phase IN ('provisioning', 'active')
+        AND c.gpu_state IS NOT NULL
+        AND (c.gpu_state -> 'nvidiaRuntime' = 'true'::jsonb
+             OR jsonb_array_length(c.gpu_state -> 'pciAddresses') > 0)
     ) THEN
       RAISE EXCEPTION 'server % still has GPU claims', NEW.id
         USING ERRCODE = 'P0001',

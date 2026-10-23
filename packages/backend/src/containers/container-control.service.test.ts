@@ -134,6 +134,7 @@ function makeHarness() {
     {} as never,
     {
       isEnabled: vi.fn().mockResolvedValue(false),
+      lockEnabled: vi.fn().mockResolvedValue(false),
       forContainer: vi.fn(),
       health: vi.fn(),
       releaseContainerClaims: vi.fn().mockResolvedValue(undefined),
@@ -143,6 +144,7 @@ function makeHarness() {
   return {
     service,
     transaction,
+    transactions,
     row,
     repository,
     access,
@@ -232,6 +234,24 @@ describe('ContainerControlService intent boundary', () => {
     expect(harness.intents.createPending).not.toHaveBeenCalled();
   });
 
+  it('lets an owner in the grace period stop and delete, but not start or restart', async () => {
+    for (const action of ['stop', 'delete'] as const) {
+      const harness = makeHarness();
+      resolveServerAccessMock.mockResolvedValueOnce(null);
+      await expect(harness.service.action(owner, containerId, action)).resolves.toMatchObject({
+        status: 'pending',
+      });
+      expect(harness.intents.createPending).toHaveBeenCalledOnce();
+    }
+    for (const action of ['start', 'restart'] as const) {
+      const harness = makeHarness();
+      resolveServerAccessMock.mockResolvedValueOnce(null);
+      await expect(harness.service.action(owner, containerId, action))
+        .rejects.toThrow('Server access was revoked');
+      expect(harness.intents.createPending).not.toHaveBeenCalled();
+    }
+  });
+
   it('stores the observed started_at baseline for restart without calling Incus', async () => {
     const harness = makeHarness();
     const result = await harness.service.action(owner, containerId, 'restart');
@@ -298,6 +318,17 @@ describe('ContainerControlService intent boundary', () => {
       Role.Operator,
     );
     expect(resolveServerAccessMock).not.toHaveBeenCalled();
+    // Read committed: the role re-check reads past the IAM lock wait, not a
+    // snapshot from before it. Only the owner's start admission needs serializable.
+    expect(harness.transactions.run).toHaveBeenLastCalledWith(
+      expect.any(Function),
+      expect.objectContaining({ isolationLevel: 'read committed' }),
+    );
+    await harness.service.action(owner, containerId, 'stop');
+    expect(harness.transactions.run).toHaveBeenLastCalledWith(
+      expect.any(Function),
+      expect.objectContaining({ isolationLevel: 'serializable' }),
+    );
   });
 
   it('blocks root changes while a quota application is pending', async () => {
@@ -436,6 +467,72 @@ describe('ContainerControlService intent boundary', () => {
     expect(harness.repository.updateDesired).not.toHaveBeenCalled();
   });
 
+  function quotaOnlinePool(harness: ReturnType<typeof makeHarness>) {
+    const selectFrom = vi.fn((table: string) => {
+      const query = {
+        select: vi.fn(),
+        selectAll: vi.fn(),
+        where: vi.fn(),
+        forUpdate: vi.fn(),
+        executeTakeFirst: vi.fn(),
+      };
+      query.select.mockReturnValue(query);
+      query.selectAll.mockReturnValue(query);
+      query.where.mockReturnValue(query);
+      query.forUpdate.mockReturnValue(query);
+      query.executeTakeFirst.mockResolvedValue(
+        table === 'infra.images'
+          ? { min_root_size_bytes: 1 }
+          : table === 'infra.storage_pools'
+            ? { resize_family: 'quota_online', quota_effective: true }
+            : {},
+      );
+      return query;
+    });
+    Object.assign(harness.transaction, { selectFrom });
+  }
+
+  it('keeps the old root size reserved while an accepted shrink is unapplied', async () => {
+    const harness = makeHarness();
+    Object.assign(harness.row, { root_size_bytes: '2147483648', root_used_bytes: '100000000' });
+    quotaOnlinePool(harness);
+
+    await harness.service.resizeRoot(owner, containerId, { sizeBytes: 1_073_741_824 });
+
+    expect(harness.repository.updateDesired).toHaveBeenCalledWith(
+      containerId,
+      1,
+      {
+        root_size_bytes: 1_073_741_824,
+        root_size_pending_bytes: null,
+        root_shrink_reserved_bytes: 2_147_483_648,
+      },
+      harness.transaction,
+    );
+  });
+
+  it('grows back within an unapplied shrink reservation without a capacity check', async () => {
+    const harness = makeHarness();
+    Object.assign(harness.row, {
+      root_size_bytes: '1073741824',
+      root_shrink_reserved_bytes: '2147483648',
+    });
+    quotaOnlinePool(harness);
+
+    // No capacity query is mocked: admitting any growth here would throw.
+    await harness.service.resizeRoot(owner, containerId, { sizeBytes: 1_610_612_736 });
+
+    expect(harness.repository.updateDesired).toHaveBeenCalledWith(
+      containerId,
+      1,
+      expect.objectContaining({
+        root_size_bytes: 1_610_612_736,
+        root_shrink_reserved_bytes: 2_147_483_648,
+      }),
+      harness.transaction,
+    );
+  });
+
   it('authorizes exec through the current server grant and never audits the command', async () => {
     const harness = makeHarness();
     const secret = 'not-for-audit';
@@ -537,10 +634,10 @@ describe('ContainerControlService actor authorization', () => {
     expect(list).toHaveBeenLastCalledWith({ ownerId: undefined, serverId: 'server-9' });
   });
 
-  it('requires a browser JWT for console admission', async () => {
+  it('requires a signed-in user for console admission', async () => {
     const harness = makeHarness();
     await expect(harness.service.createExecSession(
-      { ...owner, userId: actorId, authKind: 'api-token' as const },
+      SYSTEM_ACTOR,
       containerId,
       { command: ['/bin/sh'], tty: true, cols: 80, rows: 24 },
     )).rejects.toBeInstanceOf(ForbiddenException);

@@ -13,16 +13,19 @@ x-service-defaults: &service-defaults
 services:
   postgres:
     <<: *service-defaults
-    image: postgres:18.4-bookworm@sha256:1961f96e6029a02c3812d7cb329a3b03a3ac2bb067058dec17b0f5596aca9296
+    image: &postgres-image postgres:18.4-bookworm@sha256:1961f96e6029a02c3812d7cb329a3b03a3ac2bb067058dec17b0f5596aca9296
     environment:
-      POSTGRES_DB: ${POSTGRES_DB:-nyabase}
-      POSTGRES_USER: ${POSTGRES_USER:-nyabase}
+      # The cluster superuser is for operators only (backups, restores,
+      # upgrades). The Backend connects as `nyabase`, a non-superuser that owns
+      # only the `nyabase` database; the postgres-app-role service below
+      # creates both.
+      POSTGRES_USER: postgres
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in deploy/.env}
       POSTGRES_INITDB_ARGS: --data-checksums
     volumes:
       # PostgreSQL 18 stores its version-specific PGDATA below this mount.
       - postgres-data:/var/lib/postgresql
-    cpus: ${POSTGRES_CPUS:-4.0}
+    cpus: ${POSTGRES_CPUS:-2.0}
     mem_limit: ${POSTGRES_MEMORY_LIMIT:-4g}
     pids_limit: ${POSTGRES_PIDS_LIMIT:-512}
     shm_size: ${POSTGRES_SHM_SIZE:-256m}
@@ -31,26 +34,70 @@ services:
     healthcheck:
       test:
         - CMD-SHELL
-        - pg_isready -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}" -h 127.0.0.1
+        - pg_isready -U postgres -d postgres -h 127.0.0.1
       interval: 5s
       timeout: 5s
       retries: 12
       start_period: 20s
     stop_grace_period: 1m
 
+  # Creates the Backend's role and database when they are missing and checks
+  # them otherwise, on every `up` that starts the Backend (which waits for it
+  # to succeed), not only on the first start of an empty volume. It runs in
+  # the postgres container's network namespace and reaches the server over
+  # its trusted loopback, so no superuser password is involved. Root with only
+  # CAP_DAC_READ_SEARCH reads the mounted script whatever its host mode.
+  postgres-app-role:
+    image: *postgres-image
+    restart: "no"
+    network_mode: service:postgres
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      POSTGRES_USER: postgres
+      NYABASE_DB_PASSWORD: ${NYABASE_DB_PASSWORD:?set NYABASE_DB_PASSWORD in deploy/.env}
+    entrypoint:
+      - bash
+      - /opt/nyabase/postgres-app-role.sh
+    user: "0:0"
+    volumes:
+      - ./postgres-app-role.sh:/opt/nyabase/postgres-app-role.sh:ro
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - DAC_READ_SEARCH
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
   victoriametrics:
     <<: *service-defaults
     image: victoriametrics/victoria-metrics:v1.148.0@sha256:407013e902f9a0ba1d4b2d4c077c47bbaf917c893c52ff39b19efe83a654afda
-    ports:
-      # Keep the existing loopback-only operational endpoint.
-      - "127.0.0.1:8428:8428"
+    # No host port: its HTTP API, admin endpoints (delete series, snapshots)
+    # included, is unauthenticated, so only the Backend reaches it over the
+    # internal telemetry network (see OPERATIONS.md for operator access).
     volumes:
       - vm-data:/victoria-metrics-data
     command:
       - -storageDataPath=/victoria-metrics-data
       - -retentionPeriod=${VM_RETENTION_PERIOD:-30d}
       - -storage.minFreeDiskSpaceBytes=${VM_MIN_FREE_DISK_SPACE_BYTES:-5GiB}
-    cpus: ${VICTORIAMETRICS_CPUS:-4.0}
+    # The image runs as root and vm-data belongs to root; without capabilities
+    # that root can write only what it owns (the data volume).
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,noexec,mode=1777,size=64m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cpus: ${VICTORIAMETRICS_CPUS:-2.0}
     mem_limit: ${VICTORIAMETRICS_MEMORY_LIMIT:-4g}
     pids_limit: ${VICTORIAMETRICS_PIDS_LIMIT:-512}
     networks:
@@ -70,15 +117,27 @@ services:
 
   backend:
     <<: *service-defaults
+    # Every release is built under its own tag and kept, so rolling back is
+    # `docker compose up -d backend` with the previous NYABASE_VERSION, not a
+    # rebuild (see OPERATIONS.md, Upgrades).
+    image: nyabase-backend:${NYABASE_VERSION:?set NYABASE_VERSION in deploy/.env}
     build:
       context: ..
       dockerfile: deploy/Dockerfile.backend
+      args:
+        NYABASE_VERSION: ${NYABASE_VERSION}
     ports:
       # Loopback only: a TLS-terminating reverse proxy on this host is the
       # public entrypoint for the panel, /api and /ws/* (see OPERATIONS.md).
       - "127.0.0.1:3001:3001"
     environment:
       NYABASE_CONFIG_FILE: /etc/nyabase/config.yaml
+      # Inside the container; the host publish below stays loopback-only.
+      LISTEN_ADDRESS: 0.0.0.0
+      # Docker forwards the loopback publish from the edge bridge's own
+      # address (the first one of EDGE_SUBNET), so that is the reverse proxy's
+      # address as the Backend sees it.
+      TRUSTED_PROXIES: ${TRUSTED_PROXIES:-172.30.250.1}
       DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL in deploy/.env}
       DB_POOL_MAX: ${DB_POOL_MAX:-20}
       PG_APPLICATION_NAME: ${PG_APPLICATION_NAME:-nyabase-backend}
@@ -95,9 +154,10 @@ services:
       INCUS_PREFLIGHT_IMAGE_ALIAS: ${INCUS_PREFLIGHT_IMAGE_ALIAS:-}
       INCUS_PREFLIGHT_IMAGE_FINGERPRINT: ${INCUS_PREFLIGHT_IMAGE_FINGERPRINT:-}
       INCUS_PREFLIGHT_EGRESS_URL: ${INCUS_PREFLIGHT_EGRESS_URL:-}
-      INCUS_PREFLIGHT_SOURCE_SERVER: ${INCUS_PREFLIGHT_SOURCE_SERVER:-https://nyabase-images.nyabase-lxc-images.workers.dev}
-      INCUS_REQUEST_TIMEOUT_MS: ${INCUS_REQUEST_TIMEOUT_MS:-10000}
-      INCUS_OPERATION_WAIT_TIMEOUT_MS: ${INCUS_OPERATION_WAIT_TIMEOUT_MS:-120000}
+      # Empty leaves these online-editable in the system settings page.
+      INCUS_PREFLIGHT_SOURCE_SERVER: ${INCUS_PREFLIGHT_SOURCE_SERVER:-}
+      INCUS_REQUEST_TIMEOUT_MS: ${INCUS_REQUEST_TIMEOUT_MS:-}
+      INCUS_OPERATION_WAIT_TIMEOUT_MS: ${INCUS_OPERATION_WAIT_TIMEOUT_MS:-}
       VICTORIA_METRICS_URL: http://victoriametrics:8428
     volumes:
       # Copy config.example.yaml to config.yaml and set production secrets first.
@@ -110,7 +170,7 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
-    cpus: ${BACKEND_CPUS:-4.0}
+    cpus: ${BACKEND_CPUS:-2.0}
     mem_limit: ${BACKEND_MEMORY_LIMIT:-2g}
     pids_limit: ${BACKEND_PIDS_LIMIT:-512}
     networks:
@@ -120,6 +180,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      postgres-app-role:
+        condition: service_completed_successfully
     healthcheck:
       test:
         - CMD
@@ -139,6 +201,11 @@ services:
 
 networks:
   edge:
+    ipam:
+      config:
+        # Pinned so TRUSTED_PROXIES survives network recreation; change
+        # EDGE_SUBNET and TRUSTED_PROXIES together if it collides.
+        - subnet: ${EDGE_SUBNET:-172.30.250.0/24}
   control-plane:
     internal: true
   telemetry:

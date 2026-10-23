@@ -73,7 +73,7 @@ export function CanonicalGrantPanel({ subject, kind }: { subject: UserDto | Grou
       <ConfirmDialog
         open={Boolean(deleteTarget)}
         title="删除授权？"
-        description={`将删除「${deleteTarget?.label}」。若删除后${kind === 'groups' ? '组内成员' : '该用户'}在该资源上不再被任何授权覆盖，将立即进入 ${GRANT_EXPIRY_GRACE_DAYS} 天宽限期（正在运行的容器会被停止），期满后其在该资源上的容器与数据卷将被清除。`}
+        description={`将删除「${deleteTarget?.label}」。若删除后${kind === 'groups' ? '组内成员' : '该用户'}在该资源上不再被任何授权覆盖，将立即进入 ${GRANT_EXPIRY_GRACE_DAYS} 天宽限期，${lapseConsequence(deleteTarget?.resource)}`}
         confirmLabel="确认删除"
         pendingLabel="删除中..."
         pending={remove.isPending}
@@ -84,4 +84,12 @@ export function CanonicalGrantPanel({ subject, kind }: { subject: UserDto | Grou
       />
     </div>
   );
+}
+
+/** What a lapse does on each kind of resource: servers stop and purge, pools and backends only lose volumes. */
+function lapseConsequence(resource: DeleteTarget['resource'] | undefined): string {
+  if (resource === 'server-grants') {
+    return '正在运行的容器会被停止，期满后其在该服务器上的容器与数据卷将被清除。';
+  }
+  return '其在该资源上的数据卷会立即从容器卸载（容器保留并继续运行），期满后这些数据卷将被删除。';
 }

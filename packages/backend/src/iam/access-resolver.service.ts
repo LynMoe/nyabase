@@ -8,6 +8,7 @@ import {
   type GroupSummaryDto,
 } from '@nyabase/common';
 import { numberValue } from '../platform/domain-utils.js';
+import { committedVolumeBytesSql } from '../platform/persistence-pg/committed-bytes.js';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
@@ -194,14 +195,17 @@ export class AccessResolverService {
     ];
   }
 
-  /** Current shared-backend coverage with booked usage; grace backends are omitted. */
+  /**
+   * Current shared-backend coverage with booked usage, counted as admission
+   * counts it (`committedVolumeBytesSql`); grace backends are omitted.
+   */
   async getEffectiveSharedAccess(userId: string): Promise<EffectiveSharedBackendAccessDto[]> {
     const live = await listSharedBackendAccess(this.database, userId);
     if (live.length === 0) return [];
     const usedRows = await this.database.selectFrom('control.volumes')
       .select([
         'shared_backend_id',
-        sql<string>`coalesce(sum(size_bytes), 0)`.as('used'),
+        sql<string>`coalesce(sum(${committedVolumeBytesSql()}), 0)`.as('used'),
       ])
       .where('owner_id', '=', userId)
       .where('shared_backend_id', 'in', live.map((access) => access.sharedBackendId))

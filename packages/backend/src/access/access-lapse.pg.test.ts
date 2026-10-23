@@ -1,9 +1,14 @@
 import { randomUUID } from 'node:crypto';
-import type { Kysely } from 'kysely';
+import { sql, type Kysely } from 'kysely';
 import { AuditAction, GRANT_EXPIRY_GRACE_DAYS, UserStatus } from '@nyabase/common';
 import { describe, expect, it, vi } from 'vitest';
 import { ContainerControlRepository } from '../containers/container-control.repository.js';
+import { ContainerReconcileStore } from '../containers/container-reconcile.store.js';
+import { makeContainerControlService } from '../containers/container-services.test-helper.js';
+import { ContainerSshConvergenceService } from '../containers/container-ssh.js';
+import type { Actor } from '../iam/actor.js';
 import { AccessChangeNotifier } from '../iam/access-resolver.service.js';
+import { lockIamPolicy } from '../iam/administration.js';
 import {
   addMember,
   days,
@@ -24,44 +29,82 @@ import {
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 import { withPostgresTestDatabase } from '../platform/persistence-pg/postgres-test-harness.js';
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
-import { IntentRepository } from '../reconcile/intent.repository.js';
+import { IncusError } from '../incus/index.js';
+import { IntentRepository, type IntentRecord } from '../reconcile/intent.repository.js';
 import { ReconcileClaimRepository } from '../reconcile/reconcile-claim.repository.js';
+import { ReconcileWorkerService } from '../reconcile/reconcile-worker.service.js';
 import { noopWake } from '../reconcile/reconcile-wake.test-helper.js';
+import { DETACH_REDRIVE_BACKOFF_MS, DETACH_REDRIVE_MAX_BACKOFF_MS } from '../volumes/detach-redrive.js';
+import { VolumeAttachmentsService } from '../volumes/volume-attachments.service.js';
 import { VolumesRepository } from '../volumes/volumes.repository.js';
 import { AccessLapseProcessor } from './access-lapse.processor.js';
-import { AccessLapseRepository } from './access-lapse.repository.js';
+import { AccessLapseRepository, lapseWork, type LapseCandidate } from './access-lapse.repository.js';
 import { UserServerResourcePurgeService } from './user-server-resource-purge.service.js';
 
 const describePg = process.env.NYABASE_TEST_DATABASE_URL ? describe : describe.skip;
 const DAY_MS = 24 * 60 * 60 * 1000;
 
-async function fixture(database: Kysely<NyabaseDatabase>) {
+async function fixture(database: Kysely<NyabaseDatabase>, onDelete?: () => Promise<void>) {
   const transactions = new PgTransactionManager(database);
   const claims = new ReconcileClaimRepository(database);
   const changes = new AccessChangeNotifier();
-  // Real repositories, real purge service; only the container power/delete
-  // endpoint is replaced by a recorder (it would talk to Incus intents).
+  // Real repositories, real purge service, the real access-lapse stop (it
+  // only writes rows: desired power, revision, intent); the deletes of the
+  // purge are replaced by a recorder. `actions` records both.
   const actions: Array<{ id: string; action: string; actorIsSystem: boolean }> = [];
+  const audit = { append: vi.fn(async () => undefined) };
+  const intents = new IntentRepository(database, noopWake());
+  const control = makeContainerControlService(
+    database,
+    transactions,
+    new ContainerControlRepository(database),
+    {} as never,
+    intents,
+    {} as never,
+    audit as never,
+    {} as never,
+    {} as never,
+    {} as never,
+    {} as never,
+    {} as never,
+  );
   const containers = {
-    action: vi.fn(async (actor: { authKind: string }, id: string, action: string) => {
+    enforceStop: vi.fn(async (actor: Actor, id: string) => {
+      const accepted = await control.enforceStop(actor, id);
+      if (accepted) actions.push({ id, action: 'stop', actorIsSystem: actor.authKind === 'system' });
+      return accepted;
+    }),
+    // The purge queues its deletes in the transaction holding the IAM lock.
+    actionInTransaction: vi.fn(async (
+      _transaction: unknown,
+      actor: { authKind: string },
+      id: string,
+      action: string,
+    ) => {
+      await onDelete?.();
       actions.push({ id, action, actorIsSystem: actor.authKind === 'system' });
-      // The real endpoint records the desired power state.
-      if (action === 'stop') {
-        await database.updateTable('control.containers').set({ power_intent: 'stopped' })
-          .where('id', '=', id).execute();
-      }
       return { intentId: randomUUID() };
     }),
   };
-  const audit = { append: vi.fn(async () => undefined) };
   const proxySnapshots = { notify: vi.fn(async () => undefined) };
+  const volumes = new VolumesRepository(database);
+  // The real force-detach: it only writes rows (attachment, revision, intent).
+  const attachments = new VolumeAttachmentsService(
+    volumes,
+    {} as never,
+    transactions,
+    intents,
+    database,
+    audit as never,
+    {} as never,
+  );
   const purge = new UserServerResourcePurgeService(
     transactions,
     new ContainerControlRepository(database),
     containers as never,
-    new VolumesRepository(database),
-    new IntentRepository(database, noopWake()),
-    claims,
+    volumes,
+    intents,
+    attachments,
     audit as never,
   );
   const processor = new AccessLapseProcessor(
@@ -474,7 +517,7 @@ describePg('access lapse processor', () => {
     });
   });
 
-  it('scopes a storage-pool lapse to containers using that pool and to that pool\'s volumes', async () => {
+  it('detaches a lapsed pool\'s volumes at once, keeps the containers, and destroys only the volumes after the grace', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const { processor, actions } = await fixture(database);
       const { userId, serverId, poolId, imageId } = await world(database);
@@ -490,32 +533,412 @@ describePg('access lapse processor', () => {
       });
       const lapsedVolume = await seedVolume(database, { ownerId: userId, poolId: lapsedPool, serverId });
       const keptVolume = await seedVolume(database, { ownerId: userId, poolId, serverId });
-      await seedAttachment(database, usesLapsedPool, lapsedVolume);
+      const lapsedAttachment = await seedAttachment(database, usesLapsedPool, lapsedVolume);
+      const keptAttachment = await seedAttachment(database, unrelated, keptVolume);
 
       await processor.process();
 
       const rows = await ledger(database, userId);
       expect(rows).toMatchObject([{ resource_kind: 'storage_pool', resource_id: lapsedPool }]);
-      expect(actions).toEqual([{ id: usesLapsedPool, action: 'stop', actorIsSystem: true }]);
-      expect(actions.some((entry) => entry.id === unrelated)).toBe(false);
-      expect(keptVolume).toBeDefined();
+      expect(rows[0]!.stopped_at).not.toBeNull();
+      // No container is stopped or deleted; the lapsed volume is unplugged.
+      expect(actions).toEqual([]);
+      expect(await bindStates(database)).toEqual(new Map([
+        [lapsedAttachment, 'detaching'],
+        [keptAttachment, 'attached'],
+      ]));
+      expect(await pendingDetaches(database, usesLapsedPool)).toEqual([lapsedAttachment]);
+      expect(await powerOf(database, usesLapsedPool)).toBe('running');
 
-      // After the grace: the pool's volume (and the containers using it) go, the rest stays.
+      // The reconciler unplugged it; an administrator attaches it again during the grace.
+      await database.deleteFrom('control.volume_attachments').where('id', '=', lapsedAttachment).execute();
+      const reattached = await seedAttachment(database, usesLapsedPool, lapsedVolume);
+      await processor.process();
+      expect((await bindStates(database)).get(reattached)).toBe('detaching');
+
+      // After the grace: the pool's volume is destroyed, the containers stay.
+      await database.deleteFrom('control.volume_attachments').where('id', '=', reattached).execute();
       await database.updateTable('control.access_lapses')
         .set({ lapsed_at: new Date(Date.now() - (GRANT_EXPIRY_GRACE_DAYS + 1) * DAY_MS) })
         .execute();
-      actions.length = 0;
       await processor.process();
-      expect(actions).toEqual([{ id: usesLapsedPool, action: 'delete', actorIsSystem: true }]);
+      expect(actions).toEqual([]);
       const remaining = await database.selectFrom('control.volumes')
         .select(['id', 'lifecycle_phase']).execute();
       expect(remaining.find((row) => row.id === keptVolume)?.lifecycle_phase).toBe('active');
-      expect(remaining.find((row) => row.id === lapsedVolume)?.lifecycle_phase)
+      expect(remaining.find((row) => row.id === lapsedVolume)?.lifecycle_phase ?? 'gone')
         .not.toBe('active');
+      expect(await database.selectFrom('control.containers').select('lifecycle_phase')
+        .where('id', 'in', [usesLapsedPool, unrelated]).execute())
+        .toEqual([{ lifecycle_phase: 'active' }, { lifecycle_phase: 'active' }]);
     });
   });
 
-  it('scopes a shared-backend lapse to that backend\'s volumes and their containers', async () => {
+  it('detaches a lapsed pool volume again when its detach intent ended without unplugging it', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const { processor } = await fixture(database);
+      const { userId, serverId, poolId, imageId } = await world(database);
+      const lapsedPool = await seedPool(database, serverId);
+      await grantServer(database, { user: userId }, serverId);
+      await grantPool(database, { user: userId }, poolId);
+      await grantPool(database, { user: userId }, lapsedPool, days(-1));
+      const container = await seedContainer(database, {
+        ownerId: userId, serverId, poolId, imageId, running: true,
+      });
+      const volume = await seedVolume(database, { ownerId: userId, poolId: lapsedPool, serverId });
+      const attachmentId = await seedAttachment(database, container, volume);
+      await processor.process();
+      expect(await pendingDetaches(database, container)).toEqual([attachmentId]);
+
+      // While the detach intent is pending, later passes leave it alone.
+      await processor.process();
+      expect(await containerIntents(database, container)).toHaveLength(1);
+
+      // The intent fails (the device may still be in the instance): the row
+      // stays detaching, which counts as exposed once the re-drive backoff
+      // has passed, and that pass detaches again.
+      await failPendingIntents(database, container);
+      await processor.process();
+      expect(await containerIntents(database, container)).toHaveLength(1);
+      await ageContainerIntents(database, container, DETACH_REDRIVE_BACKOFF_MS - 60_000);
+      await processor.process();
+      expect(await containerIntents(database, container)).toHaveLength(1);
+      await ageContainerIntents(database, container, 2 * 60_000);
+      await processor.process();
+      expect(await pendingDetaches(database, container)).toEqual([attachmentId]);
+      expect(await containerIntents(database, container)).toHaveLength(2);
+      expect((await bindStates(database)).get(attachmentId)).toBe('detaching');
+      // The re-drive leaves the failure visible to operators.
+      expect(await attentionOf(database, container)).toBe(true);
+    });
+  });
+
+  it('backs off re-driving a detach whose container keeps failing its intents', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const { processor, audit } = await fixture(database);
+      const { userId, serverId, poolId, imageId } = await world(database);
+      const lapsedPool = await seedPool(database, serverId);
+      await grantServer(database, { user: userId }, serverId);
+      await grantPool(database, { user: userId }, poolId);
+      await grantPool(database, { user: userId }, lapsedPool, days(-1));
+      const container = await seedContainer(database, {
+        ownerId: userId, serverId, poolId, imageId, running: true,
+      });
+      const volume = await seedVolume(database, { ownerId: userId, poolId: lapsedPool, serverId });
+      const attachmentId = await seedAttachment(database, container, volume);
+
+      // One virtual day of passes every 10 minutes; every intent of the
+      // container fails at once (e.g. its managed network device is gone).
+      const STEP_MS = 10 * 60_000;
+      for (let elapsed = 0; elapsed < DAY_MS; elapsed += STEP_MS) {
+        await processor.process();
+        // A re-drive never clears the attention the failed intent left.
+        if (elapsed > 0) expect(await attentionOf(database, container)).toBe(true);
+        await failPendingIntents(database, container);
+        await ageContainerIntents(database, container, STEP_MS);
+      }
+
+      // Waits of 15, 30, 60, 120 and then 240 minutes after each failure:
+      // re-drives at 20, 50, 110, 230, 470, 710, 950, 1190 and 1430 minutes
+      // (on 10-minute passes), instead of one per pass (144).
+      const intents = await containerIntents(database, container);
+      expect(intents).toHaveLength(10);
+      const detachAudits = audit.append.mock.calls
+        .filter((call) => (call as unknown[])[2] === AuditAction.DetachVolume);
+      expect(detachAudits).toHaveLength(10);
+      expect((await bindStates(database)).get(attachmentId)).toBe('detaching');
+      expect(await attentionOf(database, container)).toBe(true);
+    });
+  });
+
+  it('unplugs a lapsed volume from a parked container: the re-drive runs despite needs_attention', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const { processor } = await fixture(database);
+      const { userId, serverId, poolId, imageId } = await world(database);
+      const lapsedPool = await seedPool(database, serverId);
+      await grantServer(database, { user: userId }, serverId);
+      await grantPool(database, { user: userId }, poolId);
+      await grantPool(database, { user: userId }, lapsedPool, days(-1));
+      const container = await seedContainer(database, {
+        ownerId: userId, serverId, poolId, imageId, running: true,
+      });
+      const volume = await seedVolume(database, { ownerId: userId, poolId: lapsedPool, serverId });
+      const attachmentId = await seedAttachment(database, container, volume);
+      const worker = reconcileWorker(database);
+      try {
+        await processor.process();
+        expect(await pendingDetaches(database, container)).toEqual([attachmentId]);
+
+        // The instance stays busy: five strikes park the container.
+        await worker.strikeBusy(container);
+        expect(await attentionOf(database, container)).toBe(true);
+        expect(await containerIntents(database, container))
+          .toEqual([expect.objectContaining({ status: 'failed' })]);
+
+        // The re-drive keeps the attention and is still processed; it fails
+        // the same way, which parks the container again.
+        await ageContainerIntents(database, container, DETACH_REDRIVE_BACKOFF_MS + 60_000);
+        await processor.process();
+        expect(await pendingDetaches(database, container)).toEqual([attachmentId]);
+        expect(await attentionOf(database, container)).toBe(true);
+        await worker.strikeBusy(container);
+        expect(worker.reconcile).toHaveBeenCalledTimes(10);
+        expect(await attentionOf(database, container)).toBe(true);
+        expect((await bindStates(database)).get(attachmentId)).toBe('detaching');
+
+        // The next re-drive (after the doubled backoff) unplugs the device:
+        // success clears the attention.
+        await ageContainerIntents(database, container, 2 * DETACH_REDRIVE_BACKOFF_MS + 60_000);
+        await processor.process();
+        expect(await pendingDetaches(database, container)).toEqual([attachmentId]);
+        await worker.succeed();
+        expect(await bindStates(database)).toEqual(new Map());
+        expect(await attentionOf(database, container)).toBe(false);
+        expect(await containerIntents(database, container)).toEqual([
+          expect.objectContaining({ status: 'failed' }),
+          expect.objectContaining({ status: 'failed' }),
+          expect.objectContaining({ status: 'succeeded' }),
+        ]);
+      } finally {
+        await worker.stop();
+      }
+    });
+  });
+
+  it('re-drives the detach on a parked container although an SSH key sync waits on it', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const { processor } = await fixture(database);
+      const { userId, serverId, poolId, imageId } = await world(database);
+      const lapsedPool = await seedPool(database, serverId);
+      await grantServer(database, { user: userId }, serverId);
+      await grantPool(database, { user: userId }, poolId);
+      await grantPool(database, { user: userId }, lapsedPool, days(-1));
+      const container = await seedContainer(database, {
+        ownerId: userId, serverId, poolId, imageId, running: true,
+      });
+      const volume = await seedVolume(database, { ownerId: userId, poolId: lapsedPool, serverId });
+      const attachmentId = await seedAttachment(database, container, volume);
+      const worker = reconcileWorker(database);
+      const ssh = new ContainerSshConvergenceService(database, new IntentRepository(database, noopWake()));
+      try {
+        await processor.process();
+        await worker.strikeBusy(container);
+        expect(await attentionOf(database, container)).toBe(true);
+
+        // The lapsed user adds an SSH key: the sync intent on the parked
+        // container waits for an operator (the worker skips it).
+        await ssh.reconcileUser(userId);
+        await worker.succeed();
+        expect(worker.reconcile).toHaveBeenCalledTimes(5);
+        expect(await pendingOperations(database, container)).toEqual(['sync_user_ssh_keys']);
+
+        // It does not hold off the re-drive, which runs despite the attention.
+        await ageContainerIntents(database, container, DETACH_REDRIVE_BACKOFF_MS + 60_000);
+        await processor.process();
+        expect(await pendingDetaches(database, container)).toEqual([attachmentId]);
+        await worker.succeed();
+        expect(await bindStates(database)).toEqual(new Map());
+        expect(await attentionOf(database, container)).toBe(false);
+        // The newer revision's success settles the sync as well.
+        expect(await pendingOperations(database, container)).toEqual([]);
+      } finally {
+        await worker.stop();
+      }
+    });
+  });
+
+  it('re-drives again when a newer revision superseded the re-drive on a parked container', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const { processor } = await fixture(database);
+      const { userId, serverId, poolId, imageId } = await world(database);
+      const lapsedPool = await seedPool(database, serverId);
+      await grantServer(database, { user: userId }, serverId);
+      await grantPool(database, { user: userId }, poolId);
+      await grantPool(database, { user: userId }, lapsedPool, days(-1));
+      const container = await seedContainer(database, {
+        ownerId: userId, serverId, poolId, imageId, running: true,
+      });
+      const volume = await seedVolume(database, { ownerId: userId, poolId: lapsedPool, serverId });
+      const attachmentId = await seedAttachment(database, container, volume);
+      const worker = reconcileWorker(database);
+      const ssh = new ContainerSshConvergenceService(database, new IntentRepository(database, noopWake()));
+      try {
+        await processor.process();
+        await worker.strikeBusy(container);
+        await ageContainerIntents(database, container, DETACH_REDRIVE_BACKOFF_MS + 60_000);
+        await processor.process();
+        expect(await pendingDetaches(database, container)).toEqual([attachmentId]);
+
+        // An SSH key sync bumps the revision right after: the re-drive runs
+        // as a stale no-op, the sync waits on the parked container.
+        await ssh.reconcileUser(userId);
+        await worker.succeed();
+        expect(worker.reconcile).toHaveBeenCalledTimes(6);
+        expect((await bindStates(database)).get(attachmentId)).toBe('detaching');
+        expect(await attentionOf(database, container)).toBe(true);
+        expect(await pendingOperations(database, container)).toEqual(['sync_user_ssh_keys']);
+
+        // The next re-drive follows the doubled backoff and unplugs the device.
+        await ageContainerIntents(database, container, DETACH_REDRIVE_BACKOFF_MS + 60_000);
+        await processor.process();
+        expect(await pendingDetaches(database, container)).toEqual([]);
+        await ageContainerIntents(database, container, DETACH_REDRIVE_BACKOFF_MS);
+        await processor.process();
+        expect(await pendingDetaches(database, container)).toEqual([attachmentId]);
+        await worker.succeed();
+        expect(await bindStates(database)).toEqual(new Map());
+        expect(await attentionOf(database, container)).toBe(false);
+        expect(await pendingOperations(database, container)).toEqual([]);
+      } finally {
+        await worker.stop();
+      }
+    });
+  });
+
+  it('keeps re-driving the detach of a purged volume once coverage is back, without the ledger row', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const { processor } = await fixture(database);
+      const { userId, serverId, poolId, imageId } = await world(database);
+      const lapsedPool = await seedPool(database, serverId);
+      await grantServer(database, { user: userId }, serverId);
+      await grantPool(database, { user: userId }, poolId);
+      await grantPool(database, { user: userId }, lapsedPool, days(-1));
+      const container = await seedContainer(database, {
+        ownerId: userId, serverId, poolId, imageId, running: true,
+      });
+      const volume = await seedVolume(database, { ownerId: userId, poolId: lapsedPool, serverId });
+      const attachmentId = await seedAttachment(database, container, volume);
+      await processor.process();
+      await failPendingIntents(database, container);
+      await database.updateTable('control.access_lapses')
+        .set({ lapsed_at: new Date(Date.now() - (GRANT_EXPIRY_GRACE_DAYS + 1) * DAY_MS) })
+        .execute();
+      await processor.process();
+      expect(await volumePhase(database, volume)).toBe('deleting');
+      expect((await bindStates(database)).get(attachmentId)).toBe('detaching');
+
+      // Coverage returns: the row is cleared, the purge is not undone, and
+      // the user attaches a new volume of the pool.
+      await database.updateTable('iam.storage_pool_grants').set({ expires_at: null })
+        .where('user_id', '=', userId).where('pool_id', '=', lapsedPool).execute();
+      await processor.process();
+      expect(await ledger(database, userId)).toEqual([]);
+      const fresh = await seedVolume(database, { ownerId: userId, poolId: lapsedPool, serverId });
+      const freshAttachment = await seedAttachment(database, container, fresh);
+      expect(await processor.process()).toBe(0);
+
+      // Once due, only the deleting volume's detach is re-driven.
+      await ageContainerIntents(database, container, DETACH_REDRIVE_BACKOFF_MS + 60_000);
+      await processor.process();
+      expect(await pendingDetaches(database, container)).toEqual([attachmentId]);
+      expect((await bindStates(database)).get(freshAttachment)).toBe('attached');
+      expect(await ledger(database, userId)).toEqual([]);
+
+      // The device is gone: nothing more is queued.
+      await database.deleteFrom('control.volume_attachments').where('id', '=', attachmentId).execute();
+      await database.updateTable('control.intents').set({ status: 'succeeded', settled_at: sql`clock_timestamp()` })
+        .where('resource_id', '=', container).where('status', '=', 'pending').execute();
+      await ageContainerIntents(database, container, DETACH_REDRIVE_MAX_BACKOFF_MS);
+      expect(await processor.process()).toBe(0);
+      expect((await bindStates(database)).get(freshAttachment)).toBe('attached');
+    });
+  });
+
+  it('keeps re-driving a lapsed pool volume\'s detach after the purge until the attachment is gone', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const { processor } = await fixture(database);
+      const { userId, serverId, poolId, imageId } = await world(database);
+      const lapsedPool = await seedPool(database, serverId);
+      await grantServer(database, { user: userId }, serverId);
+      await grantPool(database, { user: userId }, poolId);
+      await grantPool(database, { user: userId }, lapsedPool, days(-1));
+      const container = await seedContainer(database, {
+        ownerId: userId, serverId, poolId, imageId, running: true,
+      });
+      const volume = await seedVolume(database, { ownerId: userId, poolId: lapsedPool, serverId });
+      const attachmentId = await seedAttachment(database, container, volume);
+      await processor.process();
+      await failPendingIntents(database, container);
+
+      // The grace ends while the re-drive is backed off: the purge's own
+      // detach is skipped, the volume is marked deleting all the same.
+      await database.updateTable('control.access_lapses')
+        .set({ lapsed_at: new Date(Date.now() - (GRANT_EXPIRY_GRACE_DAYS + 1) * DAY_MS) })
+        .execute();
+      await processor.process();
+      const [purged] = await ledger(database, userId);
+      expect(purged!.purged_at).not.toBeNull();
+      expect(await volumePhase(database, volume)).toBe('deleting');
+      expect(await containerIntents(database, container)).toHaveLength(1);
+      await processor.process();
+      expect(await containerIntents(database, container)).toHaveLength(1);
+
+      // Once due, the purged pair still re-drives the detach.
+      await ageContainerIntents(database, container, DETACH_REDRIVE_BACKOFF_MS + 60_000);
+      await processor.process();
+      expect(await pendingDetaches(database, container)).toEqual([attachmentId]);
+      expect(await containerIntents(database, container)).toHaveLength(2);
+
+      // It fails again: the next one waits for the doubled backoff.
+      await failPendingIntents(database, container);
+      await ageContainerIntents(database, container, DETACH_REDRIVE_BACKOFF_MS + 60_000);
+      await processor.process();
+      expect(await containerIntents(database, container)).toHaveLength(2);
+      await ageContainerIntents(database, container, DETACH_REDRIVE_BACKOFF_MS);
+      await processor.process();
+      expect(await pendingDetaches(database, container)).toEqual([attachmentId]);
+
+      // The device is gone: nothing more is queued, the purge is not repeated.
+      await database.deleteFrom('control.volume_attachments').where('id', '=', attachmentId).execute();
+      await database.updateTable('control.intents').set({ status: 'succeeded', settled_at: sql`clock_timestamp()` })
+        .where('resource_id', '=', container).where('status', '=', 'pending').execute();
+      await ageContainerIntents(database, container, DETACH_REDRIVE_MAX_BACKOFF_MS);
+      expect(await processor.process()).toBe(0);
+      expect(await containerIntents(database, container)).toHaveLength(3);
+      expect((await ledger(database, userId))[0]!.purged_at).toEqual(purged!.purged_at);
+    });
+  });
+
+  it('does not detach when a pool grant commits between the scan and the detach', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const { processor } = await fixture(database);
+      const { userId, serverId, poolId, imageId } = await world(database);
+      const lapsedPool = await seedPool(database, serverId);
+      await grantServer(database, { user: userId }, serverId);
+      await grantPool(database, { user: userId }, poolId);
+      await grantPool(database, { user: userId }, lapsedPool, days(-1));
+      const container = await seedContainer(database, {
+        ownerId: userId, serverId, poolId, imageId, running: true,
+      });
+      const volume = await seedVolume(database, { ownerId: userId, poolId: lapsedPool, serverId });
+      // In grace, enforced once, and exposed again (re-attached by an administrator).
+      await database.insertInto('control.access_lapses').values({
+        user_id: userId,
+        resource_kind: 'storage_pool',
+        resource_id: lapsedPool,
+        lapsed_at: new Date(Date.now() - DAY_MS),
+        stopped_at: new Date(Date.now() - DAY_MS),
+      }).execute();
+      const attachmentId = await seedAttachment(database, container, volume);
+      // The scan still sees the pair uncovered; the grant lands right after it.
+      const lapses = (processor as unknown as { lapses: AccessLapseRepository }).lapses;
+      const inspect = lapses.inspect.bind(lapses);
+      vi.spyOn(lapses, 'inspect').mockImplementationOnce(async (key) => {
+        const scanned = await inspect(key);
+        await database.updateTable('iam.storage_pool_grants').set({ expires_at: null })
+          .where('user_id', '=', userId).where('pool_id', '=', lapsedPool).execute();
+        return scanned;
+      });
+
+      await processor.process();
+
+      expect((await bindStates(database)).get(attachmentId)).toBe('attached');
+      expect(await containerIntents(database, container)).toEqual([]);
+      expect(await ledger(database, userId)).toEqual([]);
+    });
+  });
+
+  it('detaches a lapsed shared backend\'s volumes and destroys them, never the containers', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const { processor, actions } = await fixture(database);
       const { userId, serverId, poolId, imageId } = await world(database);
@@ -538,24 +961,262 @@ describePg('access lapse processor', () => {
       const keptVolume = await seedVolume(database, {
         ownerId: userId, poolId: null, serverId: null, sharedBackendId: otherBackendId,
       });
-      await seedAttachment(database, mounted, lapsedVolume);
-      await seedAttachment(database, other, keptVolume);
+      const lapsedAttachment = await seedAttachment(database, mounted, lapsedVolume);
+      const keptAttachment = await seedAttachment(database, other, keptVolume);
 
       await processor.process();
       expect(await ledger(database, userId)).toMatchObject([
         { resource_kind: 'shared_backend', resource_id: backendId },
       ]);
-      expect(actions).toEqual([{ id: mounted, action: 'stop', actorIsSystem: true }]);
+      expect(actions).toEqual([]);
+      expect(await bindStates(database)).toEqual(new Map([
+        [lapsedAttachment, 'detaching'],
+        [keptAttachment, 'attached'],
+      ]));
 
       await database.updateTable('control.access_lapses')
         .set({ lapsed_at: new Date(Date.now() - (GRACE_DAYS + 1) * DAY_MS) })
         .execute();
-      actions.length = 0;
       await processor.process();
-      expect(actions).toEqual([{ id: mounted, action: 'delete', actorIsSystem: true }]);
+      expect(actions).toEqual([]);
       const volumes = await database.selectFrom('control.volumes')
         .select(['id', 'lifecycle_phase']).execute();
       expect(volumes.find((row) => row.id === keptVolume)?.lifecycle_phase).toBe('active');
+      expect(volumes.find((row) => row.id === lapsedVolume)?.lifecycle_phase).toBe('deleting');
+    });
+  });
+
+  it('stops a parked container again: the lapse stop runs despite needs_attention and is re-driven', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const { processor, actions } = await fixture(database);
+      const { userId, serverId, poolId, imageId } = await world(database);
+      await grantServer(database, { user: userId }, serverId, { expiresAt: days(-1) });
+      const container = await seedContainer(database, {
+        ownerId: userId, serverId, poolId, imageId, running: true,
+      });
+      await observeInstance(database, container, serverId, 'running');
+      const worker = reconcileWorker(database);
+      try {
+        await processor.process();
+        expect(await powerOf(database, container)).toBe('stopped');
+        expect(await pendingRequests(database, container)).toEqual([
+          expect.objectContaining({ operation: 'stop', reason: 'access_lapse', despiteAttention: true }),
+        ]);
+
+        // The instance stays busy: five strikes park the container. Its row
+        // says stopped, the instance still runs, the full scan skips it.
+        await worker.strikeBusy(container);
+        expect(await attentionOf(database, container)).toBe(true);
+        expect(await containerIntents(database, container))
+          .toEqual([expect.objectContaining({ status: 'failed' })]);
+
+        // Not before the backoff has passed.
+        await processor.process();
+        expect(await containerIntents(database, container)).toHaveLength(1);
+
+        // Then the stop is queued again, keeping the attention, and processed
+        // although the container is parked; success clears the attention.
+        await ageContainerIntents(database, container, DETACH_REDRIVE_BACKOFF_MS + 60_000);
+        await processor.process();
+        expect(await pendingRequests(database, container)).toEqual([
+          expect.objectContaining({ operation: 'stop', despiteAttention: true, redrive: true }),
+        ]);
+        expect(await attentionOf(database, container)).toBe(true);
+        await worker.succeed();
+        expect(await attentionOf(database, container)).toBe(false);
+
+        // Observed stopped: nothing is exposed any more.
+        await observeInstance(database, container, serverId, 'stopped');
+        await ageContainerIntents(database, container, DETACH_REDRIVE_MAX_BACKOFF_MS);
+        await processor.process();
+        expect(await containerIntents(database, container)).toEqual([
+          expect.objectContaining({ status: 'failed' }),
+          expect.objectContaining({ status: 'succeeded' }),
+        ]);
+        expect(actions).toEqual([
+          { id: container, action: 'stop', actorIsSystem: true },
+          { id: container, action: 'stop', actorIsSystem: true },
+        ]);
+      } finally {
+        await worker.stop();
+      }
+    });
+  });
+
+  it('backs off a lapse stop re-drive by the stops of the current lapse only', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const { processor } = await fixture(database);
+      const { userId, serverId, poolId, imageId } = await world(database);
+      await grantServer(database, { user: userId }, serverId, { expiresAt: days(-1) });
+      const container = await seedContainer(database, {
+        ownerId: userId, serverId, poolId, imageId, running: true,
+      });
+      await observeInstance(database, container, serverId, 'running');
+      // Earlier lapses stopped it six times; the owner started it again each
+      // time coverage came back.
+      const longAgo = new Date(Date.now() - 30 * DAY_MS);
+      await database.insertInto('control.intents').values(Array.from({ length: 6 }, () => ({
+        id: randomUUID(),
+        kind: 'container.power' as const,
+        resource_type: 'container' as const,
+        resource_id: container,
+        server_id: serverId,
+        requested_by: null,
+        request_json: JSON.stringify({ operation: 'stop', reason: 'access_lapse', despiteAttention: true }),
+        target_revision: 1,
+        baseline_json: null,
+        status: 'succeeded' as const,
+        failure_code: null,
+        failure_json: null,
+        attempt_count: 1,
+        next_attempt_at: null,
+        created_at: longAgo,
+        settled_at: longAgo,
+      }))).execute();
+      const worker = reconcileWorker(database);
+      try {
+        await processor.process();
+        await worker.strikeBusy(container);
+        expect(await attentionOf(database, container)).toBe(true);
+
+        // The first re-drive of this lapse follows the first backoff, not one
+        // doubled by the stops of earlier lapses (which would be at the cap).
+        await ageContainerIntents(database, container, DETACH_REDRIVE_BACKOFF_MS + 60_000);
+        await processor.process();
+        expect(await pendingRequests(database, container)).toEqual([
+          expect.objectContaining({ operation: 'stop', reason: 'access_lapse', redrive: true }),
+        ]);
+      } finally {
+        await worker.stop();
+      }
+    });
+  });
+
+  it('does not stop a container again that its owner stopped and that was observed stopped', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const { processor, actions } = await fixture(database);
+      const { userId, serverId, poolId, imageId } = await world(database);
+      await grantServer(database, { user: userId }, serverId, { expiresAt: days(-1) });
+      const container = await seedContainer(database, { ownerId: userId, serverId, poolId, imageId });
+      await observeInstance(database, container, serverId, 'stopped');
+      await processor.process();
+      await processor.process();
+      expect(actions).toEqual([]);
+      expect(await containerIntents(database, container)).toEqual([]);
+    });
+  });
+
+  it('stops a running container of a lapsed server that is still provisioning', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const { processor, actions } = await fixture(database);
+      const { userId, serverId, poolId, imageId } = await world(database);
+      await grantServer(database, { user: userId }, serverId, { expiresAt: days(-1) });
+      const container = await seedContainer(database, {
+        ownerId: userId, serverId, poolId, imageId, running: true,
+      });
+      await database.updateTable('control.containers').set({ lifecycle_phase: 'provisioning' })
+        .where('id', '=', container).execute();
+
+      await processor.process();
+
+      expect(actions).toEqual([{ id: container, action: 'stop', actorIsSystem: true }]);
+    });
+  });
+
+  it('does not purge when coverage returns between the scan and the purge', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const { processor, actions } = await fixture(database);
+      const { userId, serverId, poolId, imageId } = await world(database);
+      await grantServer(database, { user: userId }, serverId, { expiresAt: days(-1) });
+      await seedContainer(database, { ownerId: userId, serverId, poolId, imageId });
+      await processor.process();
+      await database.updateTable('control.access_lapses')
+        .set({ lapsed_at: new Date(Date.now() - (GRACE_DAYS + 1) * DAY_MS) })
+        .execute();
+      // The scan still sees the pair uncovered; the grant lands right after it.
+      const lapses = (processor as unknown as { lapses: AccessLapseRepository }).lapses;
+      const inspect = lapses.inspect.bind(lapses);
+      vi.spyOn(lapses, 'inspect').mockImplementationOnce(async (key) => {
+        const scanned = await inspect(key);
+        await renewServerGrant(database, userId, serverId);
+        return scanned;
+      });
+      actions.length = 0;
+
+      await processor.process();
+
+      expect(actions).toEqual([]);
+      expect((await ledger(database, userId))[0]?.purged_at ?? null).toBeNull();
+    });
+  });
+
+  it('does not purge when a grant commits while the purge waits for the IAM lock', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const { processor, actions, transactions } = await fixture(database);
+      const { userId, serverId, poolId, imageId } = await overduePurge(database);
+      const container = await seedContainer(database, { ownerId: userId, serverId, poolId, imageId });
+      const volume = await seedVolume(database, { ownerId: userId, poolId, serverId });
+      // An IAM write holds the lock with its grant not yet committed.
+      let commitGrant!: () => void;
+      let locked!: () => void;
+      const lockHeld = new Promise<void>((resolve) => { locked = resolve; });
+      const granting = transactions.run(async (transaction) => {
+        await lockIamPolicy(transaction);
+        await renewServerGrant(transaction, userId, serverId);
+        locked();
+        await new Promise<void>((resolve) => { commitGrant = resolve; });
+      });
+      await lockHeld;
+
+      const processing = processor.process();
+      await waitForIamLockWaiter(database);
+      commitGrant();
+      await granting;
+      await processing;
+
+      expect(actions).toEqual([]);
+      expect((await ledger(database, userId))[0]?.purged_at ?? null).toBeNull();
+      const phase = await database.selectFrom('control.containers').select('lifecycle_phase')
+        .where('id', '=', container).executeTakeFirstOrThrow();
+      expect(phase.lifecycle_phase).not.toBe('deleting');
+      expect(await database.selectFrom('control.volumes').select('id')
+        .where('id', '=', volume).executeTakeFirst()).toBeDefined();
+    });
+  });
+
+  it('holds the IAM lock until every delete of the purge is queued', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      let granting: Promise<void> | null = null;
+      let grantWaited = false;
+      const { processor, actions, transactions } = await fixture(database, async () => {
+        if (granting) return;
+        // A grant arriving while the first delete is queued must wait for the
+        // purge to commit; it cannot slip in between the check and the deletes.
+        granting = transactions.run(async (transaction) => {
+          await lockIamPolicy(transaction);
+          await renewServerGrant(transaction, userId, serverId);
+        });
+        await waitForIamLockWaiter(database);
+        grantWaited = true;
+      });
+      const { userId, serverId, poolId, imageId } = await overduePurge(database);
+      const containers = [
+        await seedContainer(database, { ownerId: userId, serverId, poolId, imageId }),
+        await seedContainer(database, { ownerId: userId, serverId, poolId, imageId }),
+      ];
+
+      await expect(processor.process()).resolves.toBe(1);
+      await granting;
+
+      expect(grantWaited).toBe(true);
+      expect(actions.map((entry) => entry.id).sort()).toEqual([...containers].sort());
+      const row = (await ledger(database, userId))[0]!;
+      expect(row.purged_at).not.toBeNull();
+      // The grant committed after the purge: the next pass only clears the row.
+      actions.length = 0;
+      await processor.process();
+      expect(actions).toEqual([]);
+      expect(await ledger(database, userId)).toEqual([]);
     });
   });
 
@@ -659,10 +1320,272 @@ describePg('access lapse processor', () => {
   });
 });
 
+describe('lapseWork after the purge', () => {
+  const now = new Date();
+  const purgedLapse = {
+    lapsedAt: new Date(now.getTime() - (GRANT_EXPIRY_GRACE_DAYS + 1) * DAY_MS),
+    stoppedAt: now,
+    purgedAt: now,
+  };
+  const candidate = (kind: LapseCandidate['kind'], exposed: boolean): LapseCandidate => ({
+    userId: randomUUID(),
+    kind,
+    resourceId: randomUUID(),
+    covered: false,
+    exposed,
+    destroyBlocked: false,
+    lapse: purgedLapse,
+    now,
+  });
+
+  it('detaches again on a purged pool or backend while a volume is exposed, and does nothing else', () => {
+    expect(lapseWork(candidate('storage_pool', true))).toBe('detach');
+    expect(lapseWork(candidate('shared_backend', true))).toBe('detach');
+    expect(lapseWork(candidate('storage_pool', false))).toBe('none');
+    expect(lapseWork(candidate('server', true))).toBe('none');
+    expect(lapseWork({ ...candidate('storage_pool', true), covered: true })).toBe('clear');
+  });
+
+  it('keeps detaching the volumes a purge destroys once coverage is back, without the ledger row', () => {
+    const covered = { ...candidate('storage_pool', true), covered: true, lapse: null };
+    expect(lapseWork({ ...covered, destroyBlocked: true })).toBe('detach');
+    expect(lapseWork({ ...covered, kind: 'shared_backend', destroyBlocked: true })).toBe('detach');
+    expect(lapseWork(covered)).toBe('none');
+    // The row is cleared first.
+    expect(lapseWork({ ...covered, lapse: purgedLapse, destroyBlocked: true })).toBe('clear');
+  });
+});
+
 const GRACE_DAYS = GRANT_EXPIRY_GRACE_DAYS;
+
+/**
+ * The real reconcile worker over the database, with the real container store
+ * for `needs_attention`; only the Incus-facing reconcile is scripted.
+ */
+function reconcileWorker(database: Kysely<NyabaseDatabase>) {
+  const intents = new IntentRepository(database, noopWake());
+  const store = new ContainerReconcileStore(database, intents);
+  let mode: 'busy' | 'succeed' = 'busy';
+  const reconcile = vi.fn(async ({ intent }: { intent: IntentRecord }) => {
+    // As the real reconciler: a superseded revision settles without touching Incus.
+    const { revision } = await database.selectFrom('control.containers').select('revision')
+      .where('id', '=', intent.resourceId).executeTakeFirstOrThrow();
+    if (intent.targetRevision < Number(revision)) {
+      return { outcome: 'succeeded' as const, observedRevision: intent.targetRevision, stale: true };
+    }
+    if (mode === 'busy') throw new IncusError('INSTANCE_BUSY', 'retry', { action: 'update' });
+    // The desired document leaves out every detaching device; the reconciler
+    // deletes those rows once the devices are gone.
+    await database.deleteFrom('control.volume_attachments')
+      .where('container_id', '=', intent.resourceId)
+      .where('bind_state', '=', 'detaching')
+      .execute();
+    return { outcome: 'succeeded' as const, observedRevision: intent.targetRevision };
+  });
+  const reconciler = {
+    resourceType: 'container',
+    supports: () => true,
+    reconcile,
+    needsAttention: (id: string) => store.needsAttention(id),
+    markSucceeded: (id: string, revision: number) => store.markSucceeded(id, revision),
+    markFailure: (id: string, failure: never, attention: boolean) => store.markFailure(id, failure, attention),
+  };
+  const worker = new ReconcileWorkerService(
+    intents,
+    new ReconcileClaimRepository(database),
+    {
+      all: () => [reconciler],
+      forIntent: () => reconciler,
+      forResource: () => reconciler,
+      serverHealth: () => ({
+        isCurrentServerIntent: async () => true,
+        markServer: async () => undefined,
+      }),
+    } as never,
+    { get: async () => ({}), listServerIds: async () => [] } as never,
+    { onWake: () => () => undefined, wake: () => undefined } as never,
+  );
+  return {
+    reconcile,
+    /** Five busy passes in a row (each retry made due at once) park the container. */
+    async strikeBusy(containerId: string): Promise<void> {
+      mode = 'busy';
+      for (let attempt = 0; attempt < 5; attempt += 1) {
+        await database.updateTable('control.intents').set({ next_attempt_at: sql`clock_timestamp() - interval '1 second'` })
+          .where('resource_id', '=', containerId).where('status', '=', 'pending').execute();
+        await worker.runOnce();
+      }
+    },
+    async succeed(): Promise<void> {
+      mode = 'succeed';
+      await worker.runOnce();
+    },
+    stop: () => worker.onModuleDestroy(),
+  };
+}
+
+async function volumePhase(database: Kysely<NyabaseDatabase>, volumeId: string): Promise<string> {
+  const row = await database.selectFrom('control.volumes').select('lifecycle_phase')
+    .where('id', '=', volumeId).executeTakeFirstOrThrow();
+  return row.lifecycle_phase;
+}
 
 async function groupOf(database: Kysely<NyabaseDatabase>, userId: string): Promise<string> {
   const group = await seedGroup(database);
   await addMember(database, group, userId);
   return group;
+}
+
+async function bindStates(database: Kysely<NyabaseDatabase>): Promise<Map<string, string>> {
+  const rows = await database.selectFrom('control.volume_attachments').select(['id', 'bind_state']).execute();
+  return new Map(rows.map((row) => [row.id, row.bind_state]));
+}
+
+async function pendingDetaches(database: Kysely<NyabaseDatabase>, containerId: string): Promise<unknown[]> {
+  const rows = await database.selectFrom('control.intents').select('request_json')
+    .where('resource_id', '=', containerId)
+    .where('status', '=', 'pending')
+    .execute();
+  return rows
+    .map((row) => row.request_json as { operation?: string; attachmentId?: string } | null)
+    .filter((request) => request?.operation === 'detach_volume')
+    .map((request) => request!.attachmentId);
+}
+
+async function pendingOperations(database: Kysely<NyabaseDatabase>, containerId: string): Promise<unknown[]> {
+  const rows = await database.selectFrom('control.intents').select('request_json')
+    .where('resource_id', '=', containerId)
+    .where('status', '=', 'pending')
+    .orderBy('created_at')
+    .execute();
+  return rows.map((row) => (row.request_json as { operation?: string } | null)?.operation);
+}
+
+async function pendingRequests(database: Kysely<NyabaseDatabase>, containerId: string): Promise<unknown[]> {
+  const rows = await database.selectFrom('control.intents').select('request_json')
+    .where('resource_id', '=', containerId)
+    .where('status', '=', 'pending')
+    .orderBy('created_at')
+    .execute();
+  return rows.map((row) => row.request_json);
+}
+
+/** What the reconciler last observed of the instance (its route row). */
+async function observeInstance(
+  database: Kysely<NyabaseDatabase>,
+  containerId: string,
+  serverId: string,
+  status: 'running' | 'stopped',
+): Promise<void> {
+  await database.insertInto('control.container_ssh_routes').values({
+    container_id: containerId,
+    server_id: serverId,
+    instance_name: `nyc-${containerId.replaceAll('-', '')}`,
+    routed_ip: '10.0.0.8',
+    instance_status: status,
+    instance_started_at: null,
+    ssh_status: status === 'running' ? 'running' : 'container_stopped',
+    last_error: null,
+    observed_at: new Date(),
+  }).onConflict((conflict) => conflict.column('container_id').doUpdateSet({ instance_status: status }))
+    .execute();
+}
+
+async function containerIntents(database: Kysely<NyabaseDatabase>, containerId: string): Promise<unknown[]> {
+  return database.selectFrom('control.intents').select(['id', 'status'])
+    .where('resource_id', '=', containerId)
+    .orderBy('created_at')
+    .execute();
+}
+
+/** The container's pending intents fail now, as the reconciler records it. */
+async function failPendingIntents(database: Kysely<NyabaseDatabase>, containerId: string): Promise<void> {
+  const failed = await database.updateTable('control.intents')
+    .set({ status: 'failed', failure_code: 'TEST', settled_at: sql`clock_timestamp()` })
+    .where('resource_id', '=', containerId)
+    .where('status', '=', 'pending')
+    .executeTakeFirst();
+  if (Number(failed.numUpdatedRows) === 0) return;
+  await database.updateTable('control.containers').set({ needs_attention: true })
+    .where('id', '=', containerId).execute();
+}
+
+/**
+ * Moves the container's intents into the past, as if `ms` had passed, and the
+ * lapse of its owner on its server with them (the stops of the current lapse
+ * are those queued since `lapsed_at`).
+ */
+async function ageContainerIntents(
+  database: Kysely<NyabaseDatabase>,
+  containerId: string,
+  ms: number,
+): Promise<void> {
+  const shift = sql`make_interval(secs => ${ms / 1000}::double precision)`;
+  await database.updateTable('control.intents')
+    .set({
+      created_at: sql`created_at - ${shift}`,
+      settled_at: sql`settled_at - ${shift}`,
+    })
+    .where('resource_id', '=', containerId)
+    .execute();
+  const { owner_id: ownerId, server_id: serverId } = await database.selectFrom('control.containers')
+    .select(['owner_id', 'server_id']).where('id', '=', containerId).executeTakeFirstOrThrow();
+  await database.updateTable('control.access_lapses')
+    .set({ lapsed_at: sql`lapsed_at - ${shift}`, stopped_at: sql`stopped_at - ${shift}` })
+    .where('user_id', '=', ownerId)
+    .where('resource_kind', '=', 'server')
+    .where('resource_id', '=', serverId)
+    .execute();
+}
+
+async function attentionOf(database: Kysely<NyabaseDatabase>, containerId: string): Promise<boolean> {
+  const row = await database.selectFrom('control.containers').select('needs_attention')
+    .where('id', '=', containerId).executeTakeFirstOrThrow();
+  return row.needs_attention;
+}
+
+async function powerOf(database: Kysely<NyabaseDatabase>, containerId: string): Promise<string> {
+  const row = await database.selectFrom('control.containers').select('power_intent')
+    .where('id', '=', containerId).executeTakeFirstOrThrow();
+  return row.power_intent;
+}
+
+/** A user whose server grant expired and whose 14-day grace there is already over. */
+async function overduePurge(database: Kysely<NyabaseDatabase>) {
+  const ids = await world(database);
+  await grantServer(database, { user: ids.userId }, ids.serverId, { expiresAt: days(-20) });
+  await database.insertInto('control.access_lapses').values({
+    user_id: ids.userId,
+    resource_kind: 'server',
+    resource_id: ids.serverId,
+    lapsed_at: new Date(Date.now() - (GRACE_DAYS + 1) * DAY_MS),
+  }).execute();
+  return ids;
+}
+
+/** Makes the user's expired direct server grant current again (one grant per user and server). */
+async function renewServerGrant(
+  executor: Kysely<NyabaseDatabase>,
+  userId: string,
+  serverId: string,
+): Promise<void> {
+  const result = await executor.updateTable('iam.server_grants').set({ expires_at: null })
+    .where('user_id', '=', userId)
+    .where('server_id', '=', serverId)
+    .executeTakeFirst();
+  expect(Number(result.numUpdatedRows)).toBe(1);
+}
+
+/** Resolves once some session of this database waits for an advisory (IAM) lock. */
+async function waitForIamLockWaiter(database: Kysely<NyabaseDatabase>): Promise<void> {
+  for (let attempt = 0; attempt < 500; attempt += 1) {
+    const result = await sql<{ waiting: number }>`
+      SELECT count(*)::int AS waiting FROM pg_locks
+      WHERE locktype = 'advisory' AND NOT granted
+        AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
+    `.execute(database);
+    if ((result.rows[0]?.waiting ?? 0) > 0) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error('No session waited for the IAM lock');
 }

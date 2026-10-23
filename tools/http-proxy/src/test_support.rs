@@ -1,5 +1,7 @@
-use crate::config::ConnectionLimits;
+use crate::config::{ConnectionLimits, DEFAULT_MAX_CONNECTIONS_PER_CONTAINER};
+use crate::container_limit::{ContainerLimiter, UpstreamCaps};
 use crate::protocol::ProxySnapshot;
+use crate::request::ClientContext;
 use crate::runtime::Runtime;
 use crate::snapshot::Route;
 use proxy_common::clock::now_ms;
@@ -44,6 +46,9 @@ pub(crate) fn test_runtime() -> Arc<Runtime> {
         https_listen: None,
         started_at: Instant::now(),
         limits: ConnectionLimits::default(),
+        container_slots: ContainerLimiter::new(UpstreamCaps::per_container(
+            DEFAULT_MAX_CONNECTIONS_PER_CONTAINER,
+        )),
         connected_at: AtomicU64::new(0),
         last_snapshot_generation: AtomicU64::new(0),
         last_snapshot_at: AtomicU64::new(0),
@@ -51,4 +56,11 @@ pub(crate) fn test_runtime() -> Arc<Runtime> {
         total_requests: AtomicU64::new(0),
         total_rejected_requests: AtomicU64::new(0),
     })
+}
+
+pub(crate) fn test_client() -> ClientContext {
+    ClientContext {
+        peer_ip: "192.0.2.10".parse().unwrap(),
+        https: false,
+    }
 }

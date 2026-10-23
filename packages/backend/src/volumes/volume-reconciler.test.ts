@@ -271,9 +271,11 @@ describe('volume reconciler scan and shifted policy', () => {
     expect(ensurePending).not.toHaveBeenCalled();
   });
 
-  it('does not Incus-DELETE a live logical nyv-* and enqueues volume.destroy for deleting volumes', async () => {
+  it('quarantines only orphans labelled for this server and deletes them once the ledger says they are due', async () => {
     const knownName = `nyv-${'c'.repeat(32)}`;
     const orphanName = `nyv-${'d'.repeat(32)}`;
+    const foreignName = `nyv-${'f'.repeat(32)}`;
+    const unlabelledName = `nyv-${'0'.repeat(32)}`;
     const deletingId = '44444444-4444-4444-8444-444444444444';
     const deletingName = `nyv-${'e'.repeat(32)}`;
     const ensurePending = vi.fn().mockResolvedValue({ id: 'intent' });
@@ -293,17 +295,33 @@ describe('volume reconciler scan and shifted policy', () => {
         { volume_id: deletingId, server_id: serverId, catalog_state: 'present', pool_id: 'pool-1' },
       ],
     });
-    const reconciler = new VolumeReconciler(new VolumeReconcileStore(db as never, { ensurePending } as never),
+    const store = new VolumeReconcileStore(db as never, { ensurePending } as never);
+    const orphans = {
+      sight: vi.fn(async (_server: string, _kind: string, seen: Array<{ poolName: string; name: string }>) => ({
+        fresh: [],
+        due: seen,
+      })),
+      forget: vi.fn().mockResolvedValue(undefined),
+    };
+    Object.assign(store, { orphans });
+    const reconciler = new VolumeReconciler(store,
       { log: vi.fn().mockResolvedValue(undefined) } as never,
       { get: vi.fn().mockResolvedValue(undefined), listServerIds: vi.fn() } as never,
       { register: vi.fn() } as never,
     );
+    const ours = { 'user.nyabase.managed': 'true', 'user.nyabase.scope': serverId };
     const client = {
       listStorageVolumes: vi.fn().mockResolvedValue({
         metadata: [
-          { name: knownName, type: 'custom' },
-          { name: orphanName, type: 'custom' },
-          { name: deletingName, type: 'custom' },
+          { name: knownName, type: 'custom', config: ours },
+          { name: orphanName, type: 'custom', config: ours },
+          {
+            name: foreignName,
+            type: 'custom',
+            config: { ...ours, 'user.nyabase.scope': '99999999-9999-4999-8999-999999999999' },
+          },
+          { name: unlabelledName, type: 'custom', config: {} },
+          { name: deletingName, type: 'custom', config: ours },
           { name: 'operator-volume', type: 'custom' },
         ],
       }),
@@ -319,24 +337,16 @@ describe('volume reconciler scan and shifted policy', () => {
 
     await reconciler.scan(serverId, client as never, new AbortController().signal);
 
+    // Another installation's volume, or one without our labels, is never a candidate.
+    expect(orphans.sight).toHaveBeenCalledWith(serverId, 'volume', [{ poolName: 'default', name: orphanName }]);
+    expect(client.deleteStorageVolume).toHaveBeenCalledTimes(1);
     expect(client.deleteStorageVolume).toHaveBeenCalledWith(
       'default',
       'custom',
       orphanName,
       expect.anything(),
     );
-    expect(client.deleteStorageVolume).not.toHaveBeenCalledWith(
-      'default',
-      'custom',
-      knownName,
-      expect.anything(),
-    );
-    expect(client.deleteStorageVolume).not.toHaveBeenCalledWith(
-      'default',
-      'custom',
-      deletingName,
-      expect.anything(),
-    );
+    expect(orphans.forget).toHaveBeenCalledWith(serverId, 'volume', { poolName: 'default', name: orphanName });
     expect(ensurePending).toHaveBeenCalledWith(expect.objectContaining({
       kind: 'volume.destroy',
       resourceId: deletingId,
@@ -346,8 +356,40 @@ describe('volume reconciler scan and shifted policy', () => {
       kind: 'volume.ensure',
       resourceId: deletingId,
     }));
-    expect(db.deleteFrom).not.toHaveBeenCalled();
     expect(db.insertInto).not.toHaveBeenCalled();
+  });
+
+  it('keeps a labelled orphan volume while its quarantine runs', async () => {
+    const orphanName = `nyv-${'d'.repeat(32)}`;
+    const store = new VolumeReconcileStore(
+      selectDb({ volumes: [], pools: [localPool(serverId)] }) as never,
+      { ensurePending: vi.fn() } as never,
+    );
+    const orphans = {
+      sight: vi.fn().mockResolvedValue({ fresh: [{ poolName: 'default', name: orphanName }], due: [] }),
+      forget: vi.fn(),
+    };
+    Object.assign(store, { orphans });
+    const reconciler = new VolumeReconciler(store,
+      { log: vi.fn().mockResolvedValue(undefined) } as never,
+      { get: vi.fn().mockResolvedValue(undefined), listServerIds: vi.fn() } as never,
+      { register: vi.fn() } as never,
+    );
+    const client = {
+      listStorageVolumes: vi.fn().mockResolvedValue({
+        metadata: [{
+          name: orphanName,
+          type: 'custom',
+          config: { 'user.nyabase.managed': 'true', 'user.nyabase.scope': serverId },
+        }],
+      }),
+      deleteStorageVolume: vi.fn(),
+    };
+
+    await reconciler.scan(serverId, client as never, new AbortController().signal);
+
+    expect(orphans.sight).toHaveBeenCalledOnce();
+    expect(client.deleteStorageVolume).not.toHaveBeenCalled();
   });
 
   it('does not upsert a placement when the backend is visible but no catalog row exists', async () => {
@@ -364,6 +406,7 @@ describe('volume reconciler scan and shifted policy', () => {
         needs_attention: false,
         incus_name: listedName,
         size_bytes: 10,
+        shrink_reserved_bytes: null,
         pool_id: 'pool-home',
       }],
       pools: [{
@@ -410,6 +453,7 @@ describe('volume reconciler scan and shifted policy', () => {
         needs_attention: false,
         incus_name: listedName,
         size_bytes: 10,
+        shrink_reserved_bytes: null,
         pool_id: null,
       }],
       pools: [{
@@ -456,6 +500,7 @@ describe('volume reconciler scan and shifted policy', () => {
         needs_attention: true,
         incus_name: incusName,
         size_bytes: 10,
+        shrink_reserved_bytes: null,
         pool_id: 'pool-home',
       }],
       pools: [{
@@ -533,6 +578,7 @@ describe('volume reconciler scan and shifted policy', () => {
         needs_attention: false,
         incus_name: listedName,
         size_bytes: 10,
+        shrink_reserved_bytes: null,
         pool_id: null,
       }],
       pools: [{
@@ -579,6 +625,7 @@ describe('volume reconciler scan and shifted policy', () => {
         needs_attention: false,
         incus_name: listedName,
         size_bytes: 10,
+        shrink_reserved_bytes: null,
         pool_id: 'pool-t',
       }],
       pools: [{
@@ -628,6 +675,7 @@ describe('volume reconciler scan and shifted policy', () => {
         needs_attention: false,
         incus_name: listedName,
         size_bytes: 10,
+        shrink_reserved_bytes: null,
         pool_id: null,
       }],
       pools: [{
@@ -748,6 +796,51 @@ describe('volume reconciler scan and shifted policy', () => {
         failure_code: 'VOLUME_SHRINK_BELOW_USAGE',
       }),
     ]));
+  });
+
+  it('settles a blocked shrink as stale without parking when a newer resize replaced it', async () => {
+    // The revision-guarded revert matched nothing: a grow was accepted while this pass ran.
+    const db = volumeExistsDb({ updatedRows: 0n });
+    const reconciler = new VolumeReconciler(new VolumeReconcileStore(db as never, {} as never),
+      { log: vi.fn().mockResolvedValue(undefined) } as never,
+      { get: vi.fn().mockResolvedValue(undefined), listServerIds: vi.fn() } as never,
+      { register: vi.fn() } as never,
+    );
+    vi.spyOn(
+      storeOf(reconciler) as unknown as { readVolume: () => Promise<unknown> },
+      'readVolume',
+    ).mockResolvedValue({ ...ensureRow(), size_bytes: '5' });
+    vi.spyOn(
+      storeOf(reconciler) as unknown as { readAttachments: () => Promise<unknown[]> },
+      'readAttachments',
+    ).mockResolvedValue([]);
+    vi.spyOn(
+      storeOf(reconciler) as unknown as { isCurrentRevision: () => Promise<boolean> },
+      'isCurrentRevision',
+    ).mockResolvedValue(false);
+    const outcome = await reconciler.reconcile(runContext({
+      kind: 'volume.resize',
+      client: {
+        getStorageVolume: vi.fn().mockResolvedValue({
+          metadata: { config: { size: '20', 'security.shifted': 'true' }, content_type: 'filesystem' },
+        }),
+        getStorageVolumeState: vi.fn().mockResolvedValue({
+          metadata: { usage: { used: '9', total: '20' } },
+        }),
+        updateStorageVolume: vi.fn(),
+      },
+    }));
+
+    expect(outcome).toMatchObject({
+      outcome: 'failed',
+      stale: true,
+      failure: { code: 'VOLUME_SHRINK_BELOW_USAGE' },
+    });
+    const wheres = (db.updateTable as ReturnType<typeof vi.fn>).mock.results.flatMap((result) => {
+      const query = result.value as { where: ReturnType<typeof vi.fn> };
+      return query.where.mock.calls.map((call) => call.slice(0, 3));
+    });
+    expect(wheres).toContainEqual(['revision', '=', 2]);
   });
 
   it('reverts desired size and writes used_bytes NULL when CephFS usage is phantom', async () => {
@@ -1193,6 +1286,59 @@ describe('volume.destroy eligible-node D', () => {
     expect(spies.mark).not.toHaveBeenCalled();
   });
 
+  it('probes every catalog again when the pin of a never-ensured shared volume answers 404', async () => {
+    const present = new Set([serverB]);
+    const clientA = catalogClient(serverA, present);
+    const clientB = catalogClient(serverB, present);
+    const state = destroyState({
+      dirEnsured: false,
+      removeAllServerId: serverA,
+      catalogs: [
+        catalog(serverA, 'cephfs-a', 'present'),
+        catalog(serverB, 'cephfs-b', 'present'),
+      ],
+    });
+    const reconciler = new VolumeReconciler(new VolumeReconcileStore(volumeExistsDb({ lifecycle_phase: 'deleting' }) as never, {} as never),
+      { log: vi.fn().mockResolvedValue(undefined) } as never,
+      { get: vi.fn(async (id: string) => (id === serverA ? clientA : clientB)) } as never,
+      { register: vi.fn() } as never,
+    );
+    const spies = installDestroySpies(reconciler, state);
+    const outcome = await reconciler.reconcile(destroyContext(spies.lease));
+    expect(outcome).toMatchObject({ outcome: 'succeeded' });
+    expect(spies.pin).toHaveBeenCalledWith(volumeId, serverB);
+    expect(clientA.deleteStorageVolume).not.toHaveBeenCalled();
+    expect(clientA.createStorageVolume).not.toHaveBeenCalled();
+    expect(clientB.deleteStorageVolume).toHaveBeenCalledTimes(1);
+    expect(spies.mark).toHaveBeenCalledWith(volumeId, serverB);
+  });
+
+  it('commits with no DELETE when the pin and every other catalog of a never-ensured shared volume are 404', async () => {
+    const present = new Set<string>();
+    const clientA = catalogClient(serverA, present);
+    const clientB = catalogClient(serverB, present);
+    const state = destroyState({
+      dirEnsured: false,
+      removeAllServerId: serverA,
+      catalogs: [
+        catalog(serverA, 'cephfs-a', 'present'),
+        catalog(serverB, 'cephfs-b', 'present'),
+      ],
+    });
+    const reconciler = new VolumeReconciler(new VolumeReconcileStore(volumeExistsDb({ lifecycle_phase: 'deleting' }) as never, {} as never),
+      { log: vi.fn().mockResolvedValue(undefined) } as never,
+      { get: vi.fn(async (id: string) => (id === serverA ? clientA : clientB)) } as never,
+      { register: vi.fn() } as never,
+    );
+    const spies = installDestroySpies(reconciler, state);
+    const outcome = await reconciler.reconcile(destroyContext(spies.lease));
+    expect(outcome).toMatchObject({ outcome: 'succeeded' });
+    expect(clientA.deleteStorageVolume).not.toHaveBeenCalled();
+    expect(clientB.deleteStorageVolume).not.toHaveBeenCalled();
+    expect(spies.mark).toHaveBeenCalledWith(volumeId, null);
+    expect(spies.finish).toHaveBeenCalled();
+  });
+
   it('reselects after the pin is cascaded away while E is still nonempty', async () => {
     const present = new Set<string>();
     const clientB = catalogClient(serverB, present);
@@ -1468,11 +1614,12 @@ function localVolume(input: {
     needs_attention: input.needs_attention ?? false,
     incus_name: input.incusName,
     size_bytes: input.size_bytes ?? 10,
+    shrink_reserved_bytes: null,
     pool_id: 'pool-1',
   };
 }
 
-function volumeExistsDb(row: { lifecycle_phase?: string } = {}) {
+function volumeExistsDb(row: { lifecycle_phase?: string; updatedRows?: bigint } = {}) {
   return {
     selectFrom: vi.fn((table: string) => {
       const query = chain();
@@ -1500,7 +1647,8 @@ function volumeExistsDb(row: { lifecycle_phase?: string } = {}) {
     }),
     updateTable: vi.fn(() => {
       const query = chain();
-      query.execute = vi.fn().mockResolvedValue(undefined);
+      query.execute = vi.fn().mockResolvedValue([]);
+      query.executeTakeFirst = vi.fn().mockResolvedValue({ numUpdatedRows: row.updatedRows ?? 1n });
       return query;
     }),
     deleteFrom: vi.fn(() => {
@@ -1558,7 +1706,7 @@ function selectDb(input: {
     }),
     updateTable: vi.fn(() => {
       const query = chain();
-      query.execute = vi.fn().mockResolvedValue(undefined);
+      query.execute = vi.fn().mockResolvedValue([]);
       return query;
     }),
     deleteFrom: vi.fn(() => {
@@ -1582,6 +1730,7 @@ function chain(): Record<string, unknown> {
     'forUpdate',
     'values',
     'onConflict',
+    'returning',
   ]) {
     query[method] = vi.fn(() => query);
   }
@@ -1634,6 +1783,16 @@ describe('VolumeReconciler resource status', () => {
       false,
     );
     expect(sets).toEqual([{ needs_attention: true, failure_code: 'VOLUME_SHRINK_BELOW_USAGE' }]);
+  });
+
+  it('parks a busy volume without failing its phase, so a retry can release it', async () => {
+    const sets: Record<string, unknown>[] = [];
+    await statusReconciler('active', sets).markFailure(
+      'v1',
+      { code: 'RESOURCE_NEEDS_ATTENTION', message: 'busy', details: {} },
+      true,
+    );
+    expect(sets).toEqual([{ needs_attention: true, failure_code: 'RESOURCE_NEEDS_ATTENTION' }]);
   });
 
   it('does not skip deleting volumes that still have needs_attention', async () => {

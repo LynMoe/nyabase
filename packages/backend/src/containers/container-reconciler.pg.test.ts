@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { withPostgresTestDatabase } from '../platform/persistence-pg/postgres-test-harness.js';
 import { ContainerReconciler } from './container-reconciler.service.js';
 import { ContainerReconcileStore } from './container-reconcile.store.js';
+import { IntentRepository } from '../reconcile/intent.repository.js';
 
 const describePg = process.env.NYABASE_TEST_DATABASE_URL ? describe : describe.skip;
 
@@ -127,6 +128,7 @@ describePg('ContainerReconciler PostgreSQL status', () => {
         {} as never,
         { onChange: vi.fn() } as never,
         {} as never,
+        {} as never,
       );
       await reconciler.markFailure(containerId, {
         code: 'RESOURCE_NEEDS_ATTENTION',
@@ -175,6 +177,135 @@ describePg('ContainerReconciler PostgreSQL status', () => {
       const route = await database.selectFrom('control.container_ssh_routes')
         .select('instance_status').where('container_id', '=', containerId).executeTakeFirstOrThrow();
       expect(route.instance_status).toBe('running');
+    });
+  });
+
+  it('never lets a stale create observation undo a delete accepted meanwhile', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const { containerId } = await seedRunningContainer(database);
+      await database.updateTable('control.containers')
+        .set({ lifecycle_phase: 'provisioning', observed_revision: null })
+        .where('id', '=', containerId).execute();
+      const createPass = await database.selectFrom('control.containers').selectAll()
+        .where('id', '=', containerId).executeTakeFirstOrThrow();
+      // The delete lands while the create pass is still talking to Incus.
+      await database.updateTable('control.containers')
+        .set({ lifecycle_phase: 'deleting', power_intent: 'stopped', revision: 2 })
+        .where('id', '=', containerId).execute();
+
+      const store = new ContainerReconcileStore(database, {} as never);
+      await store.recordObservation(
+        createPass as never,
+        { name: createPass.instance_name } as never,
+        { status: 'Running', started_at: null } as never,
+        false,
+        { status: 'running', lastError: null },
+        123n,
+      );
+      await store.markSucceeded(containerId, 1);
+
+      const row = await database.selectFrom('control.containers')
+        .select(['lifecycle_phase', 'revision', 'observed_revision', 'root_used_bytes'])
+        .where('id', '=', containerId).executeTakeFirstOrThrow();
+      expect(row.lifecycle_phase).toBe('deleting');
+      expect(row.revision).toBe(2);
+      expect(row.observed_revision).toBeNull();
+    });
+  });
+
+  it('moves provisioning to active only for the revision it observed', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const { containerId } = await seedRunningContainer(database);
+      await database.updateTable('control.containers')
+        .set({ lifecycle_phase: 'provisioning', observed_revision: null })
+        .where('id', '=', containerId).execute();
+      const row = await database.selectFrom('control.containers').selectAll()
+        .where('id', '=', containerId).executeTakeFirstOrThrow();
+      await new ContainerReconcileStore(database, {} as never).recordObservation(
+        row as never,
+        { name: row.instance_name } as never,
+        { status: 'Running', started_at: null } as never,
+        false,
+        { status: 'running', lastError: null },
+        null,
+      );
+      const after = await database.selectFrom('control.containers')
+        .select(['lifecycle_phase', 'observed_revision'])
+        .where('id', '=', containerId).executeTakeFirstOrThrow();
+      expect(after).toEqual({ lifecycle_phase: 'active', observed_revision: 1 });
+    });
+  });
+
+  it('releases a root shrink reservation only once Incus applied the size, or on a current revert', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const { containerId } = await seedRunningContainer(database);
+      await database.updateTable('control.containers')
+        .set({ root_shrink_reserved_bytes: 8_000_000_000 })
+        .where('id', '=', containerId).execute();
+      const store = new ContainerReconcileStore(database, {} as never);
+      const reserved = async () => (await database.selectFrom('control.containers')
+        .select(['root_size_bytes', 'root_shrink_reserved_bytes'])
+        .where('id', '=', containerId).executeTakeFirstOrThrow());
+      const observe = async (quotaPending: boolean) => {
+        const row = await database.selectFrom('control.containers').selectAll()
+          .where('id', '=', containerId).executeTakeFirstOrThrow();
+        await store.recordObservation(
+          row as never,
+          { name: row.instance_name } as never,
+          { status: 'Running', started_at: null } as never,
+          quotaPending,
+          { status: 'running', lastError: null },
+          null,
+        );
+      };
+
+      // Incus applies the quota at the next start: it still holds the larger size.
+      await observe(true);
+      expect((await reserved()).root_shrink_reserved_bytes).toBe('8000000000');
+      await observe(false);
+      expect((await reserved()).root_shrink_reserved_bytes).toBeNull();
+
+      // A revert of a superseded revision changes nothing; the current one releases it.
+      await database.updateTable('control.containers')
+        .set({ root_shrink_reserved_bytes: 8_000_000_000, revision: 2 })
+        .where('id', '=', containerId).execute();
+      await store.revertImpossibleRootShrink(containerId, 1, 8_000_000_000n, null, 'ROOT_SHRINK_BELOW_USAGE');
+      expect((await reserved()).root_shrink_reserved_bytes).toBe('8000000000');
+      await store.revertImpossibleRootShrink(containerId, 2, 8_000_000_000n, null, 'ROOT_SHRINK_BELOW_USAGE');
+      expect(await reserved()).toEqual({ root_size_bytes: '8000000000', root_shrink_reserved_bytes: null });
+    });
+  });
+
+  it('does not re-queue a scan intent that already failed for the same revision', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const { serverId, containerId } = await seedRunningContainer(database);
+      const intents = new IntentRepository(database, { wake: vi.fn() } as never);
+      const store = new ContainerReconcileStore(database, intents);
+      const desired = { id: containerId, revision: 1, server_id: serverId };
+      await store.enqueueScanIntent(desired, 'container.update');
+      await intents.settleForObservedRevision('container', containerId, 1, {
+        outcome: 'failed',
+        failure: { code: 'GPU_MUTATION_REQUIRES_STOP', message: 'stop first' },
+        placementServerId: serverId,
+      });
+      await store.enqueueScanIntent(desired, 'container.update');
+      await store.enqueueScanIntent(desired, 'container.update');
+      const rows = await database.selectFrom('control.intents').select(['status'])
+        .where('resource_id', '=', containerId).execute();
+      expect(rows).toEqual([{ status: 'failed' }]);
+
+      // After the back-off the scan tries again.
+      await database.updateTable('control.intents')
+        .set({ settled_at: new Date(Date.now() - 2 * 60 * 60_000) })
+        .where('resource_id', '=', containerId).execute();
+      await store.enqueueScanIntent(desired, 'container.update');
+      expect(await database.selectFrom('control.intents').select('id')
+        .where('resource_id', '=', containerId).execute()).toHaveLength(2);
+
+      // A newer revision is scanned again at once.
+      await store.enqueueScanIntent({ ...desired, revision: 2 }, 'container.update');
+      expect(await database.selectFrom('control.intents').select('id')
+        .where('resource_id', '=', containerId).execute()).toHaveLength(3);
     });
   });
 });

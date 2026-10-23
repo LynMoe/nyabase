@@ -7,7 +7,7 @@
 // (recursive; platform/ is the shared toolkit and exempt), <= 4 per frontend
 // page or component sub-folder. Split by responsibility, not by line count.
 import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -22,9 +22,13 @@ const BACKEND_MODULE_FILE_LIMIT = 16;
 const BACKEND_MODULE_EXEMPT = new Set(['platform']);
 const FRONTEND_FOLDER_FILE_LIMIT = 4;
 
-const tracked = execFileSync('git', ['ls-files', 'packages/*.ts', 'packages/*.tsx'], { cwd: root, encoding: 'utf8' })
+// The working tree as it will be committed: tracked and new files, minus deletions.
+const tracked = execFileSync('git', [
+  'ls-files', '--cached', '--others', '--exclude-standard', 'packages/*.ts', 'packages/*.tsx',
+], { cwd: root, encoding: 'utf8' })
   .split('\n')
   .filter(Boolean)
+  .filter((f, index, all) => all.indexOf(f) === index && existsSync(join(root, f)))
   .filter((f) => /^packages\/(backend|frontend|common|agent)\/src\//.test(f))
   .filter((f) => !GENERATED.some((g) => f.endsWith(g)))
   .filter((f) => !/\.(test|spec|test-helper|pg-test-helper)\.tsx?$/.test(f) && !f.endsWith('.d.ts'));

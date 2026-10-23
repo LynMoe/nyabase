@@ -7,7 +7,11 @@ use crate::session::ProxySshSession;
 use crate::snapshot::SnapshotStore;
 use anyhow::{anyhow, Context, Result};
 use futures_util::future::Abortable;
-use proxy_common::conn_limit::{ConnectionLimiter, ConnectionPermit, LimitRejection};
+use proxy_common::accept::accept_retrying;
+use proxy_common::conn_limit::{
+    wait_evicted, ConnectionLimiter, ConnectionPermit, LimitRejection, PendingEviction,
+    PendingPermit,
+};
 use russh::{MethodKind, MethodSet};
 use std::future::Future;
 use std::net::{Shutdown, SocketAddr};
@@ -37,9 +41,15 @@ pub(crate) async fn serve_public(
     control: Arc<ControlPlane>,
     telemetry: TelemetrySender,
 ) -> Result<()> {
-    let limiter = ConnectionLimiter::new(config.max_connections, config.max_connections_per_ip);
+    let limiter = ConnectionLimiter::new(config.connection_limits());
     loop {
-        let (stream, peer) = listener.accept().await?;
+        let (stream, peer) = accept_retrying(
+            || listener.accept(),
+            |error, delay| {
+                warn!(%error, retry_ms = delay.as_millis() as u64, "SSH proxy accept failed");
+            },
+        )
+        .await;
         // The permit is held by the connection task until the session ends,
         // so one address cannot exhaust the pool before authenticating.
         let permit = match limiter.try_acquire(peer.ip()) {
@@ -50,6 +60,8 @@ pub(crate) async fn serve_public(
                 let result = match limit {
                     LimitRejection::Global => "rejected_limit",
                     LimitRejection::PerClient => "rejected_client_limit",
+                    LimitRejection::PerSite => "rejected_site_limit",
+                    LimitRejection::Pending => "rejected_preauth_limit",
                 };
                 emit_metric(
                     &telemetry,
@@ -94,7 +106,7 @@ pub(crate) async fn serve_public(
 async fn serve_connection(
     stream: TcpStream,
     peer: SocketAddr,
-    _permit: ConnectionPermit,
+    mut permit: ConnectionPermit,
     admit: bool,
     store: Arc<SnapshotStore>,
     control: Arc<ControlPlane>,
@@ -105,6 +117,12 @@ async fn serve_connection(
     let auth_timeout = config.auth_timeout;
     if admit {
         let (connection, abort_registration) = runtime.register_connection(peer);
+        // The pre-auth slot moves to the connection, which drops it once
+        // public-key authentication succeeds; the main slot stays here.
+        let pending = permit.take_pending();
+        let eviction = pending.as_ref().map(PendingPermit::eviction);
+        connection.hold_pending(pending);
+        let _permit = permit;
         let _cleanup = ConnectionCleanup {
             runtime: runtime.clone(),
             id: connection.id.clone(),
@@ -129,6 +147,7 @@ async fn serve_connection(
                 ),
                 &connection,
                 auth_timeout,
+                eviction.clone(),
             ),
             abort_registration,
         )
@@ -136,10 +155,16 @@ async fn serve_connection(
         match connection_result {
             Ok(Err(error)) => {
                 debug!(%peer, %error, "SSH connection closed");
+                let evicted = eviction.as_ref().is_some_and(PendingEviction::is_evicted);
+                let result = if evicted {
+                    "closed_preauth_evicted"
+                } else {
+                    "closed_error"
+                };
                 emit_metric(
                     &telemetry,
                     "ssh_proxy_connections_total",
-                    vec![("result", "closed_error".to_string())],
+                    vec![("result", result.to_string())],
                     1.0,
                 );
             }
@@ -148,25 +173,36 @@ async fn serve_connection(
         }
         return;
     }
+    // Never authenticates, so it keeps its pre-auth slot to the end.
+    let eviction = permit.take_pending().map(|pending| {
+        let eviction = pending.eviction();
+        (pending, eviction)
+    });
+    let _permit = permit;
     runtime.record_rejected_connection();
     let (connection, _abort_registration) = ConnectionState::new(0, peer);
     let connection = Arc::new(connection);
     // The paused reject path never yields an authenticated session, so the
     // whole exchange is bounded by the authentication deadline.
-    let result = tokio::time::timeout(
-        auth_timeout,
-        handle_ssh_connection(
-            stream,
-            peer,
-            store,
-            control,
-            config,
-            telemetry.clone(),
-            connection,
-            true,
-        ),
-    )
-    .await;
+    let result = tokio::select! {
+        biased;
+        _ = wait_evicted(eviction.as_ref().map(|(_, eviction)| eviction)) => {
+            Ok(Err(anyhow!("pre-auth connection evicted to admit a lighter client")))
+        }
+        result = tokio::time::timeout(
+            auth_timeout,
+            handle_ssh_connection(
+                stream,
+                peer,
+                store,
+                control,
+                config,
+                telemetry.clone(),
+                connection,
+                true,
+            ),
+        ) => result,
+    };
     match result {
         Ok(Ok(())) => {}
         Ok(Err(error)) => debug!(%peer, %error, "paused SSH reject path closed"),
@@ -181,12 +217,16 @@ async fn serve_connection(
 }
 
 /// Closes the session if public-key authentication has not succeeded within
-/// `deadline` of accept. This is independent of (and much shorter than) the
-/// session inactivity timeout, so idle pre-auth sockets cannot pin slots.
+/// `deadline` of accept, or if its pre-auth slot is evicted for a lighter
+/// client before then. The deadline is independent of (and much shorter
+/// than) the session inactivity timeout, so idle pre-auth sockets cannot pin
+/// slots. An authenticated session has released its slot, which can then no
+/// longer be evicted.
 pub(crate) async fn with_auth_deadline<F>(
     session: F,
     connection: &ConnectionState,
     deadline: Duration,
+    eviction: Option<PendingEviction>,
 ) -> Result<()>
 where
     F: Future<Output = Result<()>>,
@@ -195,6 +235,9 @@ where
         result = session => result,
         _ = auth_deadline_elapsed(connection, deadline) => {
             Err(anyhow!("SSH authentication deadline exceeded"))
+        }
+        _ = wait_evicted(eviction.as_ref()) => {
+            Err(anyhow!("SSH pre-auth connection evicted to admit a lighter client"))
         }
     }
 }

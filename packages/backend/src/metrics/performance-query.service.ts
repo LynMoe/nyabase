@@ -96,6 +96,7 @@ export class PerformanceQueryService {
     scope: ListScope,
   ): Promise<PerformanceUsageResponse | PerformanceAdminUsageResponse | PerformanceSelfResponse> {
     assertListScope(actor, scope, Role.Operator);
+    adminUserFilter(query, scope);
     return scope === 'all'
       ? this.scopedUsage(requireUserId(actor), query, 'all')
       : this.ownUsage(requireUserId(actor), query);
@@ -107,6 +108,7 @@ export class PerformanceQueryService {
     scope: ListScope,
   ): Promise<PerformanceSeriesResponse | PerformanceMultiSeriesResponse> {
     assertListScope(actor, scope, Role.Operator);
+    adminUserFilter(query, scope);
     return scope === 'all'
       ? this.scopedSeries(requireUserId(actor), query, 'all')
       : this.ownSeries(requireUserId(actor), query);
@@ -137,7 +139,7 @@ export class PerformanceQueryService {
     const admin = scope === 'all';
     if (query.containerId) return this.selfUsage(actorId, query.containerId, scope);
     const servers = await this.resolveServers(actorId, query.serverId, scope);
-    const userId = optionalUuid(query.userId, 'userId');
+    const userId = adminUserFilter(query, scope);
     if (servers.length === 0) {
       return { sampledAt: null, truncated: false, servers: [] };
     }
@@ -190,7 +192,7 @@ export class PerformanceQueryService {
     }
     const containerId = optionalUuid(query.containerId, 'containerId');
     const servers = await this.resolveServers(actorId, query.serverId, scope);
-    const userId = optionalUuid(query.userId, 'userId');
+    const userId = adminUserFilter(query, scope);
     const containers = (await this.loadContainers(servers)).filter((container) =>
       (!userId || container.ownerId === userId)
       && (!containerId || container.id === containerId));
@@ -266,7 +268,7 @@ export class PerformanceQueryService {
     const range = query.range ?? '1h';
     if (!RANGES[range]) throw new BadRequestException('metric or range is invalid');
     const containerId = optionalUuid(query.containerId, 'containerId');
-    const userId = optionalUuid(query.userId, 'userId');
+    const userId = adminUserFilter(query, scope);
     const servers = await this.resolveServers(actorId, query.serverId, scope);
     let containers = await this.loadContainers(servers);
     if (userId) containers = containers.filter((container) => container.ownerId === userId);
@@ -756,6 +758,15 @@ function optionalUuid(value: string | undefined, name: string): string | undefin
   if (value === undefined || value === '') return undefined;
   if (!UUID_PATTERN.test(value)) throw new BadRequestException(`${name} is invalid`);
   return value.toLowerCase();
+}
+
+/** `userId` picks another person's usage: an administrator filter, `scope=all` only. */
+function adminUserFilter(query: PerformanceQuery, scope: ListScope): string | undefined {
+  if (scope !== 'all') {
+    if (query.userId !== undefined) throw new BadRequestException('userId is only available with scope=all');
+    return undefined;
+  }
+  return optionalUuid(query.userId, 'userId');
 }
 
 function selectorFor(serverIds: readonly string[], containerId?: string): string | null {

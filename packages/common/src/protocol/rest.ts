@@ -27,7 +27,6 @@ export type {
   AddSshKeyRequest,
   AttachVolumeRequest,
   RotateServerEnrollmentRequest,
-  CreateApiTokenRequest,
   CreateContainerRequest,
   CreateGroupRequest,
   AddCatalogImageRequest,
@@ -114,6 +113,7 @@ export interface PublicSettingsDto {
   sshProxy: {
     host: string;
     port: number;
+    hostSuffix: string;
   } | null;
 }
 
@@ -154,7 +154,9 @@ export interface SystemSettingFieldDto {
   envValuePresent: boolean;
   defaultValue: unknown;
   secret: boolean;
+  /** Editable online by the caller: false when env-overridden or admin-only for a non-admin. */
   editable: boolean;
+  adminOnly: boolean;
   restartRequired: boolean;
   public: boolean;
   label: string;
@@ -202,7 +204,34 @@ export interface OffsetPaginatedResponse<T> {
   offset: number;
 }
 
+/** The Backend's last SSH proxy snapshot build (`GET /admin/ssh-proxy/status`). */
+export interface SshProxySnapshotSummaryDto {
+  generation: number;
+  builtAt: string | null;
+  /** Encoded size against the hard cap; a build over the cap fails and the proxies keep the last one. */
+  bytes: number;
+  maxBytes: number;
+  users: number;
+  routes: number;
+  /** Set when the most recent build failed; the counts above are from the last good build. */
+  failedAt: string | null;
+  error: string | null;
+}
+
+/** `GET /users/:id/ssh-client-config` (yourself only): reach every container as `<name>.<hostSuffix>`. */
+export interface SshClientConfigDto {
+  hostSuffix: string;
+  /** Null until an administrator sets the SSH proxy's public address. */
+  proxy: { host: string; port: number; hostKey: string } | null;
+  /** Your host CA (`ssh-ed25519 …`); it signs only your containers' host keys. */
+  hostCertificateAuthority: string;
+  /** Ready to paste into ~/.ssh/config and ~/.ssh/known_hosts; null without a proxy address. */
+  sshConfig: string | null;
+  knownHosts: string | null;
+}
+
 export interface SshProxyHostKeySummaryDto {
+  publicKey: string | null;
   fingerprint: string | null;
   generation: number | null;
   rotatedAt: string | null;
@@ -249,6 +278,8 @@ export interface ServerAgentDto {
   connectedAt: string | null;
   /** Expiry of the outstanding enrollment token, if one was issued and not yet used. */
   enrollmentExpiresAt: string | null;
+  /** Live from the connected agent (null while disconnected); without it guests are not started. */
+  ipv6Guard: { present: boolean; error: string | null } | null;
 }
 
 export interface ServerCpuDto {
@@ -374,6 +405,7 @@ export interface SharedBackendDto {
   id: string;
   name: string;
   displayName: string | null;
+  /** Infrastructure details: empty (`''` / `[]` for serverIds) outside the admin view. */
   identityKey: string;
   cephFsid: string;
   totalBytes: number | null;
@@ -677,6 +709,8 @@ export interface ContainerSshDto {
   status: 'disabled' | 'container_stopped' | 'running' | 'error' | 'unknown' | 'key_applied_sshd_missing';
   ready: boolean;
   loginUser: string;
+  /** `<name>.<suffix>`: the SSH proxy resolves it among the owner's containers. */
+  hostName: string;
   proxyHost: string | null;
   proxyPort: number | null;
   observedAt: string | null;

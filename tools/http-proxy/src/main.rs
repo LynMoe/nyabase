@@ -8,7 +8,9 @@ use std::time::Instant;
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 
+mod chunked;
 mod config;
+mod container_limit;
 mod control;
 mod listener;
 mod protocol;
@@ -21,6 +23,7 @@ mod test_support;
 mod upstream;
 
 use crate::config::Config;
+use crate::container_limit::ContainerLimiter;
 use crate::control::{control_loop, snapshot_lease_loop, status_loop};
 use crate::listener::http_listener;
 use crate::runtime::Runtime;
@@ -44,6 +47,7 @@ async fn main() -> Result<()> {
         https_listen: config.https_listen.clone(),
         started_at: Instant::now(),
         limits: config.limits,
+        container_slots: ContainerLimiter::new(config.upstream_caps()),
         connected_at: AtomicU64::new(0),
         last_snapshot_generation: AtomicU64::new(0),
         last_snapshot_at: AtomicU64::new(0),
@@ -53,8 +57,7 @@ async fn main() -> Result<()> {
     });
     let (status_tx, status_rx) = mpsc::channel(32);
     // HTTP and HTTPS listeners share one pool so the caps are per process.
-    let connection_slots =
-        ConnectionLimiter::new(config.max_connections, config.max_connections_per_ip);
+    let connection_slots = ConnectionLimiter::new(config.connection_limits());
     let mut tasks = JoinSet::new();
 
     spawn_supervised(

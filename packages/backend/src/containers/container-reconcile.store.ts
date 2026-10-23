@@ -10,6 +10,7 @@ import {
   type PhysicalSettlement,
 } from '../reconcile/intent.repository.js';
 import type { ResourceAuthority } from '../reconcile/managed-reconciler.js';
+import { OrphanSightingsStore } from '../reconcile/orphan-sightings.store.js';
 import { settleContainerIntent } from './container-rules.js';
 
 /** The desired container joined with its server, root pool, image and network claim. */
@@ -17,6 +18,8 @@ export interface ContainerRow {
   id: string;
   server_id: string;
   owner_id: string;
+  /** The user-facing name; the host certificate is issued for it. */
+  name: string;
   image_id: string;
   revision: number;
   image_fingerprint: string;
@@ -49,6 +52,8 @@ export interface ContainerAttachment {
   pool_name: string;
   size_bytes: string;
   shared: boolean;
+  /** The owning shared backend of a shared volume (its catalog label). */
+  shared_backend_id?: string | null;
   bind_state: 'attaching' | 'attached' | 'detaching';
 }
 
@@ -56,6 +61,12 @@ export interface SshFileObservation {
   readonly status: 'disabled' | 'container_stopped' | 'running' | 'error' | 'unknown';
   readonly lastError: string | null;
 }
+
+/** How long a scan intent that failed waits before the full scan queues it again. */
+const SCAN_FAILED_RETRY_AFTER_MS = {
+  'container.update': 60 * 60_000,
+  'container.delete': 15 * 60_000,
+} as const;
 
 /** Build guest authorized_keys from platform user public keys only (T3 jump). */
 function composeAuthorizedKeys(
@@ -76,10 +87,15 @@ function composeAuthorizedKeys(
 /** Every SQL statement the container reconciler issues; the Incus-facing logic never touches Kysely. */
 @Injectable()
 export class ContainerReconcileStore {
+  /** Quarantine ledger of instances no row owns (full scan). */
+  readonly orphans: OrphanSightingsStore;
+
   constructor(
     @Inject(PG_DATABASE) private readonly database: Kysely<NyabaseDatabase>,
     private readonly intents: IntentRepository,
-  ) {}
+  ) {
+    this.orphans = new OrphanSightingsStore(database);
+  }
 
   // --- ManagedReconciler state -------------------------------------------------
 
@@ -100,6 +116,7 @@ export class ContainerReconcileStore {
     return row?.needs_attention === true;
   }
 
+  /** Only the current revision's success clears status; a stale pass leaves newer state alone. */
   async markSucceeded(containerId: string, revision: number): Promise<void> {
     await this.database
       .updateTable('control.containers')
@@ -111,14 +128,16 @@ export class ContainerReconcileStore {
         last_transition_at: sql<Date>`clock_timestamp()`,
       })
       .where('id', '=', containerId)
+      .where('revision', '=', revision)
       .execute();
   }
 
+  /** `attention` parks the container; a plain failure never un-parks it (only success or a retry does). */
   async markFailure(containerId: string, failure: IntentFailure, attention: boolean): Promise<void> {
     await this.database
       .updateTable('control.containers')
       .set({
-        needs_attention: attention,
+        ...(attention ? { needs_attention: true } : {}),
         failure_code: failure.code.slice(0, 128),
         failure_reason: failure.message.slice(0, 4096),
         last_transition_at: sql<Date>`clock_timestamp()`,
@@ -137,10 +156,8 @@ export class ContainerReconcileStore {
         .select(['id', 'owner_id'])
         .where('id', 'in', containerIds)
         .execute();
-    const owners = new Map(rows.map((row) => [row.id, row.owner_id]));
-    return new Map(containerIds.map((id) => [id, {
-      ownerId: owners.get(id) ?? null,
-    }]));
+    // A deleted container has no entry (see ResourceAuthority).
+    return new Map(rows.map((row) => [row.id, { ownerId: row.owner_id }]));
   }
 
   // --- desired state -----------------------------------------------------------
@@ -155,6 +172,7 @@ export class ContainerReconcileStore {
         'c.id as id',
         'c.server_id as server_id',
         'c.owner_id as owner_id',
+        'c.name as name',
         'c.image_id as image_id',
         'c.revision as revision',
         'c.image_fingerprint as image_fingerprint',
@@ -263,6 +281,7 @@ export class ContainerReconcileStore {
         incus_name: row.incus_name,
         size_bytes: String(row.size_bytes),
         shared,
+        shared_backend_id: row.shared_backend_id,
         bind_state: row.bind_state ?? 'attached',
       };
       if (row.bind_state === 'detaching') {
@@ -318,10 +337,31 @@ export class ContainerReconcileStore {
     };
   }
 
+  /** Device names of the attachments being removed from the container. */
+  async readDetachingDevices(containerId: string): Promise<string[]> {
+    const rows = await this.database
+      .selectFrom('control.volume_attachments')
+      .select('device_name')
+      .where('container_id', '=', containerId)
+      .where('bind_state', '=', 'detaching')
+      .orderBy('id')
+      .execute();
+    return rows.map((row) => row.device_name);
+  }
+
+  /**
+   * A catalog that was not known present appears without a verified size (it
+   * may have been created at a size read before a shrink): it drops the
+   * observed revision, so it counts as not caught up
+   * (`releaseSettledShrinkReservations`) until a volume pass verifies it.
+   */
   async markCatalogPresent(volumeId: string, serverId: string): Promise<void> {
     await this.database
       .updateTable('control.volume_placements')
-      .set({ catalog_state: 'present' })
+      .set({
+        catalog_state: 'present',
+        observed_revision: sql<number | null>`case when catalog_state = 'present' then observed_revision end`,
+      })
       .where('volume_id', '=', volumeId)
       .where('server_id', '=', serverId)
       .execute();
@@ -332,10 +372,53 @@ export class ContainerReconcileStore {
       .execute();
   }
 
+  /**
+   * This pass created a shared volume's catalog at `postedBytes`, a size it
+   * read before the POST. When the volume's size moved since, or it still
+   * holds a shrink reservation (which only a verified catalog releases), a
+   * resize for this server is queued and woken now instead of waiting for
+   * the full scan. Its own idempotency key keeps a resize already running
+   * for the revision (one that found the catalog missing) from absorbing it.
+   */
+  async requeueResizeAfterCatalogPost(
+    volumeId: string,
+    serverId: string,
+    postedBytes: string | number,
+  ): Promise<void> {
+    const volume = await this.database
+      .selectFrom('control.volumes as v')
+      .innerJoin('control.volume_placements as pl', 'pl.volume_id', 'v.id')
+      .select(['v.revision', 'v.size_bytes', 'v.shrink_reserved_bytes'])
+      .where('v.id', '=', volumeId)
+      .where('pl.server_id', '=', serverId)
+      .where('v.shared_backend_id', 'is not', null)
+      .where('v.lifecycle_phase', '!=', 'deleting')
+      .where('v.needs_attention', '=', false)
+      .executeTakeFirst();
+    if (!volume) return;
+    if (String(volume.size_bytes) === String(postedBytes) && volume.shrink_reserved_bytes === null) return;
+    await this.intents.ensurePending({
+      kind: 'volume.resize',
+      resourceType: 'volume',
+      resourceId: volumeId,
+      serverId,
+      targetRevision: volume.revision,
+      reuseSettled: false,
+      request: { source: 'catalog_posted', operation: 'resize', idempotencyKey: 'resize:catalog_posted' },
+    });
+  }
+
   // --- observation -------------------------------------------------------------
 
-  /** Attachments that finished binding become `attached`; finished unbinds disappear. */
-  async settleVolumeBinds(containerId: string, document: IncusSchema<'InstanceFull'>): Promise<void> {
+  /**
+   * Attachments that finished binding become `attached`; finished unbinds
+   * disappear. `detachedOnly` settles only the unbinds.
+   */
+  async settleVolumeBinds(
+    containerId: string,
+    document: Pick<IncusSchema<'InstanceFull'>, 'devices'>,
+    detachedOnly = false,
+  ): Promise<void> {
     const devices = document.devices ?? {};
     const rows = await this.database
       .selectFrom('control.volume_attachments')
@@ -344,7 +427,7 @@ export class ContainerReconcileStore {
       .execute();
     for (const row of rows) {
       const present = Object.prototype.hasOwnProperty.call(devices, row.device_name);
-      if (row.bind_state === 'attaching' && present) {
+      if (row.bind_state === 'attaching' && present && !detachedOnly) {
         await this.database
           .updateTable('control.volume_attachments')
           .set({ bind_state: 'attached' })
@@ -369,8 +452,14 @@ export class ContainerReconcileStore {
       .execute();
   }
 
+  /**
+   * Undo a shrink the instance cannot take, unless a newer revision already
+   * replaced it. The actual size is within the reservation the shrink kept, so
+   * the revert exceeds no grant or pool capacity; the reservation is released.
+   */
   async revertImpossibleRootShrink(
     containerId: string,
+    revision: number,
     actualRootBytes: bigint,
     usedBytes: bigint | null,
     failureCode: string,
@@ -379,11 +468,13 @@ export class ContainerReconcileStore {
       .updateTable('control.containers')
       .set({
         root_size_bytes: actualRootBytes.toString(),
+        root_shrink_reserved_bytes: null,
         ...(usedBytes === null ? {} : { root_used_bytes: usedBytes.toString() }),
         needs_attention: true,
         failure_code: failureCode.slice(0, 128),
       })
       .where('id', '=', containerId)
+      .where('revision', '=', revision)
       .where('lifecycle_phase', 'not in', ['deleting', 'failed'])
       .execute();
   }
@@ -397,20 +488,28 @@ export class ContainerReconcileStore {
     ssh: SshFileObservation,
     usedBytes: bigint | null,
   ): Promise<void> {
+    // Guarded on the revision this pass reconciled and a live phase: a delete
+    // (or any newer revision) accepted meanwhile is never overwritten, and the
+    // only phase transition here is provisioning -> active. A shrink's
+    // reservation is released once Incus has applied the verified size, not
+    // while the quota is still pending (it applies at the next start).
     await this.database
       .updateTable('control.containers')
       .set({
         instance_name: actual.name ?? deriveInstanceName(row.id),
         observed_revision: row.revision,
         root_size_pending_bytes: quotaPending ? String(row.root_size_bytes) : null,
+        ...(quotaPending ? {} : { root_shrink_reserved_bytes: null }),
         failure_code: null,
         failure_reason: null,
         last_transition_at: sql<Date>`clock_timestamp()`,
-        lifecycle_phase: row.lifecycle_phase === 'provisioning' ? 'active' : row.lifecycle_phase,
-        ...(usedBytes === null ? {} : { root_used_bytes: usedBytes.toString() }),
+        lifecycle_phase: 'active',
       })
       .where('id', '=', row.id)
+      .where('revision', '=', row.revision)
+      .where('lifecycle_phase', 'in', ['provisioning', 'active'])
       .execute();
+    if (usedBytes !== null) await this.recordRootUsage(row.id, usedBytes);
     await this.database
       .updateTable('control.container_ssh_routes')
       .set({
@@ -427,17 +526,6 @@ export class ContainerReconcileStore {
   }
 
   // --- deletion ----------------------------------------------------------------
-
-  /** Normalised ids of the containers on a server that are not being deleted. */
-  async listLiveContainerIds(serverId: string): Promise<string[]> {
-    const rows = await this.database
-      .selectFrom('control.containers')
-      .select('id')
-      .where('server_id', '=', serverId)
-      .where('lifecycle_phase', '!=', 'deleting')
-      .execute();
-    return rows.map((item) => item.id);
-  }
 
   /** The instance is gone: park its address for reuse and drop the container row. */
   async releaseContainerState(row: ContainerRow): Promise<void> {
@@ -508,6 +596,12 @@ export class ContainerReconcileStore {
       serverId: desired.server_id,
       targetRevision: desired.revision,
       reuseSettled: false,
+      // A scan intent that failed for this revision is not re-queued by every
+      // 60 s scan (each pass would also audit the drift and the Incus PUT
+      // again); a newer revision or a user retry runs it at once, and the scan
+      // itself tries again only after a back-off, so transient failures still heal.
+      reuseFailed: true,
+      reuseFailedSettledAfter: new Date(Date.now() - SCAN_FAILED_RETRY_AFTER_MS[kind]),
       request: { source: 'full_scan', idempotencyKey: 'physical:scan' },
     });
   }

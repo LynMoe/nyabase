@@ -1,6 +1,22 @@
-import { NotFoundException } from '@nestjs/common';
-import { describe, expect, it } from 'vitest';
-import { RouteIdPipe } from './http-filters.js';
+import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { Controller, Get, Module, NotFoundException, Param } from '@nestjs/common';
+import { NestFactory } from '@nestjs/core';
+import type { NestExpressApplication } from '@nestjs/platform-express';
+import { DatabaseError } from 'pg';
+import { FailureCode } from '@nyabase/common';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import {
+  IMMUTABLE_ASSET_CACHE_CONTROL,
+  isStaticFilePath,
+  PgTransactionConflictFilter,
+  REVALIDATE_CACHE_CONTROL,
+  RouteIdPipe,
+  serveBundledFrontend,
+  ZodExceptionFilter,
+} from './http-filters.js';
+import { securityHeaders } from './http-security.js';
 
 describe('RouteIdPipe', () => {
   const pipe = new RouteIdPipe();
@@ -15,5 +31,146 @@ describe('RouteIdPipe', () => {
   it('turns a malformed path id into a 404', () => {
     expect(() => pipe.transform('undefined', { type: 'param', data: 'containerId' }))
       .toThrow(NotFoundException);
+  });
+});
+
+describe('isStaticFilePath', () => {
+  it('treats /assets/* and paths ending in a file extension as files', () => {
+    expect(isStaticFilePath('/assets/index-3f9a1c.js')).toBe(true);
+    expect(isStaticFilePath('/assets/fonts/x')).toBe(true);
+    expect(isStaticFilePath('/favicon.ico')).toBe(true);
+    expect(isStaticFilePath('/vite.svg')).toBe(true);
+  });
+
+  it('leaves client-side routes to the SPA', () => {
+    expect(isStaticFilePath('/')).toBe(false);
+    expect(isStaticFilePath('/containers/6172518f-5edb-402b-ac2a-c0a899f53b0e/usage')).toBe(false);
+    expect(isStaticFilePath('/assets')).toBe(false);
+  });
+});
+
+@Controller('ping')
+class PingController {
+  @Get()
+  ping() {
+    return { ok: true };
+  }
+}
+
+@Module({ controllers: [PingController] })
+class FrontendProbeModule {}
+
+describe('serveBundledFrontend', () => {
+  let publicDir: string;
+  let app: NestExpressApplication;
+  let baseUrl: string;
+
+  beforeAll(async () => {
+    publicDir = await mkdtemp(join(tmpdir(), 'nyabase-frontend-'));
+    await mkdir(join(publicDir, 'assets'));
+    await writeFile(join(publicDir, 'index.html'), '<!doctype html><title>nyabase</title>');
+    await writeFile(join(publicDir, 'assets', 'index-3f9a1c.js'), 'export {};');
+    app = await NestFactory.create<NestExpressApplication>(FrontendProbeModule, { logger: false });
+    app.setGlobalPrefix('api');
+    app.use(securityHeaders());
+    serveBundledFrontend(app, publicDir);
+    await app.listen(0, '127.0.0.1');
+    baseUrl = await app.getUrl();
+  });
+
+  afterAll(async () => {
+    await app?.close();
+    await rm(publicDir, { recursive: true, force: true });
+  });
+
+  it('caches hashed assets for a year', async () => {
+    const response = await fetch(`${baseUrl}/assets/index-3f9a1c.js`);
+    expect(response.status).toBe(200);
+    expect(response.headers.get('cache-control')).toBe(IMMUTABLE_ASSET_CACHE_CONTROL);
+    expect(response.headers.get('content-type')).toMatch(/javascript/);
+    expect(response.headers.get('content-security-policy')).toContain("script-src 'self'");
+  });
+
+  it('answers a missing asset with a real 404, not index.html', async () => {
+    for (const path of ['/assets/gone-0b1d2e.js', '/assets/gone-0b1d2e.css', '/vite.svg']) {
+      const response = await fetch(`${baseUrl}${path}`);
+      expect(response.status, path).toBe(404);
+      expect(response.headers.get('content-type'), path).not.toMatch(/html/);
+      expect(await response.text(), path).not.toContain('<title>nyabase</title>');
+      expect(response.headers.get('content-security-policy'), path).toContain("default-src 'self'");
+    }
+  });
+
+  it('serves index.html for client-side routes and the root, revalidated every time', async () => {
+    for (const path of ['/', '/containers/6172518f-5edb-402b-ac2a-c0a899f53b0e/usage']) {
+      const response = await fetch(`${baseUrl}${path}`);
+      expect(response.status, path).toBe(200);
+      expect(response.headers.get('content-type'), path).toMatch(/text\/html/);
+      expect(response.headers.get('cache-control'), path).toBe(REVALIDATE_CACHE_CONTROL);
+      expect(response.headers.get('content-security-policy'), path).toContain("frame-ancestors 'none'");
+      expect(await response.text(), path).toContain('<title>nyabase</title>');
+    }
+  });
+
+  it('keeps JSON 404s for the API and does not answer other methods with the SPA', async () => {
+    const api = await fetch(`${baseUrl}/api/missing`);
+    expect(api.status).toBe(404);
+    expect(await api.json()).toMatchObject({ statusCode: 404, error: 'Not Found' });
+    expect((await fetch(`${baseUrl}/api/ping`)).status).toBe(200);
+
+    const post = await fetch(`${baseUrl}/containers`, { method: 'POST' });
+    expect(post.status).toBe(404);
+    expect(await post.text()).not.toContain('<title>nyabase</title>');
+  });
+});
+
+function databaseError(code: string): DatabaseError {
+  const error = new DatabaseError('could not serialize access', 0, 'error');
+  error.code = code;
+  return error;
+}
+
+@Controller('db')
+class DatabaseFailureController {
+  @Get(':code')
+  fail(@Param('code') code: string) {
+    if (code === 'missing') throw new NotFoundException('gone');
+    throw databaseError(code);
+  }
+}
+
+@Module({ controllers: [DatabaseFailureController] })
+class DatabaseFailureModule {}
+
+describe('PgTransactionConflictFilter', () => {
+  let app: NestExpressApplication;
+  let baseUrl: string;
+
+  beforeAll(async () => {
+    app = await NestFactory.create<NestExpressApplication>(DatabaseFailureModule, { logger: false });
+    app.setGlobalPrefix('api');
+    app.useGlobalFilters(new ZodExceptionFilter(), new PgTransactionConflictFilter(app.getHttpAdapter()));
+    await app.listen(0, '127.0.0.1');
+    baseUrl = await app.getUrl();
+  });
+
+  afterAll(async () => {
+    await app?.close();
+  });
+
+  it('answers a serialization failure or deadlock that outlasted the retries with a retryable 409', async () => {
+    for (const code of ['40001', '40P01']) {
+      const response = await fetch(`${baseUrl}/api/db/${code}`);
+      expect(response.status, code).toBe(409);
+      expect(await response.json(), code).toMatchObject({ code: FailureCode.TransactionConflict });
+    }
+  });
+
+  it('leaves every other error to the default handling', async () => {
+    const unique = await fetch(`${baseUrl}/api/db/23505`);
+    expect(unique.status).toBe(500);
+    expect(await unique.json()).toEqual({ statusCode: 500, message: 'Internal server error' });
+    const missing = await fetch(`${baseUrl}/api/db/missing`);
+    expect(missing.status).toBe(404);
   });
 });

@@ -31,6 +31,12 @@ function newSecret(): string {
  * server (only its digest is stored, it expires), and the agent trades it
  * for its long-lived credential. Re-issuing never revokes the running agent;
  * a successful enrollment replaces its credential and drops the old socket.
+ *
+ * The token is spent when the agent first authenticates its control socket
+ * with the credential it got (AgentCredentialVerifier.confirmControl), not by
+ * the exchange itself: a response lost in transit or a failed write on the
+ * host is retried with the same token, and every retry rotates the credential
+ * so only the last one handed out works.
  */
 @Injectable()
 export class AgentEnrollmentService {
@@ -47,7 +53,12 @@ export class AgentEnrollmentService {
     const expiresAt = new Date(Date.now() + AGENT_ENROLLMENT_TTL_MS);
     await transaction
       .updateTable('infra.servers')
-      .set({ agent_enrollment_token_hash: agentSecretDigest(token), agent_enrollment_expires_at: expiresAt })
+      .set({
+        agent_enrollment_token_hash: agentSecretDigest(token),
+        agent_enrollment_expires_at: expiresAt,
+        // Whatever credential is stored now did not come from this token.
+        agent_credential_unconfirmed: false,
+      })
       .where('id', '=', serverId)
       .execute();
     return { enrollmentToken: token, expiresAt: expiresAt.toISOString() };
@@ -98,8 +109,8 @@ export class AgentEnrollmentService {
         .updateTable('infra.servers')
         .set({
           agent_credential_hash: agentSecretDigest(credential),
-          agent_enrollment_token_hash: null,
-          agent_enrollment_expires_at: null,
+          // The token stays valid until this credential is first used.
+          agent_credential_unconfirmed: true,
           agent_hostname: request.hostname,
         })
         .where('id', '=', serverId)
@@ -107,7 +118,7 @@ export class AgentEnrollmentService {
       await this.audit.append(transaction, null, AuditAction.EnrollAgent, serverId, 'server', {
         hostname: request.hostname,
       });
-      // A previous agent's credential just stopped being valid.
+      // A previous agent's credential (or an earlier attempt's) just stopped being valid.
       afterCommit(transaction, () => this.agents.disconnect(serverId));
     });
     return { serverId, credential };

@@ -7,18 +7,42 @@ import { z } from 'zod';
  * WebSocket the agent opens back to the Backend on request.
  */
 
-export const AGENT_PROTOCOL_VERSION = 1;
+/**
+ * The contract between a Backend build and an agent build: the frame shapes
+ * here AND what the agent's policy (packages/agent/src/policy.ts) accepts.
+ * Bump it whenever either changes so that one side's output could be refused
+ * by the other; the Backend closes a control socket that says hello with any
+ * other version (AGENT_CLOSE_PROTOCOL_UNSUPPORTED) and records why on the
+ * server. packages/agent/src/protocol-freeze.test.ts pins the sources.
+ */
+export const AGENT_PROTOCOL_VERSION = 2;
 export const AGENT_CONTROL_PATH = '/ws/agent';
 export const AGENT_STREAM_PATH = '/ws/agent/stream';
 export const AGENT_ENROLL_PATH = '/api/agent/enroll';
 
+/** Close code for a hello whose protocol the Backend does not speak. */
+export const AGENT_CLOSE_PROTOCOL_UNSUPPORTED = 4426;
+
 export const AGENT_ENROLLMENT_TTL_MS = 24 * 60 * 60 * 1000;
 export const AGENT_HEARTBEAT_INTERVAL_MS = 15_000;
 export const AGENT_STREAM_CONNECT_TIMEOUT_MS = 15_000;
-/** Largest Incus request or response body carried through the tunnel. */
+/** Largest Incus response body carried back through the tunnel (instance lists with state). */
 export const MAX_AGENT_INCUS_BODY_BYTES = 16 * 1024 * 1024;
-/** Control frames carry base64 bodies; leave room for the 4/3 expansion. */
-export const MAX_AGENT_CONTROL_FRAME_BYTES = 24 * 1024 * 1024;
+/** Largest request body the Backend sends: instance / volume documents and small guest files. */
+export const MAX_AGENT_INCUS_REQUEST_BODY_BYTES = 1024 * 1024;
+const base64Bytes = (bytes: number): number => Math.ceil(bytes / 3) * 4;
+/** Room for the JSON frame around a body: ids, the path, the header map. */
+const AGENT_FRAME_ENVELOPE_BYTES = 256 * 1024;
+/** Agent -> Backend: a response carrying the largest response body, base64 encoded. */
+export const MAX_AGENT_CONTROL_FRAME_BYTES = base64Bytes(MAX_AGENT_INCUS_BODY_BYTES) + AGENT_FRAME_ENVELOPE_BYTES;
+/** Backend -> agent: a request carrying the largest request body, base64 encoded. */
+export const MAX_AGENT_BACKEND_FRAME_BYTES = base64Bytes(MAX_AGENT_INCUS_REQUEST_BODY_BYTES) + AGENT_FRAME_ENVELOPE_BYTES;
+/** hello (up to 2048 API extensions) is the largest frame that answers no request. */
+export const MAX_AGENT_HELLO_FRAME_BYTES = 512 * 1024;
+/** After hello only status frames come unasked; anything larger must answer a pending request. */
+export const MAX_AGENT_STATUS_FRAME_BYTES = 4 * 1024;
+/** Status frames one control connection may send per minute (the agent sends them on change only). */
+export const MAX_AGENT_STATUS_FRAMES_PER_MINUTE = 30;
 export const MAX_AGENT_STREAM_FRAME_BYTES = 8 * 1024 * 1024;
 export const MAX_AGENT_METRICS_TEXT_BYTES = 8 * 1024 * 1024;
 
@@ -35,6 +59,30 @@ export const GUEST_IPV6_DISABLE_SYSCTLS = [
   'linux.sysctl.net.ipv6.conf.all.disable_ipv6',
   'linux.sysctl.net.ipv6.conf.default.disable_ipv6',
 ] as const;
+
+/**
+ * Why `value` cannot be a simplestreams image server Incus pulls from, or
+ * undefined. One rule for the image source settings (config/definition.ts)
+ * and the agent policy, so a saved source is never refused at pull time.
+ * Incus fetches `<server>/streams/v1/...` itself from the host's network:
+ * https without credentials, query or fragment. IP literals and internal
+ * names are allowed, since an in-house mirror is a normal setup on hosts
+ * dedicated to nyabase.
+ */
+export function imageSourceServerProblem(value: string): string | undefined {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return 'image source server must be a URL';
+  }
+  if (url.protocol !== 'https:') return 'image source server must use https';
+  if (url.username || url.password) return 'image source server must not carry credentials';
+  if (url.search || url.hash || value.includes('?') || value.includes('#')) {
+    return 'image source server must not carry a query or fragment';
+  }
+  return undefined;
+}
 
 export type AgentSecretKind = 'credential' | 'enrollment';
 const AGENT_SECRET_PREFIX: Readonly<Record<AgentSecretKind, string>> = {
@@ -74,6 +122,18 @@ export const zAgentEnrollResponse = z.object({
   credential: zText(256),
 }).strict();
 
+/**
+ * Host state the agent enforces on its own and the Backend only shows: sent
+ * in hello and again in a status frame whenever it changes.
+ */
+export const zAgentHostStatus = z.object({
+  /** The `bridge nyabase_guard` table verified in place; guest NICs are not brought up otherwise. */
+  ipv6Guard: z.object({
+    present: z.boolean(),
+    error: z.string().max(512).nullable(),
+  }).strict(),
+}).strict();
+
 export const zAgentHello = z.object({
   type: z.literal('hello'),
   protocol: z.literal(AGENT_PROTOCOL_VERSION),
@@ -83,6 +143,13 @@ export const zAgentHello = z.object({
     serverVersion: zText(64),
     apiExtensions: z.array(zText(128)).max(2048),
   }).strict(),
+  status: zAgentHostStatus,
+}).strict();
+
+/** Agent -> Backend, unsolicited and only after welcome: the host status changed. */
+export const zAgentStatus = z.object({
+  type: z.literal('status'),
+  status: zAgentHostStatus,
 }).strict();
 
 export const zAgentWelcome = z.object({
@@ -98,7 +165,7 @@ export const zAgentIncusHttpParams = z.object({
   path: zText(4096).regex(/^\/1\.0(?:[/?].*)?$/),
   headers: z.record(zText(256), z.string().max(4096)).optional(),
   /** Request body, base64 encoded. */
-  body: z.string().max(Math.ceil(MAX_AGENT_INCUS_BODY_BYTES / 3) * 4 + 4).optional(),
+  body: z.string().max(base64Bytes(MAX_AGENT_INCUS_REQUEST_BODY_BYTES)).optional(),
   timeoutMs: z.number().int().positive().max(600_000),
 }).strict();
 
@@ -154,6 +221,8 @@ export const AGENT_ERROR_CODES = [
   'timeout',
   'cancelled',
   'too_large',
+  /** The request would bring a guest NIC up while the IPv6 guard is not verified; retry later. */
+  'ipv6_guard_missing',
   'internal',
 ] as const;
 export type AgentErrorCode = typeof AGENT_ERROR_CODES[number];
@@ -177,11 +246,13 @@ export const zAgentResponse = z.discriminatedUnion('ok', [
 ]);
 
 /** Agent -> Backend control frames. */
-export const zAgentFrame = z.union([zAgentHello, zAgentResponse]);
+export const zAgentFrame = z.union([zAgentHello, zAgentResponse, zAgentStatus]);
 
 export type AgentEnrollRequest = z.infer<typeof zAgentEnrollRequest>;
 export type AgentEnrollResponse = z.infer<typeof zAgentEnrollResponse>;
 export type AgentHello = z.infer<typeof zAgentHello>;
+export type AgentHostStatus = z.infer<typeof zAgentHostStatus>;
+export type AgentStatus = z.infer<typeof zAgentStatus>;
 export type AgentWelcome = z.infer<typeof zAgentWelcome>;
 export type AgentRequest = z.infer<typeof zAgentRequest>;
 export type AgentCancel = z.infer<typeof zAgentCancel>;

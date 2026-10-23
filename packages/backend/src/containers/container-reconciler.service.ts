@@ -7,7 +7,6 @@ import {
   compareManagedFields,
   deriveInstanceName,
   IncusError,
-  isMissingCustomVolumeError,
   observeRootQuotaPending,
   type DesiredInstanceSpec,
   type IncusClientPort,
@@ -32,27 +31,21 @@ import { failedOutcome } from '../reconcile/managed-reconciler.js';
 import { ReconcilerRegistry } from '../reconcile/reconciler-registry.service.js';
 import { ProxySnapshotNotifierService } from '../proxy-snapshots/proxy-snapshot-notifier.service.js';
 import { gpuRequiresStop } from '../gpu/instance-spec.js';
-import {
-  VOLUME_ADOPT_FAIL_AFTER_ATTEMPTS,
-  ensureSharedCatalogOnServer,
-} from '../volumes/shared-volume-catalog.service.js';
 import { applyGuestNetwork, parseCidrPrefix } from './guest-network.adapter.js';
 import {
   buildContainerSpec,
   createInstance,
   deletePhysicalInstance,
   findExpectedOrIdentity,
-  isNotFound,
   MANAGED_FIELD_OWNERSHIP,
   managedContainerIdentity,
   normalized,
-  observedDiskUsageBytes,
   observeRootUsage,
-  orphanInstances,
   powerTransition,
   putManagedFields,
   readRequired,
   readState,
+  removeDevices,
   renameInstance,
   restartTransition,
   restartWithProof,
@@ -66,12 +59,25 @@ import {
 } from './container-instance-ops.js';
 import {
   ContainerReconcileStore,
-  type ContainerAttachment,
   type ContainerRow,
   type SshFileObservation,
 } from './container-reconcile.store.js';
-import { decideRootShrink } from './container-rules.js';
-import { IncusContainerSshStateAdapter, reconcileSshFile } from './container-ssh.js';
+import { isRestartIntent } from './container-rules.js';
+import {
+  awaitsSshDaemon,
+  guardRootShrink,
+  NotReadyPasses,
+  prepareAttachments,
+  rootShrinkDecision,
+  scanServerContainers,
+} from './container-reconcile-steps.js';
+import {
+  IncusContainerSshStateAdapter,
+  hostCertificatePrincipals,
+  reconcileHostCertificate,
+  reconcileSshFile,
+} from './container-ssh.js';
+import { SshHostCaService } from '../ssh-host-ca/ssh-host-ca.service.js';
 
 type Loaded =
   | { readonly outcome: ReconcileOutcome }
@@ -83,10 +89,20 @@ type Loaded =
  * steps are private methods; the Incus operations are plain functions in
  * container-instance-ops and all SQL is in the store.
  */
+/** Root quota polls: 5 s doubling to a minute, about an hour in all. */
+const ROOT_QUOTA_MAX_ATTEMPTS = 64;
+/** A write refused for its content (agent policy, Incus validation), not a transient failure. */
+const REFUSED_WRITE_CODES: ReadonlySet<string> = new Set(['AGENT_POLICY_DENIED', 'INCUS_BAD_REQUEST']);
+
+export function rootQuotaRetryDelay(attemptCount: number): number {
+  return Math.min(60_000, 5_000 * 2 ** Math.min(4, Math.max(0, attemptCount - 1)));
+}
+
 @Injectable()
 export class ContainerReconciler implements ManagedReconciler, OnModuleInit {
   readonly resourceType = 'container' as const;
   private readonly logger = new Logger(ContainerReconciler.name);
+  private readonly notReady = new NotReadyPasses();
 
   constructor(
     private readonly store: ContainerReconcileStore,
@@ -98,6 +114,7 @@ export class ContainerReconciler implements ManagedReconciler, OnModuleInit {
     private readonly config: NyabaseConfigService,
     private readonly accessChanges: AccessChangeNotifier,
     private readonly wake: ReconcileWakeService,
+    private readonly hostCa: SshHostCaService,
   ) {}
 
   onModuleInit(): void {
@@ -146,7 +163,13 @@ export class ContainerReconciler implements ManagedReconciler, OnModuleInit {
     if (row.lifecycle_phase === 'deleting' || context.intent.kind === 'container.delete') {
       return this.reconcileDelete(context, client, row, expectedName);
     }
-    const prepared = await this.prepareAttachments(context, client, row);
+    await this.beforeAttachments(context, client, row, expectedName);
+    const prepared = await prepareAttachments(
+      { store: this.store, logger: this.logger, notReady: this.notReady },
+      context,
+      client,
+      row,
+    );
     if ('outcome' in prepared) return prepared.outcome;
     const desiredAttachments = prepared.attachments;
     const runtime = await resolveContainerRuntime(this.cpuSets, this.config, row);
@@ -156,7 +179,7 @@ export class ContainerReconciler implements ManagedReconciler, OnModuleInit {
     const identityOutcome = this.checkIdentity(actual, row, expectedName);
     if (identityOutcome) return identityOutcome;
 
-    const state = await readState(client, expectedName);
+    let state = await readState(client, expectedName);
     const diff = compareManagedFields(actual.document, desired, MANAGED_FIELD_OWNERSHIP);
     if (diff.kind === 'managed_failure') {
       return {
@@ -170,8 +193,9 @@ export class ContainerReconciler implements ManagedReconciler, OnModuleInit {
           : intentFailure('MANAGED_COMPARATOR_FAILURE', 'Managed field comparison failed'),
       };
     }
+    state = await this.stopForDisruptiveChange(context, client, row, actual, desired, diff, state);
     const usedBytes = await observeRootUsage(client, row.root_pool_name, expectedName, state);
-    await this.guardRootShrink(row, actual, desired, state, usedBytes);
+    await guardRootShrink(this.store, row, actual, desired, state, usedBytes);
     if (!diff.empty) {
       if (running(state) && gpuRequiresStop(diff)) {
         return failedOutcome(
@@ -184,7 +208,7 @@ export class ContainerReconciler implements ManagedReconciler, OnModuleInit {
       await putManagedFields(client, expectedName, desired, desiredAttachments.length > 0);
     }
 
-    await this.reconcilePower(context, client, row, expectedName, state);
+    state = await this.reconcilePower(context, client, row, expectedName, state);
     await this.reconcileRestart(context, client, expectedName, state);
     const sshState = await readState(client, expectedName);
     if (running(sshState)) {
@@ -214,31 +238,82 @@ export class ContainerReconciler implements ManagedReconciler, OnModuleInit {
       running(sshState),
       context.signal,
     );
-    const outcome = await this.verifyAndSettle(client, row, desired, expectedName, ssh);
+    if (ssh.status === 'running') await this.convergeHostCertificate(context, client, row, expectedName);
+    const outcome = await this.verifyAndSettle(context.intent, client, row, desired, expectedName, ssh);
     if (outcome.outcome === 'succeeded' && !sameCpus(row.cpu_set, runtime.cpus)) {
       await this.store.recordCpuSet(row.id, runtime.cpus);
     }
     return outcome;
   }
 
+  /** Best effort: a guest without a certificate still works, with trust-on-first-use. */
+  private async convergeHostCertificate(
+    context: ReconcileRunContext,
+    client: IncusClientPort,
+    row: ContainerRow,
+    name: string,
+  ): Promise<void> {
+    try {
+      const outcome = await reconcileHostCertificate(
+        this.sshState,
+        client,
+        name,
+        (hostPublicKey) => this.hostCa.certify({
+          ownerId: row.owner_id,
+          hostPublicKey,
+          principals: hostCertificatePrincipals(row.name, this.config.get<string>('ssh.proxyHostSuffix')),
+          keyId: `nyabase:${row.id}`,
+        }),
+        () => this.auditMutate(context.intent, 'POST', `/1.0/instances/${name}/exec`, name),
+        context.signal,
+      );
+      if (outcome !== 'current' && outcome !== 'issued') {
+        this.logger.warn(`Container ${row.id} has no SSH host certificate: ${outcome}`);
+      }
+    } catch (error) {
+      if (context.signal.aborted) throw error;
+      this.logger.warn(`Container ${row.id} SSH host certificate failed: ${String(error)}`);
+    }
+  }
+
   // --- loading and preparation ---------------------------------------------------
 
-  /** Load the desired container and refuse intents that cannot be applied to it. */
+  /**
+   * Load the desired container and refuse intents that cannot be applied to it.
+   * `stale` outcomes settle the intent without touching Incus. A deleting
+   * container is never stale (any intent drives it to deletion), and a
+   * superseded restart is carried forward onto the current revision unless a
+   * later stop or delete replaced it.
+   */
   private async load(context: ReconcileRunContext): Promise<Loaded> {
-    const row = await this.store.readContainer(context.intent.resourceId);
+    const { intent } = context;
+    const row = await this.store.readContainer(intent.resourceId);
     if (!row) {
+      // Only a finished delete removes the row; a retried delete (lease lost after it) is done.
+      if (intent.kind === 'container.delete') {
+        return { outcome: { outcome: 'succeeded', observedRevision: intent.targetRevision, stale: true } };
+      }
       return {
         outcome: failedOutcome('CONTAINER_NOT_FOUND', 'The desired container no longer exists'),
       };
     }
-    if (row.server_id !== context.intent.serverId) {
+    if (row.server_id !== intent.serverId) {
       return {
         outcome: failedOutcome('CONTAINER_SERVER_MISMATCH', 'The intent server does not own the container'),
       };
     }
-    if (context.intent.targetRevision < row.revision) {
+    const restart = isRestartIntent(intent.kind, intent.request);
+    if (restart && (row.lifecycle_phase === 'deleting' || row.power_intent !== 'running')) {
       return {
-        outcome: { outcome: 'succeeded', observedRevision: context.intent.targetRevision },
+        outcome: {
+          ...failedOutcome('RESTART_SUPERSEDED', 'A later stop or delete replaced the restart before it ran'),
+          stale: true,
+        },
+      };
+    }
+    if (!restart && row.lifecycle_phase !== 'deleting' && intent.targetRevision < row.revision) {
+      return {
+        outcome: { outcome: 'succeeded', observedRevision: intent.targetRevision, stale: true },
       };
     }
     if (!row.parent_interface || !row.routed_ip || !row.network_key || !row.gateway) {
@@ -262,103 +337,66 @@ export class ContainerReconciler implements ManagedReconciler, OnModuleInit {
   }
 
   /**
-   * The attachments the instance must carry, with their catalogs present on the
-   * server. An outcome means the intent became stale or must end here.
+   * Powering off and unplugging never wait for the other attachments: a
+   * volume that is not ready on this server (its create failed, a placement
+   * is pending) would hold the stop or the detach, the access-lapse ones
+   * included, in retries (and then a failure) while the instance keeps
+   * running, or keeps the detached volume mounted. A detach that lands here
+   * settles its attachment row at once, whatever the rest of the pass does.
    */
-  private async prepareAttachments(
+  private async beforeAttachments(
     context: ReconcileRunContext,
     client: IncusClientPort,
     row: ContainerRow,
-  ): Promise<{ outcome: ReconcileOutcome } | { attachments: ContainerAttachment[] }> {
-    const beforeMkdir = await this.store.rereadDesired(
-      row.id,
-      row.server_id,
-      context.intent.targetRevision,
-    );
-    if (beforeMkdir.stale) {
-      return {
-        outcome: { outcome: 'succeeded', observedRevision: context.intent.targetRevision },
-      };
+    expectedName: string,
+  ): Promise<void> {
+    const detaching = await this.store.readDetachingDevices(row.id);
+    if (row.power_intent !== 'stopped' && detaching.length === 0) return;
+    const actual = await this.findInstance(client, expectedName, row);
+    if (!actual) {
+      // No instance on this server: nothing carries the detached volumes.
+      if (detaching.length > 0) await this.store.settleVolumeBinds(row.id, { devices: {} }, true);
+      return;
     }
-    const catalogOutcome = await this.ensureDesiredCatalogs(
-      context,
-      client,
-      beforeMkdir.desired,
-      row.server_id,
-    );
-    if (catalogOutcome) return { outcome: catalogOutcome };
-    const beforePut = await this.store.rereadDesired(
-      row.id,
-      row.server_id,
-      context.intent.targetRevision,
-    );
-    return { attachments: beforePut.desired };
+    if (this.checkIdentity(actual, row, expectedName)) return;
+    const status = actual.document.state?.status ?? actual.document.status;
+    if (row.power_intent === 'stopped' && powerTransition(status, 'stopped') === 'stop') {
+      await setPowerState(client, actual.name, 'stop');
+    }
+    if (detaching.length === 0) return;
+    let document = actual.document;
+    if (detaching.some((device) => Object.prototype.hasOwnProperty.call(document.devices ?? {}, device))) {
+      await this.auditMutate(context.intent, 'PUT', `/1.0/instances/${actual.name}`, actual.name);
+      if (!await this.unplugDetaching(client, actual.name, detaching)) return;
+      document = (await readRequired(client, actual.name)).document;
+    }
+    await this.store.settleVolumeBinds(row.id, document, true);
   }
 
   /**
-   * Every volume the instance mounts must already exist in this daemon's Incus
-   * catalog before the instance PUT, or Incus rejects the device.
+   * The targeted unplug writes the instance back as it is, so host-side drift
+   * the agent policy (or Incus) refuses refuses the unplug too. Then the
+   * device is left to the full managed document of this pass, which replaces
+   * the drift as well (the desired attachments never include a detaching
+   * one) and settles the row after it; that one write does wait for the
+   * other attachments to be ready. False when the unplug was refused.
    */
-  private async ensureDesiredCatalogs(
-    context: ReconcileRunContext,
+  private async unplugDetaching(
     client: IncusClientPort,
-    attachments: readonly ContainerAttachment[],
-    serverId: string,
-  ): Promise<ReconcileOutcome | undefined> {
-    for (const attachment of attachments) {
-      if (!attachment.pool_name) {
-        throw new IncusError(
-          attachment.shared ? 'VOLUME_PLACEMENT_PENDING' : 'MISSING_STORAGE_POOL',
-          attachment.shared ? 'retry' : 'managed_failure',
-          { volumeId: attachment.volume_id, serverId },
-        );
-      }
-      if (attachment.shared) {
-        const result = await ensureSharedCatalogOnServer(client, {
-          poolName: attachment.pool_name,
-          incusName: attachment.incus_name,
-          sizeBytes: attachment.size_bytes,
-        });
-        if (result === 'missing') {
-          if (context.intent.attemptCount >= VOLUME_ADOPT_FAIL_AFTER_ATTEMPTS) {
-            return failedOutcome(
-                'VOLUME_CATALOG_ADOPT_FAILED',
-                'Incus did not adopt the existing CephFS directory into this daemon catalog',
-                { volumeId: attachment.volume_id, serverId },
-              );
-          }
-          throw new IncusError('VOLUME_CATALOG_ADOPT_PENDING', 'retry', {
-            volumeId: attachment.volume_id,
-            serverId,
-          });
-        }
-        await this.store.markCatalogPresent(attachment.volume_id, serverId);
-        this.logger.log(
-          `container=${context.intent.resourceId} ensure shared catalog volume=${attachment.volume_id} `
-          + `server=${serverId} result=${result}`,
-        );
-        continue;
-      }
-      try {
-        await client.getStorageVolume(attachment.pool_name, 'custom', attachment.incus_name);
-        await this.store.markCatalogPresent(attachment.volume_id, serverId);
-      } catch (error) {
-        if (error instanceof IncusError && error.code === 'MISSING_STORAGE_POOL') {
-          throw error;
-        }
-        if (isNotFound(error) || isMissingCustomVolumeError(error)) {
-          this.logger.log(
-            `Custom volume ${attachment.incus_name} is not present on ${serverId}`,
-          );
-          throw new IncusError('VOLUME_PLACEMENT_PENDING', 'retry', {
-            volumeId: attachment.volume_id,
-            reason: 'preflight',
-          });
-        }
-        throw error;
-      }
+    name: string,
+    detaching: readonly string[],
+  ): Promise<boolean> {
+    try {
+      await removeDevices(client, name, detaching);
+      return true;
+    } catch (error) {
+      if (!(error instanceof IncusError) || !REFUSED_WRITE_CODES.has(error.code)) throw error;
+      this.logger.warn(
+        `Unplugging ${detaching.join(', ')} from ${name} was refused (${error.code}); `
+        + 'writing the full managed document instead',
+      );
+      return false;
     }
-    return undefined;
   }
 
   // --- instance lifecycle --------------------------------------------------------
@@ -392,7 +430,6 @@ export class ContainerReconciler implements ManagedReconciler, OnModuleInit {
   ): Promise<ActualInstance> {
     const actual = await this.findInstance(client, expectedName, row);
     if (!actual) {
-      await this.deleteManagedOrphans(client, row, context.intent);
       await this.auditMutate(context.intent, 'POST', '/1.0/instances', expectedName);
       await createInstance(client, desired, expectedName);
       await this.store.setInstanceName(row.id, expectedName);
@@ -483,66 +520,32 @@ export class ContainerReconciler implements ManagedReconciler, OnModuleInit {
     return true;
   }
 
-  /** Remove managed instances on the server that no live container row owns. */
-  private async deleteManagedOrphans(
-    client: IncusClientPort,
-    row: ContainerRow,
-    intent: IntentRecord,
-  ): Promise<void> {
-    const known = new Set(
-      (await this.store.listLiveContainerIds(row.server_id)).map((id) => normalized(id)),
-    );
-    const instances = await client.listInstances(2);
-    for (const document of orphanInstances(
-      instances.metadata as InstanceFull[],
-      row.server_id,
-      known,
-    )) {
-      await this.deleteInstance(client, document.name!, intent);
-    }
-  }
-
-  // --- root disk, power ------------------------------------------------------------
+  // --- power ------------------------------------------------------------------------
 
   /**
-   * Refuse a root-disk shrink that would lose data (or cannot be judged), and
-   * revert the desired size so the container stops asking for it.
+   * A change only a stopped instance can take (GPU runtime/devices, a
+   * block-backed root shrink) must never block power-off: when the instance
+   * should be stopped, or is due a restart, stop it first and apply the change
+   * while stopped. A container that should keep running reports the change.
    */
-  private async guardRootShrink(
+  private async stopForDisruptiveChange(
+    context: ReconcileRunContext,
+    client: IncusClientPort,
     row: ContainerRow,
     actual: ActualInstance,
     desired: DesiredInstanceSpec,
+    diff: ManagedFieldsDiff,
     state: InstanceState,
-    usedBytes: bigint | null,
-  ): Promise<void> {
-    const actualRoot = observedDiskUsageBytes(
-      (actual.document.devices?.root as Record<string, unknown> | undefined)?.size,
-    );
-    const desiredRoot = observedDiskUsageBytes(
-      (desired.devices?.root as Record<string, unknown> | undefined)?.size,
-    );
-    if (actualRoot === null || desiredRoot === null) return;
-    const decision = decideRootShrink({
-      resizeFamily: row.root_resize_family,
-      actualRootBytes: actualRoot,
-      desiredRootBytes: desiredRoot,
-      usedBytes,
-      running: running(state),
-    });
-    if (decision === 'allow') return;
-    const code = decision === 'requires_stop'
-      ? 'ROOT_SHRINK_REQUIRES_STOP'
-      : decision === 'usage_unknown'
-        ? 'ROOT_USAGE_UNKNOWN'
-        : 'ROOT_SHRINK_BELOW_USAGE';
-    if (decision === 'usage_floor' || decision === 'usage_unknown') {
-      await this.store.revertImpossibleRootShrink(row.id, actualRoot, usedBytes, code);
+  ): Promise<InstanceState> {
+    if (!running(state)) return state;
+    if (row.power_intent !== 'stopped' && !isRestartIntent(context.intent.kind, context.intent.request)) {
+      return state;
     }
-    throw new IncusError(code, 'managed_failure', {
-      containerId: row.id,
-      requestedBytes: desiredRoot.toString(),
-      usedBytes: usedBytes?.toString() ?? null,
-    });
+    const disruptive = (!diff.empty && gpuRequiresStop(diff))
+      || rootShrinkDecision(row, actual, desired, null, true).decision === 'requires_stop';
+    if (!disruptive) return state;
+    await setPowerState(client, actual.name, 'stop');
+    return readState(client, actual.name);
   }
 
   /** Start or stop the instance so its power state matches the desired power intent. */
@@ -552,13 +555,15 @@ export class ContainerReconciler implements ManagedReconciler, OnModuleInit {
     row: ContainerRow,
     name: string,
     currentState: InstanceState,
-  ): Promise<void> {
-    if (context.intent.kind === 'container.power' && context.intent.request?.action === 'restart') {
-      return;
+  ): Promise<InstanceState> {
+    // Restarting a running instance is the restart step's job; a stopped one is started here.
+    if (isRestartIntent(context.intent.kind, context.intent.request) && running(currentState)) {
+      return currentState;
     }
     const transition = powerTransition(currentState.status, row.power_intent);
-    if (transition === 'none') return;
+    if (transition === 'none') return currentState;
     await setPowerState(client, name, transition);
+    return readState(client, name);
   }
 
   /** Restart, proven by a changed `started_at` against the baseline recorded at request time. */
@@ -568,9 +573,7 @@ export class ContainerReconciler implements ManagedReconciler, OnModuleInit {
     name: string,
     currentState: InstanceState,
   ): Promise<void> {
-    if (context.intent.kind !== 'container.power' || context.intent.request?.action !== 'restart') {
-      return;
-    }
+    if (!isRestartIntent(context.intent.kind, context.intent.request)) return;
     const baseline = context.intent.baseline;
     if (!baseline || !Object.prototype.hasOwnProperty.call(baseline, 'startedAt')) {
       throw new IncusError('RESTART_BASELINE_MISSING', 'managed_failure');
@@ -587,6 +590,7 @@ export class ContainerReconciler implements ManagedReconciler, OnModuleInit {
 
   /** Re-read the instance, check it matches the spec, record the observation and pick the outcome. */
   private async verifyAndSettle(
+    intent: IntentRecord,
     client: IncusClientPort,
     row: ContainerRow,
     desired: DesiredInstanceSpec,
@@ -626,19 +630,20 @@ export class ContainerReconciler implements ManagedReconciler, OnModuleInit {
       observedUsage,
     );
     if (quota.pending) {
-      return {
-        outcome: 'retry',
-        failure: intentFailure(
-          'ROOT_QUOTA_PENDING',
-          'Incus has not finished applying the root filesystem quota',
-          { pendingSizeBytes: quota.pendingSizeBytes ?? row.root_size_bytes },
-        ),
-        retryAfterMs: 5_000,
-      };
+      const failure = intentFailure(
+        'ROOT_QUOTA_PENDING',
+        'Incus has not finished applying the root filesystem quota',
+        { pendingSizeBytes: quota.pendingSizeBytes ?? row.root_size_bytes },
+      );
+      // Every pass re-runs the guest network and SSH steps: back off, and
+      // give up (a user retry restarts it) instead of polling forever.
+      if (intent.attemptCount >= ROOT_QUOTA_MAX_ATTEMPTS) return { outcome: 'failed', failure };
+      return { outcome: 'retry', failure, retryAfterMs: rootQuotaRetryDelay(intent.attemptCount) };
     }
     if (
       running(verifiedState)
       && row.ssh_public_key
+      && awaitsSshDaemon(intent)
       && ssh.status !== 'running'
       && ssh.status !== 'disabled'
       && ssh.status !== 'container_stopped'
@@ -716,73 +721,12 @@ export class ContainerReconciler implements ManagedReconciler, OnModuleInit {
 
   // --- full scan -------------------------------------------------------------------
 
-  /** Full scan: queue update/delete intents for drifted containers and remove orphaned instances. */
-  async scan(serverId: string, client: IncusClientPort, signal: AbortSignal): Promise<void> {
-    const rows = await this.store.listScanContainers(serverId);
-    const known = new Set(
-      rows
-        .filter((row) => row.lifecycle_phase !== 'deleting')
-        .map((row) => normalized(row.id)),
+  scan(serverId: string, client: IncusClientPort, signal: AbortSignal): Promise<void> {
+    return scanServerContainers(
+      { store: this.store, cpuSets: this.cpuSets, config: this.config, logger: this.logger },
+      serverId,
+      client,
+      signal,
     );
-    const instances = await client.listInstances(2, { signal });
-    const documents = instances.metadata as InstanceFull[];
-    const byContainerId = new Map<string, ActualInstance>();
-    for (const document of documents) {
-      const identity = managedContainerIdentity(document);
-      if (identity.managed && identity.serverId === normalized(serverId) && identity.containerId) {
-        byContainerId.set(identity.containerId, { name: document.name ?? '', document });
-      }
-    }
-    for (const desired of rows) {
-      if (desired.needs_attention || desired.lifecycle_phase === 'failed') continue;
-      if (desired.lifecycle_phase === 'deleting') {
-        await this.store.enqueueScanIntent(desired, 'container.delete');
-        continue;
-      }
-      const actual = byContainerId.get(normalized(desired.id));
-      const usage = observedDiskUsageBytes(actual?.document.state?.disk?.root?.usage);
-      if (usage !== null) {
-        await this.store.recordRootUsage(desired.id, usage);
-      }
-      try {
-        if (await this.scanNeedsUpdate(desired, deriveInstanceName(desired.id), actual)) {
-          await this.store.enqueueScanIntent(desired, 'container.update');
-        }
-      } catch (error) {
-        // One container that cannot be specified must not stop the scan of the others.
-        this.logger.warn(`Full scan could not check container ${desired.id}: ${String(error)}`);
-      }
-    }
-    for (const document of orphanInstances(documents, serverId, known)) {
-      await this.deleteInstance(client, document.name!);
-    }
-    await this.cpuSets.releaseIdle(serverId);
-  }
-
-  /** Does the live instance differ from what the platform wants (name, power, managed fields)? */
-  private async scanNeedsUpdate(
-    row: {
-      readonly id: string;
-      readonly server_id: string;
-      readonly power_intent: 'running' | 'stopped';
-    },
-    expectedName: string,
-    actual: ActualInstance | undefined,
-  ): Promise<boolean> {
-    if (!actual) return true;
-    if (actual.name !== expectedName) return true;
-    const status = actual.document.state?.status ?? actual.document.status;
-    if (powerTransition(status, row.power_intent) !== 'none') return true;
-    const full = await this.store.readContainer(row.id);
-    if (!full?.parent_interface || !full.routed_ip || !full.network_key || !full.gateway) {
-      return true;
-    }
-    const attachments = await this.store.readAttachments(row.id, row.server_id);
-    const desired = buildContainerSpec(
-      full,
-      toSpecAttachments(attachments.filter((attachment) => attachment.bind_state !== 'detaching')),
-      await resolveContainerRuntime(this.cpuSets, this.config, full, 'preview'),
-    );
-    return compareManagedFields(actual.document, desired, MANAGED_FIELD_OWNERSHIP).kind !== 'empty';
   }
 }

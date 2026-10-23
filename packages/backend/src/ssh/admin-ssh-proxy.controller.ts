@@ -14,8 +14,11 @@ import type { UserRecord } from '../iam/auth-persistence.js';
 import { AuditService } from '../iam/audit.service.js';
 import { assertActorRole } from '../iam/administration.js';
 import { AccessResolverService } from '../iam/access-resolver.service.js';
+import { ContainerSshConvergenceService } from '../containers/container-ssh.js';
+import { SshHostCaService } from '../ssh-host-ca/ssh-host-ca.service.js';
 
 interface SshProxyHostKeySummaryDto {
+  publicKey: string | null;
   fingerprint: string | null;
   generation: number | null;
   rotatedAt: string | null;
@@ -28,6 +31,8 @@ export class AdminSshProxyController {
     private sshIdentities: SshIdentityService,
     private audit: AuditService,
     private accessResolver: AccessResolverService,
+    private hostCa: SshHostCaService,
+    private containerSsh: ContainerSshConvergenceService,
   ) {}
 
   @Get('status')
@@ -54,6 +59,36 @@ export class AdminSshProxyController {
       ),
     );
     return this.sshProxyGateway.disconnectAll('admin disconnect all', requestId);
+  }
+
+  /**
+   * Recovery after ssh.keyEncryptionSecret was lost: every user gets a new
+   * host CA and every container a new certificate. Users must replace their
+   * `@cert-authority` known_hosts line.
+   */
+  @Post('host-authorities/reset')
+  @HttpCode(200)
+  @RequireRole(Role.Operator)
+  async resetHostAuthorities(@CurrentUser() actor: UserRecord): Promise<{ reset: number }> {
+    const reset = await this.accessResolver.runWithActorRole(
+      actor.id,
+      Role.Operator,
+      async (transaction) => {
+        const count = await this.hostCa.resetAll(transaction);
+        await this.audit.append(
+          transaction,
+          actor.id,
+          AuditAction.ResetSshHostAuthorities,
+          'host-authorities',
+          'ssh_proxy',
+          { reset: count },
+        );
+        return count;
+      },
+    );
+    // Re-signing every container runs in the background; a retry would reset the CAs again.
+    this.containerSsh.startReconcileAllHostCertificates();
+    return { reset };
   }
 
   @Get('host-key')
@@ -87,6 +122,7 @@ export class AdminSshProxyController {
       () => this.sshProxyGateway.broadcastSnapshot(),
     );
     const result = {
+      publicKey: rotated.publicKey,
       fingerprint: rotated.fingerprint,
       generation: rotated.generation,
       rotatedAt: rotated.rotatedAt.toISOString(),
@@ -101,6 +137,7 @@ export class AdminSshProxyController {
       },
     );
     return {
+      publicKey: hostKey.publicKey,
       fingerprint: hostKey.fingerprint,
       generation: hostKey.generation,
       rotatedAt: hostKey.rotatedAt.toISOString(),

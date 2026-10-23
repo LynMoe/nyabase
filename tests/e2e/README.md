@@ -30,9 +30,10 @@ guest LAN (the proxies dial guests). Only one run exists at a time (fixed ports)
 6. Starts `nyabase-ssh-proxy` and `nyabase-http-proxy` on the configured ports.
 7. `lib/bootstrap.ts servers`: logs in as admin and registers every server; each
    response carries a one-time agent enrollment token (written to `enroll.env`).
-8. Starts a run-scoped agent on every lab host: the built `packages/agent` plus
-   `@nyabase/common`, `zod` and `ws` go to `/var/tmp/nyabase-e2e-agent-<run id>-s<n>/`
-   and run as the transient systemd unit of the same name. The agent dials the
+8. Starts a run-scoped agent on every lab host: the same self-contained bundle an
+   operator installs (`scripts/build-agent-bundle.sh`, from what step 2 built) goes to
+   `/var/tmp/nyabase-e2e-agent-<run id>-s<n>/` and runs as the transient systemd unit
+   of the same name. The agent dials the
    backend; for a remote host through an ssh reverse tunnel (`ssh -R`, loopback port
    `E2E_AGENT_TUNNEL_PORT`, default 13901) so the backend can stay on loopback. It
    enrolls with its token and keeps its credential in that directory.
@@ -72,7 +73,7 @@ types come from `@nyabase/common`, so DTO drift fails `pnpm e2e:check`.
 
 | File | Covers |
 | :--- | :--- |
-| `01-auth-sessions` | login, refresh rotation, logout, API tokens, password change, disabled user |
+| `01-auth-sessions` | login, refresh rotation, logout, no API tokens, password change, disabled user |
 | `02-servers-preflight` | agent connected, enrollment token rules, agent socket auth, preflight, proxies |
 | `03-images` | assignment status, user visibility, assignment removal |
 | `04-container-lifecycle` | create, memory limit, root resize, power, SSH via ssh-proxy, console, delete |

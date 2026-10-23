@@ -103,11 +103,14 @@ export class Api {
   }
 }
 
+/** `__Host-` with Secure cookies; the lab runs with `AUTH_COOKIE_SECURE=false`. */
+const REFRESH_COOKIE = /^(__Host-)?nyabase_refresh=/;
+
 export interface Session {
   api: Api;
   user: LoginResponse['user'];
   accessToken: string;
-  /** `nyabase_refresh=<secret>`, the only cookie the refresh flow needs. */
+  /** `[__Host-]nyabase_refresh=<secret>`, the only cookie the refresh flow needs. */
   refreshCookie: string | null;
 }
 
@@ -121,7 +124,7 @@ export async function login(baseUrl: string, username: string, password: string)
   const body = JSON.parse(text) as LoginResponse;
   const cookie = response.headers.getSetCookie()
     .map((entry) => entry.split(';')[0]!)
-    .find((entry) => entry.startsWith('nyabase_refresh=')) ?? null;
+    .find((entry) => REFRESH_COOKIE.test(entry)) ?? null;
   return {
     api: anonymous.withToken(body.accessToken),
     user: body.user,
@@ -148,6 +151,6 @@ export async function refresh(baseUrl: string, cookie: string): Promise<{
   const body = JSON.parse(text) as LoginResponse;
   const next = response.headers.getSetCookie()
     .map((entry) => entry.split(';')[0]!)
-    .find((entry) => entry.startsWith('nyabase_refresh=')) ?? null;
+    .find((entry) => REFRESH_COOKIE.test(entry)) ?? null;
   return { accessToken: body.accessToken, user: body.user, refreshCookie: next };
 }

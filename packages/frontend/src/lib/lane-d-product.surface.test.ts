@@ -107,18 +107,16 @@ describe('lane D product UI copy', () => {
     expect(src).not.toMatch(/setError\(message\.message/);
   });
 
-  it('profile page manages API tokens with a one-time secret and password re-check', () => {
+  it('console answers reauthenticate with a fresh access token of the same session', () => {
+    const src = read('components/containers/container-console.tsx');
+    expect(src).toMatch(/message\.type === 'reauthenticate'/);
+    expect(src).toMatch(/freshAccessTokenWithRetry\(auth\.sentToken, open\)/);
+  });
+
+  it('profile page offers no API tokens: the browser session is the only credential', () => {
     const src = read('pages/profile-page.tsx');
-    expect(src).toMatch(/<ApiTokensPanel userId=\{user\.id\} \/>/);
-    expect(src).toMatch(/API 令牌/);
-    expect(src).toMatch(/'\/auth\/tokens'/);
-    expect(src).toMatch(/`\/auth\/tokens\/\$\{tokenId\}`/);
-    expect(src).toMatch(/queryKeys\.apiTokens\(userId\)/);
+    expect(src).not.toMatch(/API 令牌|ApiToken|\/auth\/tokens/);
     expect(src).toMatch(/autoComplete="current-password"/);
-    expect(src).toMatch(/copyOneTimeSecret\(created\.secret\)/);
-    expect(src).toMatch(/只显示这一次/);
-    expect(src).toMatch(/修改密码会吊销全部 API 令牌/);
-    expect(src).toMatch(/title="删除 API 令牌？"/);
   });
 
   it('image catalog is list/add/repull/remove without free-form fields', () => {

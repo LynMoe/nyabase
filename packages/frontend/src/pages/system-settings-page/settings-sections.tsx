@@ -231,7 +231,11 @@ const FIELD_LABELS: Record<string, { label: string; description: string }> = {
   },
   'auth.refreshTokenExpiresDays': {
     label: '刷新令牌有效天数',
-    description: '刷新令牌过期前可使用的天数。',
+    description: '会话空闲超时：在此天数内未刷新的登录会话失效；每次刷新顺延，但不超过会话最长有效期。',
+  },
+  'auth.sessionMaxLifetimeDays': {
+    label: '会话最长有效天数',
+    description: '从登录起算的登录会话绝对有效期，刷新不会延长；到期后需重新登录。',
   },
   'auth.adminInitPassword': {
     label: '初始管理员密码',
@@ -288,6 +292,10 @@ const FIELD_LABELS: Record<string, { label: string; description: string }> = {
   'ssh.proxyPublicPort': {
     label: 'SSH 代理公网端口',
     description: '用户通过 SSH 代理连接时使用的端口。',
+  },
+  'ssh.proxyHostSuffix': {
+    label: '容器主机名后缀',
+    description: '用户通过 SSH 代理用 <容器名>.<后缀> 登录容器，容器主机证书也签发给这个名字。修改后用户已复制的 ssh_config 和 known_hosts 需要更新。',
   },
   'containers.processLimit': {
     label: '进程数上限',

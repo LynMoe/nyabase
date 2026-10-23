@@ -11,7 +11,7 @@ import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
 import type { AuditEventTable } from '../platform/persistence-pg/audit-database.types.js';
 
-const RETENTION_BATCH_SIZE = 1_000;
+export const RETENTION_BATCH_SIZE = 1_000;
 const RETENTION_ADVISORY_LOCK = 1_856_214_885;
 const RETENTION_ADVISORY_KEY = 4;
 export const MAX_AUDIT_OFFSET = 100_000;
@@ -150,83 +150,75 @@ export class AuditRepository {
     return row ? toAuditEvent(row) : null;
   }
 
-  enforceRetention(options: AuditRetentionOptions): Promise<void> {
-    return this.enforceRetentionWith(options);
+  /**
+   * Deletes at most one batch of expired / overflowing rows in its own
+   * transaction and returns how many rows were removed.
+   */
+  enforceRetention(options: AuditRetentionOptions): Promise<number> {
+    return this.transactions.run((transaction) => this.enforceRetentionBatch(transaction, options));
   }
 
-  /**
-   * Enforces retention in a caller-owned transaction so domain changes,
-   * audit insertion, and cleanup share one commit or rollback boundary.
-   */
-  enforceRetentionInTransaction(
+  private async enforceRetentionBatch(
     transaction: Transaction<NyabaseDatabase>,
     options: AuditRetentionOptions,
-  ): Promise<void> {
-    return this.enforceRetentionWith(options, transaction);
-  }
+  ): Promise<number> {
+    await sql`select pg_advisory_xact_lock(
+      ${RETENTION_ADVISORY_LOCK},
+      ${RETENTION_ADVISORY_KEY}
+    )`.execute(transaction);
 
-  private enforceRetentionWith(
-    options: AuditRetentionOptions,
-    existingTransaction?: Transaction<NyabaseDatabase>,
-  ): Promise<void> {
-    const work = async (transaction: Transaction<NyabaseDatabase>): Promise<void> => {
-      await sql`select pg_advisory_xact_lock(
-        ${RETENTION_ADVISORY_LOCK},
-        ${RETENTION_ADVISORY_KEY}
-      )`.execute(transaction);
-
-      const now = await this.databaseClock(transaction);
-      let remainingBatch = RETENTION_BATCH_SIZE;
-      if (options.enforceAge && options.retentionDays > 0) {
-        const cutoff = new Date(
-          now.getTime() - options.retentionDays * 24 * 60 * 60 * 1_000,
-        );
-        const expired = await transaction
-          .selectFrom('audit.events')
-          .select('id')
-          .where('occurred_at', '<', cutoff)
-          .orderBy('occurred_at', 'asc')
-          .orderBy('id', 'asc')
-          .limit(remainingBatch)
-          .forUpdate()
-          .skipLocked()
-          .execute();
-        if (expired.length > 0) {
-          await transaction
-            .deleteFrom('audit.events')
-            .where('id', 'in', expired.map((row) => row.id))
-            .execute();
-          remainingBatch -= expired.length;
-        }
-      }
-
-      if (
-        remainingBatch <= 0
-        || !options.enforceCount
-        || options.maxEntries <= 0
-      ) return;
-      const countRow = await transaction
-        .selectFrom('audit.events')
-        .select((expression) => expression.fn.countAll<string>().as('count'))
-        .executeTakeFirstOrThrow();
-      const overflow = Number(countRow.count) - options.maxEntries;
-      if (overflow <= 0) return;
-      const ids = await transaction
+    const now = await this.databaseClock(transaction);
+    let remainingBatch = RETENTION_BATCH_SIZE;
+    if (options.enforceAge && options.retentionDays > 0) {
+      const cutoff = new Date(
+        now.getTime() - options.retentionDays * 24 * 60 * 60 * 1_000,
+      );
+      const expired = await transaction
         .selectFrom('audit.events')
         .select('id')
+        .where('occurred_at', '<', cutoff)
         .orderBy('occurred_at', 'asc')
         .orderBy('id', 'asc')
-        .limit(Math.min(remainingBatch, overflow))
+        .limit(remainingBatch)
         .forUpdate()
         .skipLocked()
         .execute();
-      if (ids.length === 0) return;
-      await transaction
-        .deleteFrom('audit.events')
-        .where('id', 'in', ids.map((row) => row.id))
-        .execute();
-    };
-    return existingTransaction ? work(existingTransaction) : this.transactions.run(work);
+      if (expired.length > 0) {
+        await transaction
+          .deleteFrom('audit.events')
+          .where('id', 'in', expired.map((row) => row.id))
+          .execute();
+        remainingBatch -= expired.length;
+      }
+    }
+
+    const deleted = () => RETENTION_BATCH_SIZE - remainingBatch;
+    if (
+      remainingBatch <= 0
+      || !options.enforceCount
+      || options.maxEntries <= 0
+    ) return deleted();
+    const countRow = await transaction
+      .selectFrom('audit.events')
+      .select((expression) => expression.fn.countAll<string>().as('count'))
+      .executeTakeFirstOrThrow();
+    const overflow = Number(countRow.count) - options.maxEntries;
+    if (overflow <= 0) return deleted();
+    const ids = await transaction
+      .selectFrom('audit.events')
+      .select('id')
+      .orderBy('occurred_at', 'asc')
+      .orderBy('id', 'asc')
+      .limit(Math.min(remainingBatch, overflow))
+      .forUpdate()
+      .skipLocked()
+      .execute();
+    if (ids.length === 0) return deleted();
+    await transaction
+      .deleteFrom('audit.events')
+      .where('id', 'in', ids.map((row) => row.id))
+      .execute();
+    return deleted() + ids.length;
   }
 
   private async databaseClock(

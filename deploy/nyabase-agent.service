@@ -1,8 +1,12 @@
 [Unit]
 Description=Nyabase host agent (dials the Backend, fronts the local Incus)
 Documentation=file:/opt/nyabase/deploy/OPERATIONS.md
-After=network-online.target incus.service
+After=network-online.target
 Wants=network-online.target
+# Incus restores the containers that were running when it starts (at boot).
+# The guest IPv6 guard must already be in place then, so the agent starts
+# first (ExecStartPre below); it reaches Incus later and retries until it can.
+Before=incus.service incus-startup.service
 
 [Service]
 Type=simple
@@ -19,6 +23,10 @@ WorkingDirectory=/opt/nyabase/agent
 StateDirectory=nyabase-agent
 StateDirectoryMode=0700
 Environment=NYABASE_AGENT_STATE_DIR=/var/lib/nyabase-agent
+# Put the `bridge nyabase_guard` table in place before Incus starts. Best effort
+# (`-`): if it fails, the agent itself still refuses to bring guest NICs up
+# and reports the missing guard to the Backend.
+ExecStartPre=-/usr/bin/env node dist/main.js ipv6-guard
 # Documented package start command: `node dist/main.js` (Node.js 20+).
 ExecStart=/usr/bin/env node dist/main.js
 Restart=always

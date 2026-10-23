@@ -1,26 +1,36 @@
-import { Controller, Get, Query } from '@nestjs/common';
+import { BadRequestException, Controller, Get, Query } from '@nestjs/common';
 import { z } from 'zod';
-import { BadRequestException } from '@nestjs/common';
-import { zListScope, type PerformanceMetric, type PerformanceRange } from '@nyabase/common';
+import {
+  onlyWithScopeAll,
+  zListScope,
+  type PerformanceMetric,
+  type PerformanceRange,
+} from '@nyabase/common';
 import { CurrentActor } from '../iam/decorators.js';
 import type { Actor } from '../iam/actor.js';
 import { PerformanceQueryService } from './performance-query.service.js';
 
-const zUsageQuery = z.object({
+const zUsageFields = z.object({
   scope: zListScope,
   serverId: z.string().optional(),
+  /** Another person's usage: an administrator filter, `scope=all` only. */
   userId: z.string().optional(),
   containerId: z.string().optional(),
   spark: z.literal('1').optional(),
 }).strict();
 
-const zSeriesQuery = zUsageQuery.extend({
+export const zUsageQuery = zUsageFields.superRefine(onlyWithScopeAll('userId'));
+
+export const zSeriesQuery = zUsageFields.extend({
   metric: z.enum(['cpu', 'memory', 'disk', 'gpu', 'network']).optional(),
   metrics: z.string().optional(),
   range: z.enum(['15m', '1h', '6h', '24h']).optional(),
-});
+}).strict().superRefine(onlyWithScopeAll('userId'));
 
-/** `scope=mine` (default) is the caller's own usage; `scope=all` needs the operator role. */
+/**
+ * `scope=mine` (default) is the caller's own usage; `scope=all` needs the
+ * operator role and is the only scope that takes `userId`.
+ */
 @Controller('performance')
 export class PerformanceController {
   constructor(private readonly performance: PerformanceQueryService) {}
@@ -57,7 +67,6 @@ function parseQuery<T extends z.ZodTypeAny>(
     if (value === undefined || value === '') continue;
     normalized[key] = value;
   }
-  const parsed = schema.safeParse(normalized);
-  if (!parsed.success) throw new BadRequestException('Invalid performance query');
-  return parsed.data;
+  // A ZodError becomes 400 INVALID_INPUT naming the field (ZodExceptionFilter).
+  return schema.parse(normalized);
 }

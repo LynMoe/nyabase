@@ -3,9 +3,9 @@ import { sql, type Transaction } from 'kysely';
 import {
   AuditAction,
   ContainerPhase,
-  ContainerPowerIntent,
   IntentKind,
   IntentResourceType,
+  Role,
 } from '@nyabase/common';
 import { AuditService } from '../iam/audit.service.js';
 import { ContainerControlRepository } from '../containers/container-control.repository.js';
@@ -13,10 +13,11 @@ import { ContainerControlService } from '../containers/container-control.service
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
 import { IntentRepository } from '../reconcile/intent.repository.js';
-import { ReconcileClaimRepository } from '../reconcile/reconcile-claim.repository.js';
 import { VOLUME_DESTROY_PLACEMENT_ID } from '../reconcile/reconcile-claim.repository.js';
+import { VolumeAttachmentsService } from '../volumes/volume-attachments.service.js';
 import { listEligibleDestroyExecutors, VolumesRepository } from '../volumes/volumes.repository.js';
-import { isSystemActor, type Actor } from '../iam/actor.js';
+import { isSystemActor, requireUserId, type Actor } from '../iam/actor.js';
+import { assertActorRole } from '../iam/administration.js';
 
 const OPERATOR_PURGE_AUDIT_ACTION = 'user.server.purge_resources' as AuditAction;
 /**
@@ -25,6 +26,22 @@ const OPERATOR_PURGE_AUDIT_ACTION = 'user.server.purge_resources' as AuditAction
  * either way.
  */
 const PURGE_SCOPE = 'all';
+
+interface OwnedVolume {
+  id: string;
+  owner_id: string;
+  lifecycle_phase: string;
+  pool_id: string | null;
+  server_id: string | null;
+  shared_backend_id: string | null;
+}
+
+/** `deletingOnly`: only volumes already being destroyed (coverage came back after the purge). */
+export interface DetachVolumesOptions {
+  readonly deletingOnly?: boolean;
+}
+
+const STOPPABLE_PHASES: ReadonlySet<string> = new Set([ContainerPhase.Active, ContainerPhase.Provisioning]);
 
 export interface PurgeUserServerResourcesResult {
   intentIds: string[];
@@ -41,54 +58,81 @@ export class UserServerResourcePurgeService {
     private readonly containers: ContainerControlService,
     private readonly volumes: VolumesRepository,
     private readonly intents: IntentRepository,
-    private readonly reconcileClaims: ReconcileClaimRepository,
+    private readonly attachments: VolumeAttachmentsService,
     private readonly audit: AuditService,
   ) {}
 
   /**
-   * Deletes a user's containers and local volumes on one server. An
-   * administrator purges as themselves; grant expiry purges as the system.
+   * Deletes a user's containers and local volumes on one server, all queued in
+   * one transaction (an administrator purges as themselves). Read committed,
+   * as for the expiry purge: nothing here is admitted against a quota, every
+   * row is locked before it is read, and the administrator's role is re-read
+   * first, after the IAM lock wait (a snapshot would predate the wait and miss
+   * a demotion committed during it).
    */
   async purge(
     actor: Actor,
     userId: string,
     serverId: string,
   ): Promise<PurgeUserServerResourcesResult> {
-    const actorId = actor.userId;
+    return this.transactions.run(
+      async (transaction) => {
+        if (!isSystemActor(actor)) await assertActorRole(transaction, requireUserId(actor), Role.Admin);
+        return this.purgeServerInTransaction(transaction, actor, userId, serverId);
+      },
+      { isolationLevel: 'read committed', maxAttempts: 5 },
+    );
+  }
+
+  /**
+   * `purge` in the caller's transaction. Grant expiry purges as the system in
+   * the transaction that re-checked coverage under the IAM lock, so a grant
+   * committed before the lock is seen and one committed after waits until
+   * every delete is queued (a queued delete cannot be taken back).
+   */
+  async purgeServerInTransaction(
+    transaction: Transaction<NyabaseDatabase>,
+    actor: Actor,
+    userId: string,
+    serverId: string,
+  ): Promise<PurgeUserServerResourcesResult> {
     const reason = isSystemActor(actor) ? 'expiry' : 'admin';
-    const owned = await this.containerRepository.list({ ownerId: userId, serverId });
+    const owned = await this.containerRepository.list({ ownerId: userId, serverId }, transaction);
     const intentIds: string[] = [];
     const containerIds: string[] = [];
     for (const container of owned) {
       if (container.lifecycle_phase === ContainerPhase.Deleting) continue;
-      const accepted = await this.containers.action(actor, container.id, 'delete', PURGE_SCOPE);
+      const accepted = await this.containers.actionInTransaction(
+        transaction,
+        actor,
+        container.id,
+        'delete',
+        PURGE_SCOPE,
+      );
       intentIds.push(accepted.intentId);
       containerIds.push(container.id);
     }
-    const volumeResult = await this.purgeVolumes(
+    const volumeResult = await this.destroyVolumes(
+      transaction,
+      actor,
       userId,
       (volume) => volume.server_id === serverId && volume.shared_backend_id === null,
-      actor,
     );
-    await this.transactions.run(async (transaction) => {
-      await this.audit.append(
-        transaction,
-        actorId,
-        reason === 'expiry'
-          ? AuditAction.ExpiryPurgeResources
-          : OPERATOR_PURGE_AUDIT_ACTION,
-        userId,
-        'user',
-        {
-          serverId,
-          containerIds,
-          intentIds,
-          volumeIds: volumeResult.volumeIds,
-          volumeIntentIds: volumeResult.intentIds,
-          reason,
-        },
-      );
-    });
+    await this.audit.append(
+      transaction,
+      actor.userId,
+      reason === 'expiry' ? AuditAction.ExpiryPurgeResources : OPERATOR_PURGE_AUDIT_ACTION,
+      userId,
+      'user',
+      {
+        serverId,
+        containerIds,
+        intentIds,
+        volumeIds: volumeResult.volumeIds,
+        volumeIntentIds: volumeResult.intentIds,
+        reason,
+      },
+    );
     return {
       intentIds,
       containerIds,
@@ -97,103 +141,77 @@ export class UserServerResourcePurgeService {
     };
   }
 
+  /**
+   * Grace over on a storage pool: the user's volumes there are destroyed, in
+   * the caller's transaction (as for `purgeServerInTransaction`). The
+   * containers they were attached to stay; detach what is still attached (an
+   * administrator re-attached it during the grace) with
+   * `detachVolumesForStoragePool` first.
+   */
   async purgeStoragePoolVolumes(
+    transaction: Transaction<NyabaseDatabase>,
     actor: Actor,
     userId: string,
     poolId: string,
   ): Promise<{ intentIds: string[]; volumeIds: string[] }> {
-    const actorId = actor.userId;
-    const result = await this.purgeVolumes(
+    return this.purgeResourceVolumes(
+      transaction,
+      actor,
       userId,
       (volume) => volume.pool_id === poolId && volume.shared_backend_id === null,
-      actor,
-      true,
+      { kind: 'storage_pool', id: poolId, field: 'poolId' },
     );
-    if (result.volumeIds.length > 0) {
-      await this.transactions.run(async (transaction) => {
-        await this.audit.append(
-          transaction,
-          actorId,
-          AuditAction.ExpiryPurgeResources,
-          poolId,
-          'storage_pool',
-          {
-            userId,
-            poolId,
-            ...result,
-            intentIds: [...result.intentIds, ...result.containerIntentIds],
-          },
-        );
-      });
-    }
-    return {
-      intentIds: [...result.intentIds, ...result.containerIntentIds],
-      volumeIds: result.volumeIds,
-    };
   }
 
+  /** Grace over on a shared backend: as for a storage pool, on every server. */
   async purgeSharedBackendVolumes(
+    transaction: Transaction<NyabaseDatabase>,
     actor: Actor,
     userId: string,
     sharedBackendId: string,
   ): Promise<{ intentIds: string[]; volumeIds: string[] }> {
-    const actorId = actor.userId;
-    const result = await this.purgeVolumes(
+    return this.purgeResourceVolumes(
+      transaction,
+      actor,
       userId,
       (volume) => volume.shared_backend_id === sharedBackendId,
-      actor,
-      true,
+      { kind: 'shared_backend', id: sharedBackendId, field: 'sharedBackendId' },
     );
-    if (result.volumeIds.length > 0) {
-      await this.transactions.run(async (transaction) => {
-        await this.audit.append(
-          transaction,
-          actorId,
-          AuditAction.ExpiryPurgeResources,
-          sharedBackendId,
-          'shared_backend',
-          {
-            userId,
-            sharedBackendId,
-            ...result,
-            intentIds: [...result.intentIds, ...result.containerIntentIds],
-          },
-        );
-      });
-    }
-    return {
-      intentIds: [...result.intentIds, ...result.containerIntentIds],
-      volumeIds: result.volumeIds,
-    };
   }
 
-  async stopRunningContainersForStoragePool(
+  /**
+   * Access to a storage pool lapsed: detach the user's volumes there from
+   * every container at once (running containers keep running without them).
+   * The user may attach them again once access returns.
+   */
+  async detachVolumesForStoragePool(
     actor: Actor,
     userId: string,
     poolId: string,
-    workerId = actor.userId ?? 'access-lapse',
+    options: DetachVolumesOptions = {},
   ): Promise<{ intentIds: string[] }> {
-    return this.stopRunningContainersForResource(
+    return this.detachVolumesForResource(
+      actor,
       userId,
       (volume) => volume.pool_id === poolId && volume.shared_backend_id === null,
-      actor,
       { resourceKind: 'storage_pool', resourceId: poolId },
-      workerId,
+      options,
     );
   }
 
-  async stopRunningContainersForSharedBackend(
+  /** Access to a shared backend lapsed: as for a storage pool, on every server. */
+  async detachVolumesForSharedBackend(
     actor: Actor,
     userId: string,
     sharedBackendId: string,
-    workerId = actor.userId ?? 'access-lapse',
+    options: DetachVolumesOptions = {},
   ): Promise<{ intentIds: string[] }> {
-    return this.stopRunningContainersForResource(
+    return this.detachVolumesForResource(
+      actor,
       userId,
       (volume) => volume.shared_backend_id === sharedBackendId,
-      actor,
       { resourceKind: 'shared_backend', resourceId: sharedBackendId },
-      workerId,
+      options,
     );
   }
 
@@ -206,12 +224,13 @@ export class UserServerResourcePurgeService {
     const owned = await this.containerRepository.list({ ownerId: userId, serverId });
     const intentIds: string[] = [];
     for (const container of owned) {
-      if (
-        container.lifecycle_phase !== ContainerPhase.Active
-        || container.power_intent !== ContainerPowerIntent.Running
-      ) continue;
-      const accepted = await this.containers.action(actor, container.id, 'stop', PURGE_SCOPE);
-      intentIds.push(accepted.intentId);
+      // A container still provisioning may already run (a create that failed
+      // after the start): it stops like any other. One already desired
+      // stopped is stopped again only when its stop did not take effect
+      // (`enforceStop`), so a parked container cannot keep running the grace.
+      if (!STOPPABLE_PHASES.has(container.lifecycle_phase)) continue;
+      const accepted = await this.containers.enforceStop(actor, container.id);
+      if (accepted) intentIds.push(accepted.intentId);
     }
     if (intentIds.length > 0) {
       await this.transactions.run(async (transaction) => {
@@ -228,68 +247,26 @@ export class UserServerResourcePurgeService {
     return { intentIds };
   }
 
-  private async stopRunningContainersForResource(
-    userId: string,
-    matches: (volume: {
-      id: string;
-      owner_id: string;
-      pool_id: string | null;
-      server_id: string | null;
-      shared_backend_id: string | null;
-    }) => boolean,
+  private async detachVolumesForResource(
     actor: Actor,
+    userId: string,
+    matches: (volume: OwnedVolume) => boolean,
     resource: { resourceKind: string; resourceId: string },
-    workerId: string,
+    options: DetachVolumesOptions,
   ): Promise<{ intentIds: string[] }> {
-    const actorId = actor.userId;
-    const volumes = (await this.volumes.list(userId)).filter(matches);
-    const containerIds = new Set<string>();
-    for (const volume of volumes) {
-      for (const attachment of await this.volumes.listAttachments(undefined, volume.id)) {
-        containerIds.add(attachment.container_id);
-      }
-    }
-    const intentIds: string[] = [];
-    for (const containerId of containerIds) {
-      const container = await this.containerRepository.find(containerId);
-      if (
-        !container
-        || container.lifecycle_phase !== ContainerPhase.Active
-        || container.power_intent !== ContainerPowerIntent.Running
-      ) continue;
-      const claim = await this.reconcileClaims.claim({
-        resourceType: IntentResourceType.Container,
-        resourceId: containerId,
-        placementServerId: container.server_id,
-        serverId: container.server_id,
-        workerId,
-      });
-      if (!claim) continue;
-      try {
-        const current = await this.containerRepository.find(containerId);
-        if (
-          !current
-          || current.lifecycle_phase !== ContainerPhase.Active
-          || current.power_intent !== ContainerPowerIntent.Running
-        ) continue;
-        // The desired power state and pending intent are the completion marker.
-        const accepted = await this.containers.action(actor, containerId, 'stop', PURGE_SCOPE);
-        intentIds.push(accepted.intentId);
-      } finally {
-        await this.reconcileClaims.release({
-          resourceType: claim.resourceType,
-          resourceId: claim.resourceId,
-          placementServerId: claim.placementServerId,
-          workerId: claim.workerId,
-        });
-      }
-    }
+    const intentIds = await this.detachAll(
+      actor,
+      userId,
+      options.deletingOnly
+        ? (volume) => volume.lifecycle_phase === 'deleting' && matches(volume)
+        : matches,
+    );
     if (intentIds.length > 0) {
       await this.transactions.run(async (transaction) => {
         await this.audit.append(
           transaction,
-          actorId,
-          AuditAction.ExpiryStopContainers,
+          actor.userId,
+          AuditAction.ExpiryDetachVolumes,
           userId,
           'user',
           { ...resource, intentIds },
@@ -299,102 +276,126 @@ export class UserServerResourcePurgeService {
     return { intentIds };
   }
 
-  private async purgeVolumes(
-    userId: string,
-    matches: (volume: {
-      id: string;
-      owner_id: string;
-      pool_id: string | null;
-      server_id: string | null;
-      shared_backend_id: string | null;
-    }) => boolean,
+  /**
+   * Detach intents for every attachment of the matching volumes that is not
+   * already going (one whose detach intent ended without unplugging it is
+   * detached again: `forceDetach`).
+   */
+  private async detachAll(
     actor: Actor,
-    deleteAttachedContainers = false,
-  ): Promise<{ intentIds: string[]; containerIntentIds: string[]; volumeIds: string[] }> {
-    const actorId = actor.userId;
-    const owned = (await this.volumes.list(userId)).filter(matches);
-    const containerIds = new Set<string>();
-    for (const volume of owned) {
+    userId: string,
+    matches: (volume: OwnedVolume) => boolean,
+  ): Promise<string[]> {
+    const intentIds: string[] = [];
+    for (const volume of (await this.volumes.list(userId)).filter(matches)) {
       for (const attachment of await this.volumes.listAttachments(undefined, volume.id)) {
-        containerIds.add(attachment.container_id);
+        const intent = await this.attachments.forceDetach(actor, attachment.id);
+        if (intent) intentIds.push(intent.id);
       }
     }
-    const containerIntentIds: string[] = [];
-    if (deleteAttachedContainers) {
-      for (const containerId of containerIds) {
-        const container = await this.containerRepository.find(containerId);
-        if (!container || container.lifecycle_phase === ContainerPhase.Deleting) continue;
-        const accepted = await this.containers.action(actor, containerId, 'delete', PURGE_SCOPE);
-        containerIntentIds.push(accepted.intentId);
-      }
+    return intentIds;
+  }
+
+  private async purgeResourceVolumes(
+    transaction: Transaction<NyabaseDatabase>,
+    actor: Actor,
+    userId: string,
+    matches: (volume: OwnedVolume) => boolean,
+    resource: { kind: 'storage_pool' | 'shared_backend'; id: string; field: 'poolId' | 'sharedBackendId' },
+  ): Promise<{ intentIds: string[]; volumeIds: string[] }> {
+    const result = await this.destroyVolumes(transaction, actor, userId, matches);
+    if (result.volumeIds.length > 0) {
+      await this.audit.append(
+        transaction,
+        actor.userId,
+        AuditAction.ExpiryPurgeResources,
+        resource.id,
+        resource.kind,
+        {
+          userId,
+          [resource.field]: resource.id,
+          volumeIds: result.volumeIds,
+          intentIds: result.intentIds,
+        },
+      );
     }
-    const result = await this.transactions.run(async (transaction) => {
-      const intentIds: string[] = [];
-      const volumeIds: string[] = [];
-      for (const volume of owned) {
-        const locked = await transaction.selectFrom('control.volumes')
-          .selectAll()
-          .where('id', '=', volume.id)
-          .forUpdate()
-          .executeTakeFirst();
-        if (!locked) continue;
-        const sentinel = await transaction
-          .selectFrom('control.reconcile_claims')
-          .select('resource_id')
+    return result;
+  }
+
+  /**
+   * Marks the matching volumes deleting and queues their destroy. A volume
+   * that is still attached is destroyed once its attachments are gone. Each
+   * volume row is locked first, and attachments and placements reference it,
+   * so read committed sees every one committed before the lock.
+   */
+  private async destroyVolumes(
+    transaction: Transaction<NyabaseDatabase>,
+    actor: Actor,
+    userId: string,
+    matches: (volume: OwnedVolume) => boolean,
+  ): Promise<{ intentIds: string[]; volumeIds: string[] }> {
+    const actorId = actor.userId;
+    const owned = (await this.volumes.list(userId, transaction)).filter(matches);
+    const intentIds: string[] = [];
+    const volumeIds: string[] = [];
+    for (const volume of owned) {
+      const locked = await transaction.selectFrom('control.volumes')
+        .selectAll()
+        .where('id', '=', volume.id)
+        .forUpdate()
+        .executeTakeFirst();
+      if (!locked) continue;
+      const sentinel = await transaction
+        .selectFrom('control.reconcile_claims')
+        .select('resource_id')
+        .where('resource_type', '=', 'volume')
+        .where('resource_id', '=', locked.id)
+        .where('placement_server_id', '=', VOLUME_DESTROY_PLACEMENT_ID)
+        .where('lease_expires_at', '>', sql<Date>`clock_timestamp()`)
+        .executeTakeFirst();
+      if (sentinel) continue;
+      const attachments = await this.volumes.listAttachments(undefined, locked.id, transaction);
+      const placements = await this.volumes.listPlacements(locked.id, transaction);
+      // Any executor, online or not: an unreachable one only delays the
+      // destroy, while dropping the row would leave the data behind.
+      const eligible = locked.shared_backend_id
+        ? await listEligibleDestroyExecutors(transaction, locked.shared_backend_id, {
+          includeOffline: true,
+        })
+        : [];
+      const dropNow = attachments.length === 0 && placements.length === 0
+        && (!locked.dir_ensured || eligible.length === 0);
+      if (dropNow) {
+        const pending = await transaction
+          .selectFrom('control.intents')
+          .select('id')
           .where('resource_type', '=', 'volume')
           .where('resource_id', '=', locked.id)
-          .where('placement_server_id', '=', VOLUME_DESTROY_PLACEMENT_ID)
-          .where('lease_expires_at', '>', sql<Date>`clock_timestamp()`)
-          .executeTakeFirst();
-        if (sentinel) continue;
-        const attachments = await this.volumes.listAttachments(undefined, locked.id, transaction);
-        const placements = await this.volumes.listPlacements(locked.id, transaction);
-        // Any executor, online or not: an unreachable one only delays the
-        // destroy, while dropping the row would leave the data behind.
-        const eligible = locked.shared_backend_id
-          ? await listEligibleDestroyExecutors(transaction, locked.shared_backend_id, {
-            includeOffline: true,
-          })
-          : [];
-        const dropNow = attachments.length === 0 && placements.length === 0
-          && (!locked.dir_ensured || eligible.length === 0);
-        if (dropNow) {
-          const pending = await transaction
-            .selectFrom('control.intents')
-            .select('id')
-            .where('resource_type', '=', 'volume')
-            .where('resource_id', '=', locked.id)
-            .where('status', '=', 'pending')
-            .execute();
-          for (const row of pending) {
-            await this.intents.settleOne(row.id, { outcome: 'succeeded' }, transaction);
-          }
-          await this.volumes.deleteVolumeRow(locked.id, transaction);
-          if (locked.dir_ensured && eligible.length === 0) {
-            await this.audit.append(
-              transaction,
-              actorId,
-              AuditAction.DeleteVolume,
-              locked.id,
-              'volume',
-              { reason: 'destroy_executor_gone' },
-            );
-          }
-          volumeIds.push(locked.id);
-          continue;
+          .where('status', '=', 'pending')
+          .execute();
+        for (const row of pending) {
+          await this.intents.settleOne(row.id, { outcome: 'succeeded' }, transaction);
         }
-        const intentId = await this.beginDestroy(transaction, actorId, locked);
-        if (!intentId) continue;
-        intentIds.push(intentId);
+        await this.volumes.deleteVolumeRow(locked.id, transaction);
+        if (locked.dir_ensured && eligible.length === 0) {
+          await this.audit.append(
+            transaction,
+            actorId,
+            AuditAction.DeleteVolume,
+            locked.id,
+            'volume',
+            { reason: 'destroy_executor_gone' },
+          );
+        }
         volumeIds.push(locked.id);
+        continue;
       }
-      return { intentIds, volumeIds };
-    }, { isolationLevel: 'serializable', maxAttempts: 5 });
-    return {
-      intentIds: result.intentIds,
-      containerIntentIds,
-      volumeIds: result.volumeIds,
-    };
+      const intentId = await this.beginDestroy(transaction, actorId, locked);
+      if (!intentId) continue;
+      intentIds.push(intentId);
+      volumeIds.push(locked.id);
+    }
+    return { intentIds, volumeIds };
   }
 
   /** Marks the volume deleting (once) and ensures its pending destroy intent. */

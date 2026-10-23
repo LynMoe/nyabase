@@ -7,6 +7,7 @@ import {
 } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import {
+  AuditAction,
   FailureCode,
   type ListScope,
   type SharedBackendDto,
@@ -19,9 +20,11 @@ import { isoDate, numberValue } from '../platform/domain-utils.js';
 import { sql, type Kysely } from 'kysely';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
+import { committedVolumeBytesSql } from '../platform/persistence-pg/committed-bytes.js';
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
 import { listSharedBackendAccess } from '../iam/effective-access.js';
-import { assertListScope, type Actor, requireUserId } from '../iam/actor.js';
+import { AuditService } from '../iam/audit.service.js';
+import { assertListScope, hasRole, type Actor, requireUserId } from '../iam/actor.js';
 
 function normalizedIdentity(value: string): string {
   const identity = value.trim();
@@ -66,18 +69,22 @@ export class SharedBackendsService {
     private readonly transactions: PgTransactionManager,
     @Inject(PG_DATABASE) private readonly database: Kysely<NyabaseDatabase>,
     private readonly storagePools: SharedBackendExecutorsService,
+    private readonly audit: AuditService,
   ) {}
 
   /**
    * `scope=mine`: backends the caller holds a live grant for.
-   * `scope=all`: every backend (operator).
+   * `scope=all`: every backend (operator, to grant them); executor details,
+   * like the executor routes, only for admins.
    */
   async list(actor: Actor, scope: ListScope): Promise<SharedBackendDto[]> {
     assertListScope(actor, scope, Role.Operator);
-    return scope === 'all' ? this.listAll() : this.listGranted(requireUserId(actor));
+    return scope === 'all'
+      ? this.listAll(hasRole(actor, Role.Admin))
+      : this.listGranted(requireUserId(actor));
   }
 
-  /** `scope=mine` needs a grant (404 otherwise); `scope=all` needs the operator role. */
+  /** `scope=mine` needs a grant (404 otherwise); `scope=all` needs the admin role. */
   async get(actor: Actor, id: string, scope: ListScope): Promise<SharedBackendDto> {
     assertListScope(actor, scope, Role.Admin);
     if (scope === 'all') return this.getAny(id);
@@ -86,9 +93,10 @@ export class SharedBackendsService {
     return backend;
   }
 
-  private async listAll(): Promise<SharedBackendDto[]> {
+  private async listAll(withExecutors: boolean): Promise<SharedBackendDto[]> {
     const rows = await this.repository.list();
     const committed = await this.committedUsedByBackendIds(rows.map((row) => row.id));
+    if (!withExecutors) return rows.map((row) => this.toDto(row, committed.get(row.id) ?? 0));
     const executors = await this.storagePools.listExecutorsByBackendIds(rows.map((row) => row.id));
     return rows.map((row) => this.toDto(row, committed.get(row.id) ?? 0, executors.get(row.id) ?? []));
   }
@@ -112,28 +120,35 @@ export class SharedBackendsService {
       .map((access) => access.sharedBackendId));
     const rows = await this.repository.list();
     const committed = await this.committedUsedByBackendIds(rows.map((row) => row.id));
+    // Users see capacity, not where or how the backend is mounted.
     return rows
       .filter((row) => ids.has(row.id))
-      .map((row) => this.toDto(row, committed.get(row.id) ?? 0));
+      .map((row) => ({
+        ...this.toDto(row, committed.get(row.id) ?? 0),
+        identityKey: '',
+        cephFsid: '',
+        serverIds: [],
+      }));
   }
 
   listExecutors(backendId: string) {
     return this.storagePools.listExecutors(backendId);
   }
 
-  discoverExecutors(backendId: string, serverId?: string) {
-    return this.storagePools.discoverExecutors(backendId, serverId);
+  discoverExecutors(actorId: string, backendId: string, serverId?: string) {
+    return this.storagePools.discoverExecutors(actorId, backendId, serverId);
   }
 
   patchExecutor(
+    actorId: string,
     backendId: string,
     executorId: string,
     input: { expectedRevision: number; registered: boolean },
   ) {
-    return this.storagePools.patchExecutor(backendId, executorId, input);
+    return this.storagePools.patchExecutor(actorId, backendId, executorId, input);
   }
 
-  async create(input: {
+  async create(actorId: string, input: {
     name: string;
     displayName?: string | null;
     identityKey: string;
@@ -183,6 +198,12 @@ export class SharedBackendsService {
             cephFsid: fsid,
             overcommitRatio: input.overcommitRatio,
           }, transaction);
+          await this.audit.append(transaction, actorId, AuditAction.CreateSharedBackend, row.id, 'shared_backend', {
+            name: input.name,
+            identityKey,
+            cephFsid: fsid,
+            overcommitRatio: input.overcommitRatio,
+          });
           return { row, created: true };
         },
         { isolationLevel: 'serializable', maxAttempts: 5 },
@@ -208,6 +229,7 @@ export class SharedBackendsService {
   }
 
   async patch(
+    actorId: string,
     id: string,
     input: {
       expectedRevision: number;
@@ -253,6 +275,11 @@ export class SharedBackendsService {
             : {}),
         }, transaction);
         if (!row) throw new ConflictException({ code: FailureCode.RevisionConflict });
+        await this.audit.append(transaction, actorId, AuditAction.UpdateSharedBackend, id, 'shared_backend', {
+          ...(input.displayName !== undefined ? { displayName: input.displayName } : {}),
+          ...(input.cephFsid !== undefined ? { cephFsid: requestedFsid, previousCephFsid: current.ceph_fsid } : {}),
+          ...(input.overcommitRatio !== undefined ? { overcommitRatio: input.overcommitRatio } : {}),
+        });
         return row;
       },
       { isolationLevel: 'serializable', maxAttempts: 5 },
@@ -260,7 +287,7 @@ export class SharedBackendsService {
     return this.getAny(updated.id);
   }
 
-  async delete(id: string): Promise<void> {
+  async delete(actorId: string, id: string): Promise<void> {
     try {
       await this.transactions.run(
         async (transaction) => {
@@ -272,6 +299,10 @@ export class SharedBackendsService {
               message: 'Shared backend is still referenced',
             });
           }
+          await this.audit.append(transaction, actorId, AuditAction.DeleteSharedBackend, id, 'shared_backend', {
+            name: row.name,
+            identityKey: row.identity_key,
+          });
           await this.repository.delete(id, transaction);
         },
         { isolationLevel: 'serializable', maxAttempts: 5 },
@@ -293,7 +324,7 @@ export class SharedBackendsService {
     const rows = await this.database
       .selectFrom('control.volumes')
       .select(['shared_backend_id'])
-      .select(sql<string>`coalesce(sum(size_bytes), 0)`.as('used'))
+      .select(sql<string>`coalesce(sum(${committedVolumeBytesSql()}), 0)`.as('used'))
       .where('shared_backend_id', 'in', ids)
       .where('lifecycle_phase', 'not in', ['failed', 'deleting'])
       .groupBy('shared_backend_id')

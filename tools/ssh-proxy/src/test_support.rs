@@ -42,6 +42,7 @@ pub(crate) fn fixture_proxy_snapshot(generation: u64) -> ProxySnapshot {
             fingerprint: "SHA256:host".to_string(),
             generation: 1,
         },
+        host_suffix: "nya".to_string(),
         users: vec![
             ProxyUser {
                 id: "user-a".to_string(),
@@ -228,11 +229,14 @@ pub(crate) fn test_config() -> ProxyConfig {
         listen: "127.0.0.1:2222".to_string(),
         max_connections: 8,
         max_connections_per_ip: 8,
+        max_connections_per_ipv6_48: 8,
+        max_preauth_connections: 8,
         auth_timeout: Duration::from_secs(30),
         reconnect_delay: Duration::from_secs(1),
         route_connect_timeout: Duration::from_secs(1),
         status_interval: Duration::from_secs(1),
         control_hold: Duration::from_secs(300),
+        control_liveness: Default::default(),
     }
 }
 

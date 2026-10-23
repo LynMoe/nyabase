@@ -95,7 +95,8 @@ export class GpuService {
         await this.transactions.run(async (transaction) => {
           await assertActorRole(transaction, actorId, Role.Operator);
           await assertGpuCanDisable({
-            count: () => this.claims.countForServer(serverId, transaction),
+            count: async () => await this.claims.countForServer(serverId, transaction)
+              + await this.claims.countOccupyingContainers(serverId, transaction),
           });
           await transaction
             .updateTable('infra.servers')

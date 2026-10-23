@@ -17,7 +17,6 @@ export const AUDIT_RESOURCE_LABELS: Record<string, string> = {
   grant: '授权',
   system_settings: '系统设置',
   ssh_proxy: 'SSH 代理',
-  api_token: 'API 令牌',
   ssh_public_key: 'SSH 公钥',
 };
 
@@ -41,6 +40,10 @@ const AUDIT_ACTION_LABELS: Record<string, string> = {
   [AuditAction.EnrollAgent]: 'Agent 接入',
   [AuditAction.RunServerPreflight]: '运行前置检查',
   [AuditAction.RegisterStoragePool]: '登记存储池',
+  [AuditAction.UpdateStoragePool]: '修改存储池',
+  [AuditAction.DiscoverStoragePools]: '发现存储池',
+  [AuditAction.UpdateSharedBackendExecutor]: '修改共享后端执行器',
+  [AuditAction.DiscoverSharedBackendExecutors]: '发现共享后端执行器',
   [AuditAction.CreateIpPool]: '创建 IP 池',
   [AuditAction.UpdateIpPool]: '更新 IP 池',
   [AuditAction.DeleteIpPool]: '删除 IP 池',
@@ -65,6 +68,7 @@ const AUDIT_ACTION_LABELS: Record<string, string> = {
   [AuditAction.DeleteSharedBackendGrant]: '删除共享存储授权',
   [AuditAction.GrantExpired]: '授权到期',
   [AuditAction.ExpiryStopContainers]: '到期停止容器',
+  [AuditAction.ExpiryDetachVolumes]: '到期卸载数据卷',
   [AuditAction.ExpiryPurgeResources]: '到期清理资源',
   [AuditAction.ContainerDriftCorrected]: '纠正容器配置漂移',
   [AuditAction.UpdateSystemSettings]: '更新系统设置',
@@ -80,8 +84,8 @@ const AUDIT_ACTION_LABELS: Record<string, string> = {
   [AuditAction.RemoveGroupMember]: '移除组成员',
   [AuditAction.UserLogin]: '用户登录',
   [AuditAction.UserLogout]: '用户登出',
-  [AuditAction.CreateApiToken]: '创建 API 令牌',
-  [AuditAction.DeleteApiToken]: '删除 API 令牌',
+  [AuditAction.RetryIntent]: '重试操作',
+  [AuditAction.RefreshTokenReuse]: '刷新令牌重放，会话已撤销',
   [AuditAction.CreateHttpProxyBinding]: '创建 HTTP 发布',
   [AuditAction.UpdateHttpProxyBinding]: '更新 HTTP 发布',
   [AuditAction.DeleteHttpProxyBinding]: '删除 HTTP 发布',
@@ -90,6 +94,7 @@ const AUDIT_ACTION_LABELS: Record<string, string> = {
   [AuditAction.DeleteHttpDomainPool]: '删除 HTTP 域名池',
   [AuditAction.DisconnectSshProxySessions]: '断开 SSH 代理会话',
   [AuditAction.RotateSshProxyHostKey]: '轮换 SSH 主机密钥',
+  [AuditAction.ResetSshHostAuthorities]: '重置容器主机证书 CA',
 };
 
 /** Filter options for the audit list, in label order. */

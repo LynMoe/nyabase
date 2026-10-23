@@ -1,7 +1,7 @@
 import { ForbiddenException } from '@nestjs/common';
 import { Role, roleAtLeast } from '@nyabase/common';
 
-export type UserActorAuthKind = 'jwt' | 'api-token';
+export type UserActorAuthKind = 'jwt';
 export type ActorAuthKind = UserActorAuthKind | 'system';
 
 /** A request authenticated as a user (from `RolesGuard`). */

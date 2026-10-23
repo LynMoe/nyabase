@@ -26,6 +26,35 @@ export type StorageVolume = IncusSchema<'StorageVolume'>;
 export type StorageVolumeState = IncusSchema<'StorageVolumeState'>;
 export type CatalogGetStatus = 'present' | 'missing' | 'error';
 
+/** Labels every custom volume the platform creates: it is ours, and whose. */
+export const VOLUME_MANAGED_KEY = 'user.nyabase.managed';
+/** The server (local volume) or shared backend (shared volume) that owns it. */
+export const VOLUME_SCOPE_KEY = 'user.nyabase.scope';
+
+/** The owner scope a volume is labelled with: its shared backend, else its server. */
+export function volumeOwnerScope(row: {
+  readonly server_id: string | null;
+  readonly shared_backend_id: string | null;
+}): string | null {
+  return row.shared_backend_id ?? row.server_id;
+}
+
+export function volumeLabels(ownerScope: string | null | undefined): Record<string, string> {
+  return ownerScope ? { [VOLUME_MANAGED_KEY]: 'true', [VOLUME_SCOPE_KEY]: ownerScope } : {};
+}
+
+/**
+ * Only a volume labelled with one of `scopes` was created by this platform for
+ * this pool. Another installation that shares the Incus host, or a volume
+ * created by hand, never qualifies, whatever its name.
+ */
+export function labelledFor(volume: StorageVolume | string, scopes: ReadonlySet<string>): boolean {
+  if (typeof volume === 'string') return false;
+  const config = volume.config ?? {};
+  const scope = config[VOLUME_SCOPE_KEY];
+  return config[VOLUME_MANAGED_KEY] === 'true' && typeof scope === 'string' && scopes.has(scope.toLowerCase());
+}
+
 export function isNotFound(error: unknown): boolean {
   return error instanceof IncusError && error.code === 'INCUS_NOT_FOUND';
 }
@@ -58,6 +87,22 @@ export function destroyRetry(
   return {
     outcome: 'retry',
     failure: intentFailure(code, message, details),
+  };
+}
+
+/**
+ * The pass found the catalog missing, but a container pass marked it present
+ * meanwhile: look again at once instead of recording it missing.
+ */
+export function catalogChangedRetry(volumeId: string, serverId: string): ReconcileOutcome {
+  return {
+    outcome: 'retry',
+    retryAfterMs: 0,
+    failure: intentFailure(
+      'VOLUME_CATALOG_CHANGED',
+      'The catalog appeared while the volume pass was running',
+      { volumeId, serverId },
+    ),
   };
 }
 
@@ -105,6 +150,7 @@ export async function createCustomVolume(
   poolName: string,
   incusName: string,
   sizeBytes: string,
+  ownerScope: string | null,
 ): Promise<StorageVolume | undefined> {
   try {
     await readAfterTimeout(
@@ -119,6 +165,7 @@ export async function createCustomVolume(
             config: {
               size: sizeBytes,
               'security.shifted': 'true',
+              ...volumeLabels(ownerScope),
             },
           },
           options,
@@ -287,27 +334,36 @@ async function verifyAbsent(
   });
 }
 
-/** Delete a custom volume from one daemon's catalog, confirmed by a GET 404. */
+/**
+ * Delete a custom volume from one daemon's catalog, confirmed by a GET 404.
+ * Idempotent: a DELETE answered with 404 (the volume went between our GET and
+ * the DELETE, or an earlier pass already removed it) is not a failure, the
+ * closing GET decides.
+ */
 export async function deleteCatalog(
   client: IncusClientPort,
   poolName: string,
   incusName: string,
 ): Promise<void> {
-  await readAfterTimeout(
-    () => requestAndWait(
-      client,
-      (options) => client.deleteStorageVolume(poolName, 'custom', incusName, options),
-    ),
-    async () => {
-      try {
-        await client.getStorageVolume(poolName, 'custom', incusName);
-      } catch (error) {
-        if (isNotFound(error)) return undefined;
-        throw error;
-      }
-      throw new Error('VOLUME_DELETE_NOT_CONFIRMED');
-    },
-  );
+  try {
+    await readAfterTimeout(
+      () => requestAndWait(
+        client,
+        (options) => client.deleteStorageVolume(poolName, 'custom', incusName, options),
+      ),
+      async () => {
+        try {
+          await client.getStorageVolume(poolName, 'custom', incusName);
+        } catch (error) {
+          if (isNotFound(error)) return undefined;
+          throw error;
+        }
+        throw new Error('VOLUME_DELETE_NOT_CONFIRMED');
+      },
+    );
+  } catch (error) {
+    if (!isNotFound(error)) throw error;
+  }
   await verifyAbsent(client, poolName, incusName);
 }
 

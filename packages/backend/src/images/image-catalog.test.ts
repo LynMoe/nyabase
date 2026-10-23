@@ -46,6 +46,22 @@ describe('parseSimplestreamsProducts', () => {
     ]);
   });
 
+  it('offers only the amd64 build when the source publishes several architectures', () => {
+    const product = (arch: string, fingerprint: string) => ({
+      aliases: 'debian/12',
+      arch,
+      versions: { '1': { items: { 'root.squashfs': { ftype: 'squashfs', sha256: fingerprint } } } },
+    });
+    // arm64 listed first: it must not win the alias.
+    const entries = parseSimplestreamsProducts({
+      products: {
+        'debian:12:arm64:default': product('arm64', 'd'.repeat(64)),
+        'debian:12:amd64:default': product('amd64', 'e'.repeat(64)),
+      },
+    });
+    expect(entries.map((entry) => entry.fingerprint)).toEqual(['e'.repeat(64)]);
+  });
+
   it('skips products without a squashfs fingerprint', () => {
     expect(parseSimplestreamsProducts({
       products: {

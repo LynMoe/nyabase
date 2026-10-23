@@ -18,15 +18,6 @@ export interface AuthUser {
 /** The authenticated principal attached to a request (service-facing camelCase contract). */
 export type UserRecord = AuthUser;
 
-export interface AuthApiToken {
-  id: string;
-  userId: string;
-  name: string;
-  hash: string;
-  lastUsedAt: Date | null;
-  createdAt: Date;
-}
-
 export interface NewRefreshSession {
   id: string;
   hash: string;
@@ -44,10 +35,62 @@ export type AuthTransactionHook<T> = (
   value: T,
 ) => Promise<void>;
 
+export interface RefreshRotationInput {
+  hash: string;
+  requestIdHash: string;
+  /** Idle timeout: a rotation moves the expiry to now + idleMs... */
+  idleMs: number;
+  /** ...but never past the session start (login) + absoluteMs. */
+  absoluteMs: number;
+  /**
+   * How long the immediately previous token, presented with a different
+   * request id, still counts as a concurrent refresh instead of reuse.
+   */
+  reuseGraceMs: number;
+  /** Retired hashes kept per session; older ones are forgotten (just invalid). */
+  retainedAncestors: number;
+  /**
+   * A rotation that would forget a hash retired less than this long ago is
+   * refused (`throttled`), so every recent ancestor stays detectable however
+   * fast a holder loops refresh.
+   */
+  ancestorMinimumAgeMs: number;
+  maximumSessions: number;
+  successorHash: (sessionId: string) => string;
+  /** Runs in the transaction that deleted a session for token reuse. */
+  onReuse?: AuthTransactionHook<RefreshTokenReuse>;
+}
+
+export interface RefreshTokenReuse {
+  userId: string;
+  sessionId: string;
+}
+
+/** A browser (refresh) session, identified by its stable row id. */
+export interface RefreshSessionRef {
+  userId: string;
+  sessionId: string;
+}
+
+/** A live browser session: `expiresAt` is the idle expiry, `createdAt` the login time. */
+export interface LiveRefreshSession {
+  expiresAt: Date;
+  createdAt: Date;
+}
+
 export type RefreshRotationResult =
   | { kind: 'invalid' }
-  | { kind: 'recovered'; user: AuthUser; sessionId: string }
-  | { kind: 'rotated'; user: AuthUser; sessionId: string };
+  /** The just-retired token lost a concurrent rotation; the session is intact. */
+  | { kind: 'superseded' }
+  /**
+   * The session rotated `retainedAncestors` times within `ancestorMinimumAgeMs`;
+   * the next rotation is allowed in `retryAfterMs`.
+   */
+  | { kind: 'throttled'; retryAfterMs: number }
+  /** A retired token was presented again; the whole session was deleted. */
+  | ({ kind: 'reused' } & RefreshTokenReuse)
+  | { kind: 'recovered'; user: AuthUser; sessionId: string; expiresInMs: number }
+  | { kind: 'rotated'; user: AuthUser; sessionId: string; expiresInMs: number };
 
 export interface AuthPersistence {
   findUserByUsername(username: string): Promise<AuthUser | null>;
@@ -59,40 +102,14 @@ export interface AuthPersistence {
     credentialSnapshot?: LoginCredentialSnapshot,
     onIssued?: AuthTransactionHook<AuthUser>,
   ): Promise<AuthUser | null>;
-  rotateRefreshSession(input: {
-    hash: string;
-    requestIdHash: string;
-    expiresInMs: number;
-    maximumSessions: number;
-    successorHash: (sessionId: string) => string;
-  }): Promise<RefreshRotationResult>;
-  deleteRefreshSessionByCurrentOrPreviousHash(
+  rotateRefreshSession(input: RefreshRotationInput): Promise<RefreshRotationResult>;
+  deleteRefreshSessionByCurrentOrRetiredHash(
     hash: string,
     onDeleted?: AuthTransactionHook<string>,
-  ): Promise<string | null>;
-  validateApiToken(
-    hash: string,
-    now: Date,
-    touchIntervalMs: number,
-  ): Promise<AuthUser | null>;
-  createApiToken(
-    userId: string,
-    token: AuthApiToken,
-    maximumTokens: number,
-    credentialSnapshot: LoginCredentialSnapshot,
-    onCreated?: AuthTransactionHook<AuthApiToken>,
-  ): Promise<'created' | 'inactive-user' | 'capacity'>;
-  listApiTokens(userId: string): Promise<AuthApiToken[]>;
-  deleteApiToken(
-    userId: string,
-    tokenId: string,
-    onDeleted?: AuthTransactionHook<AuthApiToken>,
-  ): Promise<AuthApiToken | null>;
+  ): Promise<RefreshSessionRef | null>;
+  /** The user's session `sessionId` if it exists, is not revoked and has not idled out. */
+  findLiveRefreshSession(userId: string, sessionId: string): Promise<LiveRefreshSession | null>;
   revokeBrowserSessions(
-    transaction: Transaction<NyabaseDatabase>,
-    userId: string,
-  ): Promise<void>;
-  deleteUserCredentials(
     transaction: Transaction<NyabaseDatabase>,
     userId: string,
   ): Promise<void>;

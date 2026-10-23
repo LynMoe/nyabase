@@ -1,6 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
 import { WebSocket } from 'ws';
-import { SshProxyGateway, SSH_PROXY_PAUSE_ADMIT_FLUSH_MS } from './ssh-proxy-gateway.js';
+import {
+  SshProxyGateway,
+  SSH_PROXY_PAUSE_ADMIT_FLUSH_MS,
+  SSH_PROXY_REFUSED_LOGIN_SUMMARY_MS,
+} from './ssh-proxy-gateway.js';
 
 class FakeSocket {
   readyState: number = WebSocket.OPEN;
@@ -95,5 +99,72 @@ describe('SshProxyGateway shutdown', () => {
     client.sent.length = 0;
     await gateway.broadcastSnapshot();
     expect(client.sent).toHaveLength(0);
+  });
+});
+
+describe('SshProxyGateway snapshot build failure', () => {
+  it('sends nothing and logs at error level when the proxies will fail closed', async () => {
+    const gateway = new SshProxyGateway(
+      { buildSnapshot: () => Promise.reject(new Error('over the cap')) } as never,
+      {
+        get: (key: string) => (key === 'ssh.proxySnapshotStaleMs' ? 120_000 : 'a'.repeat(32)),
+      } as never,
+      { register: () => () => undefined } as never,
+    );
+    const internals = gateway as unknown as {
+      sentLeaseEnds: Map<FakeSocket, number>;
+      logger: { error: (message: string) => void };
+    };
+    const client = new FakeSocket();
+    clientsOf(gateway).add(client);
+    internals.sentLeaseEnds.set(client, Date.now() + 60_000);
+    const logged = vi.spyOn(internals.logger, 'error').mockImplementation(() => undefined);
+
+    await expect(gateway.broadcastSnapshot()).rejects.toThrow('over the cap');
+
+    expect(client.sent).toHaveLength(0);
+    expect(logged).toHaveBeenCalledWith(expect.stringMatching(
+      /^SSH proxy snapshot build failed: over the cap; proxies keep their last snapshot until .* and then fail closed/,
+    ));
+    await gateway.onModuleDestroy();
+  });
+});
+
+describe('SshProxyGateway login audit logging', () => {
+  function audit(gateway: SshProxyGateway, payload: Record<string, unknown>): void {
+    (gateway as unknown as { handleMessage: (ws: unknown, raw: string) => void }).handleMessage(
+      new FakeSocket(),
+      JSON.stringify({ kind: 'audit', payload: { action: 'login', ts: 1, ...payload } }),
+    );
+  }
+
+  it('logs successes per login but only a periodic sum of refusals', async () => {
+    vi.useFakeTimers();
+    const gateway = makeGateway();
+    const logger = (gateway as unknown as { logger: { log: (message: string) => void } }).logger;
+    const logged = vi.spyOn(logger, 'log').mockImplementation(() => undefined);
+
+    audit(gateway, { ok: true, username: 'alice' });
+    expect(logged).toHaveBeenCalledTimes(1);
+    expect(logged.mock.calls[0]![0]).toContain('user=alice');
+
+    for (let attempt = 0; attempt < 50; attempt += 1) {
+      audit(gateway, { ok: false, username: `scanner${attempt}`, reason: 'public_key_rejected' });
+    }
+    audit(gateway, { ok: false, reason: 'invalid_login' });
+    expect(logged).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(SSH_PROXY_REFUSED_LOGIN_SUMMARY_MS);
+    expect(logged).toHaveBeenCalledTimes(2);
+    const summary = logged.mock.calls[1]![0];
+    expect(summary).toBe(
+      'SSH proxy refused 51 login attempt(s) since the last summary: '
+      + 'login:invalid_login=1 login:public_key_rejected=50',
+    );
+    expect(summary).not.toContain('scanner');
+
+    await vi.advanceTimersByTimeAsync(SSH_PROXY_REFUSED_LOGIN_SUMMARY_MS);
+    expect(logged).toHaveBeenCalledTimes(2);
+    vi.useRealTimers();
   });
 });

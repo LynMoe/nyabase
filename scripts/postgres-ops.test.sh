@@ -165,4 +165,102 @@ bash "$ops" upgrade-preflight \
   --output "$test_root/out/upgrade-preflight.txt"
 grep -qx 'result=pass' "$test_root/out/upgrade-preflight.txt"
 
+# A uid that may not read the archives or write their directory is told so,
+# not handed a checksum or dump failure. Root ignores mode bits, so as root
+# the script runs as nobody.
+perm_root="$test_root/perm"
+mkdir -p "$perm_root/archives"
+cp deploy/postgres-ops.sh "$perm_root/postgres-ops.sh"
+cp "$test_root/out/nyabase.dump" "$test_root/out/nyabase.dump.sha256" "$perm_root/archives/"
+chmod 0000 "$perm_root/archives/nyabase.dump" "$perm_root/archives/nyabase.dump.sha256"
+chmod 0500 "$perm_root/archives"
+as_other=()
+if [[ "$(id -u)" -eq 0 ]]; then
+  chmod 0755 "$test_root" "$perm_root"
+  chmod 0644 "$perm_root/postgres-ops.sh"
+  as_other=(setpriv --reuid=65534 --regid=65534 --clear-groups)
+fi
+if "${as_other[@]}" bash "$perm_root/postgres-ops.sh" verify-logical \
+  --input "$perm_root/archives/nyabase.dump" 2>"$test_root/err"; then
+  echo "verify unexpectedly read an archive it may not read" >&2
+  exit 1
+fi
+grep -Eq 'cannot (open|read) .*run as the owner of the backup directory' "$test_root/err"
+! grep -q checksum "$test_root/err"
+if "${as_other[@]}" bash "$perm_root/postgres-ops.sh" logical-backup \
+  --output "$perm_root/archives/new.dump" 2>"$test_root/err"; then
+  echo "backup unexpectedly wrote to a directory it may not write" >&2
+  exit 1
+fi
+grep -q 'cannot write to .*run as the owner of the backup directory' "$test_root/err"
+chmod 0700 "$perm_root/archives"
+chmod 0600 "$perm_root/archives/nyabase.dump" "$perm_root/archives/nyabase.dump.sha256"
+
+# Scheduled backup wrapper: a fake docker runs the in-container command on the
+# host with the bind mounts mapped back to their sources.
+make_fake docker '
+case "$1" in
+  ps) [[ -z "${FAKE_POSTGRES_CONTAINERS-pgcontainer}" ]] || echo "${FAKE_POSTGRES_CONTAINERS-pgcontainer}" ;;
+  inspect) echo "postgres:fake" ;;
+  run)
+    shift
+    mounts=() envs=()
+    while (($#)); do
+      case "$1" in
+        --volume) mounts+=("$2"); shift 2 ;;
+        --env) envs+=("$2"); shift 2 ;;
+        --network | --user | --security-opt | --cap-drop) shift 2 ;;
+        --rm | --read-only) shift ;;
+        *) break ;;
+      esac
+    done
+    shift # image
+    [[ "$1" == bash && "$2" == -c ]]
+    script="$3"
+    shift 3
+    for mount in "${mounts[@]}"; do
+      IFS=: read -r source target _ <<<"$mount"
+      script="${script//$target/$source}"
+    done
+    env "${envs[@]}" bash -c "$script" "$@"
+    ;;
+  *) exit 1 ;;
+esac
+'
+backup_root="$test_root/scheduled"
+mkdir -p "$backup_root"
+touch -d '30 days ago' "$backup_root/nyabase-20200101T000000Z.dump" \
+  "$backup_root/nyabase-20200101T000000Z.dump.sha256"
+touch -d '3 days ago' "$backup_root/nyabase-recent.dump"
+upload_log="$test_root/uploaded"
+make_fake upload "printf '%s\n' \"\$@\" >>'$upload_log'"
+NYABASE_DEPLOY_DIR="$PWD/deploy" \
+NYABASE_BACKUP_ROOT="$backup_root" \
+NYABASE_BACKUP_KEEP_DAYS=14 \
+NYABASE_BACKUP_UPLOAD_COMMAND="$fake_bin/upload" \
+  bash deploy/nyabase-backup.sh >/dev/null
+new_archive="$(find "$backup_root" -name 'nyabase-2*.dump' -newer "$backup_root/nyabase-recent.dump")"
+[[ -n "$new_archive" && -f "$new_archive.sha256" ]]
+[[ "$(cat "$upload_log")" == "$new_archive"$'\n'"$new_archive.sha256" ]]
+[[ ! -e "$backup_root/nyabase-20200101T000000Z.dump" ]]
+[[ ! -e "$backup_root/nyabase-20200101T000000Z.dump.sha256" ]]
+[[ -e "$backup_root/nyabase-recent.dump" ]]
+if FAKE_POSTGRES_CONTAINERS='' NYABASE_DEPLOY_DIR="$PWD/deploy" \
+  NYABASE_BACKUP_ROOT="$backup_root" bash deploy/nyabase-backup.sh 2>"$test_root/err"; then
+  echo "scheduled backup unexpectedly ran without a postgres container" >&2
+  exit 1
+fi
+grep -q 'expected one running postgres container' "$test_root/err"
+touch -d '30 days ago' "$backup_root/nyabase-kept-on-failure.dump"
+sleep 1 # a new archive name
+archives_before="$(find "$backup_root" -name 'nyabase-*' | sort)"
+if FAIL_PG_DUMP=1 NYABASE_DEPLOY_DIR="$PWD/deploy" \
+  NYABASE_BACKUP_ROOT="$backup_root" bash deploy/nyabase-backup.sh 2>/dev/null; then
+  echo "scheduled backup unexpectedly succeeded after a failed dump" >&2
+  exit 1
+fi
+# Nothing new is published and retention does not run after a failure.
+[[ "$(find "$backup_root" -name 'nyabase-*' | sort)" == "$archives_before" ]]
+[[ -z "$(find "$backup_root" -name '.nyabase-*')" ]]
+
 echo "postgres operations contract tests passed"

@@ -12,6 +12,7 @@ import {
 } from '@nestjs/common';
 import { UsersService } from './users.service.js';
 import { UserSshKeysService } from './user-ssh-keys.service.js';
+import { SshClientConfigService } from './ssh-client-config.service.js';
 import { RequireRole, CurrentActor } from '../iam/decorators.js';
 import { hasRole, type Actor, requireUserId } from '../iam/actor.js';
 import {
@@ -31,6 +32,7 @@ export class UsersController {
   constructor(
     private usersService: UsersService,
     private sshKeys: UserSshKeysService,
+    private sshClientConfig: SshClientConfigService,
   ) {}
 
   @Get()
@@ -96,6 +98,14 @@ export class UsersController {
     return this.sshKeys.listSshKeys(id);
   }
 
+  /** Yourself only: it carries your host CA, created on first use. */
+  @Get(':id/ssh-client-config')
+  async sshClientConfigFor(@Param('id') id: string, @CurrentActor() actor: Actor) {
+    if (actor.userId !== id) throw new ForbiddenException();
+    const user = await this.usersService.findById(id);
+    return this.sshClientConfig.forUser({ id, username: user.username });
+  }
+
   @Post(':id/ssh-keys')
   async addSshKey(
     @Param('id') id: string,
@@ -104,7 +114,7 @@ export class UsersController {
   ) {
     if (actor.userId !== id) throw new ForbiddenException();
     const dto = zAddSshKeyRequest.parse(body);
-    return this.sshKeys.addSshKey(id, dto.name, dto.keyText, actor.userId);
+    return this.sshKeys.addSshKey(actor, dto.name, dto.keyText, dto.currentPassword);
   }
 
   @Delete(':id/ssh-keys/:keyId')

@@ -72,6 +72,40 @@ describePg('IP pools', () => {
       await expect(service.delete(actorId, pool.id)).rejects.toMatchObject({
         response: { code: FailureCode.IpPoolInUse },
       });
+
+      // The gateway or a reservation cannot move onto a claimed address.
+      await expect(service.patch(actorId, pool.id, {
+        expectedRevision: pool.revision,
+        gateway: '10.8.100.10',
+      })).rejects.toMatchObject({ response: { code: FailureCode.IpPoolInUse } });
+      await expect(service.patch(actorId, pool.id, {
+        expectedRevision: pool.revision,
+        reservedIps: ['10.8.0.1', '10.8.96.92', '10.8.100.10'],
+      })).rejects.toMatchObject({ response: { code: FailureCode.IpPoolInUse } });
+    });
+  });
+
+  it('serializes concurrent creation of overlapping pools', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const actorId = randomUUID();
+      await seedUser(database, actorId);
+      const service = new IpPoolsService(
+        new IpPoolsRepository(database),
+        new PgTransactionManager(database),
+        { append: vi.fn().mockResolvedValue(undefined) } as never,
+        database,
+      );
+      const results = await Promise.allSettled([
+        service.create(actorId, {
+          name: 'wide', cidr: '10.9.0.0/16', allocationCidr: '10.9.1.0/24',
+          gateway: '10.9.0.1', reservedIps: [], serverIds: [],
+        }),
+        service.create(actorId, {
+          name: 'narrow', cidr: '10.9.1.0/24', allocationCidr: '10.9.1.0/24',
+          gateway: '10.9.1.1', reservedIps: [], serverIds: [],
+        }),
+      ]);
+      expect(results.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
     });
   });
 });

@@ -26,6 +26,7 @@ import { noopWake } from '../reconcile/reconcile-wake.test-helper.js';
 import { testActor } from '../iam/actor.test-helper.js';
 import { ContainerSshConvergenceService, IncusContainerSshStateAdapter } from './container-ssh.js';
 import { AccessResolverService } from '../iam/access-resolver.service.js';
+import { SshProxySnapshotService } from '../ssh/ssh-proxy-snapshot.service.js';
 import {
   days,
   grantPool,
@@ -156,6 +157,7 @@ describePg('PostgreSQL container create admission and capacity', () => {
         { get: vi.fn().mockReturnValue(1_000) } as never,
         { onChange: vi.fn() } as never,
         { wake: vi.fn() } as never,
+        { certify: vi.fn().mockResolvedValue(null) } as never,
       );
       const client = {
         listInstances: vi.fn().mockResolvedValue({ metadata: [] }),
@@ -414,6 +416,40 @@ describePg('PostgreSQL GPU claims', () => {
       } catch (error) {
         expect(isGpuOccupiedSqlError(error)).toBe(true);
       }
+    });
+  });
+
+  it('keeps GPU on while a live container carries the NVIDIA runtime, even without a card', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const fixture = await seedFixture(database, { poolTotalBytes: 10_000 });
+      const harness = gpuHarness(database, { diskBytes: 10_000 });
+      await enableGpu(database, fixture);
+      const disable = () => database.updateTable('infra.servers')
+        .set({ gpu_enabled: false })
+        .where('id', '=', fixture.serverId)
+        .execute();
+      const claims = new GpuClaimsRepository(database);
+
+      // Runtime not ready: {nvidiaRuntime:false, pciAddresses:[]} contributes nothing.
+      const plain = await harness.service.create(testActor(fixture.userId), request(fixture, 'runtime-off'));
+      expect(await claims.countOccupyingContainers(fixture.serverId)).toBe(0);
+
+      await database.updateTable('infra.servers')
+        .set({ gpu_health: { runtimeReady: true } })
+        .where('id', '=', fixture.serverId)
+        .execute();
+      const runtime = await harness.service.create(testActor(fixture.userId), request(fixture, 'runtime-on'));
+      expect(await claims.countOccupyingContainers(fixture.serverId)).toBe(1);
+      await expect(disable()).rejects.toSatisfy((error) => isGpuOccupiedSqlError(error));
+
+      // A deleting container no longer holds GPU.
+      await database.updateTable('control.containers')
+        .set({ lifecycle_phase: 'deleting' })
+        .where('id', '=', runtime.resourceId)
+        .execute();
+      expect(await claims.countOccupyingContainers(fixture.serverId)).toBe(0);
+      await disable();
+      expect(plain.resourceId).toBeTruthy();
     });
   });
 
@@ -1101,6 +1137,88 @@ describePg('PostgreSQL running-memory and GPU admission', () => {
       await database.updateTable('iam.server_grants').set({ gpu_pci_addresses: [GPU] })
         .where('user_id', '=', fixture.userId).execute();
       await expect(service.action(owner, created.resourceId, 'start')).resolves.toBeDefined();
+    });
+  });
+});
+
+describePg('Container names and the SSH proxy snapshot', () => {
+  function service(database: Kysely<NyabaseDatabase>): ContainerControlService {
+    const transactions = new PgTransactionManager(database);
+    const intents = new IntentRepository(database, noopWake());
+    return makeContainerControlService(
+      database,
+      transactions,
+      new ContainerControlRepository(database),
+      new AccessResolverService(database, transactions),
+      intents,
+      {} as never,
+      { append: vi.fn().mockResolvedValue(undefined) } as never,
+      new IpPoolsRepository(database),
+      { get: vi.fn().mockReturnValue(null) } as never,
+      new ContainerSshConvergenceService(database, intents),
+      {} as never,
+      new GpuClaimsRepository(database),
+    );
+  }
+
+  it('keeps container names unique per owner, ignoring case, so the proxy can route by name', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const fixture = await seedFixture(database);
+      await grantServer(database, { user: fixture.userId }, fixture.serverId, {});
+      const owner = testActor(fixture.userId);
+      await service(database).create(owner, request(fixture, 'Work'));
+      await expect(service(database).create(owner, request(fixture, 'work'))).rejects.toMatchObject({
+        response: { message: expect.stringContaining('names are unique per user') },
+      });
+      const beta = await service(database).create(owner, request(fixture, 'beta'));
+      // The index holds across servers too, where the admission check cannot see a race.
+      await expect(database.updateTable('control.containers').set({ name: 'WORK' })
+        .where('id', '=', beta.resourceId).execute())
+        .rejects.toMatchObject({ code: '23505', constraint: 'containers_owner_name_key' });
+    });
+  });
+
+  it('sends the proxy only users and containers that have a routable SSH route', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const fixture = await seedFixture(database);
+      await grantServer(database, { user: fixture.userId }, fixture.serverId, {});
+      const owner = testActor(fixture.userId);
+      const routed = await service(database).create(owner, request(fixture, 'routed', {
+        powerIntent: ContainerPowerIntent.Running,
+      }));
+      const parked = await service(database).create(owner, request(fixture, 'parked'));
+      const idle = await seedUser(database, 'idle-user');
+      await database.insertInto('iam.ssh_public_keys').values([
+        { id: randomUUID(), user_id: fixture.userId, name: 'k', key_text: 'ssh-ed25519 AAAAowner', fingerprint: 'f1' },
+        { id: randomUUID(), user_id: idle, name: 'k', key_text: 'ssh-ed25519 AAAAidle', fingerprint: 'f2' },
+      ]).execute();
+      await database.updateTable('control.containers').set({ lifecycle_phase: 'active' })
+        .where('id', 'in', [routed.resourceId, parked.resourceId]).execute();
+      await database.updateTable('control.container_ssh_routes')
+        .set({ instance_status: 'Running', ssh_status: 'running', observed_at: new Date() })
+        .where('container_id', '=', routed.resourceId).execute();
+
+      const settings: Record<string, unknown> = {
+        'ssh.proxySnapshotStaleMs': 300_000,
+        'ssh.proxyHostSuffix': 'NYA',
+        'ssh.proxyPublicHost': '',
+        'ssh.proxyPublicPort': 2222,
+      };
+      const snapshots = new SshProxySnapshotService(
+        new PgTransactionManager(database),
+        new ContainerControlRepository(database),
+        { ensureProxyHostKey: async () => ({ privateKey: 'k', publicKey: 'p', fingerprint: 'f', generation: 1 }) } as never,
+        { get: (key: string) => settings[key] } as never,
+      );
+      const snapshot = await snapshots.buildSnapshot();
+      expect(snapshot.hostSuffix).toBe('nya');
+      expect(snapshot.users.map((user) => user.id)).toEqual([fixture.userId]);
+      expect(snapshot.containers.map((container) => container.id)).toEqual([routed.resourceId]);
+      expect(snapshot.routes.map((route) => route.containerId)).toEqual([routed.resourceId]);
+      expect(snapshot.servers.map((server) => server.id)).toEqual([fixture.serverId]);
+      expect(snapshot.images.map((image) => image.id)).toEqual([fixture.imageId]);
+      expect(snapshots.lastSummary()).toMatchObject({ users: 1, routes: 1, error: null, generation: 1 });
+      expect(snapshots.lastSummary()!.bytes).toBeGreaterThan(0);
     });
   });
 });

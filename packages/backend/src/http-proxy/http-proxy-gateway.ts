@@ -13,6 +13,8 @@ import {
 } from '@nyabase/common';
 import { HttpProxySnapshotService } from './http-proxy-snapshot.service.js';
 import { ProxySnapshotNotifierService } from '../proxy-snapshots/proxy-snapshot-notifier.service.js';
+import { snapshotBuildFailureMessage } from '../proxy-snapshots/snapshot-build-failure.js';
+import { ProxyControlHeartbeat } from '../proxy-snapshots/proxy-control-heartbeat.js';
 import { NyabaseConfigService } from '../platform/config/nyabase-config.service.js';
 import {
   configuredProxyTokenDigest,
@@ -57,6 +59,7 @@ export class HttpProxyGateway implements OnModuleInit, OnModuleDestroy {
   private destroyed = false;
   private unregisterSnapshotNotifier: (() => void) | null = null;
   private readonly expectedTokenDigest: Buffer;
+  private readonly heartbeat = new ProxyControlHeartbeat(() => this.clients);
 
   constructor(
     private service: HttpProxySnapshotService,
@@ -82,6 +85,7 @@ export class HttpProxyGateway implements OnModuleInit, OnModuleDestroy {
       'http',
       () => this.broadcastSnapshot(),
     );
+    this.heartbeat.start();
   }
 
   attachToHttpServer(server: http.Server): void {
@@ -109,7 +113,9 @@ export class HttpProxyGateway implements OnModuleInit, OnModuleDestroy {
       // synchronously, before authentication or snapshot I/O can yield.
       ws.on('error', (error) => this.logger.warn(`HTTP proxy WS error: ${error.message}`));
       void this.handleConnection(ws, req).catch((error: unknown) => {
-        this.logBroadcastFailure(error);
+        this.logger.warn(
+          `HTTP proxy connection initialization failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
         ws.terminate();
       });
     });
@@ -118,6 +124,7 @@ export class HttpProxyGateway implements OnModuleInit, OnModuleDestroy {
 
   onModuleDestroy(): void {
     this.destroyed = true;
+    this.heartbeat.stop();
     this.unregisterSnapshotNotifier?.();
     this.unregisterSnapshotNotifier = null;
     if (this.snapshotRenewalTimer) clearInterval(this.snapshotRenewalTimer);
@@ -245,6 +252,7 @@ export class HttpProxyGateway implements OnModuleInit, OnModuleDestroy {
         // (and schedule an update), never in an unobserved promise hop.
         this.initializingClients.delete(ws);
         this.clients.add(ws);
+        this.heartbeat.track(ws);
         ws.on('message', (raw) => this.handleMessage(ws, raw.toString()));
         if (!this.sendSnapshot(ws, { kind: 'snapshot', payload: initialSnapshot })) return;
         break;
@@ -274,14 +282,22 @@ export class HttpProxyGateway implements OnModuleInit, OnModuleDestroy {
         );
         this.broadcast({ kind: 'update', payload: snapshot });
       } catch (error) {
+        // The next change or renewal tick retries. Never re-send the old
+        // routes with a fresh lease: the proxies fail closed when it ends.
         this.snapshotDirty = true;
+        this.logger.error(snapshotBuildFailureMessage(
+          'HTTP',
+          error,
+          Array.from(this.latestSentSnapshot.values(), (sent) => sent.validUntil),
+        ));
         throw error;
       }
     }
   }
 
+  /** Build failures were already logged at error level where they happened. */
   private logBroadcastFailure(error: unknown): void {
-    this.logger.warn(
+    this.logger.debug(
       `HTTP proxy snapshot broadcast failed: ${error instanceof Error ? error.message : String(error)}`,
     );
   }

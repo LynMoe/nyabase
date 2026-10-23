@@ -1,5 +1,9 @@
 import { z } from 'zod';
 
+/**
+ * `auth` is the first frame and again whenever the console sends
+ * `reauthenticate`: a fresh access token of the same browser session.
+ */
 export const zBrowserToConsole = z.discriminatedUnion('type', [
   z.object({
     type: z.literal('auth'),
@@ -20,6 +24,13 @@ export const zConsoleToBrowser = z.discriminatedUnion('type', [
   z.object({
     type: z.literal('ready'),
   }).strict(),
+  /**
+   * The current access token is about to stop authorizing the console; send a
+   * fresh `auth` frame or the console closes (4408) when it expires.
+   */
+  z.object({
+    type: z.literal('reauthenticate'),
+  }).strict(),
   z.object({
     type: z.literal('data'),
     data: z.string().max(1_048_576),
@@ -35,3 +46,6 @@ export const zConsoleToBrowser = z.discriminatedUnion('type', [
     message: z.string().min(1).max(4_096),
   }).strict(),
 ]);
+
+export type BrowserToConsole = z.infer<typeof zBrowserToConsole>;
+export type ConsoleToBrowser = z.infer<typeof zConsoleToBrowser>;

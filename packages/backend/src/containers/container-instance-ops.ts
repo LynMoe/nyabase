@@ -294,22 +294,27 @@ export async function renameInstance(
 }
 
 /** Stop (if running) and delete one instance, confirmed by a GET 404. */
+/** Force-stop the instance if it runs; true when it had to be stopped. */
+export async function stopPhysicalInstance(client: IncusClientPort, name: string): Promise<boolean> {
+  const state = await readState(client, name);
+  if (!running(state)) return false;
+  await readAfterTimeout(
+    () => requestAndWait(
+      client,
+      (options) => client.updateInstanceState(name, { action: 'stop', force: true }, options),
+    ),
+    async () => {
+      const after = await client.getInstanceState(name);
+      if (!running(after.metadata)) return undefined;
+      throw new Error('INSTANCE_STOP_NOT_CONFIRMED');
+    },
+  );
+  return true;
+}
+
 export async function deletePhysicalInstance(client: IncusClientPort, name: string): Promise<void> {
   if (!name) return;
-  const state = await readState(client, name);
-  if (running(state)) {
-    await readAfterTimeout(
-      () => requestAndWait(
-        client,
-        (options) => client.updateInstanceState(name, { action: 'stop', force: true }, options),
-      ),
-      async () => {
-        const after = await client.getInstanceState(name);
-        if (!running(after.metadata)) return undefined;
-        throw new Error('INSTANCE_STOP_NOT_CONFIRMED');
-      },
-    );
-  }
+  await stopPhysicalInstance(client, name);
   await readAfterTimeout(
     () => requestAndWait(client, (options) => client.deleteInstance(name, options)),
     async () => {
@@ -369,6 +374,40 @@ export async function putManagedFields(
     }
     throw error;
   }
+}
+
+/**
+ * Unplug the named devices (detaching volumes) and change nothing else, live
+ * on a running instance too.
+ */
+export async function removeDevices(
+  client: IncusClientPort,
+  name: string,
+  deviceNames: readonly string[],
+): Promise<void> {
+  const present = (devices: Record<string, unknown> | undefined) => deviceNames
+    .some((device) => Object.prototype.hasOwnProperty.call(devices ?? {}, device));
+  await readAfterTimeout(
+    () => requestAndWait(
+      client,
+      (options) => client.readModifyWriteInstance(
+        name,
+        (document) => {
+          const devices = { ...(document.devices ?? {}) };
+          for (const device of deviceNames) delete devices[device];
+          document.devices = devices;
+          return document;
+        },
+        options,
+      ),
+    ),
+    async () => {
+      if (present((await readRequired(client, name)).document.devices)) {
+        throw new Error('INSTANCE_UPDATE_NOT_CONFIRMED');
+      }
+      return undefined;
+    },
+  );
 }
 
 /** Start or stop the instance and wait until the state is confirmed. */

@@ -395,8 +395,12 @@ export class StoragePoolsRepository {
       .execute();
   }
 
+  /**
+   * Whether the pool still carries anything. Shared (CephFS) executors never
+   * appear in `volumes.pool_id`, so their volumes show up as placements.
+   */
   async hasDependencies(id: string, executor: StorageExecutor = this.database): Promise<boolean> {
-    const [containers, volumes, systemPool, grants] = await Promise.all([
+    const [containers, volumes, placements, systemPool, grants] = await Promise.all([
       executor
         .selectFrom('control.containers')
         .select('id')
@@ -406,6 +410,12 @@ export class StoragePoolsRepository {
       executor
         .selectFrom('control.volumes')
         .select('id')
+        .where('pool_id', '=', id)
+        .limit(1)
+        .executeTakeFirst(),
+      executor
+        .selectFrom('control.volume_placements')
+        .select('volume_id')
         .where('pool_id', '=', id)
         .limit(1)
         .executeTakeFirst(),
@@ -422,6 +432,35 @@ export class StoragePoolsRepository {
         .limit(1)
         .executeTakeFirst(),
     ]);
-    return Boolean(containers || volumes || systemPool || grants);
+    return Boolean(containers || volumes || placements || systemPool || grants);
+  }
+
+  /**
+   * Deregistering the last registered executor of a backend that still holds
+   * volumes would leave no host able to destroy them, so their data would be
+   * orphaned on the backend while the rows and quota disappear.
+   */
+  async isLastExecutorOfBackendWithVolumes(
+    executorId: string,
+    sharedBackendId: string,
+    executor: StorageExecutor = this.database,
+  ): Promise<boolean> {
+    const [otherExecutor, volume] = await Promise.all([
+      executor
+        .selectFrom('infra.storage_pools')
+        .select('id')
+        .where('shared_backend_id', '=', sharedBackendId)
+        .where('registered', '=', true)
+        .where('id', '!=', executorId)
+        .limit(1)
+        .executeTakeFirst(),
+      executor
+        .selectFrom('control.volumes')
+        .select('id')
+        .where('shared_backend_id', '=', sharedBackendId)
+        .limit(1)
+        .executeTakeFirst(),
+    ]);
+    return !otherExecutor && Boolean(volume);
   }
 }

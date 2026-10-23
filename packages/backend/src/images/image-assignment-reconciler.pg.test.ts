@@ -7,6 +7,7 @@ import { ImageReconcileStore } from './image-reconcile.store.js';
 import { ImageAssignmentReconciler } from './image-assignment-reconciler.service.js';
 import { noopWake } from '../reconcile/reconcile-wake.test-helper.js';
 import { DEFAULT_IMAGE_SOURCE_SERVER } from '@nyabase/common';
+import { seedContainer, seedImage, seedPool, seedServer, seedUser } from '../iam/access.pg-test-helper.js';
 
 const describePg = process.env.NYABASE_TEST_DATABASE_URL ? describe : describe.skip;
 const fingerprint = 'a'.repeat(64);
@@ -254,6 +255,69 @@ describePg('PostgreSQL image assignment cleanup and scan idempotency', () => {
         .select('id')
         .where('resource_id', '=', imageId)
         .execute()).toHaveLength(1);
+    });
+  });
+
+  it('queues no cleanup while a container row or an Incus resource holds the image, and fails a held one', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const serverId = await seedServer(database);
+      const poolId = await seedPool(database, serverId);
+      const userId = await seedUser(database);
+      const imageId = await seedImage(database);
+      const containerId = await seedContainer(database, { ownerId: userId, serverId, poolId, imageId });
+      // A failed container keeps the deleted image's row (and copy) held.
+      await database.updateTable('control.containers')
+        .set({ lifecycle_phase: 'failed', failure_code: 'TEST' })
+        .where('id', '=', containerId).execute();
+      await database.updateTable('infra.images')
+        .set({ is_active: false, deleting: true, cleanup_generation: 1 })
+        .where('id', '=', imageId).execute();
+      const intents = new IntentRepository(database, noopWake());
+      const reconciler = new ImageAssignmentReconciler(
+        new ImageReconcileStore(database),
+        { get: (key: string) => (key === 'incus.preflightSourceServer' ? DEFAULT_IMAGE_SOURCE_SERVER : '') } as never,
+        intents,
+        { log: vi.fn().mockResolvedValue(undefined) } as never,
+        { register: vi.fn() } as never,
+      );
+      let usedBy = ['/1.0/instances/orphan'];
+      const listImages = vi.fn(async () => ({ metadata: [{ ...incusImage(), used_by: usedBy }] }));
+      const client = { listImages, deleteImage: vi.fn(async () => syncResponse()) };
+      const cleanupIntents = () => database.selectFrom('control.intents')
+        .select(['status', 'failure_code'])
+        .where('resource_id', '=', imageId)
+        .orderBy('created_at')
+        .execute();
+
+      await reconciler.scan(serverId, client as never);
+      await reconciler.scan(serverId, client as never);
+      expect(await cleanupIntents()).toEqual([]);
+
+      // The container is gone; an Incus resource still uses the copy.
+      await database.deleteFrom('control.containers').where('id', '=', containerId).execute();
+      await reconciler.scan(serverId, client as never);
+      expect(await cleanupIntents()).toEqual([]);
+      expect(listImages).toHaveBeenCalledTimes(3);
+
+      // Free: one cleanup is queued. Held again by the time it runs, it fails
+      // instead of polling, and the next scan that finds it free queues another.
+      usedBy = [];
+      await reconciler.scan(serverId, client as never);
+      const [queued] = (await intents.list({ resourceType: 'image_assignment', resourceId: imageId })).items;
+      expect(queued).toMatchObject({ status: 'pending', request: expect.objectContaining({ operation: 'cleanup_image' }) });
+      usedBy = ['/1.0/instances/orphan'];
+      const outcome = await reconciler.reconcile({
+        intent: queued!,
+        client: client as never,
+        claim: {} as never,
+        lease: {} as never,
+        signal: new AbortController().signal,
+      });
+      expect(outcome).toEqual({
+        outcome: 'failed',
+        failure: expect.objectContaining({ code: 'IMAGE_CLEANUP_BLOCKED' }),
+      });
+      expect(client.deleteImage).not.toHaveBeenCalled();
     });
   });
 });

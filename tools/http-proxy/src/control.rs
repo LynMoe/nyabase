@@ -6,6 +6,7 @@ use anyhow::{anyhow, Context, Result};
 use futures_util::{SinkExt, StreamExt};
 use proxy_common::backend_tls::validate_backend_ws_url;
 use proxy_common::clock::now_ms;
+use proxy_common::control_link::connect_control as connect_control_link;
 use std::future::Future;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -15,7 +16,7 @@ use tokio::time;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Error as WebSocketError;
 use tokio_tungstenite::tungstenite::Message;
-use tokio_tungstenite::{connect_async_tls_with_config, Connector};
+use tokio_tungstenite::Connector;
 use tracing::warn;
 
 pub(crate) async fn control_loop(
@@ -49,7 +50,8 @@ pub(crate) async fn connect_control(
         .headers_mut()
         .insert("Authorization", format!("Bearer {}", config.token).parse()?);
     let connector = config.backend_tls.clone().map(Connector::Rustls);
-    let (ws, _) = connect_async_tls_with_config(request, None, false, connector).await?;
+    let liveness = config.control_liveness;
+    let ws = connect_control_link(request, connector, liveness.connect_deadline).await?;
     // Backend restart resets snapshot generations, so each connection is its
     // own monotonicity epoch; its first snapshot replaces the held one.
     store.begin_control_epoch();
@@ -57,13 +59,21 @@ pub(crate) async fn connect_control(
     runtime.last_snapshot_at.store(0, Ordering::Relaxed);
     runtime.connected_at.store(now_ms(), Ordering::Relaxed);
     let (mut write, mut read) = ws.split();
+    let mut ping = liveness.ping_timer();
+    let mut last_frame = time::Instant::now();
     loop {
         tokio::select! {
-            message = read.next() => {
+            message = time::timeout_at(liveness.read_deadline_after(last_frame), read.next()) => {
+                let Ok(message) = message else {
+                    return Err(liveness.dead_link_error("HTTP proxy"));
+                };
                 let Some(message) = message else {
                     return Err(anyhow!("HTTP proxy control connection closed"));
                 };
                 let message = message?;
+                // Any frame (pongs and the Backend's own pings included)
+                // proves the link is alive.
+                last_frame = time::Instant::now();
                 if !message.is_text() { continue; }
                 let envelope: Envelope = serde_json::from_str(message.to_text()?)?;
                 if envelope.kind == "snapshot" || envelope.kind == "update" {
@@ -77,6 +87,12 @@ pub(crate) async fn connect_control(
                         ).await?;
                     }
                 }
+            }
+            _ = ping.tick() => {
+                control_write_with_deadline(
+                    CONTROL_WRITE_DEADLINE,
+                    write.send(Message::Ping(Default::default())),
+                ).await?;
             }
             status = status_rx.recv() => {
                 let Some(status) = status else {

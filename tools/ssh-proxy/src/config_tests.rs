@@ -29,7 +29,16 @@ fn connection_cap_and_status_interval_reject_zero_or_excessive_values() {
     assert!(validate_auth_timeout(DEFAULT_AUTH_TIMEOUT_MS).is_ok());
     assert!(validate_auth_timeout(MIN_AUTH_TIMEOUT_MS - 1).is_err());
     assert!(validate_auth_timeout(MAX_AUTH_TIMEOUT_MS + 1).is_err());
-    const { assert!(DEFAULT_MAX_CONNECTIONS_PER_IP <= MAX_PROXY_CONNECTIONS) };
+    const {
+        assert!(DEFAULT_MAX_CONNECTIONS_PER_IP <= MAX_PROXY_CONNECTIONS);
+        assert!(DEFAULT_MAX_CONNECTIONS_PER_IPV6_48 <= MAX_PROXY_CONNECTIONS);
+        // The pre-auth pool must leave room for authenticated sessions.
+        assert!(DEFAULT_MAX_PREAUTH_CONNECTIONS < 512);
+        // One source may authenticate its whole per-IP / per-/48 total at
+        // once without filling the pre-auth pool.
+        assert!(DEFAULT_MAX_CONNECTIONS_PER_IP < DEFAULT_MAX_PREAUTH_CONNECTIONS);
+        assert!(DEFAULT_MAX_CONNECTIONS_PER_IPV6_48 < DEFAULT_MAX_PREAUTH_CONNECTIONS);
+    };
     assert!(validate_control_hold(SSH_PROXY_CONTROL_HOLD_MIN_MS).is_ok());
     assert!(validate_control_hold(SSH_PROXY_CONTROL_HOLD_MAX_MS).is_ok());
     assert!(validate_control_hold(SSH_PROXY_CONTROL_HOLD_MIN_MS - 1).is_err());
