@@ -261,10 +261,12 @@ export class VolumeReconciler implements ManagedReconciler, OnModuleInit {
     });
     if (decision.action === 'blocked') {
       const failure = blockedResizeFailure(decision, row.id, desiredSize, usedBytes, attachments);
-      if (decision.reason === 'usage_floor' || decision.reason === 'usage_unknown') {
-        await this.store.revertImpossibleShrink(row.id, currentSize, usedBytes, failure.code);
-      }
-      return { outcome: 'failed', failure };
+      const current = decision.reason === 'usage_floor' || decision.reason === 'usage_unknown'
+        ? await this.store.revertImpossibleShrink(row, currentSize, usedBytes, failure.code)
+        : await this.store.isCurrentRevision(row.id, row.revision);
+      // A resize accepted while this pass ran replaced the size: settle without
+      // parking the volume, so the newer intent runs.
+      return current ? { outcome: 'failed', failure } : { outcome: 'failed', failure, stale: true };
     }
     if (
       decision.action !== 'none'

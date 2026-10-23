@@ -24,6 +24,12 @@ export interface ContainerControlTable {
   root_pool_id: string;
   root_size_bytes: ContainerBigInt;
   root_size_pending_bytes: ContainerBigInt | null;
+  /** Largest root size Incus may still hold until a requested shrink is applied (000002). */
+  root_shrink_reserved_bytes: ColumnType<
+    string | null,
+    string | number | bigint | null | undefined,
+    string | number | bigint | null
+  >;
   root_used_bytes: ColumnType<string | null, string | number | bigint | null | undefined, string | number | bigint | null>;
   mem_bytes: ContainerBigInt;
   cpu_set: ColumnType<number[] | null, number[] | null | undefined, number[] | null>;

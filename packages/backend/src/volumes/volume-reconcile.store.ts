@@ -327,28 +327,50 @@ export class VolumeReconcileStore {
       .execute();
   }
 
+  /**
+   * Undo a shrink the volume's usage blocks: the desired size goes back to
+   * what Incus holds (within the reservation the shrink kept, so no grant or
+   * capacity is exceeded) and the volume is parked. Only for the revision the
+   * pass reconciled: a resize accepted meanwhile is never overwritten. Returns
+   * false when that revision is no longer current.
+   */
   async revertImpossibleShrink(
-    volumeId: string,
+    row: Pick<VolumeRecord, 'id' | 'revision'>,
     actualSizeBytes: bigint,
     usedBytes: bigint | null,
     failureCode: string,
-  ): Promise<void> {
-    await this.database
+  ): Promise<boolean> {
+    const result = await this.database
       .updateTable('control.volumes')
       .set({
         size_bytes: actualSizeBytes.toString(),
+        shrink_reserved_bytes: null,
         used_bytes: usedBytes === null ? null : usedBytes.toString(),
         needs_attention: true,
         failure_code: failureCode.slice(0, 128),
       })
-      .where('id', '=', volumeId)
+      .where('id', '=', row.id)
+      .where('revision', '=', row.revision)
       .where('lifecycle_phase', 'not in', ['deleting', 'failed'])
-      .execute();
+      .executeTakeFirst();
+    return result.numUpdatedRows > 0n;
+  }
+
+  /** Whether `revision` is still the volume's desired revision. */
+  async isCurrentRevision(volumeId: string, revision: number): Promise<boolean> {
+    const row = await this.database
+      .selectFrom('control.volumes')
+      .select('id')
+      .where('id', '=', volumeId)
+      .where('revision', '=', revision)
+      .executeTakeFirst();
+    return row !== undefined;
   }
 
   /**
    * The placement on the intent's server is now verified. When every placement
-   * has caught up the volume itself becomes observed (and active).
+   * has caught up the volume itself becomes observed (and active), and a
+   * shrink's reservation is released: Incus now holds the desired size.
    */
   async recordVerified(row: VolumeRow, usedBytes: bigint | null): Promise<void> {
     await this.database
@@ -389,6 +411,7 @@ export class VolumeReconcileStore {
         .set({
           observed_revision: row.revision,
           lifecycle_phase: row.lifecycle_phase === 'provisioning' ? 'active' : row.lifecycle_phase,
+          shrink_reserved_bytes: null,
           ...usedBytesUpdate,
           failure_code: null,
           needs_attention: false,

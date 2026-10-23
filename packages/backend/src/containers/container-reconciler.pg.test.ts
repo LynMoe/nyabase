@@ -236,6 +236,46 @@ describePg('ContainerReconciler PostgreSQL status', () => {
     });
   });
 
+  it('releases a root shrink reservation only once Incus applied the size, or on a current revert', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const { containerId } = await seedRunningContainer(database);
+      await database.updateTable('control.containers')
+        .set({ root_shrink_reserved_bytes: 8_000_000_000 })
+        .where('id', '=', containerId).execute();
+      const store = new ContainerReconcileStore(database, {} as never);
+      const reserved = async () => (await database.selectFrom('control.containers')
+        .select(['root_size_bytes', 'root_shrink_reserved_bytes'])
+        .where('id', '=', containerId).executeTakeFirstOrThrow());
+      const observe = async (quotaPending: boolean) => {
+        const row = await database.selectFrom('control.containers').selectAll()
+          .where('id', '=', containerId).executeTakeFirstOrThrow();
+        await store.recordObservation(
+          row as never,
+          { name: row.instance_name } as never,
+          { status: 'Running', started_at: null } as never,
+          quotaPending,
+          { status: 'running', lastError: null },
+          null,
+        );
+      };
+
+      // Incus applies the quota at the next start: it still holds the larger size.
+      await observe(true);
+      expect((await reserved()).root_shrink_reserved_bytes).toBe('8000000000');
+      await observe(false);
+      expect((await reserved()).root_shrink_reserved_bytes).toBeNull();
+
+      // A revert of a superseded revision changes nothing; the current one releases it.
+      await database.updateTable('control.containers')
+        .set({ root_shrink_reserved_bytes: 8_000_000_000, revision: 2 })
+        .where('id', '=', containerId).execute();
+      await store.revertImpossibleRootShrink(containerId, 1, 8_000_000_000n, null, 'ROOT_SHRINK_BELOW_USAGE');
+      expect((await reserved()).root_shrink_reserved_bytes).toBe('8000000000');
+      await store.revertImpossibleRootShrink(containerId, 2, 8_000_000_000n, null, 'ROOT_SHRINK_BELOW_USAGE');
+      expect(await reserved()).toEqual({ root_size_bytes: '8000000000', root_shrink_reserved_bytes: null });
+    });
+  });
+
   it('does not re-queue a scan intent that already failed for the same revision', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const { serverId, containerId } = await seedRunningContainer(database);

@@ -5,6 +5,7 @@ import { ContainerPhase, ContainerPowerIntent, type GpuContainerState } from '@n
 import type { ContainerControlTable } from '../platform/persistence-pg/container-control-database.types.js';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
+import { committedRootBytesSql } from '../platform/persistence-pg/committed-bytes.js';
 import { deriveInstanceName } from '../incus/instance-spec.js';
 import { numberValue } from '../platform/domain-utils.js';
 
@@ -139,7 +140,8 @@ export class ContainerControlRepository {
 
   /**
    * Root-disk bytes committed by containers that are neither failed nor being
-   * deleted; a pending quota change counts at its larger size.
+   * deleted; a pending quota change or an unapplied shrink counts at its
+   * larger size (`committedRootBytesSql`).
    */
   async sumLiveRootBytes(
     filter: { ownerId?: string; serverId?: string; poolId?: string },
@@ -147,12 +149,7 @@ export class ContainerControlRepository {
   ): Promise<number> {
     let query = executor
       .selectFrom('control.containers')
-      .select(sql<string>`coalesce(sum(
-        case when root_size_pending_bytes is null
-          then root_size_bytes
-          else greatest(root_size_bytes, root_size_pending_bytes)
-        end
-      ), 0)`.as('bytes'))
+      .select(sql<string>`coalesce(sum(${committedRootBytesSql()}), 0)`.as('bytes'))
       .where('lifecycle_phase', 'not in', ['failed', 'deleting']);
     if (filter.ownerId !== undefined) query = query.where('owner_id', '=', filter.ownerId);
     if (filter.serverId !== undefined) query = query.where('server_id', '=', filter.serverId);
@@ -252,6 +249,7 @@ export class ContainerControlRepository {
       mem_bytes?: number;
       root_size_bytes?: number;
       root_size_pending_bytes?: number | null;
+      root_shrink_reserved_bytes?: number | null;
       gpu_state?: GpuContainerState | null;
       power_intent?: 'running' | 'stopped';
       lifecycle_phase?: 'provisioning' | 'active' | 'deleting' | 'failed';

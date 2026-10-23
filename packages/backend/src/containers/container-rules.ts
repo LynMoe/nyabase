@@ -20,6 +20,23 @@ import type {
   IntentRepository,
   PhysicalSettlement,
 } from '../reconcile/intent.repository.js';
+import { nullableNumber, numberValue } from '../platform/domain-utils.js';
+import { shrinkReservation, type ShrinkReservation } from '../volumes/volume-rules.js';
+
+/** `shrinkReservation` for a container's root disk (`root_shrink_reserved_bytes`). */
+export function rootShrinkReservation(
+  row: {
+    readonly root_size_bytes: string | number;
+    readonly root_shrink_reserved_bytes: string | number | null;
+  },
+  requestedBytes: number,
+): ShrinkReservation {
+  return shrinkReservation({
+    currentBytes: numberValue(row.root_size_bytes),
+    reservedBytes: nullableNumber(row.root_shrink_reserved_bytes),
+    requestedBytes,
+  });
+}
 
 export interface RootResizeCheckInput {
   readonly containerId: string;

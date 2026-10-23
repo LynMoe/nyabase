@@ -20,6 +20,7 @@ import { isoDate, numberValue } from '../platform/domain-utils.js';
 import { sql, type Kysely } from 'kysely';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
+import { committedVolumeBytesSql } from '../platform/persistence-pg/committed-bytes.js';
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
 import { listSharedBackendAccess } from '../iam/effective-access.js';
 import { AuditService } from '../iam/audit.service.js';
@@ -323,7 +324,7 @@ export class SharedBackendsService {
     const rows = await this.database
       .selectFrom('control.volumes')
       .select(['shared_backend_id'])
-      .select(sql<string>`coalesce(sum(size_bytes), 0)`.as('used'))
+      .select(sql<string>`coalesce(sum(${committedVolumeBytesSql()}), 0)`.as('used'))
       .where('shared_backend_id', 'in', ids)
       .where('lifecycle_phase', 'not in', ['failed', 'deleting'])
       .groupBy('shared_backend_id')

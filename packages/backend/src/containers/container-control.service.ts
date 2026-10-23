@@ -56,11 +56,13 @@ import {
   createContainerIntent,
   gpuDeviceClaimed,
   isUniqueViolation,
+  rootShrinkReservation,
   type ContainerAccess,
 } from './container-rules.js';
 import { assertActorRole } from '../iam/administration.js';
 
 type ContainerAction = 'start' | 'stop' | 'restart' | 'delete';
+type DesiredValues = Parameters<ContainerControlRepository['updateDesired']>[2];
 
 function auditActionFor(action: ContainerAction): AuditAction {
   switch (action) {
@@ -186,7 +188,11 @@ export class ContainerControlService {
       actor,
       scope,
       containerId,
-      { root_size_bytes: size, root_size_pending_bytes: null },
+      (locked) => ({
+        root_size_bytes: size,
+        root_size_pending_bytes: null,
+        root_shrink_reserved_bytes: rootShrinkReservation(locked, size).reservedBytes,
+      }),
       { operation: 'root_resize', sizeBytes: size },
       AuditAction.ResizeContainerRoot,
       (transaction, locked, grant) => this.validateRootResize(transaction, locked, size, grant),
@@ -477,7 +483,7 @@ export class ContainerControlService {
     actor: Actor,
     scope: ListScope,
     containerId: string,
-    values: Parameters<ContainerControlRepository['updateDesired']>[2],
+    values: DesiredValues | ((current: ContainerRow) => DesiredValues),
     request: Record<string, unknown>,
     action: AuditAction,
     validate?: (
@@ -499,14 +505,15 @@ export class ContainerControlService {
       }
       const grant = await this.enforceInTransaction(transaction, actor, current, access);
       await validate?.(transaction, current, grant);
+      const desired = typeof values === 'function' ? values(current) : values;
       const updated = await this.repository.updateDesired(
         containerId,
         current.revision,
-        values,
+        desired,
         transaction,
       );
       if (!updated) throw new ConflictException({ code: FailureCode.RevisionConflict });
-      if (values.lifecycle_phase === ContainerPhase.Failed) {
+      if (desired.lifecycle_phase === ContainerPhase.Failed) {
         await this.gpuClaims.releaseContainerClaims(containerId, transaction);
       }
       const intent = await createContainerIntent(this.intents, {
@@ -625,13 +632,15 @@ export class ContainerControlService {
     const current = numberValue(locked.root_size_bytes);
     if (size === current) return;
     if (size > current) {
+      // Re-growing within an unapplied shrink's reservation costs nothing.
+      const { committedDeltaBytes } = rootShrinkReservation(locked, size);
       await assertRootCapacity(
         this.repository,
         transaction,
         locked.owner_id,
         locked.server_id,
         locked.root_pool_id,
-        size - current,
+        committedDeltaBytes,
         grant?.diskBytes ?? null,
       );
       return;

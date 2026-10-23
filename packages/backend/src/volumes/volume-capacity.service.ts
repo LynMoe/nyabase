@@ -7,6 +7,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
+import { committedRootBytesSql } from '../platform/persistence-pg/committed-bytes.js';
 import {
   FailureCode,
   StoragePoolResizeFamily,
@@ -62,12 +63,8 @@ async function committedRootBytes(
   executor: VolumeExecutor,
   filter: { ownerId?: string; serverId?: string; poolId?: string },
 ): Promise<number> {
-  let query = executor.selectFrom('control.containers').select(sql<string>`coalesce(sum(
-      case when root_size_pending_bytes is null
-        then root_size_bytes
-        else greatest(root_size_bytes, root_size_pending_bytes)
-      end
-    ), 0)`.as('bytes'))
+  let query = executor.selectFrom('control.containers')
+    .select(sql<string>`coalesce(sum(${committedRootBytesSql()}), 0)`.as('bytes'))
     .where('lifecycle_phase', 'not in', ['failed', 'deleting']);
   if (filter.ownerId !== undefined) query = query.where('owner_id', '=', filter.ownerId);
   if (filter.serverId !== undefined) query = query.where('server_id', '=', filter.serverId);

@@ -19,6 +19,7 @@ import { numberValue } from '../platform/domain-utils.js';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 import { IntentRepository } from '../reconcile/intent.repository.js';
 import { lockOwnerServerQuota } from '../platform/persistence-pg/advisory-locks.js';
+import { committedVolumeBytesSql } from '../platform/persistence-pg/committed-bytes.js';
 import { VolumeAttachmentsService } from '../volumes/volume-attachments.service.js';
 import {
   ContainerControlRepository,
@@ -63,7 +64,7 @@ export async function assertRootCapacity(
   // Custom volumes belong to the volumes module; only their committed size is read here.
   const sumVolumes = async (filter: { ownerId?: string; serverId?: string; poolId?: string }) => {
     let query = transaction.selectFrom('control.volumes')
-      .select(sql<string>`coalesce(sum(size_bytes), 0)`.as('bytes'))
+      .select(sql<string>`coalesce(sum(${committedVolumeBytesSql()}), 0)`.as('bytes'))
       .where('lifecycle_phase', 'not in', ['failed', 'deleting']);
     if (filter.ownerId !== undefined) query = query.where('owner_id', '=', filter.ownerId);
     if (filter.serverId !== undefined) {

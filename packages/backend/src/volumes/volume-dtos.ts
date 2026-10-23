@@ -26,6 +26,8 @@ export type VolumeRow = {
   incus_name: string;
   size_bytes: string | number;
   used_bytes: string | number | null;
+  /** See `shrinkReservation`. */
+  shrink_reserved_bytes: string | number | null;
   revision: number;
   observed_revision: number | null;
   lifecycle_phase: string;

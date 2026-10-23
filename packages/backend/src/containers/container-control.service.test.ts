@@ -467,6 +467,72 @@ describe('ContainerControlService intent boundary', () => {
     expect(harness.repository.updateDesired).not.toHaveBeenCalled();
   });
 
+  function quotaOnlinePool(harness: ReturnType<typeof makeHarness>) {
+    const selectFrom = vi.fn((table: string) => {
+      const query = {
+        select: vi.fn(),
+        selectAll: vi.fn(),
+        where: vi.fn(),
+        forUpdate: vi.fn(),
+        executeTakeFirst: vi.fn(),
+      };
+      query.select.mockReturnValue(query);
+      query.selectAll.mockReturnValue(query);
+      query.where.mockReturnValue(query);
+      query.forUpdate.mockReturnValue(query);
+      query.executeTakeFirst.mockResolvedValue(
+        table === 'infra.images'
+          ? { min_root_size_bytes: 1 }
+          : table === 'infra.storage_pools'
+            ? { resize_family: 'quota_online', quota_effective: true }
+            : {},
+      );
+      return query;
+    });
+    Object.assign(harness.transaction, { selectFrom });
+  }
+
+  it('keeps the old root size reserved while an accepted shrink is unapplied', async () => {
+    const harness = makeHarness();
+    Object.assign(harness.row, { root_size_bytes: '2147483648', root_used_bytes: '100000000' });
+    quotaOnlinePool(harness);
+
+    await harness.service.resizeRoot(owner, containerId, { sizeBytes: 1_073_741_824 });
+
+    expect(harness.repository.updateDesired).toHaveBeenCalledWith(
+      containerId,
+      1,
+      {
+        root_size_bytes: 1_073_741_824,
+        root_size_pending_bytes: null,
+        root_shrink_reserved_bytes: 2_147_483_648,
+      },
+      harness.transaction,
+    );
+  });
+
+  it('grows back within an unapplied shrink reservation without a capacity check', async () => {
+    const harness = makeHarness();
+    Object.assign(harness.row, {
+      root_size_bytes: '1073741824',
+      root_shrink_reserved_bytes: '2147483648',
+    });
+    quotaOnlinePool(harness);
+
+    // No capacity query is mocked: admitting any growth here would throw.
+    await harness.service.resizeRoot(owner, containerId, { sizeBytes: 1_610_612_736 });
+
+    expect(harness.repository.updateDesired).toHaveBeenCalledWith(
+      containerId,
+      1,
+      expect.objectContaining({
+        root_size_bytes: 1_610_612_736,
+        root_shrink_reserved_bytes: 2_147_483_648,
+      }),
+      harness.transaction,
+    );
+  });
+
   it('authorizes exec through the current server grant and never audits the command', async () => {
     const harness = makeHarness();
     const secret = 'not-for-audit';

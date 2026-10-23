@@ -792,6 +792,47 @@ describe('volume reconciler scan and shifted policy', () => {
     ]));
   });
 
+  it('settles a blocked shrink as stale without parking when a newer resize replaced it', async () => {
+    // The revision-guarded revert matched nothing: a grow was accepted while this pass ran.
+    const db = volumeExistsDb({ updatedRows: 0n });
+    const reconciler = new VolumeReconciler(new VolumeReconcileStore(db as never, {} as never),
+      { log: vi.fn().mockResolvedValue(undefined) } as never,
+      { get: vi.fn().mockResolvedValue(undefined), listServerIds: vi.fn() } as never,
+      { register: vi.fn() } as never,
+    );
+    vi.spyOn(
+      storeOf(reconciler) as unknown as { readVolume: () => Promise<unknown> },
+      'readVolume',
+    ).mockResolvedValue({ ...ensureRow(), size_bytes: '5' });
+    vi.spyOn(
+      storeOf(reconciler) as unknown as { readAttachments: () => Promise<unknown[]> },
+      'readAttachments',
+    ).mockResolvedValue([]);
+    const outcome = await reconciler.reconcile(runContext({
+      kind: 'volume.resize',
+      client: {
+        getStorageVolume: vi.fn().mockResolvedValue({
+          metadata: { config: { size: '20', 'security.shifted': 'true' }, content_type: 'filesystem' },
+        }),
+        getStorageVolumeState: vi.fn().mockResolvedValue({
+          metadata: { usage: { used: '9', total: '20' } },
+        }),
+        updateStorageVolume: vi.fn(),
+      },
+    }));
+
+    expect(outcome).toMatchObject({
+      outcome: 'failed',
+      stale: true,
+      failure: { code: 'VOLUME_SHRINK_BELOW_USAGE' },
+    });
+    const wheres = (db.updateTable as ReturnType<typeof vi.fn>).mock.results.flatMap((result) => {
+      const query = result.value as { where: ReturnType<typeof vi.fn> };
+      return query.where.mock.calls.map((call) => call.slice(0, 3));
+    });
+    expect(wheres).toContainEqual(['revision', '=', 2]);
+  });
+
   it('reverts desired size and writes used_bytes NULL when CephFS usage is phantom', async () => {
     const db = volumeExistsDb();
     const reconciler = new VolumeReconciler(new VolumeReconcileStore(db as never, {} as never),
@@ -1567,7 +1608,7 @@ function localVolume(input: {
   };
 }
 
-function volumeExistsDb(row: { lifecycle_phase?: string } = {}) {
+function volumeExistsDb(row: { lifecycle_phase?: string; updatedRows?: bigint } = {}) {
   return {
     selectFrom: vi.fn((table: string) => {
       const query = chain();
@@ -1596,6 +1637,7 @@ function volumeExistsDb(row: { lifecycle_phase?: string } = {}) {
     updateTable: vi.fn(() => {
       const query = chain();
       query.execute = vi.fn().mockResolvedValue(undefined);
+      query.executeTakeFirst = vi.fn().mockResolvedValue({ numUpdatedRows: row.updatedRows ?? 1n });
       return query;
     }),
     deleteFrom: vi.fn(() => {

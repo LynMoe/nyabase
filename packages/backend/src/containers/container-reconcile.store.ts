@@ -407,7 +407,11 @@ export class ContainerReconcileStore {
       .execute();
   }
 
-  /** Undo a shrink the instance cannot take, unless a newer revision already replaced it. */
+  /**
+   * Undo a shrink the instance cannot take, unless a newer revision already
+   * replaced it. The actual size is within the reservation the shrink kept, so
+   * the revert exceeds no grant or pool capacity; the reservation is released.
+   */
   async revertImpossibleRootShrink(
     containerId: string,
     revision: number,
@@ -419,6 +423,7 @@ export class ContainerReconcileStore {
       .updateTable('control.containers')
       .set({
         root_size_bytes: actualRootBytes.toString(),
+        root_shrink_reserved_bytes: null,
         ...(usedBytes === null ? {} : { root_used_bytes: usedBytes.toString() }),
         needs_attention: true,
         failure_code: failureCode.slice(0, 128),
@@ -440,13 +445,16 @@ export class ContainerReconcileStore {
   ): Promise<void> {
     // Guarded on the revision this pass reconciled and a live phase: a delete
     // (or any newer revision) accepted meanwhile is never overwritten, and the
-    // only phase transition here is provisioning -> active.
+    // only phase transition here is provisioning -> active. A shrink's
+    // reservation is released once Incus has applied the verified size, not
+    // while the quota is still pending (it applies at the next start).
     await this.database
       .updateTable('control.containers')
       .set({
         instance_name: actual.name ?? deriveInstanceName(row.id),
         observed_revision: row.revision,
         root_size_pending_bytes: quotaPending ? String(row.root_size_bytes) : null,
+        ...(quotaPending ? {} : { root_shrink_reserved_bytes: null }),
         failure_code: null,
         failure_reason: null,
         last_transition_at: sql<Date>`clock_timestamp()`,

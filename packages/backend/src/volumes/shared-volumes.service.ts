@@ -13,7 +13,7 @@ import {
 } from '@nyabase/common';
 import { assertListScope, type Actor, requireUserId } from '../iam/actor.js';
 import { AuditService } from '../iam/audit.service.js';
-import { deterministicName, numberValue } from '../platform/domain-utils.js';
+import { deterministicName, nullableNumber, numberValue } from '../platform/domain-utils.js';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
 import { acceptedIntent } from '../reconcile/accepted-intent.js';
@@ -30,6 +30,7 @@ import {
   checkVolumeResize,
   isUniqueViolation,
   nameTakenConflict,
+  shrinkReservation,
   volumeUsageUnknownFailure,
   type VolumeAccess,
 } from './volume-rules.js';
@@ -260,7 +261,6 @@ export class SharedVolumesService {
     if (access === 'owner') {
       await assertSharedGrant(transaction, locked.owner_id, locked.shared_backend_id!);
     }
-    const lockedDelta = input.sizeBytes - numberValue(locked.size_bytes);
     await this.capacityRules.lockVolumeQuota(locked, transaction);
     const placements = await this.repository.listPlacements(id, transaction);
     const representativePoolId = placements[0]?.pool_id ?? null;
@@ -281,19 +281,27 @@ export class SharedVolumesService {
       attachments: [],
     });
     if (precheckFailure && quotaEffective) throw new ConflictException(precheckFailure);
-    if (lockedDelta > 0) {
+    // The live usage above only narrows the window: the user can still fill the
+    // volume before the worker applies the shrink, so the old size stays
+    // reserved until then (`shrinkReservation`).
+    const reservation = shrinkReservation({
+      currentBytes: numberValue(locked.size_bytes),
+      reservedBytes: nullableNumber(locked.shrink_reserved_bytes),
+      requestedBytes: input.sizeBytes,
+    });
+    if (reservation.committedDeltaBytes > 0) {
       if (access === 'admin') {
         await this.capacityRules.assertSharedCapacityPhysical(
           transaction,
           locked.shared_backend_id!,
-          lockedDelta,
+          reservation.committedDeltaBytes,
         );
       } else {
         await this.capacityRules.assertSharedCapacityWithinGrants(
           transaction,
           locked.owner_id,
           locked.shared_backend_id!,
-          lockedDelta,
+          reservation.committedDeltaBytes,
         );
       }
     }
@@ -301,7 +309,7 @@ export class SharedVolumesService {
       transaction,
       requireUserId(actor),
       locked,
-      input,
+      { ...input, shrinkReservedBytes: reservation.reservedBytes },
       placements,
     );
     return { row, intent: intents[0] ?? null };

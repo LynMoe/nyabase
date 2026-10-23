@@ -207,6 +207,13 @@ lab 场景 API 测试，不在 CI 里跑；CI 只跑 `pnpm e2e:check`（e2e 包 
 - 内存（每个容器 `mem_bytes` > 0）按用户在该服务器上期望运行（`power_intent='running'`，除 deleting 外，failed 也算：intent 重试可能让它回来）的容器之和准入；只在会增加运行内存的操作上、
   `lockOwnerServerQuota` 下检查（`sumRunningMemBytes`）：start、把 `power_intent` 从非 running 改回 running 的 restart（`admitStart`）、running 创建、running 容器的 PATCH limits 增大；stopped 创建/PATCH、减小、期望已是 running 的 restart、
   管理员/system 操作与 reconciler 恢复期望状态都不检查。授权缩小不会停掉运行中的容器，只是不能再启动。start（及上述 restart）时容器持有的 GPU claim 必须 ⊆ 当前授权（`GPU_NOT_GRANTED`），不自动释放。
+- 缩容（卷与系统盘）：请求时就写入更小的 `size_bytes` / `root_size_bytes`，但空间要等 reconciler 真正缩完才释放。验证前，
+  卷的 `shrink_reserved_bytes`、容器的 `root_shrink_reserved_bytes`（迁移 000002）保留此前可能仍在 Incus 上的最大尺寸，
+  所有配额 / 容量求和都按 `greatest(size, reserved)` 计（`platform/persistence-pg/committed-bytes.ts`，准入差额由
+  `volumes/volume-rules.ts` 的 `shrinkReservation` 算，在预留内重新扩容不占额度）。用量阻止的缩容回退
+  （`revertImpossibleShrink` / `revertImpossibleRootShrink`）只作用于本轮 reconcile 的 revision，回退尺寸在预留之内，绝不让用户超出授权；
+  卷的这次失败若已被更新的 revision 取代，按 stale 结清、不搁置卷。卷在所有 placement 验证当前 revision 后释放预留，
+  系统盘在 Incus 已应用配额（无 `volatile.root.apply_quota` 挂起）的观测后释放。
 - 进程数 / 网卡带宽 / 磁盘读写是可在线编辑的系统设置 `containers.*`，统一作用于所有容器（CephFS 卷不限 IO）。
 - 漂移：平台拥有整份实例文档，只放过 `volatile.*`、`image.*`；未知配置键、多出的设备、设备内多出的键、
   非空 profiles 都算漂移，写回时整份覆盖并记审计 `container.drift_corrected`。

@@ -3,6 +3,7 @@ import { IntentKind, IntentResourceType } from '@nyabase/common';
 import { sql, type Kysely, type Transaction } from 'kysely';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
+import { committedVolumeBytesSql } from '../platform/persistence-pg/committed-bytes.js';
 import {
   resolvePoolAccess,
   resolveServerAccess,
@@ -99,6 +100,7 @@ export class VolumesRepository {
     values: {
       name?: string;
       size_bytes?: number;
+      shrink_reserved_bytes?: number | null;
       lifecycle_phase?: 'provisioning' | 'active' | 'deleting' | 'failed';
       failure_code?: string | null;
       needs_attention?: boolean;
@@ -278,7 +280,7 @@ export class VolumesRepository {
       .execute();
   }
 
-  /** Bytes committed by volumes that are neither failed nor being deleted. */
+  /** Bytes committed by volumes that are neither failed nor being deleted (`committedVolumeBytesSql`). */
   async sumLiveSizeBytes(
     filter: {
       kind: 'local' | 'shared';
@@ -291,7 +293,7 @@ export class VolumesRepository {
   ): Promise<number> {
     let query = executor
       .selectFrom('control.volumes')
-      .select(sql<string>`coalesce(sum(size_bytes), 0)`.as('bytes'))
+      .select(sql<string>`coalesce(sum(${committedVolumeBytesSql()}), 0)`.as('bytes'))
       .where('lifecycle_phase', 'not in', ['failed', 'deleting']);
     query = filter.kind === 'local'
       ? query.where('shared_backend_id', 'is', null)

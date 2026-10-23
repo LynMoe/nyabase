@@ -37,18 +37,26 @@ export class VolumeLifecycleService {
     return row;
   }
 
-  /** Persist the new desired size (and name) and queue one resize intent per placement. */
+  /**
+   * Persist the new desired size (and name) with the shrink reservation the
+   * caller admitted (`shrinkReservation`), and queue one resize intent per
+   * placement.
+   */
   async applyResize(
     transaction: Tx,
     actorId: string,
     locked: VolumeRow,
-    input: { name?: string; sizeBytes: number },
+    input: { name?: string; sizeBytes: number; shrinkReservedBytes: number | null },
     placements: ReadonlyArray<{ server_id: string }>,
   ): Promise<{ row: VolumeRow; intents: IntentRecord[] }> {
     const row = await this.repository.updateDesired(
       locked.id,
       locked.revision,
-      { ...(input.name === undefined ? {} : { name: input.name }), size_bytes: input.sizeBytes },
+      {
+        ...(input.name === undefined ? {} : { name: input.name }),
+        size_bytes: input.sizeBytes,
+        shrink_reserved_bytes: input.shrinkReservedBytes,
+      },
       transaction,
     );
     if (!row) throw new ConflictException({ code: FailureCode.RevisionConflict });

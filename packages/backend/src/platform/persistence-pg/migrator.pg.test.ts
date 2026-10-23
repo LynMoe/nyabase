@@ -1,4 +1,4 @@
-import { copyFile, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { copyFile, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Pool } from 'pg';
@@ -74,10 +74,15 @@ describePg('PostgreSQL migration lock boundary', () => {
       // The production pool shape: request-sized server and client deadlines.
       const tight = new Pool({ connectionString, max: 2, statement_timeout: 100, query_timeout: 100 });
       try {
-        await copyFile(join(pgMigrationsDirectory(), '000001_initial.sql'), join(directory, '000001_initial.sql'));
-        await writeFile(join(directory, '000002_slow.sql'), 'SELECT pg_sleep(0.4);');
+        // Every shipped migration is already applied; append the next version.
+        const shipped = (await readdir(pgMigrationsDirectory())).filter((name) => name.endsWith('.sql')).sort();
+        for (const name of shipped) {
+          await copyFile(join(pgMigrationsDirectory(), name), join(directory, name));
+        }
+        const next = String(Number(shipped.at(-1)!.slice(0, 6)) + 1).padStart(6, '0');
+        await writeFile(join(directory, `${next}_slow.sql`), 'SELECT pg_sleep(0.4);');
         const applied = await runSqlMigrations(tight, directory);
-        expect(applied.map((migration) => migration.version)).toEqual(['000002']);
+        expect(applied.map((migration) => migration.version)).toEqual([next]);
         // The lifted limits were transaction-local.
         await expect(tight.query('SELECT pg_sleep(0.4)')).rejects.toThrow();
       } finally {

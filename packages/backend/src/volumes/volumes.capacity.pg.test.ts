@@ -772,3 +772,85 @@ describePg('volume capacity locking and scope exclusions', () => {
     });
   });
 });
+
+describePg('volume shrink reservations', () => {
+  async function reservationOf(database: Kysely<NyabaseDatabase>, volumeId: string) {
+    return database.selectFrom('control.volumes')
+      .select(['size_bytes', 'shrink_reserved_bytes', 'revision', 'needs_attention'])
+      .where('id', '=', volumeId)
+      .executeTakeFirstOrThrow();
+  }
+
+  it('counts an unverified shrink at the old size, and a revert never exceeds the grant', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const ownerId = await seedUser(database);
+      const serverId = await seedServer(database);
+      const poolId = await insertLocalPool(database, serverId, 10_000);
+      await grantServer(database, { user: ownerId }, serverId, { diskBytes: 1_000 });
+      await grantPool(database, { user: ownerId }, poolId);
+      const volumeId = await seedVolume(database, { ownerId, poolId, serverId });
+      // 1000 bytes, last scanned at 100 used: the floor the API sees is stale.
+      await database.updateTable('control.volumes').set({ size_bytes: 1_000, used_bytes: 100 })
+        .where('id', '=', volumeId).execute();
+      await database.insertInto('control.volume_placements').values({
+        volume_id: volumeId,
+        server_id: serverId,
+        pool_id: poolId,
+        catalog_state: 'present',
+        observed_revision: 1,
+      }).execute();
+      const service = makeService(database);
+      const store = new VolumeReconcileStore(database, new IntentRepository(database, noopWake()));
+      const createRest = (name: string) => service.create(testActor(ownerId), {
+        name,
+        sizeBytes: 800,
+        scope: { kind: 'local', serverId, poolId },
+      });
+
+      await service.patch(testActor(ownerId), volumeId, { expectedRevision: 1, sizeBytes: 200 });
+      expect(await reservationOf(database, volumeId))
+        .toMatchObject({ size_bytes: '200', shrink_reserved_bytes: '1000', revision: 2 });
+      // Incus still holds 1000 bytes: the freed 800 is not spendable yet.
+      await expect(createRest('rest-1')).rejects.toMatchObject({
+        response: { code: FailureCode.StorageGrantExceeded },
+      });
+
+      // Growing back within the reservation costs nothing, although the grant is full.
+      await service.patch(testActor(ownerId), volumeId, { expectedRevision: 2, sizeBytes: 600 });
+      expect(await reservationOf(database, volumeId))
+        .toMatchObject({ size_bytes: '600', shrink_reserved_bytes: '1000', revision: 3 });
+
+      // The worker found revision 2's shrink below usage, but revision 3 replaced it.
+      expect(await store.revertImpossibleShrink(
+        { id: volumeId, revision: 2 },
+        1_000n,
+        900n,
+        'VOLUME_SHRINK_BELOW_USAGE',
+      )).toBe(false);
+      expect(await reservationOf(database, volumeId))
+        .toMatchObject({ size_bytes: '600', shrink_reserved_bytes: '1000', needs_attention: false });
+
+      // Reverting the current revision restores what Incus holds, within the reservation.
+      expect(await store.revertImpossibleShrink(
+        { id: volumeId, revision: 3 },
+        1_000n,
+        900n,
+        'VOLUME_SHRINK_BELOW_USAGE',
+      )).toBe(true);
+      expect(await reservationOf(database, volumeId))
+        .toMatchObject({ size_bytes: '1000', shrink_reserved_bytes: null, needs_attention: true });
+      await expect(createRest('rest-2')).rejects.toMatchObject({
+        response: { code: FailureCode.StorageGrantExceeded },
+      });
+
+      // Once a shrink is verified the space is free.
+      await database.updateTable('control.volumes').set({ used_bytes: 100, needs_attention: false })
+        .where('id', '=', volumeId).execute();
+      await service.patch(testActor(ownerId), volumeId, { expectedRevision: 3, sizeBytes: 200 });
+      await store.recordVerified((await store.readVolume(volumeId, serverId))!, 100n);
+      expect(await reservationOf(database, volumeId))
+        .toMatchObject({ size_bytes: '200', shrink_reserved_bytes: null });
+      await expect(createRest('rest-3')).resolves.toMatchObject({ resourceId: expect.any(String) });
+    });
+  });
+});

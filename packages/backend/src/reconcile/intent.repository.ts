@@ -137,7 +137,8 @@ export class IntentRepository {
    * Only ever downwards: a failed grow already left the row at its size, and
    * raising the row here would skip every grant and capacity check (it may
    * have been shrunk and the quota spent since). Any other retry reconciles
-   * toward the row as it is now.
+   * toward the row as it is now. Like any shrink, the size it leaves stays
+   * reserved until the worker verifies it (`shrinkReservation` in volumes).
    */
   private async restoreVolumeResizeSize(
     kind: string,
@@ -152,7 +153,10 @@ export class IntentRepository {
     }
     await executor
       .updateTable('control.volumes')
-      .set({ size_bytes: sizeBytes })
+      .set({
+        size_bytes: sizeBytes,
+        shrink_reserved_bytes: sql<string>`greatest(size_bytes, coalesce(shrink_reserved_bytes, 0))`,
+      })
       .where('id', '=', resourceId)
       .where('size_bytes', '>', String(sizeBytes))
       .where('lifecycle_phase', 'not in', ['deleting', 'failed'])

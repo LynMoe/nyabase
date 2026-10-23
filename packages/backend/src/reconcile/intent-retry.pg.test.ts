@@ -60,6 +60,9 @@ describePg('intent retry', () => {
       const shrink = await failedResize(repository, { volumeId, serverId, requestedBy: ownerId, sizeBytes: 50 });
       const retriedShrink = await repository.retry(shrink, null);
       expect(await sizeOf(database, volumeId)).toBe(50);
+      // Until the worker applies it, the retried shrink keeps the old size reserved.
+      expect(await database.selectFrom('control.volumes').select('shrink_reserved_bytes')
+        .where('id', '=', volumeId).executeTakeFirstOrThrow()).toEqual({ shrink_reserved_bytes: '100' });
       expect(retriedShrink.requestedBy).toBeNull();
       expect(retriedShrink.request).toMatchObject({ sizeBytes: 50, retryOf: shrink });
     });
