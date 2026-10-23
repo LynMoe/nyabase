@@ -16,7 +16,8 @@ import { AgentRequestError, type AgentHandlers } from './backend-connection.js';
 import { streamUrl, type AgentConfig } from './config.js';
 import { LocalIncus, LocalIncusError } from './incus-local.js';
 import type { Ipv6Guard } from './ipv6-guard.js';
-import { checkIncusHttp, checkIncusWebSocket } from './policy.js';
+import type { OperationLedger } from './operation-ledger.js';
+import { checkIncusHttp, checkIncusWebSocket, EVENTS_DIAL_PATH, filterIncusEvent } from './policy.js';
 import { bridgeSockets, dialBackendStream } from './stream-bridge.js';
 
 export interface MetricsSource {
@@ -27,6 +28,8 @@ export interface AgentDependencies {
   readonly config: AgentConfig;
   readonly incus: LocalIncus;
   readonly guard: Ipv6Guard;
+  /** Operations started through the policy; the only ones the Backend can reach. */
+  readonly operations: OperationLedger;
   readonly metrics: MetricsSource;
   readonly credential: () => string;
   readonly version: string;
@@ -67,10 +70,11 @@ async function incusHttp(
   signal: AbortSignal,
 ): Promise<AgentIncusHttpResult> {
   const body = params.body === undefined ? undefined : Buffer.from(params.body, 'base64');
-  const verdict = await checkIncusHttp(
-    { method: params.method, path: params.path, body },
-    (path) => deps.incus.requestJson<Record<string, unknown>>('GET', path).catch(() => undefined),
-  );
+  const verdict = await checkIncusHttp({ method: params.method, path: params.path, body }, {
+    readCurrent: (path) => deps.incus.requestJson<Record<string, unknown>>('GET', path).catch(() => undefined),
+    operations: deps.operations,
+  });
+  if (!verdict.allowed && verdict.notFound) return notFound();
   if (!verdict.allowed) {
     deps.log(`refused ${params.method} ${params.path.split('?')[0]}: ${verdict.reason}`);
     throw new AgentRequestError('policy_denied', verdict.reason);
@@ -94,6 +98,7 @@ async function incusHttp(
       timeoutMs: params.timeoutMs,
       signal,
     });
+    deps.operations.recordResponse(response.status, response.body);
     return { status: response.status, headers: response.headers, body: response.body.toString('base64') };
   } catch (error) {
     throw asRequestError(error);
@@ -106,11 +111,12 @@ async function incusWebSocket(
   signal: AbortSignal,
   session: AbortSignal,
 ): Promise<void> {
-  const verdict = checkIncusWebSocket(params.path);
+  const verdict = checkIncusWebSocket(params.path, deps.operations);
   if (!verdict.allowed) throw new AgentRequestError('policy_denied', verdict.reason);
+  const events = verdict.kind === 'events';
   let incus;
   try {
-    incus = await deps.incus.dialWebSocket(params.path, AGENT_STREAM_CONNECT_TIMEOUT_MS);
+    incus = await deps.incus.dialWebSocket(events ? EVENTS_DIAL_PATH : params.path, AGENT_STREAM_CONNECT_TIMEOUT_MS);
   } catch (error) {
     throw asRequestError(error);
   }
@@ -129,6 +135,8 @@ async function incusWebSocket(
     bridgeSockets(incus.socket, backendSocket, incus.release(), {
       session,
       heartbeatMs: AGENT_HEARTBEAT_INTERVAL_MS,
+      // The host's other workloads (and who drove them) are not the Backend's business.
+      ...(events ? { filterLeft: filterIncusEvent } : {}),
     });
   } catch (error) {
     incus.socket.terminate();
@@ -143,6 +151,12 @@ async function collectMetrics(deps: AgentDependencies): Promise<AgentMetricsResu
     throw new AgentRequestError('too_large', 'metrics exceed the transfer limit');
   }
   return { text };
+}
+
+/** What Incus answers for an operation it does not know. */
+function notFound(): AgentIncusHttpResult {
+  const body = JSON.stringify({ type: 'error', status: '', status_code: 0, operation: '', error_code: 404, error: 'Operation not found', metadata: null });
+  return { status: 404, headers: { 'content-type': 'application/json' }, body: Buffer.from(body).toString('base64') };
 }
 
 function asRequestError(error: unknown): AgentRequestError {

@@ -26,6 +26,7 @@ import {
   serialize,
   type FieldSchema,
 } from './policy-body.js';
+import type { OperationLookup } from './operation-ledger.js';
 
 /*
  * What the Backend may ask the local Incus to do. The agent is the boundary:
@@ -50,7 +51,12 @@ export type PolicyVerdict =
      */
     readonly needsIpv6Guard?: boolean;
   }
-  | { readonly allowed: false; readonly reason: string };
+  | {
+    readonly allowed: false;
+    readonly reason: string;
+    /** Answer as Incus answers a resource that does not exist (an operation the agent did not start). */
+    readonly notFound?: boolean;
+  };
 
 export interface PolicyRequest {
   readonly method: AgentIncusHttpMethod;
@@ -60,6 +66,13 @@ export interface PolicyRequest {
 
 /** Reads the current Incus document (instance, volume) for volatile-key comparison. */
 export type CurrentDocumentReader = (path: string) => Promise<Record<string, unknown> | undefined>;
+
+/** What the policy needs besides the request itself. */
+export interface PolicyContext {
+  readonly readCurrent: CurrentDocumentReader;
+  /** Operations started through this policy (operation-ledger.ts); no other operation is reachable. */
+  readonly operations: OperationLookup;
+}
 
 const ALLOW: PolicyVerdict = { allowed: true };
 const deny = (reason: string): PolicyVerdict => ({ allowed: false, reason });
@@ -119,10 +132,8 @@ function isManagedInstance(name: string | undefined): boolean {
   return name !== undefined && (MANAGED_INSTANCE_NAME_PATTERN.test(name) || PROBE_INSTANCE_PATTERN.test(name));
 }
 
-export async function checkIncusHttp(
-  request: PolicyRequest,
-  readCurrent: CurrentDocumentReader,
-): Promise<PolicyVerdict> {
+export async function checkIncusHttp(request: PolicyRequest, context: PolicyContext): Promise<PolicyVerdict> {
+  const { readCurrent } = context;
   const parsed = parseIncusPath(request.path);
   if (!parsed) return deny('path is malformed or uses a refused query parameter');
   const [, collection, ...rest] = parsed.segments;
@@ -144,19 +155,30 @@ export async function checkIncusHttp(
     case 'images':
       return checkImages(request, rest);
     case 'operations':
-      return checkOperations(request.method, rest);
+      return checkOperations(request.method, rest, context.operations);
     default:
       return deny(`/1.0/${collection} is not reachable through the agent`);
   }
 }
 
-/** Incus WebSockets the Backend may open: the event stream and operation channels. */
-export function checkIncusWebSocket(path: string): PolicyVerdict {
+export type WebSocketVerdict =
+  /** `events`: the agent dials EVENTS_DIAL_PATH and relays only what filterIncusEvent keeps. */
+  | { readonly allowed: true; readonly kind: 'events' | 'operation' }
+  | { readonly allowed: false; readonly reason: string };
+
+/** The only event stream the agent opens: lifecycle events (filtered), never logging or operations. */
+export const EVENTS_DIAL_PATH = '/1.0/events?type=lifecycle';
+
+/**
+ * Incus WebSockets the Backend may open: the (filtered) event stream and the
+ * channels of an operation this agent started (an exec or console it allowed).
+ */
+export function checkIncusWebSocket(path: string, operations: OperationLookup): WebSocketVerdict {
   const parsed = parseIncusPath(path);
-  if (!parsed) return deny('path is malformed');
+  if (!parsed) return { allowed: false, reason: 'path is malformed' };
   const [version, collection, id, leaf] = parsed.segments;
-  if (version !== '1.0') return deny('only the 1.0 API is reachable');
-  if (collection === 'events' && parsed.segments.length === 2) return ALLOW;
+  if (version !== '1.0') return { allowed: false, reason: 'only the 1.0 API is reachable' };
+  if (collection === 'events' && parsed.segments.length === 2) return { allowed: true, kind: 'events' };
   if (
     collection === 'operations'
     && OPERATION_ID_PATTERN.test(id ?? '')
@@ -164,9 +186,44 @@ export function checkIncusWebSocket(path: string): PolicyVerdict {
     && parsed.segments.length === 4
     && parsed.query.has('secret')
   ) {
-    return ALLOW;
+    return operations.knows(id!)
+      ? { allowed: true, kind: 'operation' }
+      : { allowed: false, reason: 'operation was not started through the agent' };
   }
-  return deny('only events and operation websockets are reachable');
+  return { allowed: false, reason: 'only events and operation websockets are reachable' };
+}
+
+/**
+ * The event the Backend may see, or undefined to drop it: lifecycle events of
+ * nyabase instances and volumes only, reduced to what identifies them (the
+ * Backend only wakes on them). Requestor, context and every event about the
+ * host's other workloads stay on the host.
+ */
+export function filterIncusEvent(text: string): string | undefined {
+  let event: unknown;
+  try {
+    event = JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+  if (!isRecord(event) || event.type !== 'lifecycle' || !isRecord(event.metadata)) return undefined;
+  const { action, source } = event.metadata;
+  if (typeof action !== 'string' || typeof source !== 'string' || !isManagedSource(source)) return undefined;
+  return JSON.stringify({
+    type: 'lifecycle',
+    timestamp: typeof event.timestamp === 'string' ? event.timestamp : undefined,
+    metadata: { action, source },
+  });
+}
+
+function isManagedSource(source: string): boolean {
+  const segments = parseIncusPath(source)?.segments;
+  if (!segments || segments[0] !== '1.0') return false;
+  if (segments[1] === 'instances') return isManagedInstance(segments[2]);
+  return segments[1] === 'storage-pools'
+    && segments[3] === 'volumes'
+    && segments[4] === 'custom'
+    && MANAGED_VOLUME_NAME_PATTERN.test(segments[5] ?? '');
 }
 
 async function checkInstances(
@@ -559,18 +616,24 @@ export function imageServerProblem(source: Record<string, unknown>): string | un
 
 const LOCAL_ONLY_SUFFIXES = ['.localhost', '.local', '.internal', '.home.arpa', '.lan'];
 
-function checkOperations(method: AgentIncusHttpMethod, rest: readonly string[]): PolicyVerdict {
+/**
+ * Only operations this agent started are reachable, and only to read and wait
+ * on them (the Backend never lists or cancels operations). Any other id is
+ * answered as Incus answers one that does not exist.
+ */
+function checkOperations(
+  method: AgentIncusHttpMethod,
+  rest: readonly string[],
+  operations: OperationLookup,
+): PolicyVerdict {
   const [id, leaf, ...tail] = rest;
-  if (method === 'GET') {
-    if (id === undefined) return ALLOW;
-    return OPERATION_ID_PATTERN.test(id) && (leaf === undefined || leaf === 'wait') && tail.length === 0
-      ? ALLOW
-      : deny('operation path is malformed');
+  if (method !== 'GET' || id === undefined) return deny('operations support read and wait');
+  if (!OPERATION_ID_PATTERN.test(id) || (leaf !== undefined && leaf !== 'wait') || tail.length > 0) {
+    return deny('operation path is malformed');
   }
-  if (method === 'DELETE' && id !== undefined && OPERATION_ID_PATTERN.test(id) && leaf === undefined) {
-    return ALLOW;
-  }
-  return deny('operations support read, wait and cancel');
+  return operations.knows(id)
+    ? ALLOW
+    : { allowed: false, reason: 'operation was not started through the agent', notFound: true };
 }
 
 function stringField(record: Record<string, unknown>, key: string): string | undefined {

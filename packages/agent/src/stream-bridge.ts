@@ -39,6 +39,11 @@ export interface BridgeOptions {
    * the shell behind it) alive forever.
    */
   readonly heartbeatMs?: number;
+  /**
+   * Rewrite (or drop, by returning undefined) every frame `left` sends before
+   * it reaches `right`; the result goes out as a text frame.
+   */
+  readonly filterLeft?: (text: string) => string | undefined;
 }
 
 /**
@@ -82,26 +87,39 @@ export function bridgeSockets(
   right.on('pong', markAlive);
   right.on('ping', markAlive);
   right.on('message', markAlive);
-  const forward = (from: WebSocket, to: WebSocket): void => {
+  const relay = (to: WebSocket, data: RawData, isBinary: boolean, filter?: (text: string) => string | undefined): void => {
+    if (!filter) {
+      to.send(data, { binary: isBinary });
+      return;
+    }
+    const kept = filter(rawText(data));
+    if (kept !== undefined) to.send(kept, { binary: false });
+  };
+  const forward = (from: WebSocket, to: WebSocket, filter?: (text: string) => string | undefined): void => {
     from.on('message', (data, isBinary) => {
       if (to.readyState !== WebSocket.OPEN) return;
       if (to.bufferedAmount > MAX_BUFFERED_BYTES) {
         closeBoth(1013, 'stream peer is not reading');
         return;
       }
-      to.send(data, { binary: isBinary });
+      relay(to, data, isBinary, filter);
     });
     from.on('close', (code, reason) => closeBoth(normalizeCloseCode(code), reason.toString().slice(0, 120)));
     from.on('error', () => closeBoth(1011, 'stream error'));
   };
   for (const [data, isBinary] of held.frames) {
-    if (right.readyState === WebSocket.OPEN) right.send(data, { binary: isBinary });
+    if (right.readyState === WebSocket.OPEN) relay(right, data, isBinary, options.filterLeft);
   }
-  forward(left, right);
+  forward(left, right, options.filterLeft);
   forward(right, left);
   if (options.session?.aborted) endOfSession();
   else options.session?.addEventListener('abort', endOfSession, { once: true });
   if (held.closed || left.readyState === WebSocket.CLOSED) closeBoth(1000, 'incus closed the stream');
+}
+
+function rawText(data: RawData): string {
+  if (Array.isArray(data)) return Buffer.concat(data).toString('utf8');
+  return Buffer.from(data as ArrayBuffer).toString('utf8');
 }
 
 function normalizeCloseCode(code: number): number {

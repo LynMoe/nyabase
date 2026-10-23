@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { createAgentHandlers, type AgentDependencies } from './agent.js';
 import { AgentRequestError } from './backend-connection.js';
 import { Ipv6Guard, type NftRunner } from './ipv6-guard.js';
+import { OperationLedger } from './operation-ledger.js';
 
 const INSTANCE = 'nyc-0123456789abcdef0123456789abcdef';
 
@@ -21,6 +22,7 @@ function harness(guardInPlace: boolean) {
     config: {} as AgentDependencies['config'],
     incus: { request, requestJson: vi.fn(async () => ({})) } as unknown as AgentDependencies['incus'],
     guard: new Ipv6Guard(nft),
+    operations: new OperationLedger(),
     metrics: { collect: async () => [] },
     credential: () => 'nyak.x.y',
     version: 'test',
@@ -49,6 +51,28 @@ describe('agent request handling', () => {
       body: Buffer.from(JSON.stringify({ action: 'stop' })).toString('base64'),
     }, new AbortController().signal);
     expect(request).toHaveBeenCalledTimes(1);
+  });
+
+  it('waits only on operations its own requests started', async () => {
+    const { handlers, request } = harness(true);
+    const id = '0b6b2f5e-2f8f-4b64-8a8e-5f4c4c4c4c4c';
+    const wait = { method: 'GET' as const, path: `/1.0/operations/${id}/wait?timeout=30`, timeoutMs: 1_000 };
+    const hidden = await handlers.incusHttp(wait, new AbortController().signal);
+    expect(hidden.status).toBe(404);
+    expect(JSON.parse(Buffer.from(hidden.body, 'base64').toString())).toMatchObject({ error_code: 404 });
+    expect(request).not.toHaveBeenCalled();
+    request.mockResolvedValueOnce({
+      status: 202,
+      headers: {},
+      body: Buffer.from(JSON.stringify({ type: 'async', operation: `/1.0/operations/${id}` })),
+    });
+    await handlers.incusHttp({
+      ...start,
+      body: Buffer.from(JSON.stringify({ action: 'stop' })).toString('base64'),
+    }, new AbortController().signal);
+    await handlers.incusHttp(wait, new AbortController().signal);
+    expect(request).toHaveBeenCalledTimes(2);
+    expect(request).toHaveBeenLastCalledWith(expect.objectContaining({ path: wait.path }));
   });
 
   it('starts a guest once the guard verifies', async () => {

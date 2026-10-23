@@ -9,6 +9,7 @@ import { CredentialStore } from './credential-store.js';
 import { enroll, enrollUntilAccepted } from './enroll.js';
 import { collectNvidiaGpuMetrics } from './gpu-collector.js';
 import { LocalIncus } from './incus-local.js';
+import { OperationLedger } from './operation-ledger.js';
 import { Ipv6Guard } from './ipv6-guard.js';
 
 /** Backstop for `nft monitor` (which may be unavailable or restarting). */
@@ -86,6 +87,7 @@ async function serve(config: AgentConfig, version: string, guard: Ipv6Guard, sig
       config,
       incus,
       guard,
+      operations: new OperationLedger(),
       metrics,
       credential: () => credential,
       version,

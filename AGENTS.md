@@ -137,6 +137,9 @@ Vite 通过 alias 将 `@nyabase/common` 指向 `src/index.ts`，但 `index.ts` �
    unfreeze、`start: true` 创建、给未停止实例新增或改网卡）标为 `needsIpv6Guard`，agent 转发前现场校验（必要时补回），
    不在位返回可重试的 `ipv6_guard_missing`（`AGENT_IPV6_GUARD_MISSING`）；状态经 hello / status 帧上报，
    只在内存里（`AgentConnection.status` → 服务器 DTO `agent.ipv6Guard`），恢复时唤醒该服务器，backend 不轮询它。
+   Incus operation 只能 GET / wait 经 policy 的请求创建的那些（agent 内存里的 `OperationLedger`，按 202 响应记），
+   其余回 404；不能列出或取消。事件流 agent 自己开 `/1.0/events?type=lifecycle` 并只转发 nyabase 资源的 action/source，
+   backend 只把事件当唤醒信号，不要依赖事件内容。
    不要再加 mTLS、trust token 或 Incus 端点字段。
    `AGENT_PROTOCOL_VERSION` 同时约定控制帧格式和 policy 接受什么：两边构建只在协议号相同时通信，
    不同的 hello 被 close 4426 拒绝并写进服务器 `last_error`。改 `policy.ts` / `policy-body.ts` /

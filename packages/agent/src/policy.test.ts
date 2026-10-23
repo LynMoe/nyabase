@@ -1,5 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import { checkIncusHttp, checkIncusWebSocket, parseIncusPath, type PolicyRequest } from './policy.js';
+import { OperationLedger } from './operation-ledger.js';
+import {
+  checkIncusHttp,
+  checkIncusWebSocket,
+  filterIncusEvent,
+  parseIncusPath,
+  type CurrentDocumentReader,
+  type PolicyRequest,
+} from './policy.js';
 
 const INSTANCE = 'nyc-0123456789abcdef0123456789abcdef';
 const VOLUME = 'nyv-0123456789abcdef0123456789abcdef';
@@ -47,10 +55,16 @@ function instanceDocument(overrides: Record<string, unknown> = {}): Record<strin
   };
 }
 
+const OPERATION = '0b6b2f5e-2f8f-4b64-8a8e-5f4c4c4c4c4c';
 const noCurrent = async (): Promise<undefined> => undefined;
+const noOperations = new OperationLedger();
+
+function context(readCurrent: CurrentDocumentReader, operations = noOperations) {
+  return { readCurrent, operations };
+}
 
 async function check(request: PolicyRequest, current: Record<string, unknown> | undefined = undefined) {
-  return checkIncusHttp(request, async () => current);
+  return checkIncusHttp(request, context(async () => current));
 }
 
 describe('agent Incus policy', () => {
@@ -307,7 +321,7 @@ describe('agent Incus policy', () => {
       { method: 'GET', path: '/1.0/instances?project=other' },
       { method: 'GET', path: '/1.0/instances?target=node2' },
     ] as const) {
-      expect((await checkIncusHttp(request, noCurrent)).allowed, `${request.method} ${request.path}`).toBe(false);
+      expect((await checkIncusHttp(request, context(noCurrent))).allowed, `${request.method} ${request.path}`).toBe(false);
     }
   });
 
@@ -338,18 +352,59 @@ describe('agent Incus policy', () => {
       { method: 'DELETE', path: `/1.0/instances/${INSTANCE}?recursion=1?&project=other` },
       { method: 'POST', path: `/1.0/instances/${INSTANCE}/exec??&project=other`, body: body({ command: ['true'] }) },
     ] as const) {
-      expect((await checkIncusHttp(request, async () => ({ config: {} }))).allowed, request.path).toBe(false);
+      expect((await checkIncusHttp(request, context(async () => ({ config: {} })))).allowed, request.path).toBe(false);
     }
-    expect(checkIncusWebSocket('/1.0/events??&all-projects=true&type=logging').allowed).toBe(false);
+    expect(checkIncusWebSocket('/1.0/events??&all-projects=true&type=logging', noOperations).allowed).toBe(false);
     expect(parseIncusPath('/1.0/instances?recursion=1&project=default')).toBeDefined();
   });
 
-  it('opens only event and operation websockets', () => {
-    expect(checkIncusWebSocket('/1.0/events').allowed).toBe(true);
-    expect(checkIncusWebSocket('/1.0/operations/0b6b2f5e-2f8f-4b64-8a8e-5f4c4c4c4c4c/websocket?secret=abc').allowed)
-      .toBe(true);
-    expect(checkIncusWebSocket(`/1.0/instances/${INSTANCE}/console`).allowed).toBe(false);
-    expect(checkIncusWebSocket('/1.0/operations/0b6b2f5e-2f8f-4b64-8a8e-5f4c4c4c4c4c/websocket').allowed).toBe(false);
+  it('opens only the event stream and channels of operations the agent started', () => {
+    const started = new OperationLedger();
+    started.record(OPERATION);
+    expect(checkIncusWebSocket('/1.0/events', noOperations)).toEqual({ allowed: true, kind: 'events' });
+    expect(checkIncusWebSocket(`/1.0/operations/${OPERATION}/websocket?secret=abc`, started))
+      .toEqual({ allowed: true, kind: 'operation' });
+    // The host operator's own `incus exec`: its id and secret leak nothing through the agent.
+    expect(checkIncusWebSocket(`/1.0/operations/${OPERATION}/websocket?secret=abc`, noOperations).allowed).toBe(false);
+    expect(checkIncusWebSocket(`/1.0/instances/${INSTANCE}/console`, started).allowed).toBe(false);
+    expect(checkIncusWebSocket(`/1.0/operations/${OPERATION}/websocket`, started).allowed).toBe(false);
+  });
+
+  it('reaches only operations the agent started, and only to read and wait', async () => {
+    const started = new OperationLedger();
+    started.record(OPERATION);
+    const operation = (method: 'GET' | 'DELETE', path: string, operations = started) =>
+      checkIncusHttp({ method, path }, context(noCurrent, operations));
+    expect((await operation('GET', `/1.0/operations/${OPERATION}`)).allowed).toBe(true);
+    expect((await operation('GET', `/1.0/operations/${OPERATION}/wait?timeout=30`)).allowed).toBe(true);
+    // Unknown operations look like Incus' own 404, not like a policy refusal.
+    expect(await operation('GET', `/1.0/operations/${OPERATION}`, noOperations))
+      .toMatchObject({ allowed: false, notFound: true });
+    expect(await operation('GET', `/1.0/operations/${OPERATION}/wait`, noOperations))
+      .toMatchObject({ allowed: false, notFound: true });
+    expect((await operation('DELETE', `/1.0/operations/${OPERATION}`)).allowed).toBe(false);
+    expect((await operation('GET', '/1.0/operations')).allowed).toBe(false);
+    expect((await operation('GET', '/1.0/operations?recursion=1')).allowed).toBe(false);
+  });
+
+  it('relays lifecycle events of nyabase resources only, without who caused them', () => {
+    const event = (source: string, extra: Record<string, unknown> = {}) => JSON.stringify({
+      type: 'lifecycle',
+      timestamp: '2026-10-23T00:00:00Z',
+      metadata: { action: 'instance-started', source, requestor: { username: 'root', address: '@' }, context: {} },
+      ...extra,
+    });
+    expect(JSON.parse(filterIncusEvent(event(`/1.0/instances/${INSTANCE}`))!)).toEqual({
+      type: 'lifecycle',
+      timestamp: '2026-10-23T00:00:00Z',
+      metadata: { action: 'instance-started', source: `/1.0/instances/${INSTANCE}` },
+    });
+    expect(filterIncusEvent(event(`/1.0/storage-pools/default/volumes/custom/${VOLUME}`))).toBeDefined();
+    expect(filterIncusEvent(event('/1.0/instances/customer-db'))).toBeUndefined();
+    expect(filterIncusEvent(event('/1.0/storage-pools/default/volumes/custom/backups'))).toBeUndefined();
+    expect(filterIncusEvent(event(`/1.0/instances/${INSTANCE}`, { type: 'operation' }))).toBeUndefined();
+    expect(filterIncusEvent(event(`/1.0/instances/${INSTANCE}`, { type: 'logging' }))).toBeUndefined();
+    expect(filterIncusEvent('not json')).toBeUndefined();
   });
 });
 
@@ -422,7 +477,7 @@ describe('agent Incus policy body forwarding', () => {
       { method: 'POST', path: '/1.0/images', body: body({ source: { type: 'image', server: 'https://x', Secret: 's' } }) },
       { method: 'POST', path: '/1.0/images/aliases', body: body({ name: 'x', target: 'a'.repeat(64), Description: 'd' }) },
     ] as const) {
-      const verdict = await checkIncusHttp(request, async () => current);
+      const verdict = await checkIncusHttp(request, context(async () => current));
       expect(verdict.allowed, `${request.method} ${request.path} ${request.body.toString()}`).toBe(false);
     }
   });
@@ -460,7 +515,7 @@ describe('agent Incus policy body forwarding', () => {
       { method: 'POST', path: '/1.0/images/aliases', body: { name: 'ubuntu/24.04', target: 'a'.repeat(64), type: 'container' } },
     ] as const) {
       const raw = body(request.body);
-      const verdict = await checkIncusHttp({ ...request, body: raw }, async () => current);
+      const verdict = await checkIncusHttp({ ...request, body: raw }, context(async () => current));
       expect(JSON.parse(sent(verdict)), `${request.method} ${request.path}`).toEqual(request.body);
     }
   });

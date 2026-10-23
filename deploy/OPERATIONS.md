@@ -1608,6 +1608,11 @@ Backend **不直连** Incus，也不主动连接任何主机。每台 Incus 主�
   profiles、证书/服务器配置/网络/存储池写入；`security.idmap.isolated` 必须为
   true；网卡必须开 IPv4/MAC 过滤且 `host_name` 为 `nyh*`；`volatile.*` 一律改回
   Incus 当前值。即使 Backend 被攻破，也拿不到宿主机 root。
+  Incus 操作（operation）只能读取 / 等待由经过 policy 的请求创建的那些（agent 记在内存里，
+  24 小时或 4096 条后遗忘），其余一律按 Incus 的 404 回答；exec / 控制台的 operation
+  WebSocket 同理，所以宿主机运维自己的 `incus exec` 既看不到也接不上。operation 不可列出、不可取消。
+  事件流只开 `lifecycle` 类型，且只转发 `nyc-*` 实例与 `nyv-*` 卷的事件（只保留 action / source），
+  宿主机上其他负载的事件、日志事件与 operation 元数据（其中有 exec 的 fd 密钥）都不出主机。
 - agent 常驻维护 nft 表 `bridge nyabase_guard`：在 `nyh*` veth 上双向丢弃所有
   IPv6 与 802.1Q/802.1ad 帧（不依赖 `br_netfilter`，与 Docker 的 iptables 规则不
   冲突），并以 `nyabase_node_ipv6_guard_present` 上报；预检要求它为 1。

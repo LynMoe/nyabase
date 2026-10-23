@@ -44,6 +44,17 @@ describe('stream bridge', () => {
     expect(backend.sent).toEqual(['prompt$ ', 'later']);
   });
 
+  it('passes Incus frames through the filter, held ones included, and drops what it rejects', () => {
+    const incus = new FakeSocket();
+    const backend = new FakeSocket();
+    bridgeSockets(asSocket(incus), asSocket(backend), { frames: [[Buffer.from('keep:1'), false]], closed: false }, {
+      filterLeft: (text) => (text.startsWith('keep:') ? text.toUpperCase() : undefined),
+    });
+    incus.emit('message', Buffer.from('drop:2'), false);
+    incus.emit('message', [Buffer.from('keep'), Buffer.from(':3')], false);
+    expect(backend.sent).toEqual(['KEEP:1', 'KEEP:3']);
+  });
+
   it('closes the Backend side when Incus closed before the bridge', () => {
     const incus = new FakeSocket();
     incus.readyState = WebSocket.CLOSED;
