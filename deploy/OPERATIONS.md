@@ -612,7 +612,11 @@ rebuilding vmbr.
   `user.refresh_token_reuse`, warn log `Refresh token reuse: revoked session …`),
   except a lost-response retry with the same request id or a concurrent refresh
   with the immediately previous token within 15 s (401 `REFRESH_SUPERSEDED`,
-  cookie kept).
+  cookie kept; the browser retries once). A session remembers its newest 64
+  retired tokens and rotates at most 64 times per 15 minutes (beyond that 429
+  `AUTH_RATE_LIMITED`, cookie kept), so a token retired within the last 15
+  minutes is always recognised; keep `auth.jwtExpiresIn` at 15m or less so a
+  victim's tab refreshes inside that window.
 - Incus instances and custom volumes that carry this installation's labels but
   have no row (an instance `user.nyabase.server_id` of this server; a volume
   `user.nyabase.scope` of this server or of the pool's shared backend) are
