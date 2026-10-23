@@ -719,6 +719,8 @@ describe('local volume list query', () => {
     expect(zListVolumesQuery.parse({ scope: 'all', serverId })).toEqual({ scope: 'all', serverId });
     expect(zListVolumesQuery.safeParse({ serverId: 'srv-1' }).success).toBe(false);
     expect(zListVolumesQuery.safeParse({ scope: 'mine', serverId }).success).toBe(false);
+    expect(zListVolumesQuery.safeParse({ scope: 'mine', serverId }).error?.issues)
+      .toEqual([expect.objectContaining({ path: ['serverId'], message: 'serverId is only available with scope=all' })]);
   });
 
   it('rejects extra keys, an unknown scope and empty serverId', () => {

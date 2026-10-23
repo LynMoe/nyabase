@@ -38,7 +38,7 @@ Vite 通过 alias 将 `@nyabase/common` 指向 `src/index.ts`，但 `index.ts` �
   只有真实用户才能做的事用 `requireUserId(actor)`。
 - 角色不会隐式放宽对所属资源的访问：容器、本地卷、共享卷（以及 intents 的详情 / 重试）默认只按所有者规则（自己的 → `owner`，含授权 / 配额检查，不论角色；别人的 → 404），
   `?scope=all`（所有读写路由都认，管理后台发送）才是显式管理员覆盖：需要该路由对应的角色（容器 operator，卷 admin，否则 403），走管理员规则（无用户授权限制，自己的资源也一样）。
-- 列表默认 `?scope=mine`；`?scope=all` 需要对应最低角色（`assertListScope(actor, scope, minimum)`，否则 403），管理员专属过滤参数只在 `scope=all` 下可用。
+- 列表默认 `?scope=mine`；`?scope=all` 需要对应最低角色（`assertListScope(actor, scope, minimum)`，否则 403），管理员专属过滤参数只在 `scope=all` 下可用：查询 schema 用 common 的 `onlyWithScopeAll(...)` refinement，`scope=mine` 带上即 400（卷列表的 `serverId`、`/performance/*` 的 `userId`），service 的 mine 路径也不读它们。
   DTO 形状不同的详情（servers、images、shared-backends）同样用 `?scope=all` 取管理员视图。
 - 只有运维 / 管理员能做的操作在方法（或类）上声明 `@RequireRole(Role.Operator | Role.Admin)`，方法级覆盖类级；
   `http-api-roles.contract.test.ts` 固定每条路由的最低角色。`/admin/*` 路由没有声明时 `RolesGuard` 返回 403。

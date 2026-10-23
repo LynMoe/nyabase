@@ -375,6 +375,24 @@ export const zCreateSharedVolumeRequest = z.object({
  */
 export const zListScope = z.enum(['mine', 'all']).default('mine');
 
+/**
+ * Refinement for list queries: administrator-only filters (the ones that pick
+ * other people's or server-wide rows) are refused with 400 unless `scope=all`.
+ */
+export function onlyWithScopeAll<K extends string>(...keys: readonly K[]) {
+  return (value: { scope: 'mine' | 'all' } & Partial<Record<K, unknown>>, ctx: z.RefinementCtx): void => {
+    if (value.scope === 'all') return;
+    for (const key of keys) {
+      if (value[key] === undefined) continue;
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `${key} is only available with scope=all`,
+        path: [key],
+      });
+    }
+  };
+}
+
 export const zListSharedVolumesQuery = z.object({
   scope: zListScope,
   attachableOnServerId: zResourceIdentity.optional(),
@@ -383,10 +401,7 @@ export const zListSharedVolumesQuery = z.object({
 export const zListVolumesQuery = z.object({
   scope: zListScope,
   serverId: zResourceIdentity.optional(),
-}).strict().refine(
-  (value) => value.serverId === undefined || value.scope === 'all',
-  { message: 'serverId is only available with scope=all', path: ['serverId'] },
-);
+}).strict().superRefine(onlyWithScopeAll('serverId'));
 
 export const zListContainersQuery = z.object({
   scope: zListScope,
