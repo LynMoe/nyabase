@@ -33,6 +33,8 @@ import {
   hasValidBearerToken,
 } from '../platform/proxy-bearer-auth.js';
 
+type SshProxyAuditEvent = ReturnType<typeof zSshProxyAuditEvent.parse>;
+
 export const MAX_SSH_PROXY_BUFFERED_BYTES = MAX_SSH_PROXY_SNAPSHOT_BYTES;
 export const MAX_SSH_PROXY_CLIENTS = 4;
 export const MAX_PENDING_SSH_DISCONNECT_ALL = 16;
@@ -40,6 +42,10 @@ export const SSH_PROXY_PAUSE_ADMIT_FLUSH_MS = 300;
 const MAX_SSH_PROXY_CONTROL_FRAME_BYTES = 1024 * 1024;
 const MAX_SSH_PROXY_SNAPSHOT_RENEWAL_MS = 60_000;
 const INITIAL_CONNECTION_DEADLINE_MS = 15_000;
+/** Refused logins are summed and logged once per this window. */
+export const SSH_PROXY_REFUSED_LOGIN_SUMMARY_MS = 60_000;
+/** Distinct refusal reasons kept per window; the rest count as `other`. */
+const MAX_REFUSED_LOGIN_REASONS = 16;
 
 function isSshProxyEnvelope(value: unknown): value is {
   kind: 'ack' | 'metrics' | 'status' | 'disconnectAllResult' | 'audit';
@@ -78,6 +84,9 @@ export class SshProxyGateway implements OnModuleInit, OnModuleDestroy {
   private latestStatus = new Map<WebSocket, SshProxyStatusReport>();
   /** `validUntil` of the last snapshot sent to each admitted proxy. */
   private sentLeaseEnds = new Map<WebSocket, number>();
+  /** Refused login attempts by reason since the last summary line. */
+  private refusedLogins = new Map<string, number>();
+  private refusedLoginTimer: NodeJS.Timeout | null = null;
   private snapshotBroadcastPromise: Promise<void> | null = null;
   private snapshotDirty = false;
   /**
@@ -175,6 +184,7 @@ export class SshProxyGateway implements OnModuleInit, OnModuleDestroy {
       for (const client of this.initializingClients) client.terminate();
       if (this.snapshotRenewalTimer) clearTimeout(this.snapshotRenewalTimer);
       this.snapshotRenewalTimer = null;
+      this.flushRefusedLogins();
       this.initializingClients.clear();
       this.clients.clear();
       this.latestStatus.clear();
@@ -453,10 +463,49 @@ export class SshProxyGateway implements OnModuleInit, OnModuleDestroy {
     }
     if (envelope.kind === 'audit') {
       const audit = zSshProxyAuditEvent.safeParse(envelope.payload);
-      if (audit.success) {
-        this.logger.log(`SSH proxy audit action=${audit.data.action} ok=${audit.data.ok} user=${audit.data.username ?? audit.data.userId ?? 'unknown'}`);
-      }
+      if (audit.success) this.recordAudit(audit.data);
     }
+  }
+
+  /**
+   * Successful logins are logged one per line. Refused ones are internet
+   * background noise whose usernames the client chooses; one line per attempt
+   * would rotate the capped container log (and the one-time admin password
+   * line with it), and each attempt is already in the proxy's own journal.
+   * They are summed by reason and logged once per window instead.
+   */
+  private recordAudit(event: SshProxyAuditEvent): void {
+    if (event.ok) {
+      this.logger.log(
+        `SSH proxy audit action=${event.action} ok=true user=${event.username ?? event.userId ?? 'unknown'}`,
+      );
+      return;
+    }
+    const reason = refusalKey(event);
+    const key = this.refusedLogins.has(reason) || this.refusedLogins.size < MAX_REFUSED_LOGIN_REASONS
+      ? reason
+      : 'other';
+    this.refusedLogins.set(key, (this.refusedLogins.get(key) ?? 0) + 1);
+    if (this.refusedLoginTimer || this.destroyed) return;
+    this.refusedLoginTimer = setTimeout(
+      () => this.flushRefusedLogins(),
+      SSH_PROXY_REFUSED_LOGIN_SUMMARY_MS,
+    );
+    this.refusedLoginTimer.unref();
+  }
+
+  private flushRefusedLogins(): void {
+    if (this.refusedLoginTimer) clearTimeout(this.refusedLoginTimer);
+    this.refusedLoginTimer = null;
+    if (this.refusedLogins.size === 0) return;
+    let total = 0;
+    const reasons: string[] = [];
+    for (const [reason, count] of [...this.refusedLogins].sort(([a], [b]) => a.localeCompare(b))) {
+      total += count;
+      reasons.push(`${reason}=${count}`);
+    }
+    this.refusedLogins.clear();
+    this.logger.log(`SSH proxy refused ${total} login attempt(s) since the last summary: ${reasons.join(' ')}`);
   }
 
   private broadcastUpdate(snapshot: SshProxySnapshot): void {
@@ -594,6 +643,12 @@ export class SshProxyGateway implements OnModuleInit, OnModuleDestroy {
       clearTimeout(timer);
     }
   }
+}
+
+/** `action:reason`, printable ASCII only and bounded, for the summary line. */
+function refusalKey(event: SshProxyAuditEvent): string {
+  const raw = `${event.action}:${event.reason ?? 'unknown'}`;
+  return raw.replace(/[^\x21-\x7e]/g, '?').slice(0, 64);
 }
 
 function safeStatusTimestampIso(value: number | undefined): string | null {

@@ -365,12 +365,18 @@ It retries on every change and every renewal tick (a third of the lease, at
 most 60 s) and logs each failure at error level with the time the proxies
 will fail closed. The admin SSH proxy page shows the last build's size
 against the cap, warns from 75%, and shows the error of a failed build, a
-missing public address, and proxies behind the latest generation. Because users without a reachable container are left out, their
-login attempts are audited as `public_key_rejected`, the same as an unknown key.
+missing public address, and proxies behind the latest generation. Because
+users without a reachable container are left out, their login attempts are
+audited as `public_key_rejected`, the same as an unknown key.
 
 **SSH logins.** The SSH login must be 1–256 printable ASCII bytes; anything
 else is refused before any key lookup and audited as `invalid_login` without
-the login text. The once-per-second status report caps its per-connection
+the login text. The proxy's journal records every attempt; the Backend log
+records each successful login (`SSH proxy audit action=login ok=true
+user=…`) but only one line a minute summing refused attempts by reason
+(`SSH proxy refused N login attempt(s) since the last summary: …`), without
+the client-chosen usernames, so internet scanning cannot rotate the capped
+container log. The once-per-second status report caps its per-connection
 details at 1024 entries / 512 KiB; connections beyond that are counted in
 `omittedConnections` (and in `activeConnections`) but not listed. Each
 `direct-tcpip` bridge is revalidated against every new snapshot on its own: a
