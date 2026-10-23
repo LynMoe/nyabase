@@ -25,8 +25,10 @@ sudo chmod 0400 config.yaml
 ```
 
 Replace every `CHANGE_ME` value in `.env` (and keep matching passwords in the
-YAML connection URLs). `POSTGRES_PASSWORD` must match the password in
-`DATABASE_URL`. Percent-encode reserved URI characters in connection URLs.
+YAML connection URLs). `POSTGRES_PASSWORD` is the PostgreSQL superuser's
+(`postgres`) and `NYABASE_DB_PASSWORD` the Backend role's (`nyabase`); the
+password in `DATABASE_URL` must be `NYABASE_DB_PASSWORD` (see **Database
+roles**). Percent-encode reserved URI characters in connection URLs.
 `config.example.yaml` does **not** use `CHANGE_ME` for boot secrets:
 `auth.jwtSecret`, `ssh.keyEncryptionSecret`, `http.proxyToken`, and
 `ssh.proxyToken` are empty strings. Empty values fail closed at production
@@ -751,6 +753,76 @@ prints p50/p95/p99/max latency. `HTTP_LOAD_REQUEST_TIMEOUT_MS` is a hard
 per-request ceiling; a release latency threshold must still come from the
 product SLO and stored baseline.
 
+## Database roles
+
+The Backend connects as `nyabase`, a role that owns the `nyabase` database and
+nothing else: it is not a superuser and has no `CREATEDB`, `CREATEROLE`,
+`REPLICATION` or `BYPASSRLS`. Owning the database lets it create its schemas
+and run its migrations at boot; it cannot read files or run programs on the
+PostgreSQL host (`COPY … TO PROGRAM`), touch other databases or create roles.
+The cluster superuser `postgres` (password `POSTGRES_PASSWORD`) is for
+operators only and is used from inside the `postgres` container (local
+connections there are trusted, so no password is needed). On the first start
+of an empty data volume the image runs `deploy/postgres-app-role.sh`, which
+creates the role with `NYABASE_DB_PASSWORD` and the database it owns. A
+production Backend connected as a superuser logs `Connected to PostgreSQL as a
+superuser` at boot.
+
+Owning its tables, the Backend role can still alter them: audit events are
+append-only for the application (an update is rejected by a trigger, rows are
+deleted only by the retention purge), not against someone who runs arbitrary
+SQL as that role, who can drop the trigger or delete events.
+
+**Moving an existing installation off the superuser.** Installations created
+before this layout run the Backend as the superuser `nyabase` that the image
+created at initdb. Converting one takes a short outage: the Backend stops, the
+superuser is renamed to `postgres`, and the data is restored into a new
+database owned by a new, ordinary `nyabase` role (the restore makes it the
+owner of every object). The old database stays as the rollback point.
+
+1. In `deploy/.env`: remove `POSTGRES_DB` and `POSTGRES_USER`, add
+   `NYABASE_DB_PASSWORD` (`openssl rand -hex 32`) and put it into
+   `DATABASE_URL` in place of the old password. `POSTGRES_PASSWORD` stays: it
+   remains the superuser's password.
+2. Stop the Backend (`docker compose --env-file .env stop backend`), then take
+   and verify a logical backup with the current `pg_ops` setup (see **Logical
+   backups**).
+3. Recreate the `postgres` container with the new environment and the init
+   script mount (the data volume is kept; the init script does not run on it),
+   then rename the superuser through a temporary one (a role cannot rename
+   itself) and set the old database aside:
+
+   ```bash
+   docker compose --env-file .env up -d postgres
+   pg_exec() {
+     docker compose --env-file .env exec -T postgres \
+       psql --no-psqlrc -v ON_ERROR_STOP=1 -d postgres "$@"
+   }
+   pg_exec -U nyabase -c 'CREATE ROLE nyabase_rename SUPERUSER LOGIN'
+   pg_exec -U nyabase_rename -c 'ALTER ROLE nyabase RENAME TO postgres'
+   pg_exec -U postgres -c 'DROP ROLE nyabase_rename' \
+     -c 'ALTER DATABASE nyabase RENAME TO nyabase_superuser_owned'
+   ```
+
+4. Create the Backend role and its empty database with the script the image
+   runs on a new volume:
+   `docker compose --env-file .env exec -T postgres bash /docker-entrypoint-initdb.d/10-nyabase-app-role.sh`.
+5. Rewrite `$ops_dir/pgpass` with `NYABASE_DB_PASSWORD` (the one-time setup
+   under **Backup and restore contract**), restore the backup into the new
+   database and start the Backend:
+
+   ```bash
+   NYABASE_PG_TARGET_URL=postgresql://nyabase@postgres:5432/nyabase \
+     pg_ops restore-logical --input "/backups/$backup_name" --confirm-database nyabase
+   docker compose --env-file .env up -d backend
+   ```
+
+6. Once readiness and the panel check out (and no superuser warning is
+   logged), drop the old database:
+   `pg_exec -U postgres -c 'DROP DATABASE nyabase_superuser_owned'`. To roll
+   back before that, stop the Backend, swap the two database names back and
+   point `DATABASE_URL` at the superuser `postgres` with `POSTGRES_PASSWORD`.
+
 ## Backup and restore contract
 
 Compose volumes are not backups. Store backups in a different failure domain.
@@ -781,7 +853,7 @@ chmod 0700 "$ops_dir" "$backup_root"
 
 # libpq password file: host:port:database:user:password. The password is read
 # from the terminal, so it is neither in shell history nor on a command line.
-IFS= read -rsp 'PostgreSQL password (POSTGRES_PASSWORD): ' pg_password; echo
+IFS= read -rsp 'Backend database password (NYABASE_DB_PASSWORD): ' pg_password; echo
 pg_password="${pg_password//\\/\\\\}"
 pg_password="${pg_password//:/\\:}"
 printf 'postgres:5432:*:%s:%s\n' nyabase "$pg_password" >"$ops_dir/pgpass"
@@ -789,9 +861,10 @@ unset pg_password
 chmod 0600 "$ops_dir/pgpass"
 ```
 
-Replace `nyabase` with `POSTGRES_USER` (and below, the database name with
-`POSTGRES_DB`) if `.env` changes them. Then define a helper in the shell that
-runs the operations (repeat this in every new shell, from `deploy/`):
+Logical backups and restores run as the Backend role `nyabase`, which owns
+everything they read and write; the superuser is never used over the network.
+Then define a helper in the shell that runs the operations (repeat this in
+every new shell, from `deploy/`):
 
 ```bash
 ops_dir="$HOME/nyabase-ops"
@@ -842,8 +915,8 @@ drill at production. Create the empty target over the local socket inside the
 
 ```bash
 docker compose --env-file .env exec -T postgres \
-  psql -U nyabase -d postgres -v ON_ERROR_STOP=1 \
-  -c 'CREATE DATABASE nyabase_restore_drill TEMPLATE template0'
+  psql -U postgres -d postgres -v ON_ERROR_STOP=1 \
+  -c 'CREATE DATABASE nyabase_restore_drill OWNER nyabase TEMPLATE template0'
 NYABASE_PG_TARGET_URL=postgresql://nyabase@postgres:5432/nyabase_restore_drill \
   pg_ops restore-logical \
     --input "/backups/$backup_name" \
@@ -852,14 +925,15 @@ docker compose --env-file .env exec -T postgres \
   psql -U nyabase -d nyabase_restore_drill \
   -c 'SELECT version, name, applied_at FROM system.schema_migrations'
 docker compose --env-file .env exec -T postgres \
-  psql -U nyabase -d postgres -c 'DROP DATABASE nyabase_restore_drill'
+  psql -U postgres -d postgres -c 'DROP DATABASE nyabase_restore_drill'
 ```
 
 The restore refuses PostgreSQL maintenance databases, checks the exact
 database name, and refuses every non-empty target without modifying it. There
 is no in-script replace mode. Objects are restored without their original
 owners and grants, so they belong to the restoring role (`nyabase`), which is
-the role the Backend connects as. The logical archive and this helper do not
+the role the Backend connects as; create every target database `OWNER nyabase`
+(the role cannot create databases itself). The logical archive and this helper do not
 preserve database-level ACL, comments, or `ALTER DATABASE` settings; the
 shipped Compose database has none.
 
@@ -872,14 +946,14 @@ stopped. The replaced database stays in place until you drop it:
 ```bash
 docker compose --env-file .env stop backend
 docker compose --env-file .env exec -T postgres \
-  psql -U nyabase -d postgres -v ON_ERROR_STOP=1 \
-  -c 'CREATE DATABASE nyabase_restored TEMPLATE template0'
+  psql -U postgres -d postgres -v ON_ERROR_STOP=1 \
+  -c 'CREATE DATABASE nyabase_restored OWNER nyabase TEMPLATE template0'
 NYABASE_PG_TARGET_URL=postgresql://nyabase@postgres:5432/nyabase_restored \
   pg_ops restore-logical \
     --input "/backups/$backup_name" \
     --confirm-database nyabase_restored
 docker compose --env-file .env exec -T postgres \
-  psql -U nyabase -d postgres -v ON_ERROR_STOP=1 \
+  psql -U postgres -d postgres -v ON_ERROR_STOP=1 \
   -c 'ALTER DATABASE nyabase RENAME TO nyabase_replaced' \
   -c 'ALTER DATABASE nyabase_restored RENAME TO nyabase'
 # Check out / build the Backend release the backup was taken with, then:
@@ -897,13 +971,13 @@ The shipped Compose PostgreSQL keeps the image's default `pg_hba.conf`:
 replication connections are accepted only from inside the container
 (`127.0.0.1`/`::1`, `trust`), not over the `control-plane` network. Run the
 base backup in the `postgres` container's network namespace so it connects
-over loopback (no password is used there). The `nyabase` role created by the
-image is a superuser and already has `REPLICATION`:
+over loopback (no password is used there) as the superuser `postgres`, which
+has `REPLICATION` (the Backend role does not):
 
 ```bash
 base_name="base-$(date -u +%Y%m%dT%H%M%SZ)"
 PG_OPS_NETWORK="container:$(docker compose --env-file .env ps -q postgres)" \
-NYABASE_PG_SOURCE_URL=postgresql://nyabase@127.0.0.1:5432/nyabase \
+NYABASE_PG_SOURCE_URL=postgresql://postgres@127.0.0.1:5432/postgres \
   pg_ops base-backup --output-dir "/backups/$base_name"
 pg_ops verify-base --input-dir "/backups/$base_name"
 ```
@@ -929,10 +1003,14 @@ After configuring archiving, prove the chain instead of checking configuration
 text alone:
 
 ```bash
-pg_ops pitr-archive-probe \
-  --output "/backups/pitr-probe-$(date -u +%Y%m%dT%H%M%SZ).txt" \
-  --timeout-seconds 60
+PG_OPS_NETWORK="container:$(docker compose --env-file .env ps -q postgres)" \
+NYABASE_PG_SOURCE_URL=postgresql://postgres@127.0.0.1:5432/postgres \
+  pg_ops pitr-archive-probe \
+    --output "/backups/pitr-probe-$(date -u +%Y%m%dT%H%M%SZ).txt" \
+    --timeout-seconds 60
 ```
+
+It runs as the superuser over loopback because forcing a WAL switch needs it.
 
 The probe requires archiving to be enabled, records the current archiver
 failure boundary, forces one WAL switch, and waits until `last_archived_wal`
@@ -1148,6 +1226,9 @@ from the product SLO and measured baseline, not from this example deployment.
   by `10001:10001`. The configuration bind mount must remain readable without
   weakening those controls.
 - Never publish the PostgreSQL port.
+- The Backend connects as the non-superuser database owner `nyabase`; keep the
+  superuser password (`POSTGRES_PASSWORD`) out of the Backend's configuration
+  (see **Database roles**).
 - Rotate `.env` and `config.yaml` credentials through the deployment secret
   mechanism used by the target environment; do not commit either file. The
   exception is `ssh.keyEncryptionSecret`: it encrypts data at rest and has no

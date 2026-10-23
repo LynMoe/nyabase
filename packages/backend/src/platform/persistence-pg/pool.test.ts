@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { PgPersistenceOptions } from './options.js';
-import { createPgPool } from './pool.js';
+import { createPgPool, warnIfSuperuserConnection } from './pool.js';
 
 function options(): PgPersistenceOptions {
   return {
@@ -46,5 +46,24 @@ describe('PostgreSQL pool runtime policy', () => {
     expect(error).toHaveBeenCalledWith(expect.stringContaining('total=0'));
     expect(error).toHaveBeenCalledWith(expect.stringContaining(failure.message));
     await pool.end();
+  });
+});
+
+describe('superuser connection check', () => {
+  it('warns when the session is a superuser', async () => {
+    const warn = vi.fn();
+    const query = vi.fn().mockResolvedValue({ rows: [{ superuser: true }] });
+
+    await expect(warnIfSuperuserConnection({ query } as never, { warn })).resolves.toBe(true);
+    expect(query.mock.calls[0]?.[0]).toContain("current_setting('is_superuser')");
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('Database roles'));
+  });
+
+  it('stays quiet for an ordinary database owner', async () => {
+    const warn = vi.fn();
+    const query = vi.fn().mockResolvedValue({ rows: [{ superuser: false }] });
+
+    await expect(warnIfSuperuserConnection({ query } as never, { warn })).resolves.toBe(false);
+    expect(warn).not.toHaveBeenCalled();
   });
 });

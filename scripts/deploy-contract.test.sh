@@ -32,7 +32,8 @@ done
 contract_root="$(mktemp -d)"
 trap 'rm -rf "$contract_root"' EXIT
 rendered="$contract_root/compose.json"
-POSTGRES_PASSWORD=contract-test \
+POSTGRES_PASSWORD=contract-test-superuser \
+NYABASE_DB_PASSWORD=contract-test \
 DATABASE_URL=postgresql://nyabase:contract-test@postgres:5432/nyabase \
   docker compose -f deploy/docker-compose.yml config --format json >"$rendered"
 
@@ -48,7 +49,9 @@ if (JSON.stringify(serviceNames) !== JSON.stringify(expectedServices)) {
     `Compose services must be exactly ${expectedServices.join(', ')}, got ${serviceNames.join(', ')}`,
   );
 }
-const renderedText = JSON.stringify(config);
+// Bind-mount sources render as absolute paths; the checkout's own location
+// (a worktree named agent-…, say) is not part of the deployment.
+const renderedText = JSON.stringify(config).split(process.cwd()).join('<checkout>');
 for (const forbidden of [
   'backend-gateway',
   'NYABASE_RUNTIME_ROLE',
@@ -101,6 +104,24 @@ for (const envName of [
 ]) {
   if (!(envName in backend.environment)) throw new Error(`backend is missing ${envName}`);
 }
+// The Backend connects as the database owner `nyabase`, never as the cluster
+// superuser, whose password stays with the postgres service.
+const postgres = config.services.postgres;
+if (postgres.environment?.POSTGRES_USER !== 'postgres') {
+  throw new Error('the PostgreSQL superuser must be `postgres`, separate from the Backend role');
+}
+if (!postgres.environment?.NYABASE_DB_PASSWORD) {
+  throw new Error('postgres must receive NYABASE_DB_PASSWORD to create the Backend role');
+}
+if (!(postgres.volumes ?? []).some((volume) => volume.type === 'bind'
+  && volume.source.endsWith('/deploy/postgres-app-role.sh')
+  && volume.target.startsWith('/docker-entrypoint-initdb.d/')
+  && volume.read_only === true)) {
+  throw new Error('postgres does not mount postgres-app-role.sh as a read-only init script');
+}
+for (const name of ['POSTGRES_PASSWORD', 'POSTGRES_USER', 'NYABASE_DB_PASSWORD']) {
+  if (name in backend.environment) throw new Error(`backend must not receive ${name}`);
+}
 // Host agents dial the Backend; it holds no Incus TLS material.
 if ('INCUS_CA_FILE' in backend.environment || backend.secrets?.length || config.secrets) {
   throw new Error('backend must not be given Incus TLS secrets');
@@ -134,6 +155,15 @@ for (const expected of ['rw', 'nosuid', 'nodev', 'noexec', 'uid=10001', 'gid=100
 }
 NODE
 
+# The Backend's role owns its database and nothing else.
+rg -q 'NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS' deploy/postgres-app-role.sh
+rg -q 'CREATE DATABASE nyabase OWNER nyabase' deploy/postgres-app-role.sh
+[[ -x deploy/postgres-app-role.sh ]] || { echo "deploy/postgres-app-role.sh must be executable" >&2; exit 1; }
+rg -q '^DATABASE_URL=postgresql://nyabase:CHANGE_ME_NYABASE_DB@postgres:5432/nyabase$' deploy/.env.example
+if rg -n '^POSTGRES_(USER|DB)=' deploy/.env.example; then
+  echo "deploy/.env.example must not rename the superuser or the database" >&2
+  exit 1
+fi
 rg -q '^FROM node:22-slim@sha256:[0-9a-f]{64} AS builder$' deploy/Dockerfile.backend
 rg -q '^FROM node:22-slim@sha256:[0-9a-f]{64} AS runner$' deploy/Dockerfile.backend
 rg -q '^USER 10001:10001$' deploy/Dockerfile.backend

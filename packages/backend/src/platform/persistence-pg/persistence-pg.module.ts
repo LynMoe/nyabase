@@ -21,7 +21,7 @@ import {
   redactDatabaseUrl,
   type PgPersistenceOptions,
 } from './options.js';
-import { createPgPool } from './pool.js';
+import { createPgPool, warnIfSuperuserConnection } from './pool.js';
 import { PG_DATABASE, PG_OPTIONS, PG_POOL } from './tokens.js';
 import { PgTransactionManager } from './transaction.js';
 
@@ -81,10 +81,11 @@ class PgPersistenceLifecycle implements OnApplicationShutdown {
     },
     {
       provide: PG_DATABASE,
-      inject: [PG_OPTIONS, PG_POOL],
+      inject: [PG_OPTIONS, PG_POOL, NyabaseConfigService],
       useFactory: async (
         options: PgPersistenceOptions,
         pool: Pool,
+        config: NyabaseConfigService,
       ): Promise<Kysely<NyabaseDatabase>> => {
         const logger = new Logger('PgPersistenceBootstrap');
         try {
@@ -108,6 +109,9 @@ class PgPersistenceLifecycle implements OnApplicationShutdown {
             + `(${status.applied.length} migration(s))`,
           );
           logger.log(`Connected to ${redactDatabaseUrl(options.connectionString)}`);
+          if (config.get<string>('runtime.nodeEnv') === 'production') {
+            await warnIfSuperuserConnection(pool, logger);
+          }
           return new Kysely<NyabaseDatabase>({
             dialect: new PostgresDialect({ pool }),
           });

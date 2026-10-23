@@ -49,9 +49,8 @@ cleanup_smoke() {
 trap cleanup_smoke EXIT
 
 {
-  echo 'POSTGRES_DB=nyabase'
-  echo 'POSTGRES_USER=nyabase'
-  echo 'POSTGRES_PASSWORD=smoke-postgres-password'
+  echo 'POSTGRES_PASSWORD=smoke-postgres-superuser-password'
+  echo 'NYABASE_DB_PASSWORD=smoke-postgres-password'
   echo 'DATABASE_URL=postgresql://nyabase:smoke-postgres-password@postgres:5432/nyabase'
   echo 'DB_POOL_MAX=4'
   echo 'PG_CONNECTION_TIMEOUT_MS=30000'
@@ -170,6 +169,22 @@ process.stdin.on("end", () => {
     if (!tmp.includes(expected)) throw new Error(`/tmp tmpfs is missing ${expected}`);
   }
 });'
+
+# The Backend's role owns its database and its schemas but is no superuser.
+[[ "$(
+  "${compose[@]}" exec -T postgres \
+    psql -U postgres -d nyabase --no-psqlrc --tuples-only --no-align --set=ON_ERROR_STOP=1 \
+    --command="SELECT
+      NOT role.rolsuper AND NOT role.rolcreatedb AND NOT role.rolcreaterole
+      AND NOT role.rolreplication AND NOT role.rolbypassrls
+      AND (SELECT pg_get_userbyid(datdba) FROM pg_database WHERE datname = 'nyabase') = 'nyabase'
+      AND NOT EXISTS (
+        SELECT 1 FROM pg_namespace
+        WHERE nspname IN ('audit', 'control', 'iam', 'infra', 'interaction', 'system')
+          AND pg_get_userbyid(nspowner) <> 'nyabase'
+      )
+      FROM pg_roles AS role WHERE role.rolname = 'nyabase'"
+)" == t ]]
 
 [[ "$(docker exec "$backend_container" id -u)" == 10001 ]]
 docker exec "$backend_container" test -r /etc/nyabase/config.yaml
