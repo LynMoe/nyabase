@@ -318,27 +318,36 @@ async function verifyAbsent(
   });
 }
 
-/** Delete a custom volume from one daemon's catalog, confirmed by a GET 404. */
+/**
+ * Delete a custom volume from one daemon's catalog, confirmed by a GET 404.
+ * Idempotent: a DELETE answered with 404 (the volume went between our GET and
+ * the DELETE, or an earlier pass already removed it) is not a failure, the
+ * closing GET decides.
+ */
 export async function deleteCatalog(
   client: IncusClientPort,
   poolName: string,
   incusName: string,
 ): Promise<void> {
-  await readAfterTimeout(
-    () => requestAndWait(
-      client,
-      (options) => client.deleteStorageVolume(poolName, 'custom', incusName, options),
-    ),
-    async () => {
-      try {
-        await client.getStorageVolume(poolName, 'custom', incusName);
-      } catch (error) {
-        if (isNotFound(error)) return undefined;
-        throw error;
-      }
-      throw new Error('VOLUME_DELETE_NOT_CONFIRMED');
-    },
-  );
+  try {
+    await readAfterTimeout(
+      () => requestAndWait(
+        client,
+        (options) => client.deleteStorageVolume(poolName, 'custom', incusName, options),
+      ),
+      async () => {
+        try {
+          await client.getStorageVolume(poolName, 'custom', incusName);
+        } catch (error) {
+          if (isNotFound(error)) return undefined;
+          throw error;
+        }
+        throw new Error('VOLUME_DELETE_NOT_CONFIRMED');
+      },
+    );
+  } catch (error) {
+    if (!isNotFound(error)) throw error;
+  }
   await verifyAbsent(client, poolName, incusName);
 }
 

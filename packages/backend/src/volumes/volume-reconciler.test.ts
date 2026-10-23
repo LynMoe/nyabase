@@ -1235,6 +1235,59 @@ describe('volume.destroy eligible-node D', () => {
     expect(spies.mark).not.toHaveBeenCalled();
   });
 
+  it('probes every catalog again when the pin of a never-ensured shared volume answers 404', async () => {
+    const present = new Set([serverB]);
+    const clientA = catalogClient(serverA, present);
+    const clientB = catalogClient(serverB, present);
+    const state = destroyState({
+      dirEnsured: false,
+      removeAllServerId: serverA,
+      catalogs: [
+        catalog(serverA, 'cephfs-a', 'present'),
+        catalog(serverB, 'cephfs-b', 'present'),
+      ],
+    });
+    const reconciler = new VolumeReconciler(new VolumeReconcileStore(volumeExistsDb({ lifecycle_phase: 'deleting' }) as never, {} as never),
+      { log: vi.fn().mockResolvedValue(undefined) } as never,
+      { get: vi.fn(async (id: string) => (id === serverA ? clientA : clientB)) } as never,
+      { register: vi.fn() } as never,
+    );
+    const spies = installDestroySpies(reconciler, state);
+    const outcome = await reconciler.reconcile(destroyContext(spies.lease));
+    expect(outcome).toMatchObject({ outcome: 'succeeded' });
+    expect(spies.pin).toHaveBeenCalledWith(volumeId, serverB);
+    expect(clientA.deleteStorageVolume).not.toHaveBeenCalled();
+    expect(clientA.createStorageVolume).not.toHaveBeenCalled();
+    expect(clientB.deleteStorageVolume).toHaveBeenCalledTimes(1);
+    expect(spies.mark).toHaveBeenCalledWith(volumeId, serverB);
+  });
+
+  it('commits with no DELETE when the pin and every other catalog of a never-ensured shared volume are 404', async () => {
+    const present = new Set<string>();
+    const clientA = catalogClient(serverA, present);
+    const clientB = catalogClient(serverB, present);
+    const state = destroyState({
+      dirEnsured: false,
+      removeAllServerId: serverA,
+      catalogs: [
+        catalog(serverA, 'cephfs-a', 'present'),
+        catalog(serverB, 'cephfs-b', 'present'),
+      ],
+    });
+    const reconciler = new VolumeReconciler(new VolumeReconcileStore(volumeExistsDb({ lifecycle_phase: 'deleting' }) as never, {} as never),
+      { log: vi.fn().mockResolvedValue(undefined) } as never,
+      { get: vi.fn(async (id: string) => (id === serverA ? clientA : clientB)) } as never,
+      { register: vi.fn() } as never,
+    );
+    const spies = installDestroySpies(reconciler, state);
+    const outcome = await reconciler.reconcile(destroyContext(spies.lease));
+    expect(outcome).toMatchObject({ outcome: 'succeeded' });
+    expect(clientA.deleteStorageVolume).not.toHaveBeenCalled();
+    expect(clientB.deleteStorageVolume).not.toHaveBeenCalled();
+    expect(spies.mark).toHaveBeenCalledWith(volumeId, null);
+    expect(spies.finish).toHaveBeenCalled();
+  });
+
   it('reselects after the pin is cascaded away while E is still nonempty', async () => {
     const present = new Set<string>();
     const clientB = catalogClient(serverB, present);

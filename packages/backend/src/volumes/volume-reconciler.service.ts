@@ -360,6 +360,38 @@ export class VolumeReconciler implements ManagedReconciler, OnModuleInit {
     return this.clients.get(serverId);
   }
 
+  /**
+   * GET the volume on one daemon's catalog. Anything but a 200 or a 404 (no
+   * client, an unreachable agent, a timeout) retries the whole destroy.
+   */
+  private async probeCatalog(
+    context: ReconcileRunContext,
+    catalog: Executor,
+    incusName: string,
+  ): Promise<{ client: IncusClientPort; status: 'present' | 'missing' } | { retry: ReconcileOutcome }> {
+    let client: IncusClientPort | undefined;
+    try {
+      client = await this.clientFor(catalog.server_id, context);
+    } catch (error) {
+      return { retry: destroyRetryFromError(error, catalog.server_id) };
+    }
+    if (!client) {
+      const details = { serverId: catalog.server_id };
+      return { retry: destroyRetry('SERVER_UNREACHABLE', 'Destroy cannot reach a catalog Incus', details) };
+    }
+    const status = await classifyCatalogGet(client, catalog.pool_name, incusName, context.signal);
+    if (status === 'error') {
+      return {
+        retry: destroyRetry(
+          'VOLUME_DESTROY_RETRY',
+          'Destroy catalog GET did not complete with only 200/404',
+          { serverId: catalog.server_id },
+        ),
+      };
+    }
+    return { client, status };
+  }
+
   private async deleteCatalogAudited(
     client: IncusClientPort,
     intent: IntentRecord,
@@ -393,35 +425,11 @@ export class VolumeReconciler implements ManagedReconciler, OnModuleInit {
         );
         continue;
       }
-      let client: IncusClientPort | undefined;
+      const probe = await this.probeCatalog(context, catalog, volume.incus_name);
+      if ('retry' in probe) return probe.retry;
+      if (probe.status === 'missing') continue;
       try {
-        client = await this.clientFor(catalog.server_id, context);
-      } catch (error) {
-        return destroyRetryFromError(error, catalog.server_id);
-      }
-      if (!client) {
-        return destroyRetry(
-          'SERVER_UNREACHABLE',
-          'Destroy cannot reach a catalog Incus',
-          { serverId: catalog.server_id },
-        );
-      }
-      const status = await classifyCatalogGet(
-        client,
-        catalog.pool_name,
-        volume.incus_name,
-        context.signal,
-      );
-      if (status === 'error') {
-        return destroyRetry(
-          'VOLUME_DESTROY_RETRY',
-          'Destroy catalog purge GET failed',
-          { serverId: catalog.server_id },
-        );
-      }
-      if (status === 'missing') continue;
-      try {
-        await this.deleteCatalogAudited(client, context.intent, catalog.pool_name, volume.incus_name);
+        await this.deleteCatalogAudited(probe.client, context.intent, catalog.pool_name, volume.incus_name);
       } catch {
         return destroyRetry(
           'VOLUME_DESTROY_RETRY',
@@ -444,39 +452,9 @@ export class VolumeReconciler implements ManagedReconciler, OnModuleInit {
   ): Promise<ExecutorChoice> {
     const present: CatalogRow[] = [];
     for (const catalog of catalogs.filter((item) => item.server_status === 'online')) {
-      let client: IncusClientPort | undefined;
-      try {
-        client = await this.clientFor(catalog.server_id, context);
-      } catch (error) {
-        return { kind: 'retry', outcome: destroyRetryFromError(error, catalog.server_id) };
-      }
-      if (!client) {
-        return {
-          kind: 'retry',
-          outcome: destroyRetry(
-            'SERVER_UNREACHABLE',
-            'Destroy cannot reach a catalog Incus',
-            { serverId: catalog.server_id },
-          ),
-        };
-      }
-      const status = await classifyCatalogGet(
-        client,
-        catalog.pool_name,
-        volume.incus_name,
-        context.signal,
-      );
-      if (status === 'error') {
-        return {
-          kind: 'retry',
-          outcome: destroyRetry(
-            'VOLUME_DESTROY_RETRY',
-            'Destroy tracking GET did not complete with only 200/404',
-            { serverId: catalog.server_id },
-          ),
-        };
-      }
-      if (status === 'present') present.push(catalog);
+      const probe = await this.probeCatalog(context, catalog, volume.incus_name);
+      if ('retry' in probe) return { kind: 'retry', outcome: probe.retry };
+      if (probe.status === 'present') present.push(catalog);
     }
     if (present.length === 0) return { kind: 'nothing-to-remove' };
     present.sort((left, right) => left.server_id.localeCompare(right.server_id));
@@ -514,40 +492,42 @@ export class VolumeReconciler implements ManagedReconciler, OnModuleInit {
     return { kind: 'executor', executor };
   }
 
-  /** RemoveAll on the executor, confirmed by a GET 404; null once the choice is committed. */
+  /**
+   * RemoveAll on the executor, confirmed by a GET 404; null once the choice is
+   * committed. The DELETE and the commit are not atomic (a dropped agent
+   * socket, a crash or a lost lease in between), so every step accepts that an
+   * earlier pass already removed the volume:
+   * - a local volume lives in exactly one daemon's catalog, so a 404 there is
+   *   authoritative: the data is gone (an earlier DELETE, or it vanished while
+   *   the volume was parked) and the destroy commits;
+   * - a shared volume that became a directory is adopted and deleted again, so
+   *   a 404 on one executor never leaves backend data behind;
+   * - a shared volume that never became a directory was pinned because its
+   *   catalog answered 200; a 404 there says nothing about the other catalogs,
+   *   so every catalog is probed again, as an unpinned destroy does.
+   */
   private async removeAllOnExecutor(
     context: ReconcileRunContext,
     volume: VolumeRecord,
+    catalogs: CatalogRow[],
     executor: Executor,
     eligibleCount: number,
+    repicked = false,
   ): Promise<ReconcileOutcome | null> {
-    let client: IncusClientPort | undefined;
-    try {
-      client = await this.clientFor(executor.server_id, context);
-    } catch (error) {
-      return destroyRetryFromError(error, executor.server_id);
+    const probe = await this.probeCatalog(context, executor, volume.incus_name);
+    if ('retry' in probe) return probe.retry;
+    const { client, status } = probe;
+    if (status === 'missing' && volume.shared_backend_id && !volume.dir_ensured) {
+      if (repicked) {
+        return destroyRetry(
+          'VOLUME_DESTROY_RETRY',
+          'Destroy executor catalog vanished while it was being picked',
+          { serverId: executor.server_id },
+        );
+      }
+      return this.repickFromCatalogs(context, volume, catalogs, eligibleCount);
     }
-    if (!client) {
-      return destroyRetry(
-        'SERVER_UNREACHABLE',
-        'Destroy cannot reach the pinned executor',
-        { serverId: executor.server_id },
-      );
-    }
-    const status = await classifyCatalogGet(
-      client,
-      executor.pool_name,
-      volume.incus_name,
-      context.signal,
-    );
-    if (status === 'error') {
-      return destroyRetry(
-        'VOLUME_DESTROY_RETRY',
-        'Destroy executor GET failed',
-        { serverId: executor.server_id },
-      );
-    }
-    if (status === 'missing' && volume.dir_ensured && volume.shared_backend_id) {
+    if (status === 'missing' && volume.shared_backend_id) {
       const adopted = await ensureSharedCatalogOnServer(client, {
         poolName: executor.pool_name,
         incusName: volume.incus_name,
@@ -561,14 +541,10 @@ export class VolumeReconciler implements ManagedReconciler, OnModuleInit {
           { serverId: executor.server_id },
         );
       }
-    } else if (status === 'missing' && !volume.dir_ensured) {
-      return destroyRetry(
-        'VOLUME_DESTROY_RETRY',
-        'Destroy must not commit from a single executor 404',
-        { serverId: executor.server_id },
-      );
     }
-    if (status === 'present' || (status === 'missing' && volume.dir_ensured)) {
+    // A local 404 is already the confirmed absence; DELETE only what is there
+    // (or what the shared adopt just put back).
+    if (status === 'present' || volume.shared_backend_id) {
       try {
         await this.deleteCatalogAudited(client, context.intent, executor.pool_name, volume.incus_name);
       } catch {
@@ -579,10 +555,35 @@ export class VolumeReconciler implements ManagedReconciler, OnModuleInit {
         );
       }
     }
+    return this.commitRemoved(context, volume, executor.server_id, eligibleCount);
+  }
+
+  /** The pinned catalog of a never-ensured shared volume is gone: pick again among all catalogs. */
+  private async repickFromCatalogs(
+    context: ReconcileRunContext,
+    volume: VolumeRecord,
+    catalogs: CatalogRow[],
+    eligibleCount: number,
+  ): Promise<ReconcileOutcome | null> {
+    const choice = await this.pickExecutorFromCatalogs(context, volume, catalogs);
+    if (choice.kind === 'retry') return choice.outcome;
+    if (choice.kind === 'nothing-to-remove') {
+      return this.commitRemoved(context, volume, null, eligibleCount);
+    }
+    await this.store.pinRemoveAllServer(volume.id, choice.executor.server_id);
+    return this.removeAllOnExecutor(context, volume, catalogs, choice.executor, eligibleCount, true);
+  }
+
+  private async commitRemoved(
+    context: ReconcileRunContext,
+    volume: VolumeRecord,
+    executorServerId: string | null,
+    eligibleCount: number,
+  ): Promise<null> {
     context.lease?.assertOwned();
-    await this.store.markRemoveAllCommitted(volume.id, executor.server_id);
+    await this.store.markRemoveAllCommitted(volume.id, executorServerId);
     this.logger.log(
-      `volume=${volume.id} destroy pin=${executor.server_id} committed=true `
+      `volume=${volume.id} destroy pin=${executorServerId ?? 'none'} committed=true `
       + `eligible=${eligibleCount} dir_ensured=${volume.dir_ensured}`,
     );
     return null;
@@ -598,11 +599,9 @@ export class VolumeReconciler implements ManagedReconciler, OnModuleInit {
     const choice = await this.chooseExecutor(context, volume, catalogs, eligible);
     if (choice.kind === 'retry') return choice.outcome;
     if (choice.kind === 'nothing-to-remove') {
-      context.lease?.assertOwned();
-      await this.store.markRemoveAllCommitted(volume.id, null);
-      return null;
+      return this.commitRemoved(context, volume, null, eligible.length);
     }
-    return this.removeAllOnExecutor(context, volume, choice.executor, eligible.length);
+    return this.removeAllOnExecutor(context, volume, catalogs, choice.executor, eligible.length);
   }
 
   // --- full scan -----------------------------------------------------------------------

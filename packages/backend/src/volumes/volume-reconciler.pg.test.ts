@@ -427,6 +427,150 @@ describePg('volume reconciler destroy while executors are offline', () => {
   });
 });
 
+describePg('volume reconciler local destroy after a lost commit', () => {
+  /** One local Incus volume: GET reflects `state.present`, DELETE removes it. */
+  function localClient(state: { present: boolean }, incusName: string) {
+    const getStorageVolume = vi.fn(async () => {
+      if (!state.present) throw new IncusError('INCUS_NOT_FOUND', 'managed_failure');
+      return { metadata: { name: incusName } };
+    });
+    const deleteStorageVolume = vi.fn(async () => {
+      if (!state.present) throw new IncusError('INCUS_NOT_FOUND', 'managed_failure');
+      state.present = false;
+      return { status: 200, envelope: { type: 'sync' } };
+    });
+    return { getStorageVolume, deleteStorageVolume, getOperationWait: vi.fn() };
+  }
+
+  function reconcilerFor(
+    database: Parameters<Parameters<typeof withPostgresTestDatabase>[0]>[0]['database'],
+    client: ReturnType<typeof localClient>,
+  ) {
+    const store = new VolumeReconcileStore(database, new IntentRepository(database, noopWake()));
+    const reconciler = new VolumeReconciler(store,
+      { log: vi.fn().mockResolvedValue(undefined) } as never,
+      { get: vi.fn(async () => client) } as never,
+      { register: vi.fn() } as never,
+    );
+    return { reconciler, store };
+  }
+
+  function run(reconciler: VolumeReconciler, volumeId: string) {
+    return reconciler.reconcile({
+      intent: destroyIntent(volumeId) as never,
+      claim: {} as never,
+      lease: { assertOwned: vi.fn() } as never,
+      signal: new AbortController().signal,
+    });
+  }
+
+  async function seedLocalVolume(
+    database: Parameters<Parameters<typeof withPostgresTestDatabase>[0]>[0]['database'],
+    options: { dirEnsured: boolean; pinned: boolean; needsAttention?: boolean },
+  ) {
+    const fixture = await seedSharedVolume(database, { aState: 'present', bState: 'present' });
+    const localPool = randomUUID();
+    await database.insertInto('infra.storage_pools')
+      .values(poolValues(localPool, fixture.serverA, 'local-a', null)).execute();
+    await database.deleteFrom('control.volume_placements').where('volume_id', '=', fixture.volumeId).execute();
+    await database.updateTable('control.volumes')
+      .set({
+        shared_backend_id: null,
+        pool_id: localPool,
+        server_id: fixture.serverA,
+        dir_ensured: options.dirEnsured,
+        needs_attention: options.needsAttention ?? false,
+        remove_all_server_id: options.pinned ? fixture.serverA : null,
+      })
+      .where('id', '=', fixture.volumeId).execute();
+    await database.insertInto('control.volume_placements').values({
+      volume_id: fixture.volumeId,
+      server_id: fixture.serverA,
+      pool_id: localPool,
+      catalog_state: options.dirEnsured ? 'present' : 'ensuring',
+      observed_revision: options.dirEnsured ? 2 : null,
+    }).execute();
+    return fixture;
+  }
+
+  async function volumeRows(
+    database: Parameters<Parameters<typeof withPostgresTestDatabase>[0]>[0]['database'],
+    volumeId: string,
+  ) {
+    return database.selectFrom('control.volumes').select('id').where('id', '=', volumeId).execute();
+  }
+
+  for (const dirEnsured of [true, false]) {
+    it(`finishes a local destroy whose commit was lost after the DELETE (dir_ensured=${dirEnsured})`, async () => {
+      await withPostgresTestDatabase(async ({ database }) => {
+        const fixture = await seedLocalVolume(database, { dirEnsured, pinned: false });
+        const incus = { present: true };
+        const client = localClient(incus, fixture.incusName);
+        const { reconciler, store } = reconcilerFor(database, client);
+        const commit = vi.spyOn(store, 'markRemoveAllCommitted')
+          .mockRejectedValueOnce(new Error('connection lost'));
+
+        await expect(run(reconciler, fixture.volumeId)).rejects.toThrow('connection lost');
+        expect(incus.present).toBe(false);
+        expect(client.deleteStorageVolume).toHaveBeenCalledTimes(1);
+        const pinned = await database.selectFrom('control.volumes')
+          .select(['remove_all_server_id', 'remove_all_committed'])
+          .where('id', '=', fixture.volumeId).executeTakeFirstOrThrow();
+        expect(pinned).toEqual({ remove_all_server_id: fixture.serverA, remove_all_committed: false });
+
+        commit.mockRestore();
+        await expect(run(reconciler, fixture.volumeId)).resolves.toMatchObject({ outcome: 'succeeded' });
+        expect(client.deleteStorageVolume).toHaveBeenCalledTimes(1);
+        expect(await volumeRows(database, fixture.volumeId)).toHaveLength(0);
+      });
+    });
+
+    it(`finishes a pinned local destroy that finds the volume gone (dir_ensured=${dirEnsured})`, async () => {
+      await withPostgresTestDatabase(async ({ database }) => {
+        const fixture = await seedLocalVolume(database, { dirEnsured, pinned: true });
+        const client = localClient({ present: false }, fixture.incusName);
+        const { reconciler } = reconcilerFor(database, client);
+
+        await expect(run(reconciler, fixture.volumeId)).resolves.toMatchObject({ outcome: 'succeeded' });
+        expect(client.deleteStorageVolume).not.toHaveBeenCalled();
+        expect(await volumeRows(database, fixture.volumeId)).toHaveLength(0);
+      });
+    });
+  }
+
+  it('deletes a parked local volume whose Incus volume vanished', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const fixture = await seedLocalVolume(database, {
+        dirEnsured: true,
+        pinned: false,
+        needsAttention: true,
+      });
+      const client = localClient({ present: false }, fixture.incusName);
+      const { reconciler } = reconcilerFor(database, client);
+
+      await expect(run(reconciler, fixture.volumeId)).resolves.toMatchObject({ outcome: 'succeeded' });
+      expect(client.deleteStorageVolume).not.toHaveBeenCalled();
+      expect(await volumeRows(database, fixture.volumeId)).toHaveLength(0);
+    });
+  });
+
+  it('treats a DELETE 404 after a GET 200 as removed', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const fixture = await seedLocalVolume(database, { dirEnsured: true, pinned: false });
+      const incus = { present: true };
+      const client = localClient(incus, fixture.incusName);
+      client.deleteStorageVolume.mockImplementationOnce(async () => {
+        incus.present = false;
+        throw new IncusError('INCUS_NOT_FOUND', 'managed_failure');
+      });
+      const { reconciler } = reconcilerFor(database, client);
+
+      await expect(run(reconciler, fixture.volumeId)).resolves.toMatchObject({ outcome: 'succeeded' });
+      expect(await volumeRows(database, fixture.volumeId)).toHaveLength(0);
+    });
+  });
+});
+
 async function seedSharedVolume(
   database: Parameters<Parameters<typeof withPostgresTestDatabase>[0]>[0]['database'],
   options: {
