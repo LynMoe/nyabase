@@ -387,7 +387,7 @@ bytes flow at least that often and finish within that ceiling (EventSource
 reconnects on its own). Upgraded tunnels (WebSocket) have no total lifetime,
 only `NYABASE_HTTP_UPGRADED_IDLE_MS`. Each upstream container may hold at most
 `NYABASE_HTTP_MAX_CONNECTIONS_PER_CONTAINER` connections at once across all its
-hostnames, so one tenant cannot take the whole connection pool; unlike the
+hostnames, so one container cannot take the whole connection pool; unlike the
 listener limits, which close silently, going over it is answered with a 503.
 When a response is cut short (idle timeout, response lifetime, route
 revocation, upstream error) the proxy resets the client connection (TCP RST)
@@ -584,7 +584,10 @@ rebuilding vmbr.
   would keep running while their addresses are handed out again. A forced
   delete of a backend's last executor keeps its live shared volumes listed
   (they cannot be attached or deleted until a new executor is registered) and
-  only finishes destroys already in progress (`destroy_executor_gone`).
+  only finishes destroys already in progress (`destroy_executor_gone`). To
+  retire a CephFS backend, delete its volumes while an executor is still
+  registered; volumes stranded by a forced delete can only be removed by
+  registering an executor again.
 - Agent streams (event stream, console, exec): the Backend waits up to 30 s
   for the agent's `incus.ws` reply and up to 35 s for the stream socket; a
   stream connecting later is closed with 1008. A stream that buffers more than
