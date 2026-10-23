@@ -91,6 +91,8 @@ type Loaded =
  */
 /** Root quota polls: 5 s doubling to a minute, about an hour in all. */
 const ROOT_QUOTA_MAX_ATTEMPTS = 64;
+/** A write refused for its content (agent policy, Incus validation), not a transient failure. */
+const REFUSED_WRITE_CODES: ReadonlySet<string> = new Set(['AGENT_POLICY_DENIED', 'INCUS_BAD_REQUEST']);
 
 export function rootQuotaRetryDelay(attemptCount: number): number {
   return Math.min(60_000, 5_000 * 2 ** Math.min(4, Math.max(0, attemptCount - 1)));
@@ -365,10 +367,36 @@ export class ContainerReconciler implements ManagedReconciler, OnModuleInit {
     let document = actual.document;
     if (detaching.some((device) => Object.prototype.hasOwnProperty.call(document.devices ?? {}, device))) {
       await this.auditMutate(context.intent, 'PUT', `/1.0/instances/${actual.name}`, actual.name);
-      await removeDevices(client, actual.name, detaching);
+      if (!await this.unplugDetaching(client, actual.name, detaching)) return;
       document = (await readRequired(client, actual.name)).document;
     }
     await this.store.settleVolumeBinds(row.id, document, true);
+  }
+
+  /**
+   * The targeted unplug writes the instance back as it is, so host-side drift
+   * the agent policy (or Incus) refuses refuses the unplug too. Then the
+   * device is left to the full managed document of this pass, which replaces
+   * the drift as well (the desired attachments never include a detaching
+   * one) and settles the row after it; that one write does wait for the
+   * other attachments to be ready. False when the unplug was refused.
+   */
+  private async unplugDetaching(
+    client: IncusClientPort,
+    name: string,
+    detaching: readonly string[],
+  ): Promise<boolean> {
+    try {
+      await removeDevices(client, name, detaching);
+      return true;
+    } catch (error) {
+      if (!(error instanceof IncusError) || !REFUSED_WRITE_CODES.has(error.code)) throw error;
+      this.logger.warn(
+        `Unplugging ${detaching.join(', ')} from ${name} was refused (${error.code}); `
+        + 'writing the full managed document instead',
+      );
+      return false;
+    }
   }
 
   // --- instance lifecycle --------------------------------------------------------

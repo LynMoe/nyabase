@@ -28,6 +28,7 @@ import { PgTransactionManager } from '../platform/persistence-pg/transaction.js'
 import { IntentRepository } from '../reconcile/intent.repository.js';
 import { ReconcileClaimRepository } from '../reconcile/reconcile-claim.repository.js';
 import { noopWake } from '../reconcile/reconcile-wake.test-helper.js';
+import { DETACH_REDRIVE_BACKOFF_MS } from '../volumes/detach-redrive.js';
 import { VolumeAttachmentsService } from '../volumes/volume-attachments.service.js';
 import { VolumesRepository } from '../volumes/volumes.repository.js';
 import { AccessLapseProcessor } from './access-lapse.processor.js';
@@ -577,14 +578,59 @@ describePg('access lapse processor', () => {
       expect(await containerIntents(database, container)).toHaveLength(1);
 
       // The intent fails (the device may still be in the instance): the row
-      // stays detaching, which counts as exposed, and the next pass detaches again.
-      await database.updateTable('control.intents')
-        .set({ status: 'failed', failure_code: 'TEST', settled_at: new Date() })
-        .where('resource_id', '=', container).execute();
+      // stays detaching, which counts as exposed once the re-drive backoff
+      // has passed, and that pass detaches again.
+      await failPendingIntents(database, container);
+      await processor.process();
+      expect(await containerIntents(database, container)).toHaveLength(1);
+      await ageContainerIntents(database, container, DETACH_REDRIVE_BACKOFF_MS - 60_000);
+      await processor.process();
+      expect(await containerIntents(database, container)).toHaveLength(1);
+      await ageContainerIntents(database, container, 2 * 60_000);
       await processor.process();
       expect(await pendingDetaches(database, container)).toEqual([attachmentId]);
       expect(await containerIntents(database, container)).toHaveLength(2);
       expect((await bindStates(database)).get(attachmentId)).toBe('detaching');
+      // The re-drive leaves the failure visible to operators.
+      expect(await attentionOf(database, container)).toBe(true);
+    });
+  });
+
+  it('backs off re-driving a detach whose container keeps failing its intents', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const { processor, audit } = await fixture(database);
+      const { userId, serverId, poolId, imageId } = await world(database);
+      const lapsedPool = await seedPool(database, serverId);
+      await grantServer(database, { user: userId }, serverId);
+      await grantPool(database, { user: userId }, poolId);
+      await grantPool(database, { user: userId }, lapsedPool, days(-1));
+      const container = await seedContainer(database, {
+        ownerId: userId, serverId, poolId, imageId, running: true,
+      });
+      const volume = await seedVolume(database, { ownerId: userId, poolId: lapsedPool, serverId });
+      const attachmentId = await seedAttachment(database, container, volume);
+
+      // One virtual day of passes every 10 minutes; every intent of the
+      // container fails at once (e.g. its managed network device is gone).
+      const STEP_MS = 10 * 60_000;
+      for (let elapsed = 0; elapsed < DAY_MS; elapsed += STEP_MS) {
+        await processor.process();
+        // A re-drive never clears the attention the failed intent left.
+        if (elapsed > 0) expect(await attentionOf(database, container)).toBe(true);
+        await failPendingIntents(database, container);
+        await ageContainerIntents(database, container, STEP_MS);
+      }
+
+      // Waits of 15, 30, 60, 120 and then 240 minutes after each failure:
+      // re-drives at 20, 50, 110, 230, 470, 710, 950, 1190 and 1430 minutes
+      // (on 10-minute passes), instead of one per pass (144).
+      const intents = await containerIntents(database, container);
+      expect(intents).toHaveLength(10);
+      const detachAudits = audit.append.mock.calls
+        .filter((call) => (call as unknown[])[2] === AuditAction.DetachVolume);
+      expect(detachAudits).toHaveLength(10);
+      expect((await bindStates(database)).get(attachmentId)).toBe('detaching');
+      expect(await attentionOf(database, container)).toBe(true);
     });
   });
 
@@ -917,6 +963,39 @@ async function containerIntents(database: Kysely<NyabaseDatabase>, containerId: 
   return database.selectFrom('control.intents').select(['id', 'status'])
     .where('resource_id', '=', containerId)
     .execute();
+}
+
+/** The container's pending intents fail now, as the reconciler records it. */
+async function failPendingIntents(database: Kysely<NyabaseDatabase>, containerId: string): Promise<void> {
+  const failed = await database.updateTable('control.intents')
+    .set({ status: 'failed', failure_code: 'TEST', settled_at: sql`clock_timestamp()` })
+    .where('resource_id', '=', containerId)
+    .where('status', '=', 'pending')
+    .executeTakeFirst();
+  if (Number(failed.numUpdatedRows) === 0) return;
+  await database.updateTable('control.containers').set({ needs_attention: true })
+    .where('id', '=', containerId).execute();
+}
+
+/** Moves the container's intents into the past, as if `ms` had passed. */
+async function ageContainerIntents(
+  database: Kysely<NyabaseDatabase>,
+  containerId: string,
+  ms: number,
+): Promise<void> {
+  await database.updateTable('control.intents')
+    .set({
+      created_at: sql`created_at - make_interval(secs => ${ms / 1000}::double precision)`,
+      settled_at: sql`settled_at - make_interval(secs => ${ms / 1000}::double precision)`,
+    })
+    .where('resource_id', '=', containerId)
+    .execute();
+}
+
+async function attentionOf(database: Kysely<NyabaseDatabase>, containerId: string): Promise<boolean> {
+  const row = await database.selectFrom('control.containers').select('needs_attention')
+    .where('id', '=', containerId).executeTakeFirstOrThrow();
+  return row.needs_attention;
 }
 
 async function powerOf(database: Kysely<NyabaseDatabase>, containerId: string): Promise<string> {

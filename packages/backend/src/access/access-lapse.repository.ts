@@ -11,6 +11,7 @@ import {
   resolveServerAccess,
   resolveSharedBackendAccess,
 } from '../iam/effective-access.js';
+import { detachRedriveDue } from '../volumes/detach-redrive.js';
 
 export const ACCESS_LAPSE_GRACE_MS = GRANT_EXPIRY_GRACE_DAYS * 24 * 60 * 60 * 1000;
 
@@ -147,18 +148,16 @@ export class AccessLapseRepository {
         UNION
         -- Pools and backends: a volume is attached to a container, running or
         -- not, or is still detaching from one with no intent left to unplug it
-        -- (its detach failed: the reconciler deletes the row once it is gone).
+        -- (its detach failed: the reconciler deletes the row once it is gone),
+        -- once the re-drive backoff has passed (detachRedriveDue).
         SELECT volume.owner_id, CASE WHEN volume.shared_backend_id IS NULL THEN 'storage_pool' ELSE 'shared_backend' END,
                coalesce(volume.shared_backend_id, volume.pool_id)
         FROM control.volume_attachments AS attachment
         JOIN control.volumes AS volume ON volume.id = attachment.volume_id
         JOIN control.containers AS container ON container.id = attachment.container_id
         WHERE container.lifecycle_phase <> 'deleting'
-          AND (attachment.bind_state <> 'detaching' OR NOT EXISTS (
-            SELECT 1 FROM control.intents AS intent
-            WHERE intent.resource_type = 'container' AND intent.resource_id = container.id
-              AND intent.status = 'pending'
-          ))
+          AND (attachment.bind_state <> 'detaching'
+            OR ${detachRedriveDue(sql.ref('attachment.id'), sql.ref('container.id'))})
       ), candidate AS (
         SELECT owned.user_id, owned.kind, owned.resource_id,
                (coverage.user_id IS NOT NULL) AS covered,

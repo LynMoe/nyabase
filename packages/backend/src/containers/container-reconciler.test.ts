@@ -1528,6 +1528,62 @@ describe('container reconciler: detaching never waits for the other attachments'
     expect(setup.client.readModifyWriteInstance).not.toHaveBeenCalled();
     expect(setup.settle).toHaveBeenCalledWith(CONTAINER_ID, { devices: {} }, true);
   });
+
+  it('falls back to the full managed document when the agent refuses the unplug over host drift', async () => {
+    const removeName = deriveAttachmentDeviceName(ATTACH_REMOVE);
+    const binds = volumeBindDb([{ id: ATTACH_REMOVE, bind_state: 'detaching', device_name: removeName }]);
+    const setup = await harness({
+      status: 'Running',
+      powerIntent: 'running',
+      database: binds.db,
+      attachments: [attachment(ATTACH_REMOVE, VOLUME_REMOVE, '/data/remove', 'detaching')],
+      documentExtras: {
+        // Host-side drift the agent policy refuses to write back.
+        config: { 'raw.lxc': 'lxc.apparmor.profile=unconfined' },
+        devices: { [removeName]: diskDevice(VOLUME_REMOVE, '/data/remove') },
+      },
+    });
+    const write = setup.client.readModifyWriteInstance.getMockImplementation()!;
+    const refused: unknown[] = [];
+    setup.client.readModifyWriteInstance.mockImplementation(async (name, mutate, ...rest) => {
+      const probe = structuredClone({ ...setup.store.document, state: undefined });
+      mutate(probe as never);
+      if (probe.config['raw.lxc'] !== undefined) {
+        const error = new IncusError('AGENT_POLICY_DENIED', 'managed_failure', { message: 'raw.lxc' });
+        refused.push(error);
+        throw error;
+      }
+      return write(name, mutate, ...rest);
+    });
+    const actions = followPower(setup);
+
+    const outcome = await setup.reconciler.reconcile(context(setup.client, {
+      request: { operation: 'detach_volume', attachmentId: ATTACH_REMOVE },
+    }));
+
+    expect(outcome).toEqual({ outcome: 'succeeded', observedRevision: 3 });
+    expect(refused).toHaveLength(1);
+    // One write: the whole managed document, drift and detaching device gone.
+    expect(setup.putBodies).toHaveLength(1);
+    expect(setup.putBodies[0]!.config['raw.lxc']).toBeUndefined();
+    expect(setup.putBodies[0]!.devices[removeName]).toBeUndefined();
+    expect(setup.putBodies[0]!.devices.root).toBeDefined();
+    expect(actions).toEqual([]);
+    expect(binds.deleted).toContain(ATTACH_REMOVE);
+  });
+
+  it('still fails the pass when the unplug fails for another reason', async () => {
+    const setup = await detachingSetup({ status: 'Running' });
+    setup.client.readModifyWriteInstance.mockRejectedValue(
+      new IncusError('OPERATION_FAILED', 'managed_failure'),
+    );
+
+    await expect(setup.reconciler.reconcile(context(setup.client))).rejects.toMatchObject({
+      code: 'OPERATION_FAILED',
+    });
+    expect(setup.client.readModifyWriteInstance).toHaveBeenCalledTimes(1);
+    expect(setup.settle).not.toHaveBeenCalled();
+  });
 });
 
 describe('container reconciler: superseded intents', () => {

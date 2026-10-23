@@ -6,13 +6,12 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
-import type { Kysely, Transaction } from 'kysely';
+import { sql, type Kysely, type Transaction } from 'kysely';
 import {
   AuditAction,
   FailureCode,
   IntentKind,
   IntentResourceType,
-  IntentStatus,
   type AttachVolumeRequest,
   type IntentAcceptedDto,
   type ListScope,
@@ -27,6 +26,7 @@ import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
 import { acceptedIntent } from '../reconcile/accepted-intent.js';
 import { IntentRepository, type IntentRecord } from '../reconcile/intent.repository.js';
 import { StoragePoolsRepository } from '../storage-pools/storage-pools.repository.js';
+import { detachRedriveDue } from './detach-redrive.js';
 import { VolumeDtoAssembler, type VolumeRow } from './volume-dtos.js';
 import {
   VOLUME_TX,
@@ -314,8 +314,10 @@ export class VolumeAttachmentsService {
    * a running container live; the container itself is left alone. Returns
    * null when the attachment is already going or its container is. A
    * detaching attachment whose container has no pending intent is detached
-   * again: its intent ended without removing the device (the reconciler
-   * deletes the row once the device is gone).
+   * again once the re-drive backoff has passed (`detachRedriveDue`): its
+   * intent ended without removing the device (the reconciler deletes the row
+   * once the device is gone). A re-drive keeps the container's
+   * `needs_attention`, so one whose intents keep failing stays visible.
    */
   async forceDetach(actor: Actor, attachmentId: string): Promise<IntentRecord | null> {
     return this.transactions.run(async (transaction) => {
@@ -324,31 +326,41 @@ export class VolumeAttachmentsService {
       const container = await transaction.selectFrom('control.containers').selectAll()
         .where('id', '=', attachment.container_id).forUpdate().executeTakeFirst();
       if (!container || container.lifecycle_phase === 'deleting') return null;
-      if (attachment.bind_state === 'detaching') {
-        const inFlight = await transaction.selectFrom('control.intents').select('id')
-          .where('resource_type', '=', IntentResourceType.Container)
-          .where('resource_id', '=', container.id)
-          .where('status', '=', IntentStatus.Pending)
-          .executeTakeFirst();
-        if (inFlight) return null;
+      const redrive = attachment.bind_state === 'detaching';
+      if (redrive) {
+        const { rows } = await sql<{ due: boolean }>`
+          SELECT ${detachRedriveDue(sql`${attachment.id}::uuid`, sql`${container.id}::uuid`)} AS due
+        `.execute(transaction);
+        if (!rows[0]?.due) return null;
       }
-      return this.beginDetach(transaction, actor.userId, attachment, container, { reason: 'access_lapse' });
+      return this.beginDetach(
+        transaction,
+        actor.userId,
+        attachment,
+        container,
+        redrive ? { reason: 'access_lapse', redrive: true } : { reason: 'access_lapse' },
+        { clearAttention: !redrive },
+      );
     }, VOLUME_TX);
   }
 
-  /** Marks the attachment detaching, bumps the container revision and queues its update. */
+  /**
+   * Marks the attachment detaching, bumps the container revision and queues
+   * its update. A re-drive (`clearAttention: false`) keeps `needs_attention`.
+   */
   private async beginDetach(
     transaction: Tx,
     actorId: string | null,
     attachment: { id: string; volume_id: string },
     container: { id: string; server_id: string; revision: number },
     auditDetails: Record<string, unknown>,
+    options: { readonly clearAttention: boolean } = { clearAttention: true },
   ): Promise<IntentRecord> {
     await this.repository.setAttachmentBindState(attachment.id, 'detaching', transaction);
     const revision = Number(container.revision) + 1;
     const updated = await transaction.updateTable('control.containers').set({
       revision,
-      needs_attention: false,
+      ...(options.clearAttention ? { needs_attention: false } : {}),
     })
       .where('id', '=', container.id)
       .where('revision', '=', container.revision)
