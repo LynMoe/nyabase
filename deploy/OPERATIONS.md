@@ -1611,6 +1611,17 @@ Backend **不直连** Incus，也不主动连接任何主机。每台 Incus 主�
 - agent 常驻维护 nft 表 `bridge nyabase_guard`：在 `nyh*` veth 上双向丢弃所有
   IPv6 与 802.1Q/802.1ad 帧（不依赖 `br_netfilter`，与 Docker 的 iptables 规则不
   冲突），并以 `nyabase_node_ipv6_guard_present` 上报；预检要求它为 1。
+  这是安全不变量，由 agent 自己执行：
+  - 校验（缺失或不完整就补回）发生在：unit 的 `ExecStartPre=… ipv6-guard`（unit 排在
+    `incus.service` 之前，开机时 Incus 恢复运行的容器之前表已在位）、agent 启动、每 10 秒、
+    以及 `nft monitor` 报告任何规则集变化（防火墙重载、`nft flush ruleset`）之后约 200 ms。
+  - 会让客户网卡接通的请求——`start` / `restart` / `unfreeze`、`start: true` 的创建、
+    给未停止的实例新增或修改网卡——转发前再校验一次；不在位就拒绝
+    （`AGENT_IPV6_GUARD_MISSING`，可重试，intent 按退避重试，不会失败）。停止、删除、卸载照常。
+  - 状态随 hello 与之后的 status 帧上报：服务器详情「主机 Agent」卡片实时显示
+    「IPv6 拦截已就绪 / 缺失」与原因；恢复时 Backend 立即唤醒该服务器的 reconcile。
+  - 已在运行的容器在表被删到补回之间没有这层保护（有 `nft monitor` 时约 200 ms，
+    否则最长 10 秒）；持续补不回来（例如 nft 不可用）时卡片会一直显示缺失，需要人工处理。
 
 ### 接入（enrollment）
 

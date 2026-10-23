@@ -152,6 +152,40 @@ describe('agent Incus policy', () => {
       .toBe(false);
   });
 
+  it('marks every request that brings a guest NIC up as needing the IPv6 guard', async () => {
+    const needs = async (request: PolicyRequest, current?: Record<string, unknown>) => {
+      const verdict = await check(request, current);
+      expect(verdict.allowed, `${request.method} ${request.path}`).toBe(true);
+      return verdict.allowed && verdict.needsIpv6Guard === true;
+    };
+    const state = (action: string): PolicyRequest =>
+      ({ method: 'PUT', path: `/1.0/instances/${INSTANCE}/state`, body: body({ action }) });
+    expect(await needs(state('start'))).toBe(true);
+    expect(await needs(state('restart'))).toBe(true);
+    expect(await needs(state('unfreeze'))).toBe(true);
+    expect(await needs(state('stop'))).toBe(false);
+    expect(await needs(state('freeze'))).toBe(false);
+    expect(await needs({ method: 'POST', path: '/1.0/instances', body: body(instanceDocument({ start: true })) }))
+      .toBe(true);
+    expect(await needs({ method: 'POST', path: '/1.0/instances', body: body(instanceDocument({ start: false })) }))
+      .toBe(false);
+
+    const { eth0, ...withoutNic } = instanceDocument().devices as Record<string, Record<string, string>>;
+    const update = (devices: Record<string, unknown>): PolicyRequest => ({
+      method: 'PATCH',
+      path: `/1.0/instances/${INSTANCE}`,
+      body: body({ devices }),
+    });
+    const running = { status: 'Running', config: {}, devices: withoutNic };
+    // A NIC hot-plugged into (or changed on) a live guest needs the guard; an unchanged echo does not.
+    expect(await needs(update({ eth0 }), running)).toBe(true);
+    expect(await needs(update({ eth0: { ...eth0, 'limits.egress': '10Mbit' } }), { ...running, devices: { eth0 } }))
+      .toBe(true);
+    expect(await needs(update({ eth0 }), { ...running, devices: { eth0 } })).toBe(false);
+    expect(await needs(update({ eth0 }), { ...running, status: 'Stopped' })).toBe(false);
+    expect(await needs(update({ root: withoutNic.root }), running)).toBe(false);
+  });
+
   it('keeps custom volumes shifted and refuses foreign volumes', async () => {
     const create = { name: VOLUME, type: 'custom', config: { size: '1073741824', 'security.shifted': 'true' } };
     expect((await check({ method: 'POST', path: '/1.0/storage-pools/default/volumes', body: body(create) })).allowed)

@@ -10,6 +10,7 @@ const HELLO: AgentHello = {
   agentVersion: '0.1.0',
   hostname: 'worker',
   incus: { serverVersion: '7.4', apiExtensions: [] },
+  status: { ipv6Guard: { present: true, error: null } },
 };
 
 function harness() {
@@ -57,6 +58,7 @@ function harness() {
     service,
     updates,
     health,
+    wake,
     setConnected: (value: boolean) => {
       connected = value;
     },
@@ -100,5 +102,14 @@ describe('AgentPresenceService', () => {
     h.setConnected(true);
     await h.listener().refused?.(SERVER_ID, 'stale build');
     expect(h.updates).toHaveLength(1);
+  });
+
+  it('wakes the server once its agent reports the IPv6 guard back', async () => {
+    const h = harness();
+    await h.listener().status?.(SERVER_ID, { ipv6Guard: { present: false, error: 'flushed' } });
+    expect(h.wake.wake).not.toHaveBeenCalled();
+    await h.listener().status?.(SERVER_ID, { ipv6Guard: { present: true, error: null } });
+    expect(h.wake.wake).toHaveBeenCalledWith({ serverId: SERVER_ID, reason: 'reconnect' });
+    expect(h.updates).toEqual([]);
   });
 });

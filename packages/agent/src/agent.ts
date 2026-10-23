@@ -57,6 +57,7 @@ async function hello(deps: AgentDependencies): Promise<AgentHello> {
       serverVersion: server.environment?.server_version || 'unknown',
       apiExtensions: (server.api_extensions ?? []).slice(0, 2048),
     },
+    status: deps.guard.status(),
   };
 }
 
@@ -73,6 +74,15 @@ async function incusHttp(
   if (!verdict.allowed) {
     deps.log(`refused ${params.method} ${params.path.split('?')[0]}: ${verdict.reason}`);
     throw new AgentRequestError('policy_denied', verdict.reason);
+  }
+  // Checked (and re-applied if a firewall reload dropped it) right before the
+  // NIC comes up, not trusted from the last periodic check.
+  if (verdict.needsIpv6Guard && !await deps.guard.ensure()) {
+    deps.log(`refused ${params.method} ${params.path.split('?')[0]}: IPv6 guard is not in place`);
+    throw new AgentRequestError(
+      'ipv6_guard_missing',
+      `the IPv6 guard (nft table bridge nyabase_guard) is not in place: ${deps.guard.error ?? 'unknown error'}`,
+    );
   }
   try {
     const response = await deps.incus.request({

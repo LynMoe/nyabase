@@ -43,6 +43,12 @@ export type PolicyVerdict =
      * volatile.* keys forced back to what Incus holds.
      */
     readonly body?: Buffer;
+    /**
+     * The request brings a guest NIC up (a start, or a NIC added or changed on
+     * an instance that is not stopped): the agent forwards it only while the
+     * IPv6 guard is verified in place.
+     */
+    readonly needsIpv6Guard?: boolean;
   }
   | { readonly allowed: false; readonly reason: string };
 
@@ -57,13 +63,19 @@ export type CurrentDocumentReader = (path: string) => Promise<Record<string, unk
 
 const ALLOW: PolicyVerdict = { allowed: true };
 const deny = (reason: string): PolicyVerdict => ({ allowed: false, reason });
-const forward = (body: Record<string, unknown>): PolicyVerdict => ({ allowed: true, body: serialize(body) });
+const forward = (body: Record<string, unknown>, needsIpv6Guard = false): PolicyVerdict => (
+  needsIpv6Guard
+    ? { allowed: true, body: serialize(body), needsIpv6Guard }
+    : { allowed: true, body: serialize(body) }
+);
 
 const PROBE_INSTANCE_PATTERN = /^nyabase-preflight-[0-9a-f]{32}$/;
 const IMAGE_FINGERPRINT_PATTERN = /^[0-9a-f]{64}$/;
 const OPERATION_ID_PATTERN = /^[0-9a-f-]{36}$/;
 const ALLOWED_QUERY_KEYS = new Set(['recursion', 'path', 'timeout', 'secret', 'project']);
 const POWER_ACTIONS = new Set(['start', 'stop', 'restart', 'freeze', 'unfreeze']);
+/** Power actions after which guest NICs pass traffic again. */
+const NIC_UP_ACTIONS = new Set(['start', 'restart', 'unfreeze']);
 const CPUSET_PATTERN = /^\d+-\d+(?:,\d+-\d+)*$|^\d+(?:-\d+)?(?:,\d+(?:-\d+)?)+$/;
 const BOOLEAN_VALUES = new Set(['true', 'false']);
 
@@ -188,14 +200,16 @@ async function checkInstances(
     if (!current) return deny('instance to update does not exist');
     const verdict = checkInstanceDocument(body, { full: method === 'PUT' });
     if (!verdict.allowed) return verdict;
-    return withCurrentVolatile(body, stringMap(current.config));
+    return withCurrentVolatile(body, stringMap(current.config), bringsNicUp(body, current));
   }
   switch (leaf) {
     case 'state':
       if (method === 'GET') return ALLOW;
       if (method !== 'PUT') return deny('instance state only supports read and change');
-      return checkJson(request.body, INSTANCE_STATE_FIELDS, 'instance state', (body) =>
-        POWER_ACTIONS.has(String(body.action)) ? forward(body) : deny('unknown power action'));
+      return checkJson(request.body, INSTANCE_STATE_FIELDS, 'instance state', (body) => {
+        const action = String(body.action);
+        return POWER_ACTIONS.has(action) ? forward(body, NIC_UP_ACTIONS.has(action)) : deny('unknown power action');
+      });
     case 'exec':
       if (method !== 'POST') return deny('exec only supports POST');
       return checkJson(request.body, INSTANCE_EXEC_FIELDS, 'exec', (body) =>
@@ -226,7 +240,24 @@ function checkInstanceCreate(raw: Buffer | undefined): PolicyVerdict {
     return deny('volatile keys may not be set on create');
   }
   const verdict = checkInstanceDocument(body, { full: true });
-  return verdict.allowed ? forward(body) : verdict;
+  return verdict.allowed ? forward(body, body.start === true) : verdict;
+}
+
+/**
+ * Does an instance update plug a NIC into a live guest? Any NIC device that
+ * differs from what the instance has now counts unless it is stopped.
+ */
+function bringsNicUp(body: Record<string, unknown>, current: Record<string, unknown>): boolean {
+  if (!isRecord(body.devices) || String(current.status).toLowerCase() === 'stopped') return false;
+  const before = isRecord(current.devices) ? current.devices : {};
+  return Object.entries(body.devices).some(([name, device]) =>
+    isRecord(device) && device.type === 'nic' && !sameStringMap(device, before[name]));
+}
+
+function sameStringMap(left: Record<string, unknown>, right: unknown): boolean {
+  if (!isRecord(right)) return false;
+  const keys = Object.keys(left);
+  return keys.length === Object.keys(right).length && keys.every((key) => right[key] === left[key]);
 }
 
 /** Parse a JSON body, hold it to `schema`, then let `check` decide on the parsed object. */
@@ -255,15 +286,16 @@ interface DocumentCheckOptions {
 function withCurrentVolatile(
   body: Record<string, unknown>,
   current: Readonly<Record<string, string>>,
+  needsIpv6Guard = false,
 ): PolicyVerdict {
-  if (!isRecord(body.config)) return forward(body);
+  if (!isRecord(body.config)) return forward(body, needsIpv6Guard);
   const config = Object.fromEntries(
     Object.entries(body.config).flatMap(([key, value]): [string, unknown][] => {
       if (!key.startsWith('volatile.')) return [[key, value]];
       return Object.hasOwn(current, key) ? [[key, current[key]]] : [];
     }),
   );
-  return forward({ ...body, config });
+  return forward({ ...body, config }, needsIpv6Guard);
 }
 
 export function checkInstanceDocument(

@@ -310,6 +310,7 @@ export class ServersService {
         hostname: row.agent_hostname,
         connectedAt: isoDate(row.agent_connected_at),
         enrollmentExpiresAt: isoDate(row.agent_enrollment_expires_at),
+        ipv6Guard: this.agents.current(row.id)?.status.ipv6Guard ?? null,
       },
       metricsHealth: {
         status: row.node_metrics_status as NodeMetricsStatus,

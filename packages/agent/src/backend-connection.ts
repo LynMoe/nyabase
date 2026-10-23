@@ -7,6 +7,7 @@ import {
   zAgentBackendFrame,
   type AgentErrorCode,
   type AgentHello,
+  type AgentHostStatus,
   type AgentIncusHttpParams,
   type AgentIncusHttpResult,
   type AgentIncusWebSocketParams,
@@ -41,6 +42,8 @@ export interface BackendConnectionOptions {
   /** Called when the Backend refuses the credential (close 4401). */
   readonly onCredentialRejected?: () => Promise<void>;
   readonly maxConcurrentRequests?: number;
+  /** Current host status, sent after welcome and again on every publishStatus(). */
+  readonly status?: () => AgentHostStatus;
 }
 
 /** Close codes the Backend uses on the control socket. */
@@ -63,8 +66,18 @@ const REJECTED_BACKOFF_MS = 60_000;
  */
 export class BackendConnection {
   private readonly inFlight = new Map<string, AbortController>();
+  /** The control socket once the Backend welcomed it; unsolicited frames go only there. */
+  private welcomedSocket: WebSocket | undefined;
 
   constructor(private readonly options: BackendConnectionOptions) {}
+
+  /** Tell the Backend the host status changed; a no-op while not connected (hello carries it). */
+  publishStatus(): void {
+    const socket = this.welcomedSocket;
+    const status = this.options.status?.();
+    if (!socket || !status || socket.readyState !== WebSocket.OPEN) return;
+    socket.send(JSON.stringify({ type: 'status', status }));
+  }
 
   async run(signal: AbortSignal): Promise<void> {
     let attempt = 0;
@@ -148,7 +161,10 @@ export class BackendConnection {
         if (frame.type === 'welcome') {
           welcomed = true;
           clearTimeout(welcomeTimer);
+          this.welcomedSocket = socket;
           this.options.log(`connected to Backend as server ${frame.serverId}`);
+          // The status may have changed between hello and welcome.
+          this.publishStatus();
           return;
         }
         if (!welcomed) {
@@ -170,6 +186,7 @@ export class BackendConnection {
         resolve({ code, reason: '' });
       });
       const cleanup = (): void => {
+        if (this.welcomedSocket === socket) this.welcomedSocket = undefined;
         clearTimeout(welcomeTimer);
         clearInterval(heartbeat);
         signal.removeEventListener('abort', abort);

@@ -5,10 +5,13 @@ import {
   zAgentIncusHttpResult,
   zAgentMetricsResult,
   zAgentResponse,
+  zAgentStatus,
   type AgentErrorCode,
   type AgentHello,
+  type AgentHostStatus,
   type AgentRequest,
 } from '@nyabase/common';
+import { isRecord } from '../platform/domain-utils.js';
 import { IncusError } from './incus-errors.js';
 import { BufferedStreamSocket, isOpen } from './agent-stream-socket.js';
 import type {
@@ -122,6 +125,9 @@ function agentFailure(code: AgentErrorCode, message: string): IncusError {
       return new IncusError('INCUS_INVALID_RESPONSE', 'managed_failure', { reason: 'body_too_large' });
     case 'incus_unavailable':
       return new IncusError('SERVER_UNREACHABLE', 'retry', { reason: 'agent_incus_unavailable', message });
+    case 'ipv6_guard_missing':
+      // The host heals the guard itself (and reports it); the start waits for it.
+      return new IncusError('AGENT_IPV6_GUARD_MISSING', 'retry', { message });
     case 'internal':
       // A busy or failing agent request is retried; it says nothing about the server being down.
       return new IncusError('AGENT_REQUEST_FAILED', 'retry', { message });
@@ -133,13 +139,23 @@ export class AgentConnection implements StreamOwner {
   private readonly pending = new Map<string, PendingRequest>();
   private readonly streams = new Set<WebSocket>();
   private closed = false;
+  private hostStatus: AgentHostStatus;
 
   constructor(
     readonly serverId: string,
     readonly hello: AgentHello,
     private readonly socket: WebSocket,
     private readonly broker: AgentStreamBroker,
-  ) {}
+    /** Told after the agent reported a changed host status. */
+    private readonly onStatus: (connection: AgentConnection) => void = () => undefined,
+  ) {
+    this.hostStatus = hello.status;
+  }
+
+  /** What the agent last reported about its host (IPv6 guard). */
+  get status(): AgentHostStatus {
+    return this.hostStatus;
+  }
 
   get isOpen(): boolean {
     return !this.closed && this.socket.readyState === WebSocket.OPEN;
@@ -184,6 +200,13 @@ export class AgentConnection implements StreamOwner {
 
   /** Route one agent frame that is not hello; returns false for a protocol violation. */
   handleFrame(raw: unknown): boolean {
+    if (isRecord(raw) && raw.type === 'status') {
+      const status = zAgentStatus.safeParse(raw);
+      if (!status.success) return false;
+      this.hostStatus = status.data.status;
+      this.onStatus(this);
+      return true;
+    }
     const parsed = zAgentResponse.safeParse(raw);
     if (!parsed.success) return false;
     const frame = parsed.data;

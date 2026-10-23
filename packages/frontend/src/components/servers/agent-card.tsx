@@ -70,7 +70,18 @@ export function AgentCard({ server }: { server: ServerDto }) {
         <div className="flex flex-wrap items-center gap-2">
           <AgentStateBadge agent={agent} />
           <Badge variant="outline">{agent.enrolled ? '已登记凭据' : '尚未登记'}</Badge>
+          {agent.ipv6Guard && (
+            <Badge variant={agent.ipv6Guard.present ? 'outline' : 'destructive'} data-testid="server-agent-ipv6-guard">
+              {agent.ipv6Guard.present ? 'IPv6 拦截已就绪' : 'IPv6 拦截缺失'}
+            </Badge>
+          )}
         </div>
+        {agent.ipv6Guard && !agent.ipv6Guard.present && (
+          <p className="break-all text-xs text-destructive">
+            主机上的 nft 表 nyabase_guard 不在位{agent.ipv6Guard.error ? `（${agent.ipv6Guard.error}）` : ''}：
+            Agent 在它恢复前拒绝启动容器或给运行中的容器接入网卡，恢复后自动重试。
+          </p>
+        )}
         <div className="grid gap-3 sm:grid-cols-2">
           <Field label="Agent 版本" value={agent.version ?? '—'} />
           <Field

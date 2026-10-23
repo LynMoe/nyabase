@@ -1,5 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
-import type { AgentHello } from '@nyabase/common';
+import type { AgentHello, AgentHostStatus } from '@nyabase/common';
 import { AgentConnection, AgentStreamBroker } from './agent-connection.js';
 import { IncusError } from './incus-errors.js';
 import type { IncusTunnel } from './incus-client-types.js';
@@ -7,6 +7,8 @@ import type { IncusTunnel } from './incus-client-types.js';
 export interface AgentPresenceListener {
   connected(serverId: string, hello: AgentHello): void | Promise<void>;
   disconnected(serverId: string): void | Promise<void>;
+  /** The connected agent reported a changed host status (e.g. its IPv6 guard). */
+  status?(serverId: string, status: AgentHostStatus): void | Promise<void>;
   /** An authenticated agent was turned away (e.g. its protocol is not this Backend's). */
   refused?(serverId: string, reason: string): void | Promise<void>;
 }
@@ -47,6 +49,12 @@ export class AgentRegistry {
     if (this.connections.get(connection.serverId) !== connection) return;
     this.connections.delete(connection.serverId);
     this.notify((listener) => listener.disconnected(connection.serverId));
+  }
+
+  /** A registered connection's agent reported a new host status. */
+  statusChanged(connection: AgentConnection): void {
+    if (this.connections.get(connection.serverId) !== connection) return;
+    this.notify((listener) => listener.status?.(connection.serverId, connection.status));
   }
 
   /** Report an authenticated agent that was turned away, so the server can say why. */

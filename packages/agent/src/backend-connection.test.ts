@@ -40,6 +40,7 @@ describe('backend control connection', () => {
         agentVersion: 'test',
         hostname: 'worker-1',
         incus: { serverVersion: '7.4', apiExtensions: [] },
+        status: { ipv6Guard: { present: true, error: null } },
       }),
       incusHttp: vi.fn(),
       collectMetrics: vi.fn(),

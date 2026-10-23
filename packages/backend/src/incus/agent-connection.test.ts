@@ -18,6 +18,7 @@ const HELLO: AgentHello = {
   agentVersion: '0.1.0',
   hostname: 'worker-1',
   incus: { serverVersion: '7.4', apiExtensions: [] },
+  status: { ipv6Guard: { present: true, error: null } },
 };
 
 class FakeSocket extends EventEmitter {
@@ -277,6 +278,35 @@ describe('agent connection RPC', () => {
       error: { code: 'internal', message: 'agent is at its concurrent request limit' },
     });
     await expect(pending).rejects.toMatchObject({ code: 'AGENT_REQUEST_FAILED', disposition: 'retry' });
+  });
+
+  it('retries a start the agent held back for its IPv6 guard', async () => {
+    const { socket, agent } = connection();
+    const pending = agent.request({ method: 'PUT', path: '/1.0/instances/nyc-0/state', headers: {}, timeoutMs: 1_000 });
+    agent.handleFrame({
+      type: 'response',
+      id: socket.lastRequest().id,
+      ok: false,
+      error: { code: 'ipv6_guard_missing', message: 'the IPv6 guard is not in place' },
+    });
+    await expect(pending).rejects.toMatchObject({ code: 'AGENT_IPV6_GUARD_MISSING', disposition: 'retry' });
+  });
+
+  it('tracks the host status the agent reports after hello', () => {
+    const onStatus = vi.fn();
+    const agent = new AgentConnection(
+      SERVER_ID,
+      HELLO,
+      new FakeSocket() as unknown as WebSocket,
+      new AgentStreamBroker(),
+      onStatus,
+    );
+    expect(agent.status.ipv6Guard.present).toBe(true);
+    const lost = { ipv6Guard: { present: false, error: 'nft: table vanished' } };
+    expect(agent.handleFrame({ type: 'status', status: lost })).toBe(true);
+    expect(agent.status).toEqual(lost);
+    expect(onStatus).toHaveBeenCalledWith(agent);
+    expect(agent.handleFrame({ type: 'status', status: { ipv6Guard: { present: 'yes' } } })).toBe(false);
   });
 });
 

@@ -13,6 +13,7 @@ const HELLO = {
   agentVersion: '0.1.0',
   hostname: 'worker-1',
   incus: { serverVersion: '7.4', apiExtensions: [] },
+  status: { ipv6Guard: { present: true, error: null } },
 };
 
 class FakeControlSocket extends EventEmitter {

@@ -85,6 +85,18 @@ export const zAgentEnrollResponse = z.object({
   credential: zText(256),
 }).strict();
 
+/**
+ * Host state the agent enforces on its own and the Backend only shows: sent
+ * in hello and again in a status frame whenever it changes.
+ */
+export const zAgentHostStatus = z.object({
+  /** The `bridge nyabase_guard` table verified in place; guest NICs are not brought up otherwise. */
+  ipv6Guard: z.object({
+    present: z.boolean(),
+    error: z.string().max(512).nullable(),
+  }).strict(),
+}).strict();
+
 export const zAgentHello = z.object({
   type: z.literal('hello'),
   protocol: z.literal(AGENT_PROTOCOL_VERSION),
@@ -94,6 +106,13 @@ export const zAgentHello = z.object({
     serverVersion: zText(64),
     apiExtensions: z.array(zText(128)).max(2048),
   }).strict(),
+  status: zAgentHostStatus,
+}).strict();
+
+/** Agent -> Backend, unsolicited and only after welcome: the host status changed. */
+export const zAgentStatus = z.object({
+  type: z.literal('status'),
+  status: zAgentHostStatus,
 }).strict();
 
 export const zAgentWelcome = z.object({
@@ -165,6 +184,8 @@ export const AGENT_ERROR_CODES = [
   'timeout',
   'cancelled',
   'too_large',
+  /** The request would bring a guest NIC up while the IPv6 guard is not verified; retry later. */
+  'ipv6_guard_missing',
   'internal',
 ] as const;
 export type AgentErrorCode = typeof AGENT_ERROR_CODES[number];
@@ -188,11 +209,13 @@ export const zAgentResponse = z.discriminatedUnion('ok', [
 ]);
 
 /** Agent -> Backend control frames. */
-export const zAgentFrame = z.union([zAgentHello, zAgentResponse]);
+export const zAgentFrame = z.union([zAgentHello, zAgentResponse, zAgentStatus]);
 
 export type AgentEnrollRequest = z.infer<typeof zAgentEnrollRequest>;
 export type AgentEnrollResponse = z.infer<typeof zAgentEnrollResponse>;
 export type AgentHello = z.infer<typeof zAgentHello>;
+export type AgentHostStatus = z.infer<typeof zAgentHostStatus>;
+export type AgentStatus = z.infer<typeof zAgentStatus>;
 export type AgentWelcome = z.infer<typeof zAgentWelcome>;
 export type AgentRequest = z.infer<typeof zAgentRequest>;
 export type AgentCancel = z.infer<typeof zAgentCancel>;

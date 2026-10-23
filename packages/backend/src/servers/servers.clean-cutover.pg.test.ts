@@ -17,7 +17,7 @@ describePg('server agent onboarding and removal', () => {
       const transactions = new PgTransactionManager(database);
       const access = {};
       const audit = { append: vi.fn() };
-      const agents = { disconnect: vi.fn(), isConnected: vi.fn(() => false) };
+      const agents = { disconnect: vi.fn(), isConnected: vi.fn(() => false), current: vi.fn(() => undefined) };
       const enrollment = new AgentEnrollmentService(
         database,
         transactions,
@@ -138,7 +138,7 @@ describePg('server agent onboarding and removal', () => {
         {} as never,
         { append: vi.fn() } as never,
         { invalidate: vi.fn() } as never,
-        { disconnect: vi.fn(), isConnected: vi.fn(() => false) } as never,
+        { disconnect: vi.fn(), isConnected: vi.fn(() => false), current: vi.fn(() => undefined) } as never,
         {} as never,
         { wake: vi.fn() } as never,
       );
@@ -500,7 +500,7 @@ describePg('server agent onboarding and removal', () => {
         {} as never,
         { append: vi.fn() } as never,
         { invalidate } as never,
-        { disconnect: vi.fn(), isConnected: vi.fn(() => false) } as never,
+        { disconnect: vi.fn(), isConnected: vi.fn(() => false), current: vi.fn(() => undefined) } as never,
         {} as never,
         { wake: vi.fn() } as never,
       );
@@ -688,7 +688,7 @@ describePg('server agent onboarding and removal', () => {
         {} as never,
         { append: vi.fn() } as never,
         { invalidate: vi.fn() } as never,
-        { disconnect: vi.fn(), isConnected: vi.fn(() => false) } as never,
+        { disconnect: vi.fn(), isConnected: vi.fn(() => false), current: vi.fn(() => undefined) } as never,
         {} as never,
         { wake: vi.fn() } as never,
       );

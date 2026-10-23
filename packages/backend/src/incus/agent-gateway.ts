@@ -162,10 +162,19 @@ export class AgentGateway implements OnModuleDestroy {
         }
         clearTimeout(helloTimer);
         untrack();
-        connection = new AgentConnection(serverId, hello.data, ws, this.registry.streams);
+        connection = new AgentConnection(
+          serverId,
+          hello.data,
+          ws,
+          this.registry.streams,
+          (current) => this.registry.statusChanged(current),
+        );
         ws.send(JSON.stringify({ type: 'welcome', serverId }));
         this.registry.register(connection);
         this.logger.log(`Agent connected for server ${serverId} (${hello.data.hostname}, ${hello.data.agentVersion})`);
+        if (!hello.data.status.ipv6Guard.present) {
+          this.logger.warn(`Agent for server ${serverId} has no IPv6 guard: ${hello.data.status.ipv6Guard.error ?? 'unknown'}`);
+        }
       }, (error: unknown) => {
         this.logger.warn(`Agent ${serverId} credential check failed: ${error instanceof Error ? error.message : String(error)}`);
         ws.close(1011, 'credential check failed');
