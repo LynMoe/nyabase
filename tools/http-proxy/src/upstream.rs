@@ -128,9 +128,19 @@ pub(crate) async fn proxy_single_request<S: AsyncRead + AsyncWrite + Unpin>(
     // response. The request carries `Connection: close`, so the upstream
     // closes once it has answered. The response is often close-delimited, so
     // any failure from here on must reset the client, not close it cleanly.
-    copy_with_idle_timeout(&mut upstream, inbound, runtime.limits.idle)
-        .await
-        .map_err(|error| client_abort(format!("response relay failed: {error}")))?;
+    // The total lifetime stops a response that drips just often enough to
+    // dodge the idle timeout from holding its slots indefinitely.
+    match time::timeout(
+        runtime.limits.response_lifetime,
+        copy_with_idle_timeout(&mut upstream, inbound, runtime.limits.idle),
+    )
+    .await
+    {
+        Ok(result) => {
+            result.map_err(|error| client_abort(format!("response relay failed: {error}")))?
+        }
+        Err(_) => return Err(client_abort("response lifetime exceeded")),
+    }
     inbound
         .shutdown()
         .await

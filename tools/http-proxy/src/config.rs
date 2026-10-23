@@ -42,6 +42,11 @@ pub(crate) const DEFAULT_MAX_CONNECTIONS_PER_IP: usize = 64;
 
 pub(crate) const DEFAULT_MAX_CONNECTIONS_PER_IPV6_48: usize = 256;
 
+/// Concurrent connections to one upstream container (all its hostnames
+/// together), an eighth of the default pool, so a single site cannot hold
+/// every slot with long-lived tunnels or slow responses.
+pub(crate) const DEFAULT_MAX_CONNECTIONS_PER_CONTAINER: usize = 512;
+
 /// Connections still in the TLS handshake or sending their request head; a
 /// quarter of the default pool.
 pub(crate) const DEFAULT_MAX_PENDING_CONNECTIONS: usize = 1_024;
@@ -57,6 +62,12 @@ pub(crate) const DEFAULT_IDLE_TIMEOUT_MS: u64 = 120_000;
 pub(crate) const MIN_IDLE_TIMEOUT_MS: u64 = 1_000;
 
 pub(crate) const MAX_IDLE_TIMEOUT_MS: u64 = 86_400_000;
+
+pub(crate) const DEFAULT_RESPONSE_LIFETIME_MS: u64 = 1_800_000;
+
+pub(crate) const MIN_RESPONSE_LIFETIME_MS: u64 = 1_000;
+
+pub(crate) const MAX_RESPONSE_LIFETIME_MS: u64 = 86_400_000;
 
 pub(crate) const DEFAULT_UPGRADED_IDLE_MS: u64 = 3_600_000;
 
@@ -74,9 +85,13 @@ pub(crate) struct ConnectionLimits {
     /// Whole-body budget, measured from the end of the request head.
     pub(crate) body_deadline: Duration,
     /// An ordinary request is closed after this long with no bytes moving in
-    /// either direction (waiting for the upstream's answer included); there
-    /// is no total lifetime, so downloads, SSE and long-poll may run long.
+    /// either direction (waiting for the upstream's answer included).
     pub(crate) idle: Duration,
+    /// Total time for an ordinary request's response, measured from the end
+    /// of the request body, so a drip-fed response cannot hold its slot
+    /// forever. Generous enough for long downloads, SSE and long-poll;
+    /// upgraded tunnels have no total lifetime.
+    pub(crate) response_lifetime: Duration,
     /// An upgraded tunnel with no bytes in either direction for this long is closed.
     pub(crate) upgraded_idle: Duration,
 }
@@ -86,6 +101,7 @@ impl Default for ConnectionLimits {
         Self {
             body_deadline: Duration::from_millis(DEFAULT_BODY_DEADLINE_MS),
             idle: Duration::from_millis(DEFAULT_IDLE_TIMEOUT_MS),
+            response_lifetime: Duration::from_millis(DEFAULT_RESPONSE_LIFETIME_MS),
             upgraded_idle: Duration::from_millis(DEFAULT_UPGRADED_IDLE_MS),
         }
     }
@@ -102,6 +118,7 @@ pub(crate) struct Config {
     pub(crate) max_connections_per_ip: usize,
     pub(crate) max_connections_per_ipv6_48: usize,
     pub(crate) max_pending_connections: usize,
+    pub(crate) max_connections_per_container: usize,
     pub(crate) limits: ConnectionLimits,
     pub(crate) reconnect_delay: Duration,
     pub(crate) status_interval: Duration,
@@ -153,6 +170,15 @@ impl Config {
             1,
             max_connections,
         )?;
+        let max_connections_per_container = validate_limit(
+            "NYABASE_HTTP_MAX_CONNECTIONS_PER_CONTAINER",
+            env_usize(
+                "NYABASE_HTTP_MAX_CONNECTIONS_PER_CONTAINER",
+                DEFAULT_MAX_CONNECTIONS_PER_CONTAINER.min(max_connections),
+            )?,
+            1,
+            max_connections,
+        )?;
         let limits = ConnectionLimits {
             body_deadline: Duration::from_millis(validate_ms(
                 "NYABASE_HTTP_BODY_DEADLINE_MS",
@@ -165,6 +191,15 @@ impl Config {
                 env_u64("NYABASE_HTTP_IDLE_TIMEOUT_MS", DEFAULT_IDLE_TIMEOUT_MS)?,
                 MIN_IDLE_TIMEOUT_MS,
                 MAX_IDLE_TIMEOUT_MS,
+            )?),
+            response_lifetime: Duration::from_millis(validate_ms(
+                "NYABASE_HTTP_RESPONSE_LIFETIME_MS",
+                env_u64(
+                    "NYABASE_HTTP_RESPONSE_LIFETIME_MS",
+                    DEFAULT_RESPONSE_LIFETIME_MS,
+                )?,
+                MIN_RESPONSE_LIFETIME_MS,
+                MAX_RESPONSE_LIFETIME_MS,
             )?),
             upgraded_idle: Duration::from_millis(validate_ms(
                 "NYABASE_HTTP_UPGRADED_IDLE_MS",
@@ -195,6 +230,7 @@ impl Config {
             max_connections_per_ip,
             max_connections_per_ipv6_48,
             max_pending_connections,
+            max_connections_per_container,
             limits,
             reconnect_delay,
             status_interval,

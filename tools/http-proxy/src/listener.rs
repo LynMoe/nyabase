@@ -198,12 +198,27 @@ where
         reject(inbound, &runtime, "404 Not Found").await?;
         return Ok(());
     }
+    // Held until this function returns, whichever way, so the slot covers
+    // the whole exchange or upgraded tunnel.
+    let Some(_container_slot) = runtime
+        .container_slots
+        .try_acquire(&authorization.route.container_id)
+    else {
+        debug!(
+            container_id = %authorization.route.container_id,
+            hostname = %host,
+            "HTTP proxy per-container connection limit reached"
+        );
+        reject(inbound, &runtime, "503 Service Unavailable").await?;
+        return Ok(());
+    };
 
     let is_websocket = matches!(&plan.mode, RequestMode::WebSocket { .. });
-    // Neither kind has a total lifetime: an upgraded tunnel is bounded by its
-    // own idle timeout, an ordinary request by the body deadline and the
-    // request idle timeout (both inside `proxy_request`). Both end at once
-    // when the route lease lapses or the route is revoked.
+    // An upgraded tunnel has no total lifetime, only its own idle timeout
+    // (and the per-container cap); an ordinary request is bounded by the body
+    // deadline, the request idle timeout and the response lifetime (all
+    // inside `proxy_request`). Both end at once when the route lease lapses
+    // or the route is revoked.
     let proxy = proxy_request(
         inbound,
         &runtime,

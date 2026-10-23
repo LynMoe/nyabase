@@ -34,11 +34,7 @@ async fn silent_tls_clients_are_closed_by_the_handshake_deadline() {
 }
 
 fn runtime_with_idle(idle: Duration) -> Arc<crate::runtime::Runtime> {
-    Arc::new({
-        let mut runtime = Arc::try_unwrap(test_runtime()).ok().unwrap();
-        runtime.limits.idle = idle;
-        runtime
-    })
+    runtime_with(|runtime| runtime.limits.idle = idle)
 }
 
 #[tokio::test]
@@ -350,4 +346,169 @@ async fn reading_the_request_head_releases_the_pending_slot() {
     handler.await.unwrap().unwrap();
     assert_eq!(limiter.pending_available(), 1);
     drop(permit);
+}
+
+fn runtime_with(
+    configure: impl FnOnce(&mut crate::runtime::Runtime),
+) -> Arc<crate::runtime::Runtime> {
+    let mut runtime = Arc::try_unwrap(test_runtime()).ok().unwrap();
+    configure(&mut runtime);
+    Arc::new(runtime)
+}
+
+async fn exchange(
+    store: &Arc<SnapshotStore>,
+    runtime: &Arc<crate::runtime::Runtime>,
+    host: &str,
+) -> String {
+    let (mut client, proxy_side) = tokio::io::duplex(4096);
+    let handler = tokio::spawn(handle_connection(
+        proxy_side,
+        "127.0.0.1:12345".parse().unwrap(),
+        store.clone(),
+        runtime.clone(),
+    ));
+    client
+        .write_all(format!("GET / HTTP/1.1\r\nHost: {host}\r\n\r\n").as_bytes())
+        .await
+        .unwrap();
+    let mut response = Vec::new();
+    time::timeout(Duration::from_secs(2), client.read_to_end(&mut response))
+        .await
+        .expect("no response")
+        .unwrap();
+    handler.await.unwrap().unwrap();
+    String::from_utf8(response).unwrap()
+}
+
+#[tokio::test]
+async fn one_container_cannot_take_more_than_its_share_of_connections() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream_port = listener.local_addr().unwrap().port();
+    let (stalled_tx, stalled_rx) = tokio::sync::oneshot::channel();
+    let upstream = tokio::spawn(async move {
+        // The first exchange stalls until the idle timeout; later ones answer.
+        let (mut stalled, _) = listener.accept().await.unwrap();
+        let _ = read_request_head(&mut stalled).await.unwrap();
+        stalled_tx.send(()).unwrap();
+        loop {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let _ = read_request_head(&mut socket).await.unwrap();
+            socket
+                .write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n")
+                .await
+                .unwrap();
+            socket.shutdown().await.unwrap();
+        }
+    });
+    let other = crate::snapshot::Route {
+        binding_id: "binding-b".into(),
+        hostname: "other.example.test".into(),
+        container_id: "container-b".into(),
+        ..test_route(upstream_port)
+    };
+    let store = Arc::new(SnapshotStore::default());
+    store
+        .store(test_snapshot(
+            1,
+            30_000,
+            vec![test_route(upstream_port), other],
+        ))
+        .unwrap();
+    let runtime = runtime_with(|runtime| {
+        runtime.limits.idle = Duration::from_millis(300);
+        runtime.container_slots = crate::container_limit::ContainerLimiter::new(1);
+    });
+
+    let (mut client, proxy_side) = tokio::io::duplex(4096);
+    let held = tokio::spawn(handle_connection(
+        proxy_side,
+        "127.0.0.1:12345".parse().unwrap(),
+        store.clone(),
+        runtime.clone(),
+    ));
+    client
+        .write_all(b"GET /slow HTTP/1.1\r\nHost: app.example.test\r\n\r\n")
+        .await
+        .unwrap();
+    time::timeout(Duration::from_secs(1), stalled_rx)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(runtime.container_slots.active_for("container-a"), 1);
+
+    // The full container answers 503 without leaking a slot; another
+    // container on the same proxy is still served.
+    let refused = exchange(&store, &runtime, "app.example.test").await;
+    assert!(
+        refused.starts_with("HTTP/1.1 503 Service Unavailable"),
+        "{refused}"
+    );
+    assert_eq!(runtime.container_slots.active_for("container-a"), 1);
+    let served = exchange(&store, &runtime, "other.example.test").await;
+    assert!(served.starts_with("HTTP/1.1 204"), "{served}");
+    assert_eq!(runtime.container_slots.active_for("container-b"), 0);
+
+    // An exchange that ends in an error (here the idle timeout) still
+    // releases its slot.
+    let error = time::timeout(Duration::from_secs(2), held)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap_err();
+    assert!(error.to_string().contains("idle timeout"), "{error}");
+    assert_eq!(runtime.container_slots.active_for("container-a"), 0);
+    let served = exchange(&store, &runtime, "app.example.test").await;
+    assert!(served.starts_with("HTTP/1.1 204"), "{served}");
+    upstream.abort();
+}
+
+#[tokio::test]
+async fn a_drip_fed_response_is_cut_at_the_response_lifetime() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream_port = listener.local_addr().unwrap().port();
+    let upstream = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let _ = read_request_head(&mut socket).await.unwrap();
+        socket
+            .write_all(b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
+        // Always inside the idle timeout, never finishing.
+        loop {
+            time::sleep(Duration::from_millis(20)).await;
+            if socket.write_all(b".").await.is_err() {
+                return;
+            }
+        }
+    });
+    let store = Arc::new(SnapshotStore::default());
+    store
+        .store(test_snapshot(1, 30_000, vec![test_route(upstream_port)]))
+        .unwrap();
+    let runtime = runtime_with(|runtime| {
+        runtime.limits.idle = Duration::from_millis(500);
+        runtime.limits.response_lifetime = Duration::from_millis(200);
+    });
+    let (mut client, proxy_side) = tokio::io::duplex(64 * 1024);
+    let handler = tokio::spawn(handle_connection(
+        proxy_side,
+        "127.0.0.1:12345".parse().unwrap(),
+        store,
+        runtime.clone(),
+    ));
+    client
+        .write_all(b"GET /drip HTTP/1.1\r\nHost: app.example.test\r\n\r\n")
+        .await
+        .unwrap();
+
+    let error = time::timeout(Duration::from_secs(2), handler)
+        .await
+        .expect("drip-fed response outlived its lifetime")
+        .unwrap()
+        .unwrap_err();
+    assert!(error.to_string().contains("response lifetime"), "{error}");
+    assert!(crate::relay::is_client_abort(&error));
+    assert_eq!(runtime.container_slots.active_for("container-a"), 0);
+    upstream.await.unwrap();
 }

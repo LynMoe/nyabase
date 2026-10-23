@@ -64,9 +64,32 @@ pub(crate) enum RequestMode {
 
 /// Request headers that describe the client hop. The proxy is the public
 /// edge, so whatever the client sent here is untrusted and is replaced.
+/// `_` counts as `-`: CGI/WSGI-style servers fold both into one key
+/// (`HTTP_X_FORWARDED_FOR`), so `X_Forwarded_For` would spoof the address.
 pub(crate) fn is_forwarding_header(name: &str) -> bool {
-    let name = name.to_ascii_lowercase();
+    let name = fold_header_name(name);
     name == "forwarded" || name == "x-real-ip" || name.starts_with("x-forwarded-")
+}
+
+/// An underscore spelling of a header the proxy itself interprets or
+/// rewrites (body framing, hop-by-hop, the WebSocket handshake). A server
+/// that folds `_` into `-` would read it as the real header, so it is dropped.
+/// Other underscore names pass through: they can only collide with headers
+/// the client controls anyway, so dropping them all (nginx's default) would
+/// break apps that use them without protecting anything.
+pub(crate) fn is_underscore_alias_of_proxy_header(name: &str) -> bool {
+    if !name.contains('_') {
+        return false;
+    }
+    let name = fold_header_name(name);
+    matches!(
+        name.as_str(),
+        "content-length" | "transfer-encoding" | "keep-alive" | "proxy-connection"
+    ) || name.starts_with("sec-websocket-")
+}
+
+fn fold_header_name(name: &str) -> String {
+    name.to_ascii_lowercase().replace('_', "-")
 }
 
 pub(crate) fn forwarding_headers(client: &ClientContext, host_authority: &str) -> String {
@@ -140,7 +163,7 @@ pub(crate) fn request_plan(header: &[u8], client: &ClientContext) -> Result<Requ
             }
             continue;
         }
-        if is_forwarding_header(name) {
+        if is_forwarding_header(name) || is_underscore_alias_of_proxy_header(name) {
             continue;
         }
         if name.eq_ignore_ascii_case("content-length") {

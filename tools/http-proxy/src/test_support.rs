@@ -1,4 +1,5 @@
-use crate::config::ConnectionLimits;
+use crate::config::{ConnectionLimits, DEFAULT_MAX_CONNECTIONS_PER_CONTAINER};
+use crate::container_limit::ContainerLimiter;
 use crate::protocol::ProxySnapshot;
 use crate::request::ClientContext;
 use crate::runtime::Runtime;
@@ -45,6 +46,7 @@ pub(crate) fn test_runtime() -> Arc<Runtime> {
         https_listen: None,
         started_at: Instant::now(),
         limits: ConnectionLimits::default(),
+        container_slots: ContainerLimiter::new(DEFAULT_MAX_CONNECTIONS_PER_CONTAINER),
         connected_at: AtomicU64::new(0),
         last_snapshot_generation: AtomicU64::new(0),
         last_snapshot_at: AtomicU64::new(0),

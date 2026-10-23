@@ -105,6 +105,34 @@ fn client_forwarding_headers_are_replaced_with_the_proxy_view() {
 }
 
 #[test]
+fn underscore_spellings_of_proxy_headers_are_dropped() {
+    // CGI/WSGI-style servers read `X_Forwarded_For` as X-Forwarded-For.
+    let head = b"POST / HTTP/1.1\r\nHost: app.example.test\r\nX_Forwarded_For: 6.6.6.6\r\nX-Real_IP: 6.6.6.6\r\nx_forwarded_proto: https\r\nX-Forwarded_Host: evil.test\r\nContent-Length: 0\r\nContent_Length: 4\r\nTransfer_Encoding: chunked\r\nKeep_Alive: 1\r\nProxy_Connection: keep-alive\r\nSec_WebSocket_Key: x\r\nX_Api_Key: kept\r\n\r\n";
+    let plan = request_plan(head, &test_client()).unwrap();
+    assert!(matches!(plan.mode, RequestMode::FixedBody { body_len: 0 }));
+    let header = String::from_utf8(plan.header).unwrap();
+    assert!(!header.contains("6.6.6.6"), "{header}");
+    assert!(!header.contains("evil.test"), "{header}");
+    for dropped in [
+        "content_length",
+        "transfer_encoding",
+        "keep_alive",
+        "proxy_connection",
+        "sec_websocket",
+    ] {
+        assert!(!header.to_ascii_lowercase().contains(dropped), "{header}");
+    }
+    assert!(
+        header.contains("X-Forwarded-For: 192.0.2.10\r\n"),
+        "{header}"
+    );
+    assert!(header.contains("X-Forwarded-Proto: http\r\n"));
+    assert!(header.contains("Content-Length: 0\r\n"));
+    // Underscore names that collide with nothing the proxy owns are kept.
+    assert!(header.contains("X_Api_Key: kept\r\n"));
+}
+
+#[test]
 fn only_plain_chunked_transfer_coding_is_accepted() {
     let plan = request_plan(
         b"POST /git-receive-pack HTTP/1.1\r\nHost: app.example.test\r\nTransfer-Encoding: Chunked\r\n\r\n",

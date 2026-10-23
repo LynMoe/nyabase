@@ -16,6 +16,12 @@ fn http_limits_and_status_interval_are_hard_bounded() {
         assert!(DEFAULT_MAX_PENDING_CONNECTIONS < DEFAULT_MAX_CONNECTIONS);
         assert!(DEFAULT_MAX_CONNECTIONS_PER_IPV6_48 <= MAX_CONNECTIONS_LIMIT);
         assert!(DEFAULT_CONTROL_HOLD_MS <= MAX_CONTROL_HOLD_MS);
+        // One container must not be able to take the whole pool.
+        assert!(DEFAULT_MAX_CONNECTIONS_PER_CONTAINER < DEFAULT_MAX_CONNECTIONS);
+        assert!(DEFAULT_RESPONSE_LIFETIME_MS >= MIN_RESPONSE_LIFETIME_MS);
+        assert!(DEFAULT_RESPONSE_LIFETIME_MS <= MAX_RESPONSE_LIFETIME_MS);
+        // Long downloads and SSE outlive many idle periods.
+        assert!(DEFAULT_RESPONSE_LIFETIME_MS >= 10 * DEFAULT_IDLE_TIMEOUT_MS);
     }
     assert!(validate_ms("NYABASE_HTTP_CONTROL_HOLD_MS", 0, 0, MAX_CONTROL_HOLD_MS).is_ok());
     let error = validate_ms(

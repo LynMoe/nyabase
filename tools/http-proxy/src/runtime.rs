@@ -1,4 +1,5 @@
 use crate::config::ConnectionLimits;
+use crate::container_limit::ContainerLimiter;
 use proxy_common::conn_limit::ConnectionPermit;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -11,6 +12,7 @@ pub(crate) struct Runtime {
     pub(crate) https_listen: Option<String>,
     pub(crate) started_at: Instant,
     pub(crate) limits: ConnectionLimits,
+    pub(crate) container_slots: Arc<ContainerLimiter>,
     pub(crate) connected_at: AtomicU64,
     pub(crate) last_snapshot_generation: AtomicU64,
     pub(crate) last_snapshot_at: AtomicU64,
