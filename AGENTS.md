@@ -96,7 +96,7 @@ Vite 通过 alias 将 `@nyabase/common` 指向 `src/index.ts`，但 `index.ts` �
 - access JWT 带 `sid`（签发它的 refresh 会话 id，`iam.refresh_tokens.id`），没有 `sid` 的 token 一律 401。容器控制台（`/ws/console`）绑定到授权它的浏览器会话：
   登出 / refresh 重放删掉该会话后 `SessionRevocationService.endSession` 立即关闭它（4401，禁用 / 改角色 / 改密等 `revoke(userId)` 关闭该用户全部控制台）；
   控制台的授权只到 min(当前 access token 到期, 会话空闲到期, 登录 + 绝对上限)（`AuthService.browserSessionDeadline`，复核会话行），
-  到期前后端发 `reauthenticate`，前端用**同一会话**的新 access token 再发 `auth`（`freshAccessToken`，必要时强制轮换），复核通过才顺延；
+  到期前后端发 `reauthenticate`，前端用**同一会话**的新 access token 再发 `auth`（`freshAccessToken`，必要时强制轮换；拿不到——网络抖动、429 退避用尽——时由 `freshAccessTokenWithRetry` 按退避重试，直到拿到、socket 关闭或截止时间必然已过），复核通过才顺延；
   没有新 token 到期即关（4408），换了用户 / 会话或会话已不存在立即关（4401）。其他方式结束的会话（超过 16 个被挤掉、过期）最迟在当前 access token 到期时关闭。
   截止时间已是绝对上限（`renewable: false`）或新 token 没能顺延它时不再发 `reauthenticate`，到点直接关；只有鉴权结论（`UnauthorizedException`、会话不符 / 已不存在）才 4401，
   复核时的其他错误（DB 抖动）保留当前截止时间、按退避重试同一 token。socket 从建立起只有一个消息分发器（`console-bridge.gateway.ts` 的 `ConsoleFrameDispatcher`），

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { Loader2, RotateCw, Terminal as TerminalIcon } from 'lucide-react';
 import type { IDisposable } from '@xterm/xterm';
 import { zConsoleToBrowser, type ContainerDto, type ExecSessionResponse, type ListScope } from '@nyabase/common';
-import { api, freshAccessToken } from '../../lib/api.js';
+import { api, freshAccessTokenWithRetry } from '../../lib/api.js';
 import { consoleCloseMessage, consoleErrorMessage } from '../../lib/console-errors.js';
 import { scopedPath } from '../../lib/scoped-paths.js';
 import { useAuthStore } from '../../store/auth.js';
@@ -35,6 +35,33 @@ async function loadTerminal() {
       fit.fit();
       return { terminal, fit };
     },
+  };
+}
+
+/**
+ * The answer to the bridge's `reauthenticate` prompts: a fresh access token of
+ * the same browser session (`auth.sentToken` is the last one sent), one prompt
+ * at a time, retried until it is sent, the socket closes or the console is
+ * torn down.
+ */
+function consoleReauthenticator(
+  socket: WebSocket,
+  auth: { sentToken: string | null },
+  cancelled: () => boolean,
+): () => Promise<void> {
+  let answering = false;
+  const open = () => !cancelled() && socket.readyState === WebSocket.OPEN;
+  return async () => {
+    if (answering) return;
+    answering = true;
+    try {
+      const token = await freshAccessTokenWithRetry(auth.sentToken, open);
+      if (!token || !open()) return;
+      auth.sentToken = token;
+      socket.send(JSON.stringify({ type: 'auth', token }));
+    } finally {
+      answering = false;
+    }
   };
 }
 
@@ -90,16 +117,11 @@ export function ContainerConsole({ container, scope }: { container: ContainerDto
         socketRef.current = socket;
         // The console is bound to this browser session and must be re-authenticated
         // with a fresh access token before the last one expires.
-        let sentToken: string | null = null;
-        const reauthenticate = async () => {
-          const token = await freshAccessToken(sentToken);
-          if (!token || cancelled || socket.readyState !== WebSocket.OPEN) return;
-          sentToken = token;
-          socket.send(JSON.stringify({ type: 'auth', token }));
-        };
+        const auth = { sentToken: null as string | null };
+        const reauthenticate = consoleReauthenticator(socket, auth, () => cancelled);
         socket.addEventListener('open', () => {
-          sentToken = useAuthStore.getState().accessToken;
-          socket.send(JSON.stringify({ type: 'auth', token: sentToken }));
+          auth.sentToken = useAuthStore.getState().accessToken;
+          socket.send(JSON.stringify({ type: 'auth', token: auth.sentToken }));
         });
         socket.addEventListener('message', (event) => {
           try {

@@ -110,7 +110,7 @@ describe('lane D product UI copy', () => {
   it('console answers reauthenticate with a fresh access token of the same session', () => {
     const src = read('components/containers/container-console.tsx');
     expect(src).toMatch(/message\.type === 'reauthenticate'/);
-    expect(src).toMatch(/freshAccessToken\(sentToken\)/);
+    expect(src).toMatch(/freshAccessTokenWithRetry\(auth\.sentToken, open\)/);
   });
 
   it('profile page offers no API tokens: the browser session is the only credential', () => {

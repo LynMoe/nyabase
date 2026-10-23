@@ -259,6 +259,44 @@ export async function freshAccessToken(previous: string | null): Promise<string 
   }
 }
 
+/** Waits between attempts at a token for a console re-authentication prompt. */
+const FRESH_TOKEN_RETRY_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 15_000] as const;
+/**
+ * The console bridge prompts at most this long before the console's deadline
+ * and closes it there; past it a token can no longer help.
+ */
+const FRESH_TOKEN_DEADLINE_MS = 60_000;
+
+/**
+ * `freshAccessToken` for a re-authentication prompt, tried again with bounded
+ * backoff while `wanted()` holds (the console is still open): a refresh that
+ * failed for a network blip, or a rate limit past its own backoff, must not
+ * let the console lapse while its deadline leaves time. Null once the socket
+ * closed or the deadline has certainly passed.
+ */
+export async function freshAccessTokenWithRetry(
+  previous: string | null,
+  wanted: () => boolean,
+  options: {
+    fetchToken?: (previous: string | null) => Promise<string | null>;
+    sleep?: (ms: number) => Promise<void>;
+    now?: () => number;
+  } = {},
+): Promise<string | null> {
+  const fetchToken = options.fetchToken ?? freshAccessToken;
+  const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => { setTimeout(resolve, ms); }));
+  const now = options.now ?? Date.now;
+  const giveUpAt = now() + FRESH_TOKEN_DEADLINE_MS;
+  for (let attempt = 0; ; attempt += 1) {
+    if (!wanted()) return null;
+    const token = await fetchToken(previous);
+    if (token) return token;
+    const delayMs = FRESH_TOKEN_RETRY_DELAYS_MS[Math.min(attempt, FRESH_TOKEN_RETRY_DELAYS_MS.length - 1)]!;
+    if (now() + delayMs >= giveUpAt) return null;
+    await sleep(delayMs);
+  }
+}
+
 async function request<T>(
   path: string,
   options: RequestInit = {},
