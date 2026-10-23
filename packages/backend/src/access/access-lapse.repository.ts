@@ -11,6 +11,7 @@ import {
   resolveServerAccess,
   resolveSharedBackendAccess,
 } from '../iam/effective-access.js';
+import { lapseStopRedriveDue } from '../containers/container-control.repository.js';
 import { detachRedriveDue } from '../volumes/detach-redrive.js';
 
 export const ACCESS_LAPSE_GRACE_MS = GRANT_EXPIRY_GRACE_DAYS * 24 * 60 * 60 * 1000;
@@ -27,8 +28,9 @@ export interface LapseCandidate extends LapseKey {
   covered: boolean;
   /**
    * The lapse is not (or no longer) enforced: on a server, a container of the
-   * user there is meant to run; on a pool or backend, a volume of the user
-   * there is still attached to a container.
+   * user there is meant to run, or still runs although its stop was queued
+   * (and is due to be stopped again); on a pool or backend, a volume of the
+   * user there is still attached to a container.
    */
   exposed: boolean;
   /**
@@ -181,10 +183,14 @@ export class AccessLapseRepository {
           AND (attachment.bind_state <> 'detaching'
             OR ${detachRedriveDue(sql.ref('attachment.id'), sql.ref('container.id'))})
       ), exposed AS (
-        -- Servers: a container (also one still provisioning) is meant to run.
+        -- Servers: a container (also one still provisioning) is meant to run,
+        -- or is meant to be stopped but was last observed running with no
+        -- intent left to stop it (the stop failed or parked the container),
+        -- once the re-drive backoff has passed (lapseStopRedriveDue).
         SELECT owner_id AS user_id, 'server' AS kind, server_id AS resource_id
-        FROM control.containers
-        WHERE power_intent = 'running' AND lifecycle_phase IN ('active', 'provisioning')
+        FROM control.containers AS container
+        WHERE lifecycle_phase IN ('active', 'provisioning')
+          AND (power_intent = 'running' OR ${lapseStopRedriveDue(sql.ref('container.id'))})
         UNION
         SELECT user_id, kind, resource_id FROM exposed_attachment
       ), destroy_blocked AS (

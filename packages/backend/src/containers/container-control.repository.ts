@@ -1,6 +1,6 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
-import { sql, type Kysely, type Selectable, type Transaction } from 'kysely';
+import { sql, type Kysely, type RawBuilder, type Selectable, type Transaction } from 'kysely';
 import { ContainerPhase, ContainerPowerIntent, type GpuContainerState } from '@nyabase/common';
 import type { ContainerControlTable } from '../platform/persistence-pg/container-control-database.types.js';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
@@ -8,9 +8,38 @@ import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
 import { committedRootBytesSql } from '../platform/persistence-pg/committed-bytes.js';
 import { deriveInstanceName } from '../incus/instance-spec.js';
 import { numberValue } from '../platform/domain-utils.js';
+import { containerRedriveDue } from '../volumes/detach-redrive.js';
 
 export type ContainerExecutor = Kysely<NyabaseDatabase> | Transaction<NyabaseDatabase>;
 export type ContainerRow = Selectable<ContainerControlTable>;
+
+/** Request `reason` of the stops an access lapse enforces (`ContainerControlService.enforceStop`). */
+export const ACCESS_LAPSE_STOP_REASON = 'access_lapse';
+
+/**
+ * Whether an access-lapse stop did not take effect and is due to be queued
+ * again: the container is desired stopped, its instance was last observed
+ * running (the stop failed, or hit the busy-strike limit and parked the
+ * container, and nothing else stops it), and `containerRedriveDue` holds,
+ * counting the lapse stops for the backoff. Shared by the access-lapse scan
+ * (`exposed`) and `enforceStop`, so both agree on when a re-drive is due.
+ */
+export function lapseStopRedriveDue(containerId: RawBuilder<unknown>): RawBuilder<boolean> {
+  return sql<boolean>`(
+    EXISTS (
+      SELECT 1 FROM control.containers AS stopping
+      WHERE stopping.id = ${containerId} AND stopping.power_intent = 'stopped'
+    )
+    AND EXISTS (
+      SELECT 1 FROM control.container_ssh_routes AS observed
+      WHERE observed.container_id = ${containerId} AND observed.instance_status = 'running'
+    )
+    AND ${containerRedriveDue(containerId, sql<boolean>`(
+      enforcement_intent.request_json ->> 'operation' = 'stop'
+      AND enforcement_intent.request_json ->> 'reason' = ${ACCESS_LAPSE_STOP_REASON}
+    )`)}
+  )`;
+}
 
 export interface ImageRow {
   id: string;
@@ -158,6 +187,13 @@ export class ContainerControlRepository {
     return numberValue(row.bytes);
   }
 
+  async lapseStopRedriveDue(id: string, executor: ContainerExecutor): Promise<boolean> {
+    const { rows } = await sql<{ due: boolean }>`
+      SELECT ${lapseStopRedriveDue(sql`${id}::uuid`)} AS due
+    `.execute(executor);
+    return rows[0]?.due === true;
+  }
+
   lock(id: string, executor: Transaction<NyabaseDatabase>) {
     return executor.selectFrom('control.containers')
       .selectAll()
@@ -264,7 +300,9 @@ export class ContainerControlRepository {
         ...values,
         revision: revision + 1,
         last_transition_at: sql`clock_timestamp()`,
-        needs_attention: false,
+        // A desired-state change releases a parked container, unless the caller
+        // keeps it parked (an enforcement re-drive, `enforceStop`).
+        needs_attention: values.needs_attention ?? false,
       })
       .where('id', '=', id)
       .where('revision', '=', revision)

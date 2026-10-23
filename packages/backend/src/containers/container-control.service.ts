@@ -34,10 +34,11 @@ import { resolveServerAccess, type ServerAccess } from '../iam/effective-access.
 import { assertListScope, isSystemActor, type Actor, requireUserId } from '../iam/actor.js';
 import { AuditService } from '../iam/audit.service.js';
 import { acceptedIntent } from '../reconcile/accepted-intent.js';
-import { IntentRepository } from '../reconcile/intent.repository.js';
+import { DESPITE_ATTENTION_FIELD, IntentRepository } from '../reconcile/intent.repository.js';
 import { ConsoleSessionService } from './console-session.service.js';
 import { ContainerSshConvergenceService } from './container-ssh.js';
 import {
+  ACCESS_LAPSE_STOP_REASON,
   ContainerControlRepository,
   type ContainerRow,
 } from './container-control.repository.js';
@@ -63,6 +64,9 @@ import { assertActorRole } from '../iam/administration.js';
 
 type ContainerAction = 'start' | 'stop' | 'restart' | 'delete';
 type DesiredValues = Parameters<ContainerControlRepository['updateDesired']>[2];
+
+/** Phases in which a container can still be running: the access-lapse stop applies. */
+const STOPPABLE_PHASES: ReadonlySet<string> = new Set([ContainerPhase.Active, ContainerPhase.Provisioning]);
 
 function auditActionFor(action: ContainerAction): AuditAction {
   switch (action) {
@@ -374,8 +378,29 @@ export class ContainerControlService {
   }
 
   /**
+   * The access-lapse stop, the counterpart of `forceDetach`. A container meant
+   * to run is stopped as by `action('stop')`. One whose stop did not take
+   * effect (desired stopped, instance last observed running: say the stop hit
+   * the busy-strike limit and parked the container, which the full scan then
+   * skips) is stopped again once `lapseStopRedriveDue` holds, keeping
+   * `needs_attention` so a container that keeps refusing stays visible. Every
+   * intent runs despite the attention (`runsDespiteAttention`); success clears
+   * it. Returns null when the container is gone, deleting or nothing is due.
+   */
+  async enforceStop(actor: Actor, containerId: string): Promise<IntentAcceptedDto | null> {
+    return this.transactions.run(async (transaction) => {
+      const current = await this.repository.lock(containerId, transaction);
+      if (!current || !STOPPABLE_PHASES.has(current.lifecycle_phase)) return null;
+      const redrive = current.power_intent !== ContainerPowerIntent.Running;
+      if (redrive && !await this.repository.lapseStopRedriveDue(containerId, transaction)) return null;
+      return this.actionInTransaction(transaction, actor, containerId, 'stop', 'all', { enforcement: { redrive } });
+    }, { isolationLevel: 'read committed', maxAttempts: 5 });
+  }
+
+  /**
    * `action` in the caller's transaction. The access-lapse purge queues its
    * deletes in the transaction that re-checked coverage under the IAM lock.
+   * `enforcement` marks an access-lapse stop (`enforceStop`).
    */
   async actionInTransaction(
     transaction: Transaction<NyabaseDatabase>,
@@ -383,6 +408,7 @@ export class ContainerControlService {
     containerId: string,
     action: ContainerAction,
     scope: ListScope = 'mine',
+    options: { readonly enforcement?: { readonly redrive: boolean } } = {},
   ): Promise<IntentAcceptedDto> {
     const current = await this.repository.lock(containerId, transaction);
     if (!current) throw new NotFoundException('Container not found');
@@ -442,10 +468,17 @@ export class ContainerControlService {
       : action === 'start' || action === 'restart'
         ? ContainerPowerIntent.Running
         : ContainerPowerIntent.Stopped;
+    const { enforcement } = options;
     const updated = await this.repository.updateDesired(
       containerId,
       Number(current.revision),
-      { lifecycle_phase: nextPhase, power_intent: nextPower, failure_code: null, failure_reason: null },
+      {
+        lifecycle_phase: nextPhase,
+        power_intent: nextPower,
+        failure_code: null,
+        failure_reason: null,
+        ...(enforcement?.redrive ? { needs_attention: current.needs_attention } : {}),
+      },
       transaction,
     );
     if (!updated) throw new ConflictException({ code: FailureCode.RevisionConflict });
@@ -473,7 +506,17 @@ export class ContainerControlService {
             : null,
         }
         : undefined,
-      request: { action, operation: action },
+      request: {
+        action,
+        operation: action,
+        ...(enforcement
+          ? {
+            reason: ACCESS_LAPSE_STOP_REASON,
+            [DESPITE_ATTENTION_FIELD]: true,
+            ...(enforcement.redrive ? { redrive: true } : {}),
+          }
+          : {}),
+      },
     }, transaction);
     await this.audit.append(transaction, actor.userId, auditActionFor(action), containerId, 'container');
     return acceptedIntent(intent);

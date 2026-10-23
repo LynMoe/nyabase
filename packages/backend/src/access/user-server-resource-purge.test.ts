@@ -25,6 +25,7 @@ function createService() {
   };
   const containers = {
     action: vi.fn(),
+    enforceStop: vi.fn(),
     actionInTransaction: vi.fn(),
   };
   const volumes = {
@@ -142,11 +143,16 @@ describe('UserServerResourcePurgeService grant expiry actions', () => {
       { id: 'c-deleting', lifecycle_phase: ContainerPhase.Deleting, power_intent: ContainerPowerIntent.Running },
       { id: 'c-stopped', lifecycle_phase: ContainerPhase.Active, power_intent: ContainerPowerIntent.Stopped },
     ]);
-    fixture.containers.action.mockImplementation(async (_actor: unknown, id: string) => ({ intentId: `stop-${id}` }));
+    // enforceStop decides per container: nothing is due on one already stopped.
+    fixture.containers.enforceStop.mockImplementation(async (_actor: unknown, id: string) => (
+      id === 'c-stopped' ? null : { intentId: `stop-${id}` }
+    ));
 
     const result = await fixture.service.stopRunningContainersForGraceEntry(SYSTEM, 'user-1', 'server-1');
 
     expect(result.intentIds).toEqual(['stop-c-active', 'stop-c-provisioning']);
+    expect(fixture.containers.enforceStop.mock.calls.map((call) => call[1]))
+      .toEqual(['c-active', 'c-provisioning', 'c-stopped']);
   });
 
   it('purges lost local volumes through desired-state intents without tasks', async () => {

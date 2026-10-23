@@ -1,30 +1,30 @@
 import { sql, type RawBuilder } from 'kysely';
 import { runsDespiteAttentionSql } from '../reconcile/intent-model.js';
 
-/** Wait after the container's last intent before a stuck detach is queued again. */
+/** Wait after the container's last intent before a stuck enforcement is queued again. */
 export const DETACH_REDRIVE_BACKOFF_MS = 15 * 60_000;
-/** The waits double with each detach the attachment already had, up to this. */
+/** The waits double with each enforcement intent already queued, up to this. */
 export const DETACH_REDRIVE_MAX_BACKOFF_MS = 4 * 60 * 60_000;
 
 /**
- * Whether a `detaching` attachment is due to be detached again: no intent of
- * its container is pending that the worker will run (none is left to unplug
- * the device; the reconciler deletes the row once the device is gone), and
- * the container's last intent settled at least the backoff ago. An intent
- * pending on a container that needs attention counts only when it runs
- * despite the attention (`runsDespiteAttention`, the worker's own rule): any
- * other one (an SSH key sync, say) waits for an operator and would otherwise
- * hold the revoked volume mounted indefinitely. The backoff starts at
- * `DETACH_REDRIVE_BACKOFF_MS` and doubles with every detach intent the
- * attachment already had, up to `DETACH_REDRIVE_MAX_BACKOFF_MS`: a transient
- * failure is enforced again soon, while a container whose intents keep
- * failing (it needs an operator) gets a handful of new intents a day instead
- * of one per access-lapse pass. Shared by the access-lapse scan (`exposed`)
- * and `forceDetach`, so both agree on when a re-drive is due.
+ * Whether an access-lapse enforcement on a container (unplugging a revoked
+ * volume, stopping a container whose server grant lapsed) that did not take
+ * effect is due to be queued again: no intent of the container is pending that
+ * the worker will run, and the container's last intent settled at least the
+ * backoff ago. An intent pending on a container that needs attention counts
+ * only when it runs despite the attention (`runsDespiteAttention`, the
+ * worker's own rule): any other one (an SSH key sync, say) waits for an
+ * operator and would otherwise hold the enforcement off indefinitely. The
+ * backoff starts at `DETACH_REDRIVE_BACKOFF_MS` and doubles with every
+ * `enforcement` intent the container already had (the predicate is applied to
+ * `enforcement_intent`), up to `DETACH_REDRIVE_MAX_BACKOFF_MS`: a transient
+ * failure is enforced again soon, while a container whose intents keep failing
+ * (it needs an operator) gets a handful of new intents a day instead of one
+ * per access-lapse pass.
  */
-export function detachRedriveDue(
-  attachmentId: RawBuilder<unknown>,
+export function containerRedriveDue(
   containerId: RawBuilder<unknown>,
+  enforcement: RawBuilder<boolean>,
 ): RawBuilder<boolean> {
   return sql<boolean>`(
     NOT EXISTS (
@@ -46,13 +46,28 @@ export function detachRedriveDue(
         AND settled_intent.resource_id = ${containerId}
     ), '-infinity'::timestamptz) + make_interval(secs => least(
       ${DETACH_REDRIVE_BACKOFF_MS / 1000}::double precision * power(2::double precision, least(greatest((
-        SELECT count(*) FROM control.intents AS detach_intent
-        WHERE detach_intent.resource_type = 'container'
-          AND detach_intent.resource_id = ${containerId}
-          AND detach_intent.request_json ->> 'operation' = 'detach_volume'
-          AND detach_intent.request_json ->> 'attachmentId' = ${attachmentId}::text
+        SELECT count(*) FROM control.intents AS enforcement_intent
+        WHERE enforcement_intent.resource_type = 'container'
+          AND enforcement_intent.resource_id = ${containerId}
+          AND ${enforcement}
       ) - 1, 0), 16)::double precision),
       ${DETACH_REDRIVE_MAX_BACKOFF_MS / 1000}::double precision
     )) <= clock_timestamp()
   )`;
+}
+
+/**
+ * Whether a `detaching` attachment is due to be detached again
+ * (`containerRedriveDue`, counting the attachment's detach intents). Shared by
+ * the access-lapse scan (`exposed`) and `forceDetach`, so both agree on when a
+ * re-drive is due.
+ */
+export function detachRedriveDue(
+  attachmentId: RawBuilder<unknown>,
+  containerId: RawBuilder<unknown>,
+): RawBuilder<boolean> {
+  return containerRedriveDue(containerId, sql<boolean>`(
+    enforcement_intent.request_json ->> 'operation' = 'detach_volume'
+    AND enforcement_intent.request_json ->> 'attachmentId' = ${attachmentId}::text
+  )`);
 }

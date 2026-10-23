@@ -76,6 +76,10 @@ Vite 通过 alias 将 `@nyabase/common` 指向 `src/index.ts`，但 `index.ts` �
   成功清 attention，失败或因更新的 revision 成为 stale 空操作时保留 / 重新搁置，下一次按退避再下发。清除后（`purged_at` 已设）池 / 后端上仍暴露的挂载（清除时退避未到而跳过的卸载）
   由 `lapseWork` 的 `detach` 继续按退避重新下发，直到挂载消失、卷销毁得以进行；清除本身不重复。清除后覆盖恢复：台账行照常删除，
   但 `deleting` 卷上到期的 `detaching` 挂载（`destroyBlocked`，不依赖台账和覆盖）仍由 `detach` 按退避重新下发，且只卸这些卷，不碰用户重新使用的卷。
+  服务器的停机是同一模型（`ContainerControlService.enforceStop`）：停机 intent 带 `despiteAttention: true` 与 `reason: 'access_lapse'`；
+  `power_intent='stopped'` 但实例最后观测仍在运行（`container_ssh_routes.instance_status='running'`，例如停机 intent 撞上 busy strikes 把容器搁置、全量扫描又跳过它）
+  也算暴露，按同样的退避重新下停机（`containers/container-control.repository.ts` 的 `lapseStopRedriveDue`，按该容器已有的 lapse 停机 intent 数翻倍；
+  与 `detachRedriveDue` 共用 `volumes/detach-redrive.ts` 的 `containerRedriveDue`，扫描与 `enforceStop` 共用）；第一次停机清 attention，重新下发保留。
 - 禁用用户 = 失去覆盖，与撤销同一条流程：覆盖只认 `iam.effective_*_access`（active 用户 + 当前授权），禁用后其名下资源按检测时间开宽限、立即停机，
   14 天后清除；宽限内重新启用则删台账行（容器不自动启动）。用户状态变更在 `afterCommit` 里通知 `AccessChangeNotifier`。
 - 宽限中（无当前覆盖）的用户不能新建、启动、挂载、扩容；已停机的容器在覆盖恢复后不会自动启动。所有者扩容本地卷要同时有服务器和存储池的当前授权。

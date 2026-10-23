@@ -3,7 +3,6 @@ import { sql, type Transaction } from 'kysely';
 import {
   AuditAction,
   ContainerPhase,
-  ContainerPowerIntent,
   IntentKind,
   IntentResourceType,
   Role,
@@ -226,13 +225,12 @@ export class UserServerResourcePurgeService {
     const intentIds: string[] = [];
     for (const container of owned) {
       // A container still provisioning may already run (a create that failed
-      // after the start): it stops like any other.
-      if (
-        !STOPPABLE_PHASES.has(container.lifecycle_phase)
-        || container.power_intent !== ContainerPowerIntent.Running
-      ) continue;
-      const accepted = await this.containers.action(actor, container.id, 'stop', PURGE_SCOPE);
-      intentIds.push(accepted.intentId);
+      // after the start): it stops like any other. One already desired
+      // stopped is stopped again only when its stop did not take effect
+      // (`enforceStop`), so a parked container cannot keep running the grace.
+      if (!STOPPABLE_PHASES.has(container.lifecycle_phase)) continue;
+      const accepted = await this.containers.enforceStop(actor, container.id);
+      if (accepted) intentIds.push(accepted.intentId);
     }
     if (intentIds.length > 0) {
       await this.transactions.run(async (transaction) => {

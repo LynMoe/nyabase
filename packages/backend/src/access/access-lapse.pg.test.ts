@@ -4,7 +4,9 @@ import { AuditAction, GRANT_EXPIRY_GRACE_DAYS, UserStatus } from '@nyabase/commo
 import { describe, expect, it, vi } from 'vitest';
 import { ContainerControlRepository } from '../containers/container-control.repository.js';
 import { ContainerReconcileStore } from '../containers/container-reconcile.store.js';
+import { makeContainerControlService } from '../containers/container-services.test-helper.js';
 import { ContainerSshConvergenceService } from '../containers/container-ssh.js';
+import type { Actor } from '../iam/actor.js';
 import { AccessChangeNotifier } from '../iam/access-resolver.service.js';
 import { lockIamPolicy } from '../iam/administration.js';
 import {
@@ -46,18 +48,31 @@ async function fixture(database: Kysely<NyabaseDatabase>, onDelete?: () => Promi
   const transactions = new PgTransactionManager(database);
   const claims = new ReconcileClaimRepository(database);
   const changes = new AccessChangeNotifier();
-  // Real repositories, real purge service; only the container power/delete
-  // endpoint is replaced by a recorder (it would talk to Incus intents).
+  // Real repositories, real purge service, the real access-lapse stop (it
+  // only writes rows: desired power, revision, intent); the deletes of the
+  // purge are replaced by a recorder. `actions` records both.
   const actions: Array<{ id: string; action: string; actorIsSystem: boolean }> = [];
+  const audit = { append: vi.fn(async () => undefined) };
+  const intents = new IntentRepository(database, noopWake());
+  const control = makeContainerControlService(
+    database,
+    transactions,
+    new ContainerControlRepository(database),
+    {} as never,
+    intents,
+    {} as never,
+    audit as never,
+    {} as never,
+    {} as never,
+    {} as never,
+    {} as never,
+    {} as never,
+  );
   const containers = {
-    action: vi.fn(async (actor: { authKind: string }, id: string, action: string) => {
-      actions.push({ id, action, actorIsSystem: actor.authKind === 'system' });
-      // The real endpoint records the desired power state.
-      if (action === 'stop') {
-        await database.updateTable('control.containers').set({ power_intent: 'stopped' })
-          .where('id', '=', id).execute();
-      }
-      return { intentId: randomUUID() };
+    enforceStop: vi.fn(async (actor: Actor, id: string) => {
+      const accepted = await control.enforceStop(actor, id);
+      if (accepted) actions.push({ id, action: 'stop', actorIsSystem: actor.authKind === 'system' });
+      return accepted;
     }),
     // The purge queues its deletes in the transaction holding the IAM lock.
     actionInTransaction: vi.fn(async (
@@ -71,9 +86,7 @@ async function fixture(database: Kysely<NyabaseDatabase>, onDelete?: () => Promi
       return { intentId: randomUUID() };
     }),
   };
-  const audit = { append: vi.fn(async () => undefined) };
   const proxySnapshots = { notify: vi.fn(async () => undefined) };
-  const intents = new IntentRepository(database, noopWake());
   const volumes = new VolumesRepository(database);
   // The real force-detach: it only writes rows (attachment, revision, intent).
   const attachments = new VolumeAttachmentsService(
@@ -973,6 +986,77 @@ describePg('access lapse processor', () => {
     });
   });
 
+  it('stops a parked container again: the lapse stop runs despite needs_attention and is re-driven', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const { processor, actions } = await fixture(database);
+      const { userId, serverId, poolId, imageId } = await world(database);
+      await grantServer(database, { user: userId }, serverId, { expiresAt: days(-1) });
+      const container = await seedContainer(database, {
+        ownerId: userId, serverId, poolId, imageId, running: true,
+      });
+      await observeInstance(database, container, serverId, 'running');
+      const worker = reconcileWorker(database);
+      try {
+        await processor.process();
+        expect(await powerOf(database, container)).toBe('stopped');
+        expect(await pendingRequests(database, container)).toEqual([
+          expect.objectContaining({ operation: 'stop', reason: 'access_lapse', despiteAttention: true }),
+        ]);
+
+        // The instance stays busy: five strikes park the container. Its row
+        // says stopped, the instance still runs, the full scan skips it.
+        await worker.strikeBusy(container);
+        expect(await attentionOf(database, container)).toBe(true);
+        expect(await containerIntents(database, container))
+          .toEqual([expect.objectContaining({ status: 'failed' })]);
+
+        // Not before the backoff has passed.
+        await processor.process();
+        expect(await containerIntents(database, container)).toHaveLength(1);
+
+        // Then the stop is queued again, keeping the attention, and processed
+        // although the container is parked; success clears the attention.
+        await ageContainerIntents(database, container, DETACH_REDRIVE_BACKOFF_MS + 60_000);
+        await processor.process();
+        expect(await pendingRequests(database, container)).toEqual([
+          expect.objectContaining({ operation: 'stop', despiteAttention: true, redrive: true }),
+        ]);
+        expect(await attentionOf(database, container)).toBe(true);
+        await worker.succeed();
+        expect(await attentionOf(database, container)).toBe(false);
+
+        // Observed stopped: nothing is exposed any more.
+        await observeInstance(database, container, serverId, 'stopped');
+        await ageContainerIntents(database, container, DETACH_REDRIVE_MAX_BACKOFF_MS);
+        await processor.process();
+        expect(await containerIntents(database, container)).toEqual([
+          expect.objectContaining({ status: 'failed' }),
+          expect.objectContaining({ status: 'succeeded' }),
+        ]);
+        expect(actions).toEqual([
+          { id: container, action: 'stop', actorIsSystem: true },
+          { id: container, action: 'stop', actorIsSystem: true },
+        ]);
+      } finally {
+        await worker.stop();
+      }
+    });
+  });
+
+  it('does not stop a container again that its owner stopped and that was observed stopped', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const { processor, actions } = await fixture(database);
+      const { userId, serverId, poolId, imageId } = await world(database);
+      await grantServer(database, { user: userId }, serverId, { expiresAt: days(-1) });
+      const container = await seedContainer(database, { ownerId: userId, serverId, poolId, imageId });
+      await observeInstance(database, container, serverId, 'stopped');
+      await processor.process();
+      await processor.process();
+      expect(actions).toEqual([]);
+      expect(await containerIntents(database, container)).toEqual([]);
+    });
+  });
+
   it('stops a running container of a lapsed server that is still provisioning', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const { processor, actions } = await fixture(database);
@@ -1326,6 +1410,36 @@ async function pendingOperations(database: Kysely<NyabaseDatabase>, containerId:
     .orderBy('created_at')
     .execute();
   return rows.map((row) => (row.request_json as { operation?: string } | null)?.operation);
+}
+
+async function pendingRequests(database: Kysely<NyabaseDatabase>, containerId: string): Promise<unknown[]> {
+  const rows = await database.selectFrom('control.intents').select('request_json')
+    .where('resource_id', '=', containerId)
+    .where('status', '=', 'pending')
+    .orderBy('created_at')
+    .execute();
+  return rows.map((row) => row.request_json);
+}
+
+/** What the reconciler last observed of the instance (its route row). */
+async function observeInstance(
+  database: Kysely<NyabaseDatabase>,
+  containerId: string,
+  serverId: string,
+  status: 'running' | 'stopped',
+): Promise<void> {
+  await database.insertInto('control.container_ssh_routes').values({
+    container_id: containerId,
+    server_id: serverId,
+    instance_name: `nyc-${containerId.replaceAll('-', '')}`,
+    routed_ip: '10.0.0.8',
+    instance_status: status,
+    instance_started_at: null,
+    ssh_status: status === 'running' ? 'running' : 'container_stopped',
+    last_error: null,
+    observed_at: new Date(),
+  }).onConflict((conflict) => conflict.column('container_id').doUpdateSet({ instance_status: status }))
+    .execute();
 }
 
 async function containerIntents(database: Kysely<NyabaseDatabase>, containerId: string): Promise<unknown[]> {
