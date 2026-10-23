@@ -302,8 +302,6 @@ enforced at start-up):
 | `NYABASE_SSH_MAX_CONNECTIONS_PER_IP` | SSH | `16` (1–1024), per IPv4 address / IPv6 `/64` |
 | `NYABASE_SSH_MAX_CONNECTIONS_PER_IPV6_48` | SSH | `64` (1–1024), all `/64`s of one IPv6 `/48` together |
 | `NYABASE_SSH_MAX_PREAUTH_CONNECTIONS` | SSH | `128` (1–`NYABASE_SSH_MAX_CONNECTIONS`), not yet authenticated |
-| `NYABASE_SSH_MAX_PREAUTH_CONNECTIONS_PER_IP` | SSH | `8` (1–the smaller of the per-IP and pre-auth caps), per IPv4 address / IPv6 `/64` |
-| `NYABASE_SSH_MAX_PREAUTH_CONNECTIONS_PER_IPV6_48` | SSH | `32` (1–the smaller of the per-`/48` and pre-auth caps) |
 | `NYABASE_SSH_AUTH_TIMEOUT_MS` | SSH | `30000` (1000–600000), accept to successful auth |
 | `NYABASE_SSH_CONTROL_HOLD_MS` | SSH | `300000` (180000–600000) |
 | `NYABASE_HTTP_LISTEN` | HTTP | `0.0.0.0:8080` (the example uses `:80`) |
@@ -312,8 +310,6 @@ enforced at start-up):
 | `NYABASE_HTTP_MAX_CONNECTIONS_PER_IP` | HTTP | `64` (1–65536), per IPv4 address / IPv6 `/64` |
 | `NYABASE_HTTP_MAX_CONNECTIONS_PER_IPV6_48` | HTTP | `256` (1–65536), all `/64`s of one IPv6 `/48` together |
 | `NYABASE_HTTP_MAX_PENDING_CONNECTIONS` | HTTP | `1024` (1–`NYABASE_HTTP_MAX_CONNECTIONS`), in TLS handshake or before a full request head |
-| `NYABASE_HTTP_MAX_PENDING_CONNECTIONS_PER_IP` | HTTP | `16` (1–the smaller of the per-IP and pending caps), per IPv4 address / IPv6 `/64` |
-| `NYABASE_HTTP_MAX_PENDING_CONNECTIONS_PER_IPV6_48` | HTTP | `64` (1–the smaller of the per-`/48` and pending caps) |
 | `NYABASE_HTTP_MAX_CONNECTIONS_PER_CONTAINER` | HTTP | `512` (1–`NYABASE_HTTP_MAX_CONNECTIONS`), per upstream container, all its hostnames together, WebSockets included; over it the client gets a 503 |
 | `NYABASE_HTTP_MAX_CONNECTIONS_PER_IP_PER_CONTAINER` | HTTP | `32` (1–the smaller of the per-IP and per-container caps), one IPv4 address / IPv6 `/64` to one container; over it that client gets a 503 |
 | `NYABASE_HTTP_MAX_CONNECTIONS_PER_OWNER` | HTTP | `1024` (the per-container cap–`NYABASE_HTTP_MAX_CONNECTIONS`), all of one user's containers together; over it the client gets a 503 |
@@ -348,16 +344,17 @@ connection over a limit is closed immediately. Every new connection also
 takes a pre-auth (SSH: until public-key authentication succeeds) or pending
 (HTTP: until the request head is read, including the TLS handshake) slot, a
 smaller pool than the total, so unauthenticated sockets cannot crowd out
-established sessions. That pool is shared fairly: each IPv4 address / IPv6
-`/64` and each `/48` may hold only a few pending slots (the `*_PER_IP` /
-`*_PER_IPV6_48` pending variables), and when the pool is full a new
+established sessions. While that pool has room nothing else limits pending
+connections: a source may have its whole per-IP (and per-`/48`) total
+pending at once, so a team behind one NAT, an `ssh -J` or ansible fan-out
+from one address, or a browser opening many connections is never refused
+for being unauthenticated. Only a full pool is shared fairly: a new
 connection from a source (IPv4 address or IPv6 `/48`) holding at least two
 fewer pending slots than the heaviest source evicts that source's oldest
 pending connection instead of being refused; the evicted connection is closed
-at once. Holding the pool against fresh clients therefore takes as many
+at once. Holding a full pool against fresh clients therefore takes as many
 distinct sources as there are pending slots. The SSH proxy counts refusals
 and evictions in `ssh_proxy_connections_total` (`rejected_preauth_limit`,
-`rejected_preauth_client_limit`, `rejected_preauth_site_limit`,
 `closed_preauth_evicted`). The SSH authentication deadline is independent of the
 600 s session inactivity timeout. These are environment settings only, not
 YAML or panel settings. A transient `accept()` failure (descriptor

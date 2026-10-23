@@ -299,6 +299,28 @@ async fn pre_auth_sockets_cannot_fill_the_whole_pool() {
 }
 
 #[tokio::test]
+async fn one_office_ip_may_hold_its_whole_per_ip_total_in_pre_auth() {
+    // `ssh -J` / ansible fan-out from one NAT: every handshake is pre-auth at
+    // once, and only the per-IP total limits it while the pool has room.
+    let mut config = test_config();
+    config.max_connections = 32;
+    config.max_connections_per_ip = 16;
+    config.max_connections_per_ipv6_48 = 32;
+    config.max_preauth_connections = 24;
+    let listener = start_public_listener(config).await;
+
+    let mut clients = Vec::new();
+    for _ in 0..16 {
+        let mut client = connect_from("127.0.0.1", listener.address).await;
+        assert!(read_banner(&mut client).await.is_some());
+        clients.push(client);
+    }
+    let mut seventeenth = connect_from("127.0.0.1", listener.address).await;
+    assert!(read_banner(&mut seventeenth).await.is_none());
+    listener.task.abort();
+}
+
+#[tokio::test]
 async fn a_full_pre_auth_pool_evicts_the_heaviest_source_for_a_fresh_one() {
     let mut config = test_config();
     config.max_connections = 8;
@@ -338,8 +360,6 @@ fn authentication_releases_the_pre_auth_slot_but_not_the_connection_slot() {
         per_client: 4,
         per_site: 4,
         pending: 1,
-        pending_per_client: 8,
-        pending_per_site: 8,
     });
     let peer: std::net::SocketAddr = "127.0.0.1:2700".parse().unwrap();
     let mut permit = limiter.try_acquire(peer.ip()).unwrap();

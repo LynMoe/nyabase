@@ -14,13 +14,10 @@ fn http_limits_and_status_interval_are_hard_bounded() {
         assert!(DEFAULT_IDLE_TIMEOUT_MS <= MAX_IDLE_TIMEOUT_MS);
         // The pending pool must leave room for established connections.
         assert!(DEFAULT_MAX_PENDING_CONNECTIONS < DEFAULT_MAX_CONNECTIONS);
-        // A few sources must not be able to hold the whole pending pool.
-        assert!(DEFAULT_MAX_PENDING_CONNECTIONS_PER_IP <= DEFAULT_MAX_CONNECTIONS_PER_IP / 4);
-        assert!(DEFAULT_MAX_PENDING_CONNECTIONS_PER_IP * 64 <= DEFAULT_MAX_PENDING_CONNECTIONS);
-        assert!(DEFAULT_MAX_PENDING_CONNECTIONS_PER_IPV6_48 <= DEFAULT_MAX_CONNECTIONS_PER_IPV6_48);
-        assert!(
-            DEFAULT_MAX_PENDING_CONNECTIONS_PER_IPV6_48 * 16 <= DEFAULT_MAX_PENDING_CONNECTIONS
-        );
+        // One source may have its whole per-IP / per-/48 total pending at
+        // once without filling the pending pool.
+        assert!(DEFAULT_MAX_CONNECTIONS_PER_IP < DEFAULT_MAX_PENDING_CONNECTIONS);
+        assert!(DEFAULT_MAX_CONNECTIONS_PER_IPV6_48 < DEFAULT_MAX_PENDING_CONNECTIONS);
         assert!(DEFAULT_MAX_CONNECTIONS_PER_IPV6_48 <= MAX_CONNECTIONS_LIMIT);
         assert!(DEFAULT_CONTROL_HOLD_MS <= MAX_CONTROL_HOLD_MS);
         // One container must not be able to take the whole pool.

@@ -67,17 +67,10 @@ pub(crate) const DEFAULT_MAX_CONNECTIONS_PER_IP_PER_CONTAINER: usize = 32;
 pub(crate) const DEFAULT_MAX_CONNECTIONS_PER_OWNER: usize = 1_024;
 
 /// Connections still in the TLS handshake or sending their request head; a
-/// quarter of the default pool.
+/// quarter of the default pool. A source may use its whole per-IP total of
+/// it while there is room; a full pool admits a fresh source by evicting the
+/// heaviest source's oldest pending connection.
 pub(crate) const DEFAULT_MAX_PENDING_CONNECTIONS: usize = 1_024;
-
-/// Pending connections per IPv4 address / IPv6 /64: a quarter of the per-IP
-/// cap and a sixty-fourth of the pending pool, so filling the pool takes many
-/// sources (and a full pool still admits fresh sources by evicting the
-/// heaviest one's oldest pending connection).
-pub(crate) const DEFAULT_MAX_PENDING_CONNECTIONS_PER_IP: usize = 16;
-
-/// Pending connections per IPv6 /48, all its /64s together.
-pub(crate) const DEFAULT_MAX_PENDING_CONNECTIONS_PER_IPV6_48: usize = 64;
 
 pub(crate) const DEFAULT_BODY_DEADLINE_MS: u64 = 30_000;
 
@@ -149,8 +142,6 @@ pub(crate) struct Config {
     pub(crate) max_connections_per_ip: usize,
     pub(crate) max_connections_per_ipv6_48: usize,
     pub(crate) max_pending_connections: usize,
-    pub(crate) max_pending_connections_per_ip: usize,
-    pub(crate) max_pending_connections_per_ipv6_48: usize,
     pub(crate) max_connections_per_container: usize,
     pub(crate) max_connections_per_ip_per_container: usize,
     pub(crate) max_connections_per_owner: usize,
@@ -205,26 +196,6 @@ impl Config {
             )?,
             1,
             max_connections,
-        )?;
-        let pending_per_ip_cap = max_connections_per_ip.min(max_pending_connections);
-        let max_pending_connections_per_ip = validate_limit(
-            "NYABASE_HTTP_MAX_PENDING_CONNECTIONS_PER_IP",
-            env_usize(
-                "NYABASE_HTTP_MAX_PENDING_CONNECTIONS_PER_IP",
-                DEFAULT_MAX_PENDING_CONNECTIONS_PER_IP.min(pending_per_ip_cap),
-            )?,
-            1,
-            pending_per_ip_cap,
-        )?;
-        let pending_per_site_cap = max_connections_per_ipv6_48.min(max_pending_connections);
-        let max_pending_connections_per_ipv6_48 = validate_limit(
-            "NYABASE_HTTP_MAX_PENDING_CONNECTIONS_PER_IPV6_48",
-            env_usize(
-                "NYABASE_HTTP_MAX_PENDING_CONNECTIONS_PER_IPV6_48",
-                DEFAULT_MAX_PENDING_CONNECTIONS_PER_IPV6_48.min(pending_per_site_cap),
-            )?,
-            1,
-            pending_per_site_cap,
         )?;
         let max_connections_per_container = validate_limit(
             "NYABASE_HTTP_MAX_CONNECTIONS_PER_CONTAINER",
@@ -308,8 +279,6 @@ impl Config {
             max_connections_per_ip,
             max_connections_per_ipv6_48,
             max_pending_connections,
-            max_pending_connections_per_ip,
-            max_pending_connections_per_ipv6_48,
             max_connections_per_container,
             max_connections_per_ip_per_container,
             max_connections_per_owner,
@@ -337,8 +306,6 @@ impl Config {
             per_client: self.max_connections_per_ip,
             per_site: self.max_connections_per_ipv6_48,
             pending: self.max_pending_connections,
-            pending_per_client: self.max_pending_connections_per_ip,
-            pending_per_site: self.max_pending_connections_per_ipv6_48,
         }
     }
 }

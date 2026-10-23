@@ -11,8 +11,6 @@ fn settings(global: usize, pending: usize) -> LimitSettings {
         per_client: global,
         per_site: global,
         pending,
-        pending_per_client: pending,
-        pending_per_site: pending,
     }
 }
 
@@ -126,33 +124,39 @@ fn pending_slots_are_smaller_than_the_pool_and_freed_on_establishment() {
 }
 
 #[test]
-fn one_source_holds_only_a_few_pending_slots() {
+fn one_source_may_use_its_whole_per_ip_total_while_the_pool_has_room() {
+    // One office NAT behind a single IPv4 address (or one IPv6 /48) opening
+    // many connections at once: nothing but its per-IP / per-/48 totals
+    // limits it while the pending pool has room.
     let limiter = ConnectionLimiter::new(LimitSettings {
-        pending_per_client: 2,
-        pending_per_site: 3,
+        per_client: 16,
+        per_site: 24,
         ..settings(100, 50)
     });
-    let mut a = limiter.try_acquire(ip("192.0.2.1")).unwrap();
-    let _b = limiter.try_acquire(ip("192.0.2.1")).unwrap();
+    let office = (0..16)
+        .map(|_| limiter.try_acquire(ip("192.0.2.1")).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(limiter.pending_for(ip("192.0.2.1")), 16);
     assert_eq!(
         limiter.try_acquire(ip("192.0.2.1")).unwrap_err(),
-        LimitRejection::PendingPerClient
+        LimitRejection::PerClient
     );
-    assert_eq!(limiter.active_for(ip("192.0.2.1")), 2);
-    // Established connections do not count against the pending cap.
-    a.mark_established();
-    let _c = limiter.try_acquire(ip("192.0.2.1")).unwrap();
-    assert_eq!(limiter.pending_for(ip("192.0.2.1")), 2);
 
-    // An IPv6 /48 is capped as a whole across its /64s.
-    let _d = limiter.try_acquire(ip("2001:db8:1:1::1")).unwrap();
-    let _e = limiter.try_acquire(ip("2001:db8:1:2::1")).unwrap();
-    let _f = limiter.try_acquire(ip("2001:db8:1:3::1")).unwrap();
+    let site = (1..=24)
+        .map(|n| {
+            limiter
+                .try_acquire(ip(&format!("2001:db8:1:{n:x}::1")))
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
     assert_eq!(
-        limiter.try_acquire(ip("2001:db8:1:4::1")).unwrap_err(),
-        LimitRejection::PendingPerSite
+        limiter.try_acquire(ip("2001:db8:1:ff::1")).unwrap_err(),
+        LimitRejection::PerSite
     );
-    assert!(limiter.try_acquire(ip("2001:db8:2:1::1")).is_ok());
+    assert_eq!(limiter.pending_available(), 10);
+    assert_eq!(limiter.evicted_total(), 0);
+    drop((office, site));
+    assert_eq!(limiter.pending_available(), 50);
 }
 
 #[tokio::test]

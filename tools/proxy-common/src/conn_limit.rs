@@ -12,18 +12,19 @@
 //! Every new connection also holds a *pending* slot until the listener marks
 //! it established (SSH: public-key authentication succeeded; HTTP: the
 //! request head was read). The pending pool is smaller than the global pool,
-//! so unauthenticated sockets cannot crowd out authenticated sessions, and it
-//! is shared fairly between sources rather than first come, first served:
+//! so unauthenticated sockets cannot crowd out authenticated sessions.
 //!
-//! - each IPv4 address / IPv6 /64 and each IPv6 /48 may hold only a small
-//!   number of pending slots (`pending_per_client`, `pending_per_site`);
-//! - when the pool is full, a newcomer whose source (IPv4 address or IPv6
-//!   /48) holds at least two fewer pending slots than the heaviest source
-//!   evicts that source's oldest pending connection instead of being
-//!   refused. The evicted connection is told through its
-//!   [`PendingEviction`] and closes itself.
+//! There is deliberately no separate per-source pending cap: while the pool
+//! has room, a source may hold as many pending slots as its per-IP (and
+//! per-/48) total allows, so a team behind one NAT, an `ssh -J` / ansible
+//! fan-out or a browser opening many connections at once is never refused
+//! for being pending. Fairness only applies once the pool is full: a
+//! newcomer whose source (IPv4 address or IPv6 /48) holds at least two fewer
+//! pending slots than the heaviest source evicts that source's oldest pending
+//! connection instead of being refused. The evicted connection is told
+//! through its [`PendingEviction`] and closes itself.
 //!
-//! A few sources therefore cannot keep the pool to themselves: filling it
+//! A few sources therefore cannot keep a full pool to themselves: holding it
 //! against fresh clients takes as many distinct sources as there are pending
 //! slots, each holding one.
 
@@ -86,8 +87,6 @@ pub enum LimitRejection {
     PerClient,
     PerSite,
     Pending,
-    PendingPerClient,
-    PendingPerSite,
 }
 
 impl LimitRejection {
@@ -97,8 +96,6 @@ impl LimitRejection {
             Self::PerClient => "per_client",
             Self::PerSite => "per_site",
             Self::Pending => "pending",
-            Self::PendingPerClient => "pending_per_client",
-            Self::PendingPerSite => "pending_per_site",
         }
     }
 }
@@ -112,12 +109,9 @@ pub struct LimitSettings {
     pub per_client: usize,
     /// Per IPv6 /48 (sum over its /64s).
     pub per_site: usize,
-    /// Connections not yet marked established (pre-auth / pre-header).
+    /// Connections not yet marked established (pre-auth / pre-header),
+    /// shared fairly between sources once full.
     pub pending: usize,
-    /// Pending connections per IPv4 address / IPv6 /64.
-    pub pending_per_client: usize,
-    /// Pending connections per IPv6 /48 (sum over its /64s).
-    pub pending_per_site: usize,
 }
 
 impl LimitSettings {
@@ -128,8 +122,6 @@ impl LimitSettings {
             per_client,
             per_site: global,
             pending: global,
-            pending_per_client: per_client,
-            pending_per_site: global,
         }
     }
 }
@@ -139,7 +131,6 @@ struct Counts {
     clients: HashMap<ClientBucket, usize>,
     sites: HashMap<u64, usize>,
     pending_total: usize,
-    pending_clients: HashMap<ClientBucket, usize>,
     /// Pending slots per fairness source, oldest first.
     pending_sources: HashMap<PendingSource, VecDeque<Arc<PendingSlot>>>,
 }
@@ -259,24 +250,16 @@ impl ConnectionLimiter {
                 return Err(LimitRejection::PerSite);
             }
         }
-        if counts.pending_clients.get(&bucket).copied().unwrap_or(0)
-            >= self.settings.pending_per_client
-        {
-            return Err(LimitRejection::PendingPerClient);
-        }
-        let source_pending = counts.pending_sources.get(&source).map_or(0, VecDeque::len);
-        if site.is_some() && source_pending >= self.settings.pending_per_site {
-            return Err(LimitRejection::PendingPerSite);
-        }
         let global = self
             .global
             .clone()
             .try_acquire_owned()
             .map_err(|_| LimitRejection::Global)?;
         if counts.pending_total >= self.settings.pending {
+            let source_pending = counts.pending_sources.get(&source).map_or(0, VecDeque::len);
             let victim =
                 heaviest_victim(&mut counts, source_pending).ok_or(LimitRejection::Pending)?;
-            forget_pending(&mut counts, &victim.bucket);
+            counts.pending_total -= 1;
             victim.evicted.store(true, Ordering::Release);
             victim.notify.notify_one();
             self.evicted_total.fetch_add(1, Ordering::Relaxed);
@@ -288,7 +271,6 @@ impl ConnectionLimiter {
             notify: Notify::new(),
         });
         counts.pending_total += 1;
-        *counts.pending_clients.entry(bucket).or_insert(0) += 1;
         counts
             .pending_sources
             .entry(source)
@@ -318,11 +300,13 @@ impl ConnectionLimiter {
     }
 
     pub fn pending_for(&self, ip: IpAddr) -> usize {
+        let bucket = ClientBucket::of(ip);
         self.lock()
-            .pending_clients
-            .get(&ClientBucket::of(ip))
-            .copied()
-            .unwrap_or(0)
+            .pending_sources
+            .get(&bucket.pending_source())
+            .map_or(0, |queue| {
+                queue.iter().filter(|slot| slot.bucket == bucket).count()
+            })
     }
 
     pub fn pending_available(&self) -> usize {
@@ -362,7 +346,7 @@ impl ConnectionLimiter {
         if queue.is_empty() {
             counts.pending_sources.remove(&source);
         }
-        forget_pending(&mut counts, &slot.bucket);
+        counts.pending_total -= 1;
     }
 
     fn lock(&self) -> MutexGuard<'_, Counts> {
@@ -391,13 +375,6 @@ fn heaviest_victim(counts: &mut Counts, newcomer_pending: usize) -> Option<Arc<P
         counts.pending_sources.remove(&source);
     }
     victim
-}
-
-/// Drops the total and per-client pending counts of one slot already taken
-/// out of its source queue.
-fn forget_pending(counts: &mut Counts, bucket: &ClientBucket) {
-    counts.pending_total = counts.pending_total.saturating_sub(1);
-    decrement(&mut counts.pending_clients, *bucket);
 }
 
 fn decrement<K: std::hash::Hash + Eq>(map: &mut HashMap<K, usize>, key: K) {

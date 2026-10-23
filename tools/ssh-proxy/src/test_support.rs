@@ -231,8 +231,6 @@ pub(crate) fn test_config() -> ProxyConfig {
         max_connections_per_ip: 8,
         max_connections_per_ipv6_48: 8,
         max_preauth_connections: 8,
-        max_preauth_connections_per_ip: 8,
-        max_preauth_connections_per_ipv6_48: 8,
         auth_timeout: Duration::from_secs(30),
         reconnect_delay: Duration::from_secs(1),
         route_connect_timeout: Duration::from_secs(1),

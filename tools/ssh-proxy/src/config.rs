@@ -18,16 +18,10 @@ pub(crate) const DEFAULT_MAX_CONNECTIONS_PER_IP: usize = 16;
 pub(crate) const DEFAULT_MAX_CONNECTIONS_PER_IPV6_48: usize = 64;
 
 /// Connections that have not authenticated yet; a quarter of the default pool.
+/// A source may use its whole per-IP total of it while there is room; a full
+/// pool admits a fresh source by evicting the heaviest source's oldest
+/// unauthenticated connection.
 pub(crate) const DEFAULT_MAX_PREAUTH_CONNECTIONS: usize = 128;
-
-/// Unauthenticated connections per IPv4 address / IPv6 /64: half the per-IP
-/// cap and a sixteenth of the pre-auth pool, so filling the pool takes many
-/// sources (and a full pool still admits fresh sources by evicting the
-/// heaviest one's oldest unauthenticated connection).
-pub(crate) const DEFAULT_MAX_PREAUTH_CONNECTIONS_PER_IP: usize = 8;
-
-/// Unauthenticated connections per IPv6 /48, all its /64s together.
-pub(crate) const DEFAULT_MAX_PREAUTH_CONNECTIONS_PER_IPV6_48: usize = 32;
 
 pub(crate) const DEFAULT_AUTH_TIMEOUT_MS: u64 = 30_000;
 
@@ -57,8 +51,6 @@ pub(crate) struct ProxyConfig {
     /// Accepted but not yet authenticated; bounded separately so pre-auth
     /// sockets cannot occupy the whole pool.
     pub(crate) max_preauth_connections: usize,
-    pub(crate) max_preauth_connections_per_ip: usize,
-    pub(crate) max_preauth_connections_per_ipv6_48: usize,
     /// From accept to successful public-key authentication.
     pub(crate) auth_timeout: Duration,
     pub(crate) reconnect_delay: Duration,
@@ -106,26 +98,6 @@ impl ProxyConfig {
             1,
             max_connections,
         )?;
-        let preauth_per_ip_cap = max_connections_per_ip.min(max_preauth_connections);
-        let max_preauth_connections_per_ip = validate_limit(
-            "NYABASE_SSH_MAX_PREAUTH_CONNECTIONS_PER_IP",
-            env_usize(
-                "NYABASE_SSH_MAX_PREAUTH_CONNECTIONS_PER_IP",
-                DEFAULT_MAX_PREAUTH_CONNECTIONS_PER_IP.min(preauth_per_ip_cap),
-            )?,
-            1,
-            preauth_per_ip_cap,
-        )?;
-        let preauth_per_site_cap = max_connections_per_ipv6_48.min(max_preauth_connections);
-        let max_preauth_connections_per_ipv6_48 = validate_limit(
-            "NYABASE_SSH_MAX_PREAUTH_CONNECTIONS_PER_IPV6_48",
-            env_usize(
-                "NYABASE_SSH_MAX_PREAUTH_CONNECTIONS_PER_IPV6_48",
-                DEFAULT_MAX_PREAUTH_CONNECTIONS_PER_IPV6_48.min(preauth_per_site_cap),
-            )?,
-            1,
-            preauth_per_site_cap,
-        )?;
         let auth_timeout_ms = validate_auth_timeout(env_u64(
             "NYABASE_SSH_AUTH_TIMEOUT_MS",
             DEFAULT_AUTH_TIMEOUT_MS,
@@ -150,8 +122,6 @@ impl ProxyConfig {
             max_connections_per_ip,
             max_connections_per_ipv6_48,
             max_preauth_connections,
-            max_preauth_connections_per_ip,
-            max_preauth_connections_per_ipv6_48,
             auth_timeout: Duration::from_millis(auth_timeout_ms),
             reconnect_delay: Duration::from_millis(reconnect_delay_ms),
             route_connect_timeout: Duration::from_millis(route_connect_timeout_ms),
@@ -169,8 +139,6 @@ impl ProxyConfig {
             per_client: self.max_connections_per_ip,
             per_site: self.max_connections_per_ipv6_48,
             pending: self.max_preauth_connections,
-            pending_per_client: self.max_preauth_connections_per_ip,
-            pending_per_site: self.max_preauth_connections_per_ipv6_48,
         }
     }
 }

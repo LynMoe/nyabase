@@ -62,8 +62,6 @@ pub(crate) async fn serve_public(
                     LimitRejection::PerClient => "rejected_client_limit",
                     LimitRejection::PerSite => "rejected_site_limit",
                     LimitRejection::Pending => "rejected_preauth_limit",
-                    LimitRejection::PendingPerClient => "rejected_preauth_client_limit",
-                    LimitRejection::PendingPerSite => "rejected_preauth_site_limit",
                 };
                 emit_metric(
                     &telemetry,
