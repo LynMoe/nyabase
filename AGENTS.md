@@ -159,18 +159,18 @@ Vite 通过 alias 将 `@nyabase/common` 指向 `src/index.ts`，但 `index.ts` �
    并在 OPERATIONS.md 写升级顺序，然后重新固定摘要。agent 安装包只用 `pnpm build:agent-bundle`
    （`scripts/build-agent-bundle.sh`，lab e2e 同用）构建，版本 `<package>+g<commit>` 随 hello 上报。
 
-8. 体量上限（`scripts/check-source-size.mjs`，已接入 `scripts/check.sh`）：手写的 backend / frontend / common / agent
-   源文件 ≤ 800 行，单个函数 / 方法 ≤ 150 行（`api-types.ts`、`routeTree.gen.ts`、测试文件除外）。确有理由超出时，
-   在文件内或函数上方写一行 `// size-exception: <原因>`。
-9. 数据访问每个模块只选一种风格，不在同一文件里混用裸 SQL 与 repository 调用同一批表：
-   - API service（volumes、storage-pools、containers 控制面、shared-backends、ip-pools、groups 等）通过本模块的
-     `*.repository.ts` 访问自己拥有的表；跨模块的只读查询是专门的 read-model 文件里的 Kysely 查询。
-   - reconciler 的全部 SQL 放在同目录的私有 `*.store.ts`（由 reconciler 构造函数内部创建，不是 DI provider），
-     reconciler 只把 Kysely 句柄交给 store，自身和拆出的步骤函数文件里不写查询。
-   - servers、images、http-proxy、users 直接在 service 里使用 Kysely，不设 repository。
-   - 跨模块共用的 advisory lock 常量在 `platform/persistence-pg/advisory-locks.ts`（原 `infrastructure/` 已删除，
-     servers / images 各自拥有自己的查询）。
-10. 大 service 按职责拆成小 service + 纯函数文件（`*-support.ts`、`*-deps.ts` 里的依赖对象、步骤函数），
+10. 体量上限（`scripts/check-source-size.mjs`，已接入 `scripts/check.sh`）：手写的 backend / frontend / common / agent
+    源文件 ≤ 800 行，单个函数 / 方法 ≤ 150 行（`api-types.ts`、`routeTree.gen.ts`、测试文件除外）。确有理由超出时，
+    在文件内或函数上方写一行 `// size-exception: <原因>`。
+11. 数据访问每个模块只选一种风格，不在同一文件里混用裸 SQL 与 repository 调用同一批表：
+    - API service（volumes、storage-pools、containers 控制面、shared-backends、ip-pools、groups 等）通过本模块的
+      `*.repository.ts` 访问自己拥有的表；跨模块的只读查询是专门的 read-model 文件里的 Kysely 查询。
+    - reconciler 的全部 SQL 放在同目录的私有 `*.store.ts`（由 reconciler 构造函数内部创建，不是 DI provider），
+      reconciler 只把 Kysely 句柄交给 store，自身和拆出的步骤函数文件里不写查询。
+    - servers、images、http-proxy、users 直接在 service 里使用 Kysely，不设 repository。
+    - 跨模块共用的 advisory lock 常量在 `platform/persistence-pg/advisory-locks.ts`（原 `infrastructure/` 已删除，
+      servers / images 各自拥有自己的查询）。
+12. 大 service 按职责拆成小 service + 纯函数文件（`*-support.ts`、`*-deps.ts` 里的依赖对象、步骤函数），
     例如 volumes 拆为 `local-volumes` / `shared-volumes` / `volume-attachments` 三个 service，http-proxy 拆为
     bindings / domain-pools / snapshot；`IncusClient` 保持单一 facade，按 API 领域分层（transport → server →
     instance → storage → image）。
@@ -219,8 +219,9 @@ lab 场景 API 测试，不在 CI 里跑；CI 只跑 `pnpm e2e:check`（e2e 包 
 即 `tests/e2e/e2e.sh up|run|down`；输入见 `tests/e2e/lab.env.example`（复制为被忽略的 `tests/e2e/lab.env`），说明见 `tests/e2e/README.md`。
 
 - `up` 在独立运行目录里建新 PG 库、生成 secrets，启动单进程 Backend（`dist`）和两个 Rust 代理，
-  经 trust token 注册 lab 服务器，写 `state.json`；`down` 只删除本次运行创建的东西：带本次 server id 标签的实例、
-  本次库里记录的卷、以本次 Incus 客户端证书指纹匹配的 trust 条目，然后删库、删运行目录。
+  注册 lab 服务器，用 `pnpm build:agent-bundle` 的同一份安装包在每台 lab 主机上起本次运行专属的 agent
+  （transient systemd unit，远端经 `ssh -R` 反向隧道回连 loopback Backend，用一次性 enrollment token 接入），写 `state.json`；
+  `down` 只删除本次运行创建的东西：带本次 server id 标签的实例、本次库里记录的卷、本次的 agent unit 与目录，然后删库、删运行目录。
 - 场景是 `scenarios/*.test.ts`（`node --test` + `tsx`），用 `client/` 里很薄的类型化 API 客户端，请求/响应类型来自
   `@nyabase/common`；每个场景自建自清。过期/清除通过把 `control.access_lapses.lapsed_at` 写成过去时间来驱动，
   **不得**为测试加生产开关。改了路由或 DTO，先让 `pnpm e2e:check` 的类型检查通过。
@@ -236,7 +237,7 @@ lab 场景 API 测试，不在 CI 里跑；CI 只跑 `pnpm e2e:check`（e2e 包 
   `lockOwnerServerQuota` 下检查（`sumRunningMemBytes`）：start、把 `power_intent` 从非 running 改回 running 的 restart（`admitStart`）、running 创建、running 容器的 PATCH limits 增大；stopped 创建/PATCH、减小、期望已是 running 的 restart、
   管理员/system 操作与 reconciler 恢复期望状态都不检查。授权缩小不会停掉运行中的容器，只是不能再启动。start（及上述 restart）时容器持有的 GPU claim 必须 ⊆ 当前授权（`GPU_NOT_GRANTED`），不自动释放。
 - 缩容（卷与系统盘）：请求时就写入更小的 `size_bytes` / `root_size_bytes`，但空间要等 reconciler 真正缩完才释放。验证前，
-  卷的 `shrink_reserved_bytes`、容器的 `root_shrink_reserved_bytes`（迁移 000002）保留此前可能仍在 Incus 上的最大尺寸，
+  卷的 `shrink_reserved_bytes`、容器的 `root_shrink_reserved_bytes`保留此前可能仍在 Incus 上的最大尺寸，
   所有配额 / 容量求和都按 `greatest(size, reserved)` 计（`platform/persistence-pg/committed-bytes.ts`，准入差额由
   `volumes/volume-rules.ts` 的 `shrinkReservation` 算，在预留内重新扩容不占额度）。用量阻止的缩容回退
   （`revertImpossibleShrink` / `revertImpossibleRootShrink`）只作用于本轮 reconcile 的 revision，回退尺寸在预留之内，绝不让用户超出授权；
