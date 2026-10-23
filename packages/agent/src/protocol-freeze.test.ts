@@ -20,7 +20,7 @@ const CONTRACT_SOURCES = [
 
 const PINNED: { readonly protocol: number; readonly sha256: string } = {
   protocol: 2,
-  sha256: '8128f6e90ac5dbcbca3c2bb9d68e7b474ebf2ca4e4cd029532912baed8470f2d',
+  sha256: 'b6a78a2fddb6fb89a777a4e16deb4535beba0d715e36cc600b457fe37cc69626',
 };
 
 function contractDigest(): string {
@@ -32,8 +32,17 @@ function contractDigest(): string {
   return hash.digest('hex');
 }
 
+const REPIN_HELP = [
+  'The agent protocol contract changed (common/src/protocol/agent.ts, agent policy.ts or policy-body.ts).',
+  'Decide whether a Backend and an agent built on different sides of this change could refuse each',
+  "other's frames or requests. If so, bump AGENT_PROTOCOL_VERSION (common/src/protocol/agent.ts) and",
+  'write the upgrade order in deploy/OPERATIONS.md ("升级与版本匹配"); if not (or the current version',
+  'never shipped), keep it. Either way, copy the received protocol and sha256 into PINNED in',
+  'packages/agent/src/protocol-freeze.test.ts. REST-only types do not belong in agent.ts.',
+].join('\n');
+
 describe('agent protocol contract', () => {
   it('is pinned for the current protocol version', () => {
-    expect({ protocol: AGENT_PROTOCOL_VERSION, sha256: contractDigest() }).toEqual(PINNED);
+    expect({ protocol: AGENT_PROTOCOL_VERSION, sha256: contractDigest() }, REPIN_HELP).toEqual(PINNED);
   });
 });
