@@ -1,15 +1,18 @@
 import { EventEmitter } from 'node:events';
 import { randomUUID } from 'node:crypto';
+import { UnauthorizedException } from '@nestjs/common';
 import { describe, expect, it, vi } from 'vitest';
 import { SessionRevocationService } from '../iam/session-revocation.service.js';
 import {
   CONSOLE_CLOSE_AUTH_EXPIRED,
   CONSOLE_CLOSE_BACKPRESSURE,
+  CONSOLE_CLOSE_INPUT_OVERFLOW,
   CONSOLE_CLOSE_SESSION_REVOKED,
   ConsoleBridgeGateway,
   MAX_CONSOLE_BUFFERED_BYTES,
 } from './console-bridge.gateway.js';
 import { EphemeralStore } from '../platform/ephemeral-store.js';
+import { MAX_CONSOLE_PENDING_INPUT_BYTES } from './console-frames.js';
 import { ConsoleSessionService, type ConsoleSession } from './console-session.service.js';
 
 const OPEN = 1;
@@ -37,6 +40,8 @@ function harness() {
   const tokens = new Map<string, { userId: string; sessionId: string; expiresAt: Date }>();
   /** Live browser sessions and their idle expiry; absent = logged out. */
   const browserSessions = new Map<string, Date>();
+  /** Absolute end (epoch ms) of a browser session; absent = far away. */
+  const absoluteEnds = new Map<string, number>();
   const sessions = {
     claim: vi.fn(async (sessionId: string, actorId: string): Promise<ConsoleSession> => ({
       sessionId,
@@ -63,13 +68,15 @@ function harness() {
   const auth = {
     validateAccessToken: vi.fn(async (token: string) => {
       const found = tokens.get(token);
-      if (!found) throw new Error('Invalid access token');
+      if (!found) throw new UnauthorizedException('Invalid access token');
       return { user: { id: found.userId, authVersion: 0 }, sessionId: found.sessionId, expiresAt: found.expiresAt };
     }),
     browserSessionDeadline: vi.fn(async (credential: { sessionId: string; expiresAt: Date }) => {
       const sessionEnd = browserSessions.get(credential.sessionId);
       if (!sessionEnd) return null;
-      return new Date(Math.min(sessionEnd.getTime(), credential.expiresAt.getTime()));
+      const absoluteEnd = absoluteEnds.get(credential.sessionId) ?? Number.MAX_SAFE_INTEGER;
+      const at = Math.min(sessionEnd.getTime(), credential.expiresAt.getTime(), absoluteEnd);
+      return { at: new Date(at), renewable: at < absoluteEnd };
     }),
   };
   const gateway = new ConsoleBridgeGateway(
@@ -99,7 +106,8 @@ function harness() {
   }
 
   return {
-    gateway, revocations, physical, sessions, generationAtCreate, browserSessions, connect, issue,
+    gateway, revocations, physical, sessions, auth, generationAtCreate, browserSessions, absoluteEnds,
+    connect, issue,
   };
 }
 
@@ -223,6 +231,103 @@ describe('console bridge re-authentication', () => {
     alice.socket.emit('message', Buffer.from(JSON.stringify({ type: 'auth', token: fresh })));
     await vi.waitFor(() => expect(alice.socket.close)
       .toHaveBeenCalledWith(CONSOLE_CLOSE_SESSION_REVOKED, 'session revoked'));
+    await alice.handled;
+  });
+});
+
+describe('console bridge frame dispatch and re-authentication edges', () => {
+  function auth(socket: FakeSocket, token: string): void {
+    socket.emit('message', Buffer.from(JSON.stringify({ type: 'auth', token })));
+  }
+
+  it('answers a re-authentication prompt sent while the exec stream is still opening', async () => {
+    const setup = harness();
+    let openExec!: () => void;
+    setup.sessions.openExec.mockImplementationOnce(() => new Promise((resolve) => {
+      openExec = () => resolve(setup.physical);
+    }));
+    // So little authority left that the prompt fires before the exec opens.
+    const alice = await setup.connect('alice', { lifetimeMs: 150 });
+    await vi.waitFor(() => expect(sentTypes(alice.socket)).toContain('reauthenticate'));
+    auth(alice.socket, setup.issue('alice', alice.sessionId));
+    await vi.waitFor(() => expect(setup.auth.browserSessionDeadline).toHaveBeenCalledTimes(2));
+    openExec();
+    await vi.waitFor(() => expect(sentTypes(alice.socket)).toContain('ready'));
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    expect(alice.socket.close).not.toHaveBeenCalled();
+    alice.socket.close(1000);
+    await alice.handled;
+  });
+
+  it('replays input typed before the exec stream opened, in order', async () => {
+    const setup = harness();
+    const stdin = Object.assign(new EventEmitter(), { send: vi.fn() });
+    setup.physical.sockets = { '0': stdin };
+    let openExec!: () => void;
+    setup.sessions.openExec.mockImplementationOnce(() => new Promise((resolve) => {
+      openExec = () => resolve(setup.physical);
+    }));
+    const alice = await setup.connect('alice');
+    await vi.waitFor(() => expect(setup.sessions.openExec).toHaveBeenCalled());
+    for (const data of ['l', 's']) {
+      alice.socket.emit('message', Buffer.from(JSON.stringify({ type: 'input', data })));
+    }
+    openExec();
+    await vi.waitFor(() => expect(stdin.send).toHaveBeenCalledTimes(2));
+    expect(stdin.send.mock.calls.map(([raw]) => String(raw))).toEqual(['l', 's']);
+    alice.socket.close(1000);
+    await alice.handled;
+  });
+
+  it('closes instead of dropping keys when too much input arrives before the exec opens', async () => {
+    const setup = harness();
+    setup.sessions.openExec.mockImplementationOnce(() => new Promise(() => undefined));
+    const alice = await setup.connect('alice');
+    await vi.waitFor(() => expect(setup.sessions.openExec).toHaveBeenCalled());
+    const data = 'x'.repeat(MAX_CONSOLE_PENDING_INPUT_BYTES);
+    alice.socket.emit('message', Buffer.from(JSON.stringify({ type: 'input', data })));
+    expect(alice.socket.close).toHaveBeenCalledWith(CONSOLE_CLOSE_INPUT_OVERFLOW, 'console input overflow');
+  });
+
+  it('keeps the console through a transient failure checking a fresh token', async () => {
+    const setup = harness();
+    const alice = await setup.connect('alice');
+    await vi.waitFor(() => expect(sentTypes(alice.socket)).toContain('ready'));
+    setup.auth.validateAccessToken.mockRejectedValueOnce(new Error('timeout exceeded when trying to connect'));
+    auth(alice.socket, setup.issue('alice', alice.sessionId));
+    // Checked again after the first retry delay, and accepted.
+    await vi.waitFor(
+      () => expect(setup.auth.browserSessionDeadline).toHaveBeenCalledTimes(2),
+      { timeout: 3_000 },
+    );
+    expect(setup.auth.validateAccessToken).toHaveBeenCalledTimes(3);
+    expect(alice.socket.close).not.toHaveBeenCalled();
+    alice.socket.close(1000);
+    await alice.handled;
+  });
+
+  it('does not ask for a token that cannot move the deadline, and closes at it', async () => {
+    const setup = harness();
+    const sessionId = 'alice-ending';
+    // The session's absolute end comes before the token expires.
+    setup.absoluteEnds.set(sessionId, Date.now() + 80);
+    const alice = await setup.connect('alice', { sessionId });
+    await vi.waitFor(() => expect(alice.socket.close)
+      .toHaveBeenCalledWith(CONSOLE_CLOSE_AUTH_EXPIRED, 'console credential expired'));
+    expect(sentTypes(alice.socket)).not.toContain('reauthenticate');
+    await alice.handled;
+  });
+
+  it('asks once per extension: a fresh token that lands on the absolute end is not asked for again', async () => {
+    const setup = harness();
+    const sessionId = 'alice-near-end';
+    const alice = await setup.connect('alice', { sessionId, lifetimeMs: 60 });
+    await vi.waitFor(() => expect(sentTypes(alice.socket)).toContain('reauthenticate'));
+    setup.absoluteEnds.set(sessionId, Date.now() + 120);
+    auth(alice.socket, setup.issue('alice', sessionId));
+    await vi.waitFor(() => expect(alice.socket.close)
+      .toHaveBeenCalledWith(CONSOLE_CLOSE_AUTH_EXPIRED, 'console credential expired'));
+    expect(sentTypes(alice.socket).filter((type) => type === 'reauthenticate')).toHaveLength(1);
     await alice.handled;
   });
 });

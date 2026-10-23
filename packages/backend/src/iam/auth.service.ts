@@ -53,6 +53,13 @@ export interface AccessCredential {
   expiresAt: Date;
 }
 
+/** How long an `AccessCredential` may keep authorizing a long-lived connection. */
+export interface ConnectionDeadline {
+  at: Date;
+  /** False once `at` is the browser session's absolute end. */
+  renewable: boolean;
+}
+
 const SESSION_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export const MAX_REFRESH_SESSIONS_PER_USER = 16;
@@ -376,20 +383,23 @@ export class AuthService {
    * first of the token's own expiry, the browser session's idle expiry and its
    * absolute end. Null when the session is gone (logged out, reused, evicted,
    * expired) or belongs to someone else. A connection must present a fresh
-   * access token, re-checked here, before this moment to keep going.
+   * access token, re-checked here, before this moment to keep going; once the
+   * deadline is the absolute end no fresh token can move it (`renewable` false).
    */
-  async browserSessionDeadline(credential: AccessCredential): Promise<Date | null> {
+  async browserSessionDeadline(credential: AccessCredential): Promise<ConnectionDeadline | null> {
     const session = await this.persistence.findLiveRefreshSession(
       credential.user.id,
       credential.sessionId,
     );
     if (!session) return null;
+    const absoluteEnd = session.createdAt.getTime() + this.sessionLifetimeMs().absoluteMs;
     const deadline = Math.min(
       credential.expiresAt.getTime(),
       session.expiresAt.getTime(),
-      session.createdAt.getTime() + this.sessionLifetimeMs().absoluteMs,
+      absoluteEnd,
     );
-    return deadline > Date.now() ? new Date(deadline) : null;
+    if (deadline <= Date.now()) return null;
+    return { at: new Date(deadline), renewable: deadline < absoluteEnd };
   }
 
   async hashPassword(password: string): Promise<string> {

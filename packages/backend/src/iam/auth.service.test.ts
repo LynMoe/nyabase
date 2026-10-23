@@ -435,19 +435,23 @@ describe('AuthService browser-session binding', () => {
   it('bounds a long-lived connection by the token and the session, and ends it on logout', async () => {
     const { service, persistence, ended, user, login, sessionId } = await boundSession();
     const credential = await service.validateAccessToken(login.accessToken);
-    await expect(service.browserSessionDeadline(credential)).resolves.toEqual(credential.expiresAt);
+    await expect(service.browserSessionDeadline(credential))
+      .resolves.toEqual({ at: credential.expiresAt, renewable: true });
 
     // An idle expiry before the token's own expiry wins.
     const idleEnd = new Date(Date.now() + 60_000);
     persistence.updateRefreshByHash(persistence.refreshRows()[0]!.hash, { expiresAt: idleEnd });
-    await expect(service.browserSessionDeadline(credential)).resolves.toEqual(idleEnd);
+    await expect(service.browserSessionDeadline(credential))
+      .resolves.toEqual({ at: idleEnd, renewable: true });
     // So does the absolute end (login + 30 days).
     persistence.updateRefreshByHash(persistence.refreshRows()[0]!.hash, {
       expiresAt: new Date(Date.now() + DAY),
       createdAt: new Date(Date.now() - 30 * DAY + 30_000),
     });
+    // ... and no fresh token can move it.
     const absolute = await service.browserSessionDeadline(credential);
-    expect(absolute!.getTime()).toBeLessThanOrEqual(Date.now() + 30_000);
+    expect(absolute!.at.getTime()).toBeLessThanOrEqual(Date.now() + 30_000);
+    expect(absolute!.renewable).toBe(false);
 
     await expect(service.logout(login.refreshToken)).resolves.toBe(user.id);
     expect(ended).toEqual([[user.id, sessionId]]);

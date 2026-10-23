@@ -4,16 +4,18 @@ import {
   Logger,
   OnModuleDestroy,
   OnModuleInit,
+  UnauthorizedException,
 } from '@nestjs/common';
 import * as http from 'node:http';
 import { URL } from 'node:url';
-import { WebSocket, WebSocketServer, type RawData } from 'ws';
+import { WebSocket, WebSocketServer } from 'ws';
 import type { ConsoleToBrowser } from '@nyabase/common';
 import { type AccessCredential, AuthService } from '../iam/auth.service.js';
 import { SessionRevocationService } from '../iam/session-revocation.service.js';
 import { INCUS_CLIENT_FACTORY, type IncusClientFactory } from '../incus/incus-client.factory.js';
 import type { IncusExecWebSocketSession } from '../incus/index.js';
 import { ConsoleSessionService, type ConsoleSession } from './console-session.service.js';
+import { ConsoleFrameDispatcher, type ConsoleExecFrame } from './console-frames.js';
 
 const MAX_CONSOLE_FRAME_BYTES = 256 * 1024;
 const AUTH_TIMEOUT_MS = 10_000;
@@ -32,6 +34,14 @@ const CLOSE_GRACE_MS = 1_000;
  */
 const REAUTH_LEAD_MIN_MS = 5_000;
 const REAUTH_LEAD_MAX_MS = 60_000;
+/**
+ * A fresh token whose check fails for a reason other than authentication (a
+ * database stall) is checked again after these delays, while the current
+ * deadline still holds; the console is never revoked for such a failure.
+ */
+const REAUTH_RETRY_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 15_000] as const;
+/** Close code sent when more input arrived before the exec stream opened than is held. */
+export const CONSOLE_CLOSE_INPUT_OVERFLOW = 1009;
 
 /** Browser-facing text per error code; internal error messages never leave the backend. */
 const CONSOLE_ERROR_MESSAGES: Readonly<Record<string, string>> = {
@@ -61,6 +71,8 @@ interface ConsoleConnection {
   readonly socket: WebSocket;
   readonly userId: string;
   readonly browserSessionId: string;
+  /** Epoch ms; 0 until the first authorization. */
+  deadline: number;
   deadlineTimer: NodeJS.Timeout | null;
   promptTimer: NodeJS.Timeout | null;
   /** Re-authentications run one at a time, in arrival order. */
@@ -126,7 +138,12 @@ export class ConsoleBridgeGateway implements OnModuleInit, OnModuleDestroy {
       socket.close(1008);
       return;
     }
-    const auth = await this.firstAuthFrame(socket);
+    // The socket's only message listener, from now until it closes.
+    const frames = new ConsoleFrameDispatcher(socket, {
+      invalid: () => this.sendError(socket, 'CONSOLE_FRAME_INVALID'),
+      overflow: () => socket.close(CONSOLE_CLOSE_INPUT_OVERFLOW, 'console input overflow'),
+    }, AUTH_TIMEOUT_MS);
+    const auth = await frames.firstAuth;
     const credential = await this.auth.validateAccessToken(auth);
     const { user } = credential;
     const session = await this.sessions.claim(sessionId, user.id, user.authVersion);
@@ -148,6 +165,7 @@ export class ConsoleBridgeGateway implements OnModuleInit, OnModuleDestroy {
     // Registered before the session row is read: a logout committing after
     // that read reaches this console through the listener.
     const connection = this.register(socket, credential);
+    frames.onAuth((token) => this.reauthenticate(connection, token));
     let physical: IncusExecWebSocketSession | undefined;
     try {
       // A revocation between session creation and registration was missed by
@@ -165,7 +183,8 @@ export class ConsoleBridgeGateway implements OnModuleInit, OnModuleDestroy {
       if (socket.readyState !== WebSocket.OPEN) return;
       socket.send(JSON.stringify({ type: 'ready' }));
       this.pipePhysical(socket, physical, session);
-      socket.on('message', (raw) => this.handleBrowserFrame(connection, physical!, raw));
+      const exec = physical;
+      frames.onExec((frame) => this.forwardToExec(exec, frame));
       await closed;
     } finally {
       physical?.close();
@@ -179,6 +198,7 @@ export class ConsoleBridgeGateway implements OnModuleInit, OnModuleDestroy {
       socket,
       userId: credential.user.id,
       browserSessionId: credential.sessionId,
+      deadline: 0,
       deadlineTimer: null,
       promptTimer: null,
       reauth: Promise.resolve(),
@@ -208,7 +228,9 @@ export class ConsoleBridgeGateway implements OnModuleInit, OnModuleDestroy {
 
   /**
    * Check that `credential`'s browser session is still live and arm the
-   * console's deadline from it. False: the session is gone.
+   * console's deadline from it. False: the session is gone. The browser is
+   * asked for a fresh token only when one can move the deadline: not once it
+   * is the session's absolute end, nor when the last token did not move it.
    */
   private async authorize(connection: ConsoleConnection, credential: AccessCredential): Promise<boolean> {
     if (
@@ -218,14 +240,19 @@ export class ConsoleBridgeGateway implements OnModuleInit, OnModuleDestroy {
     const deadline = await this.auth.browserSessionDeadline(credential);
     // Closed meanwhile: arm nothing for a console that is already gone.
     if (!deadline || connection.socket.readyState !== WebSocket.OPEN) return false;
+    const at = deadline.at.getTime();
+    const extended = at > connection.deadline;
     this.clearTimers(connection);
-    const remainingMs = deadline.getTime() - Date.now();
-    const leadMs = Math.min(REAUTH_LEAD_MAX_MS, Math.max(REAUTH_LEAD_MIN_MS, remainingMs / 4));
-    connection.promptTimer = this.timerAt(deadline.getTime() - leadMs, () => {
-      connection.promptTimer = null;
-      this.send(connection.socket, { type: 'reauthenticate' });
-    });
-    connection.deadlineTimer = this.timerAt(deadline.getTime(), () => {
+    connection.deadline = at;
+    if (deadline.renewable && extended) {
+      const remainingMs = at - Date.now();
+      const leadMs = Math.min(REAUTH_LEAD_MAX_MS, Math.max(REAUTH_LEAD_MIN_MS, remainingMs / 4));
+      connection.promptTimer = this.timerAt(at - leadMs, () => {
+        connection.promptTimer = null;
+        this.send(connection.socket, { type: 'reauthenticate' });
+      });
+    }
+    connection.deadlineTimer = this.timerAt(at, () => {
       connection.deadlineTimer = null;
       this.closeExpired(connection.socket);
     });
@@ -238,20 +265,41 @@ export class ConsoleBridgeGateway implements OnModuleInit, OnModuleDestroy {
    * console closes now instead of at the old deadline.
    */
   private reauthenticate(connection: ConsoleConnection, token: string): void {
-    connection.reauth = connection.reauth.then(async () => {
+    connection.reauth = connection.reauth
+      .then(() => this.checkFreshToken(connection, token))
+      .catch((error: unknown) => {
+        // Not an authentication verdict: the current deadline still holds.
+        this.logger.warn(`Console re-authentication failed: ${error instanceof Error ? error.message : String(error)}`);
+      });
+  }
+
+  /**
+   * Only an authentication verdict (invalid token, another user or session,
+   * session gone) revokes the console. Any other failure (a database stall)
+   * keeps the current deadline and checks the same token again while that
+   * deadline leaves time to; the console then lapses at it like an unanswered
+   * prompt instead of being reported as logged out.
+   */
+  private async checkFreshToken(connection: ConsoleConnection, token: string): Promise<void> {
+    for (let attempt = 0; ; attempt += 1) {
       if (connection.socket.readyState !== WebSocket.OPEN) return;
-      let accepted = false;
       try {
         const credential = await this.auth.validateAccessToken(token);
-        accepted = await this.authorize(connection, credential);
-      } catch {
-        accepted = false;
+        if (!(await this.authorize(connection, credential))) this.closeRevoked(connection.socket);
+        return;
+      } catch (error) {
+        if (error instanceof UnauthorizedException) {
+          this.closeRevoked(connection.socket);
+          return;
+        }
+        const delayMs = REAUTH_RETRY_DELAYS_MS[attempt];
+        if (delayMs === undefined || Date.now() + delayMs >= connection.deadline) throw error;
+        this.logger.warn(`Console re-authentication check failed, retrying: ${error instanceof Error ? error.message : String(error)}`);
+        await new Promise<void>((resolve) => {
+          setTimeout(resolve, delayMs).unref?.();
+        });
       }
-      if (!accepted) this.closeRevoked(connection.socket);
-    }).catch((error: unknown) => {
-      this.logger.warn(`Console re-authentication failed: ${error instanceof Error ? error.message : String(error)}`);
-      this.closeRevoked(connection.socket);
-    });
+    }
   }
 
   /** Deadlines are bounded by the access-token lifetime (at most 24 h), well within setTimeout's range. */
@@ -337,63 +385,18 @@ export class ConsoleBridgeGateway implements OnModuleInit, OnModuleDestroy {
     browser.send(encoded);
   }
 
-  private handleBrowserFrame(
-    connection: ConsoleConnection,
-    physical: IncusExecWebSocketSession,
-    raw: RawData,
-  ): void {
-    const browser = connection.socket;
-    let message: unknown;
-    try {
-      message = JSON.parse(raw.toString());
-    } catch {
-      this.sendError(browser, 'CONSOLE_FRAME_INVALID');
-      return;
-    }
-    if (!message || typeof message !== 'object' || Array.isArray(message)) return;
-    const frame = message as Record<string, unknown>;
-    if (frame.type === 'auth' && typeof frame.token === 'string') {
-      this.reauthenticate(connection, frame.token);
-      return;
-    }
-    if (frame.type === 'input' && typeof frame.data === 'string') {
+  private forwardToExec(physical: IncusExecWebSocketSession, frame: ConsoleExecFrame): void {
+    if (frame.type === 'input') {
       // Incus interactive exec websockets accept binary frames for stdin/stdout.
       // Text frames are ignored, which presents as a connected console that
       // cannot accept keyboard input.
       physical.sockets['0']?.send(Buffer.from(frame.data, 'utf8'));
       return;
     }
-    if (
-      frame.type === 'resize'
-      && Number.isSafeInteger(frame.cols)
-      && Number.isSafeInteger(frame.rows)
-    ) {
-      physical.sockets.control?.send(JSON.stringify({
-        command: 'window-resize',
-        args: [String(frame.cols), String(frame.rows)],
-      }));
-    }
-  }
-
-  private firstAuthFrame(socket: WebSocket): Promise<string> {
-    return new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        socket.removeAllListeners('message');
-        reject(new Error('Console authentication timed out'));
-      }, AUTH_TIMEOUT_MS);
-      socket.once('message', (raw) => {
-        clearTimeout(timeout);
-        try {
-          const message = JSON.parse(raw.toString()) as Record<string, unknown>;
-          if (message.type !== 'auth' || typeof message.token !== 'string') {
-            throw new Error('Console authentication frame is invalid');
-          }
-          resolve(message.token);
-        } catch (error) {
-          reject(error);
-        }
-      });
-    });
+    physical.sockets.control?.send(JSON.stringify({
+      command: 'window-resize',
+      args: [String(frame.cols), String(frame.rows)],
+    }));
   }
 
   private sessionId(rawUrl: string | undefined): string | null {
