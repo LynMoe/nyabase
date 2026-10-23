@@ -165,4 +165,71 @@ bash "$ops" upgrade-preflight \
   --output "$test_root/out/upgrade-preflight.txt"
 grep -qx 'result=pass' "$test_root/out/upgrade-preflight.txt"
 
+# Scheduled backup wrapper: a fake docker runs the in-container command on the
+# host with the bind mounts mapped back to their sources.
+make_fake docker '
+case "$1" in
+  ps) [[ -z "${FAKE_POSTGRES_CONTAINERS-pgcontainer}" ]] || echo "${FAKE_POSTGRES_CONTAINERS-pgcontainer}" ;;
+  inspect) echo "postgres:fake" ;;
+  run)
+    shift
+    mounts=() envs=()
+    while (($#)); do
+      case "$1" in
+        --volume) mounts+=("$2"); shift 2 ;;
+        --env) envs+=("$2"); shift 2 ;;
+        --network | --user | --security-opt | --cap-drop) shift 2 ;;
+        --rm | --read-only) shift ;;
+        *) break ;;
+      esac
+    done
+    shift # image
+    [[ "$1" == bash && "$2" == -c ]]
+    script="$3"
+    shift 3
+    for mount in "${mounts[@]}"; do
+      IFS=: read -r source target _ <<<"$mount"
+      script="${script//$target/$source}"
+    done
+    env "${envs[@]}" bash -c "$script" "$@"
+    ;;
+  *) exit 1 ;;
+esac
+'
+backup_root="$test_root/scheduled"
+mkdir -p "$backup_root"
+touch -d '30 days ago' "$backup_root/nyabase-20200101T000000Z.dump" \
+  "$backup_root/nyabase-20200101T000000Z.dump.sha256"
+touch -d '3 days ago' "$backup_root/nyabase-recent.dump"
+upload_log="$test_root/uploaded"
+make_fake upload "printf '%s\n' \"\$@\" >>'$upload_log'"
+NYABASE_DEPLOY_DIR="$PWD/deploy" \
+NYABASE_BACKUP_ROOT="$backup_root" \
+NYABASE_BACKUP_KEEP_DAYS=14 \
+NYABASE_BACKUP_UPLOAD_COMMAND="$fake_bin/upload" \
+  bash deploy/nyabase-backup.sh >/dev/null
+new_archive="$(find "$backup_root" -name 'nyabase-2*.dump' -newer "$backup_root/nyabase-recent.dump")"
+[[ -n "$new_archive" && -f "$new_archive.sha256" ]]
+[[ "$(cat "$upload_log")" == "$new_archive"$'\n'"$new_archive.sha256" ]]
+[[ ! -e "$backup_root/nyabase-20200101T000000Z.dump" ]]
+[[ ! -e "$backup_root/nyabase-20200101T000000Z.dump.sha256" ]]
+[[ -e "$backup_root/nyabase-recent.dump" ]]
+if FAKE_POSTGRES_CONTAINERS='' NYABASE_DEPLOY_DIR="$PWD/deploy" \
+  NYABASE_BACKUP_ROOT="$backup_root" bash deploy/nyabase-backup.sh 2>"$test_root/err"; then
+  echo "scheduled backup unexpectedly ran without a postgres container" >&2
+  exit 1
+fi
+grep -q 'expected one running postgres container' "$test_root/err"
+touch -d '30 days ago' "$backup_root/nyabase-kept-on-failure.dump"
+sleep 1 # a new archive name
+archives_before="$(find "$backup_root" -name 'nyabase-*' | sort)"
+if FAIL_PG_DUMP=1 NYABASE_DEPLOY_DIR="$PWD/deploy" \
+  NYABASE_BACKUP_ROOT="$backup_root" bash deploy/nyabase-backup.sh 2>/dev/null; then
+  echo "scheduled backup unexpectedly succeeded after a failed dump" >&2
+  exit 1
+fi
+# Nothing new is published and retention does not run after a failure.
+[[ "$(find "$backup_root" -name 'nyabase-*' | sort)" == "$archives_before" ]]
+[[ -z "$(find "$backup_root" -name '.nyabase-*')" ]]
+
 echo "postgres operations contract tests passed"

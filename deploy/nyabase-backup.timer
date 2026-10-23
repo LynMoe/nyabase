@@ -1,0 +1,12 @@
+[Unit]
+Description=Daily Nyabase PostgreSQL logical backup
+Documentation=file:/opt/nyabase/deploy/OPERATIONS.md
+
+[Timer]
+# Daily; a run missed while the host was down starts at the next boot.
+OnCalendar=*-*-* 03:15:00
+RandomizedDelaySec=30min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

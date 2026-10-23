@@ -223,6 +223,17 @@ for proxy in http ssh; do
     exit 1
   fi
 done
+# Scheduled logical backups ship as a oneshot service and a persistent timer.
+rg -q '^Type=oneshot$' deploy/nyabase-backup.service
+rg -q '^ExecStart=/usr/local/sbin/nyabase-backup$' deploy/nyabase-backup.service
+rg -q '^NoNewPrivileges=true$' deploy/nyabase-backup.service
+rg -q '^OnCalendar=' deploy/nyabase-backup.timer
+rg -q '^Persistent=true$' deploy/nyabase-backup.timer
+[[ -x deploy/nyabase-backup.sh ]] || { echo "deploy/nyabase-backup.sh must be executable" >&2; exit 1; }
+if rg -n -i 'password|secret|PGPASS' deploy/backup.env.example | rg -v '^[0-9]+:#'; then
+  echo "deploy/backup.env.example must not carry credentials" >&2
+  exit 1
+fi
 rg -q '^AmbientCapabilities=CAP_NET_BIND_SERVICE$' deploy/nyabase-http-proxy.service
 rg -q '^CapabilityBoundingSet=CAP_NET_BIND_SERVICE$' deploy/nyabase-http-proxy.service
 rg -q '^CapabilityBoundingSet=$' deploy/nyabase-ssh-proxy.service
@@ -244,6 +255,11 @@ for deployment_file in \
   deploy/ssh-proxy.env.example \
   deploy/nyabase-http-proxy.service \
   deploy/nyabase-ssh-proxy.service \
+  deploy/nyabase-backup.service \
+  deploy/nyabase-backup.timer \
+  deploy/nyabase-backup.sh \
+  deploy/backup.env.example \
+  deploy/postgres-app-role.sh \
   deploy/OPERATIONS.md; do
   # Host network routing (netplan `via: <GATEWAY>`, networkd `Gateway=`) is not
   # the retired Backend gateway module.

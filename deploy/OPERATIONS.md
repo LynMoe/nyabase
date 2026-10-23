@@ -74,6 +74,9 @@ docker compose --env-file .env exec victoriametrics \
   wget --quiet --output-document=- http://127.0.0.1:8428/health
 ```
 
+Before opening the installation to users, go through the **Launch
+checklist** at the end of this section.
+
 `/api/health/live` proves only that the Backend process is alive.
 `/api/health/ready` also proves exact PostgreSQL schema readiness. VictoriaMetrics
 failure must not make the Backend unready; metric queries degrade independently.
@@ -85,6 +88,19 @@ the TLS edge example below does not expose `/api/health/` publicly.
 Authenticated operators and administrators can query `/api/admin/metrics/runtime` for aggregate
 PostgreSQL pool pressure and bounded telemetry queue health;
 the response intentionally contains no SQL, keys, identities, or raw errors.
+
+### Launch checklist
+
+- [ ] The Backend runs as the non-superuser `nyabase` (**Database roles**): no
+      `Connected to PostgreSQL as a superuser` line in its log.
+- [ ] `NYABASE_VERSION` names the release, and the CPU ceilings fit the host
+      (**Capacity**).
+- [ ] The TLS edge is the only public entrypoint and `TRUSTED_PROXIES` matches
+      it (**TLS edge**).
+- [ ] `nyabase-backup.timer` is enabled, its upload command copies every
+      archive off the host, a failed run or an archive older than a day
+      alerts, and one restore drill from an off-host copy has passed
+      (**Scheduled backups**, **Restore drills**).
 
 ## Boot secrets, TLS edge, and proxies
 
@@ -921,6 +937,47 @@ both files (`$backup_root/$backup_name` and `$backup_root/$backup_name.sha256`)
 to immutable/off-host storage only after this succeeds. Back up `config.yaml`
 with them (see **Lost `ssh.keyEncryptionSecret`**).
 
+### Scheduled backups
+
+`deploy/nyabase-backup.sh`, run daily by `nyabase-backup.timer`, takes and
+verifies the logical backup above without an operator. Install it on the
+Compose host from the checkout, as root:
+
+```bash
+install -m 0755 deploy/nyabase-backup.sh /usr/local/sbin/nyabase-backup
+install -m 0644 deploy/nyabase-backup.service deploy/nyabase-backup.timer \
+  /etc/systemd/system/
+install -d -m 0755 /etc/nyabase
+install -m 0600 deploy/backup.env.example /etc/nyabase/backup.env
+install -d -m 0700 /srv/nyabase-backups
+# edit /etc/nyabase/backup.env: NYABASE_DEPLOY_DIR, the upload command
+systemctl daemon-reload
+systemctl enable --now nyabase-backup.timer
+systemctl start nyabase-backup.service    # a first run now
+journalctl -u nyabase-backup.service -n 20 --no-pager
+```
+
+Re-run the first `install` after each upgrade of the checkout; the service
+takes `postgres-ops.sh` from `NYABASE_DEPLOY_DIR` itself. A run finds the
+running `postgres` container by its Compose labels, dumps and verifies in a
+throwaway container from the same image joined to that container's network
+namespace (the trusted loopback, so there is no password file), hands the
+archive and its `.sha256` to `NYABASE_BACKUP_UPLOAD_COMMAND`, and then deletes
+local archives older than `NYABASE_BACKUP_KEEP_DAYS` (14). A failed dump,
+verification or upload fails the unit and deletes nothing. The timer fires
+daily at 03:15 plus up to 30 minutes and catches up at boot after a missed
+run; change it with `systemctl edit nyabase-backup.timer`. The unit sees
+`/home` read-only, so keep `NYABASE_BACKUP_ROOT` elsewhere.
+
+`/srv/nyabase-backups` is staging on the database's own host. A backup exists
+only once the upload command has copied it to another failure domain (object
+storage with versioning or object lock, or another host) that keeps its own
+retention and is readable by fewer people than the host. Alert when
+`nyabase-backup.service` fails (`systemctl is-failed`, or an `OnFailure=`
+drop-in that calls your alerting) and when the newest off-host archive is
+older than about 26 hours. Without the timer, run the commands under
+**Logical backups** from cron instead; the requirements are the same.
+
 ### Restore drills
 
 Restore drills always use a new, explicitly named database. Never point a
@@ -1009,6 +1066,34 @@ additionally needs every WAL segment archived continuously to a separate
 failure domain, and the shipped Compose PostgreSQL does **not** archive WAL
 (`archive_mode` is off): PITR is not available until you configure
 `archive_mode` and an `archive_command`/`archive_library` for your storage.
+It is off by default because an archive that fails (full disk, unreachable
+storage) makes PostgreSQL keep every WAL segment in `postgres-data` until the
+volume fills and the database stops. A minimal setup archives to a host
+directory owned by uid 999 (the image's `postgres` user, mode 0700) through a
+`docker-compose.override.yml` next to `docker-compose.yml`, then restarts
+PostgreSQL:
+
+```yaml
+services:
+  postgres:
+    command:
+      - postgres
+      - -c
+      - archive_mode=on
+      - -c
+      - archive_timeout=300
+      - -c
+      - >-
+        archive_command=test ! -f /wal-archive/%f
+        && cp %p /wal-archive/%f.partial && sync /wal-archive/%f.partial
+        && mv /wal-archive/%f.partial /wal-archive/%f && sync /wal-archive
+    volumes:
+      - /srv/nyabase-wal:/wal-archive
+```
+
+That directory is still the database's host: copy it off continuously, alert on
+its free space, and remove segments older than the oldest base backup you keep
+(`pg_archivecleanup`).
 Then alert on archive failure and on WAL archive age exceeding the declared
 RPO, and retain at least one verified base backup older than the RPO window.
 Storage-specific archive transport and retention belong to the deployment
