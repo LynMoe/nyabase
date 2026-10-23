@@ -99,7 +99,7 @@ Vite 通过 alias 将 `@nyabase/common` 指向 `src/index.ts`，但 `index.ts` �
   到期前后端发 `reauthenticate`，前端用**同一会话**的新 access token 再发 `auth`（`freshAccessToken`，必要时强制轮换），复核通过才顺延；
   没有新 token 到期即关（4408），换了用户 / 会话或会话已不存在立即关（4401）。其他方式结束的会话（超过 16 个被挤掉、过期）最迟在当前 access token 到期时关闭。
   截止时间已是绝对上限（`renewable: false`）或新 token 没能顺延它时不再发 `reauthenticate`，到点直接关；只有鉴权结论（`UnauthorizedException`、会话不符 / 已不存在）才 4401，
-  复核时的其他错误（DB 抖动）保留当前截止时间、按退避重试同一 token。socket 从建立起只有一个消息分发器（`containers/console-frames.ts`），
+  复核时的其他错误（DB 抖动）保留当前截止时间、按退避重试同一 token。socket 从建立起只有一个消息分发器（`console-bridge.gateway.ts` 的 `ConsoleFrameDispatcher`），
   exec 打开前到达的 `auth` 照常复核，输入 / resize 有界暂存（超出 1009 关闭）后按序转发。
   控制台先按会话登记再读会话行，所以与并发登出不会互相错过。
 

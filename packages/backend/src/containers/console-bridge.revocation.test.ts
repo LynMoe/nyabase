@@ -10,9 +10,9 @@ import {
   CONSOLE_CLOSE_SESSION_REVOKED,
   ConsoleBridgeGateway,
   MAX_CONSOLE_BUFFERED_BYTES,
+  MAX_CONSOLE_PENDING_INPUT_BYTES,
 } from './console-bridge.gateway.js';
 import { EphemeralStore } from '../platform/ephemeral-store.js';
-import { MAX_CONSOLE_PENDING_INPUT_BYTES } from './console-frames.js';
 import { ConsoleSessionService, type ConsoleSession } from './console-session.service.js';
 
 const OPEN = 1;
