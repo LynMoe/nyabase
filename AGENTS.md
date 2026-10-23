@@ -27,7 +27,7 @@ Vite 通过 alias 将 `@nyabase/common` 指向 `src/index.ts`，但 `index.ts` �
 ## API 表面：每个资源只有一套路由
 
 - 同一资源不再有 `/x` 与 `/admin/x` 两套 controller。`/admin/` 前缀只留给没有用户版本的运维资源
-  （groups、ip-pools、catalog、metrics、ssh-proxy、system-settings）；
+  （groups、ip-pools、catalog、metrics、ssh-proxy、system-settings、agent-rejections）；
   `http-api-duplicate-routes.contract.test.ts` 断言不存在同名资源同时挂在两处。
 - 鉴权在 service 里：`@CurrentActor()`（`iam/actor.ts`）给出 `{ userId, role, authKind, authVersion }`，
   `RolesGuard` 用 `JwtAuthGuard` 已加载的用户行（带 `role`）构造，不再额外查询。

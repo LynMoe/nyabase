@@ -14,7 +14,7 @@ import {
   zAgentHello,
 } from '@nyabase/common';
 import { AgentConnection } from './agent-connection.js';
-import { AgentCredentialVerifier, AgentUpgradeAdmissions, type TrustProxy } from './agent-credentials.js';
+import { AgentCredentialVerifier, AgentUpgradeAdmissions, clientAddress, type TrustProxy } from './agent-credentials.js';
 import { AGENT_CLOSE_CREDENTIAL_REJECTED, AgentRegistry } from './agent-registry.service.js';
 
 const HELLO_TIMEOUT_MS = 10_000;
@@ -42,6 +42,7 @@ export class AgentGateway implements OnModuleDestroy {
   private heartbeat?: NodeJS.Timeout;
   private readonly alive = new WeakMap<WebSocket, boolean>();
   private admissions = new AgentUpgradeAdmissions();
+  private trustProxy: TrustProxy = () => false;
 
   constructor(
     private readonly registry: AgentRegistry,
@@ -49,7 +50,8 @@ export class AgentGateway implements OnModuleDestroy {
   ) {}
 
   attachToHttpServer(server: http.Server, options: AgentGatewayOptions = {}): void {
-    this.admissions = new AgentUpgradeAdmissions(options.trustProxy);
+    this.trustProxy = options.trustProxy ?? this.trustProxy;
+    this.admissions = new AgentUpgradeAdmissions(this.trustProxy);
     this.control = new WebSocketServer({
       noServer: true,
       maxPayload: MAX_AGENT_CONTROL_FRAME_BYTES,
@@ -100,7 +102,10 @@ export class AgentGateway implements OnModuleDestroy {
     }
     let serverId: string | undefined;
     try {
-      serverId = await this.credentials.authenticate(request.headers.authorization);
+      serverId = await this.credentials.authenticate(
+        request.headers.authorization,
+        clientAddress(request, this.trustProxy),
+      );
     } finally {
       admission.settle(serverId !== undefined);
     }

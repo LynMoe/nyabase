@@ -1,8 +1,8 @@
 import { createHash, timingSafeEqual } from 'node:crypto';
 import type * as http from 'node:http';
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, Logger } from '@nestjs/common';
 import type { Kysely } from 'kysely';
-import { parseAgentSecret } from '@nyabase/common';
+import { parseAgentSecret, type RejectedAgentCredentialDto } from '@nyabase/common';
 import { clientAddressBucket, LoginAttemptLimiter } from '../iam/login-throttling.js';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
@@ -26,12 +26,98 @@ function bearerCredential(authorization: string | undefined): { credential: stri
   return parsed ? { credential, serverId: parsed.serverId } : undefined;
 }
 
+export const MAX_REJECTED_AGENT_CREDENTIALS = 256;
+/** Agents retry a rejected credential about once a minute; an hour of silence means it stopped. */
+export const REJECTED_AGENT_CREDENTIAL_TTL_MS = 60 * 60_000;
+
+interface Rejection {
+  readonly reason: RejectedAgentCredentialDto['reason'];
+  readonly clientAddress: string | null;
+  readonly firstSeenAt: number;
+  readonly lastSeenAt: number;
+  readonly attempts: number;
+}
+
+/**
+ * Well-formed agent credentials the Backend refused, by the server id they
+ * claim, so operators can see hosts that still dial in after a restore or a
+ * re-enrollment. In memory only (agents keep retrying, so it refills after a
+ * restart); bounded, the least recently seen entry goes first. Provided by
+ * factory (IncusModule), not constructor injection.
+ */
+export class AgentCredentialRejections {
+  private readonly logger = new Logger(AgentCredentialRejections.name);
+  private readonly entries = new Map<string, Rejection>();
+
+  constructor(
+    private readonly now: () => number = Date.now,
+    private readonly capacity = MAX_REJECTED_AGENT_CREDENTIALS,
+  ) {}
+
+  record(serverId: string, reason: Rejection['reason'], clientAddress: string | undefined): void {
+    const now = this.now();
+    this.prune(now);
+    const previous = this.entries.get(serverId);
+    this.entries.delete(serverId);
+    if (!previous) {
+      const from = clientAddress ?? 'an unknown address';
+      this.logger.warn(reason === 'unknown_server'
+        ? `Refused the agent at ${from}: its credential names server ${serverId}, which this database `
+          + 'does not know (a host added after the backup this database was restored from?)'
+        : `Refused the agent at ${from}: its credential for server ${serverId} does not match the stored `
+          + 'one (enrolled again since, or a stale agent); re-enroll that host');
+      while (this.entries.size >= this.capacity) {
+        const oldest = this.entries.keys().next().value;
+        if (oldest === undefined) break;
+        this.entries.delete(oldest);
+      }
+    }
+    this.entries.set(serverId, {
+      reason,
+      clientAddress: clientAddress ?? null,
+      firstSeenAt: previous?.firstSeenAt ?? now,
+      lastSeenAt: now,
+      attempts: (previous?.attempts ?? 0) + 1,
+    });
+  }
+
+  /** The server's agent authenticated: whatever was rejected for it has been resolved. */
+  forget(serverId: string): void {
+    this.entries.delete(serverId);
+  }
+
+  /** Most recently seen first. */
+  list(): RejectedAgentCredentialDto[] {
+    this.prune(this.now());
+    return [...this.entries].reverse().map(([serverId, entry]) => ({
+      serverId,
+      reason: entry.reason,
+      clientAddress: entry.clientAddress,
+      firstSeenAt: new Date(entry.firstSeenAt).toISOString(),
+      lastSeenAt: new Date(entry.lastSeenAt).toISOString(),
+      attempts: entry.attempts,
+    }));
+  }
+
+  /** Entries are kept in last-seen order, so the stale ones are at the front. */
+  private prune(now: number): void {
+    for (const [serverId, entry] of this.entries) {
+      if (now - entry.lastSeenAt < REJECTED_AGENT_CREDENTIAL_TTL_MS) return;
+      this.entries.delete(serverId);
+    }
+  }
+}
+
 /** Resolves an agent bearer credential to the server it was issued for. */
 @Injectable()
 export class AgentCredentialVerifier {
-  constructor(@Inject(PG_DATABASE) private readonly database: Kysely<NyabaseDatabase>) {}
+  constructor(
+    @Inject(PG_DATABASE) private readonly database: Kysely<NyabaseDatabase>,
+    private readonly rejections: AgentCredentialRejections,
+  ) {}
 
-  async authenticate(authorization: string | undefined): Promise<string | undefined> {
+  /** A well-formed credential that fails is recorded for operators, with the client it came from. */
+  async authenticate(authorization: string | undefined, clientAddress?: string): Promise<string | undefined> {
     const bearer = bearerCredential(authorization);
     if (!bearer) return undefined;
     const server = await this.database
@@ -39,8 +125,13 @@ export class AgentCredentialVerifier {
       .select('agent_credential_hash')
       .where('id', '=', bearer.serverId)
       .executeTakeFirst();
-    if (!server?.agent_credential_hash) return undefined;
-    return digestsEqual(server.agent_credential_hash, agentSecretDigest(bearer.credential)) ? bearer.serverId : undefined;
+    if (!server?.agent_credential_hash
+      || !digestsEqual(server.agent_credential_hash, agentSecretDigest(bearer.credential))) {
+      this.rejections.record(bearer.serverId, server ? 'bad_secret' : 'unknown_server', clientAddress);
+      return undefined;
+    }
+    this.rejections.forget(bearer.serverId);
+    return bearer.serverId;
   }
 
   /**

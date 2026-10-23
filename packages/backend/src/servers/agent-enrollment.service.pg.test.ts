@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { AgentCredentialRejections } from '../incus/agent-credentials.js';
 import { AgentCredentialVerifier } from '../incus/agent-credentials.js';
 import { seedServer } from '../iam/access.pg-test-helper.js';
 import { withPostgresTestDatabase } from '../platform/persistence-pg/postgres-test-harness.js';
@@ -17,7 +18,8 @@ describePg('agent enrollment retries', () => {
         { append: vi.fn() } as never,
         agents as never,
       );
-      const verifier = new AgentCredentialVerifier(database);
+      const rejections = new AgentCredentialRejections();
+      const verifier = new AgentCredentialVerifier(database, rejections);
       const serverId = await seedServer(database);
       const { enrollmentToken } = await database.transaction().execute(
         (transaction) => enrollment.issueInTransaction(transaction, serverId),
@@ -28,7 +30,10 @@ describePg('agent enrollment retries', () => {
       const retried = await enrollment.enroll({ enrollmentToken, hostname: 'worker-1' });
       expect(retried.credential).not.toBe(lost.credential);
       expect(agents.disconnect).toHaveBeenCalledTimes(2);
-      await expect(verifier.authenticate(`Bearer ${lost.credential}`)).resolves.toBeUndefined();
+      await expect(verifier.authenticate(`Bearer ${lost.credential}`, '192.0.2.10')).resolves.toBeUndefined();
+      expect(rejections.list()).toMatchObject([
+        { serverId, reason: 'bad_secret', clientAddress: '192.0.2.10', attempts: 1 },
+      ]);
       await expect(verifier.confirmControl(serverId, `Bearer ${lost.credential}`)).resolves.toBe(false);
       // A failed confirmation does not spend the token.
       const pending = await database
@@ -39,6 +44,8 @@ describePg('agent enrollment retries', () => {
       expect(pending).toMatchObject({ agent_credential_unconfirmed: true });
       expect(pending.agent_enrollment_token_hash).not.toBeNull();
 
+      await expect(verifier.authenticate(`Bearer ${retried.credential}`)).resolves.toBe(serverId);
+      expect(rejections.list()).toEqual([]);
       await expect(verifier.confirmControl(serverId, `Bearer ${retried.credential}`)).resolves.toBe(true);
       const spent = await database
         .selectFrom('infra.servers')
@@ -64,7 +71,7 @@ describePg('agent enrollment retries', () => {
         { append: vi.fn() } as never,
         { disconnect: vi.fn() } as never,
       );
-      const verifier = new AgentCredentialVerifier(database);
+      const verifier = new AgentCredentialVerifier(database, new AgentCredentialRejections());
       const serverId = await seedServer(database);
       const issue = () => database.transaction().execute(
         (transaction) => enrollment.issueInTransaction(transaction, serverId),
@@ -81,7 +88,7 @@ describePg('agent enrollment retries', () => {
     });
   });
 
-  it('refuses confirmation for a deleted server or a credential naming another server', async () => {
+  it('refuses a deleted server or a credential naming another server, recording the unknown server', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const enrollment = new AgentEnrollmentService(
         database,
@@ -89,7 +96,8 @@ describePg('agent enrollment retries', () => {
         { append: vi.fn() } as never,
         { disconnect: vi.fn() } as never,
       );
-      const verifier = new AgentCredentialVerifier(database);
+      const rejections = new AgentCredentialRejections();
+      const verifier = new AgentCredentialVerifier(database, rejections);
       const serverId = await seedServer(database);
       const otherId = await seedServer(database);
       const { enrollmentToken } = await database.transaction().execute(
@@ -99,6 +107,11 @@ describePg('agent enrollment retries', () => {
       await expect(verifier.confirmControl(otherId, `Bearer ${credential}`)).resolves.toBe(false);
       await database.deleteFrom('infra.servers').where('id', '=', serverId).execute();
       await expect(verifier.confirmControl(serverId, `Bearer ${credential}`)).resolves.toBe(false);
+      // As a host enrolled after the backup a restore came from would: operators see the server id it claims.
+      await expect(verifier.authenticate(`Bearer ${credential}`, '192.0.2.11')).resolves.toBeUndefined();
+      expect(rejections.list()).toMatchObject([
+        { serverId, reason: 'unknown_server', clientAddress: '192.0.2.11', attempts: 1 },
+      ]);
     });
   });
 });

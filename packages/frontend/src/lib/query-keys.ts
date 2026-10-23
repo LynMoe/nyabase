@@ -24,6 +24,7 @@ export const queryKeys = {
   servers: {
     admin: ['servers', 'admin'] as const,
     user: ['servers', 'user'] as const,
+    rejectedAgents: ['servers', 'rejected-agents'] as const,
     detail: (serverId: string) => ['server', serverId] as const,
     pools: (serverId: string, scope: ListScope) => ['storage-pools', scope, serverId] as const,
     preflight: (serverId: string) => ['server-preflight', serverId] as const,

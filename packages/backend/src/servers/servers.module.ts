@@ -10,6 +10,7 @@ import { UsersModule } from '../users/users.module.js';
 import { VolumesModule } from '../volumes/volumes.module.js';
 import { IncusPreflightChecksAdapter } from './preflight-checks.adapter.js';
 import { ServerPreflightIntentService } from './server-intents.service.js';
+import { AdminAgentRejectionsController } from './admin-agent-rejections.controller.js';
 import { AgentEnrollController } from './agent-enroll.controller.js';
 import { AgentEnrollmentService } from './agent-enrollment.service.js';
 import { AgentPresenceService } from './agent-presence.service.js';
@@ -45,7 +46,7 @@ import { ServersService } from './servers.service.js';
     AgentEnrollmentService,
     AgentPresenceService,
   ],
-  controllers: [ServersController, AgentEnrollController],
+  controllers: [ServersController, AgentEnrollController, AdminAgentRejectionsController],
   exports: [ServersService],
 })
 export class ServersModule {}

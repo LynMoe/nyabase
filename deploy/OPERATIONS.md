@@ -1156,11 +1156,20 @@ one address.
    agent connect, then every minute) records the instances it does not know
    in `control.orphan_sightings` and keeps them stopped.
 6. **Fix the servers that are refused.** Their agents log `Backend rejected
-   the agent credential` and the servers do not come `online`.
-   - A server in the list from step 4 was re-enrolled after the backup: sign
-     in, issue a new enrollment token for it, and re-enroll its agent with
-     that token (**接入（enrollment）**, step 3).
-   - A host missing from that list was added after the backup. Stop its agent
+   the agent credential` and the servers do not come `online`. The Backend
+   lists every refused agent at the top of the servers page (服务器; `GET
+   /api/admin/agent-rejections`, operator), with the server id its credential
+   claims, the client address it dialed from, the reason and how often it
+   tried, and logs a warning once per server id. The list is kept in memory:
+   it shows the agents that dialed in since the Backend started (a refused
+   agent retries about once a minute) and drops one that authenticates or
+   stays silent for an hour.
+   - 凭据与本库不符 (`bad_secret`): the server is in the list from step 4 and
+     was enrolled or re-enrolled after the backup: sign in, issue a new
+     enrollment token for it, and re-enroll its agent with that token
+     (**接入（enrollment）**, step 3).
+   - 本库没有此服务器 (`unknown_server`): the host was added after the backup
+     (compare the client address with your inventory). Stop its agent
      (`systemctl disable --now nyabase-agent`). Its instances and `nyv-*`
      volumes are labelled with a server id the restored database does not
      know, so no scan will ever stop or delete them: export what the tenants
@@ -1168,9 +1177,11 @@ one address.
      (`incus delete`, `incus storage volume delete`). Only then register the
      host again as a new server, if it should stay.
 7. **Check before reopening.** Every server in the restored database is
-   `online` (`SELECT name, status FROM infra.servers`), and a few minutes have
-   passed since the last one connected. Re-apply, from your own records (the
-   audit trail rewound as well), what the backup undid and still matters:
+   `online` (`SELECT name, status FROM infra.servers`), no refused agent on
+   the servers page was seen after you fixed it (an entry stays for an hour
+   after its agent stops), and a few minutes have passed since the last one
+   connected. Re-apply, from your own records (the audit trail rewound as
+   well), what the backup undid and still matters:
    users disabled or demoted, grants revoked and passwords reset after the
    backup are back in force, and containers deleted after the backup are
    recreated, empty, from their images; delete those again.

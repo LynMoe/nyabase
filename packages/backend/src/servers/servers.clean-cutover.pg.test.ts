@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
 import { Role, ServerStatus, UserStatus, parseAgentSecret } from '@nyabase/common';
+import { AgentCredentialRejections } from '../incus/agent-credentials.js';
 import { AgentCredentialVerifier, agentSecretDigest } from '../incus/agent-credentials.js';
 import { withPostgresTestDatabase } from '../platform/persistence-pg/postgres-test-harness.js';
 import { seedUser } from '../iam/access.pg-test-helper.js';
@@ -54,14 +55,16 @@ describePg('server agent onboarding and removal', () => {
       expect(stored.agent_enrollment_token_hash).toBe(agentSecretDigest(token));
       expect(stored.agent_credential_hash).toBeNull();
 
+      const rejections = new AgentCredentialRejections();
+      const verifier = new AgentCredentialVerifier(database, rejections);
       const enrolled = await enrollment.enroll({ enrollmentToken: token, hostname: 'worker-1' });
       expect(enrolled.serverId).toBe(created.id);
-      await expect(new AgentCredentialVerifier(database).authenticate(`Bearer ${enrolled.credential}`))
+      await expect(verifier.authenticate(`Bearer ${enrolled.credential}`))
         .resolves.toBe(created.id);
-      await expect(new AgentCredentialVerifier(database).authenticate('Bearer nyak.x.y')).resolves.toBeUndefined();
+      await expect(verifier.authenticate('Bearer nyak.x.y')).resolves.toBeUndefined();
       expect(agents.disconnect).toHaveBeenCalledWith(created.id);
       // The token is spent by the agent's first control authentication.
-      await expect(new AgentCredentialVerifier(database).confirmControl(created.id, `Bearer ${enrolled.credential}`))
+      await expect(verifier.confirmControl(created.id, `Bearer ${enrolled.credential}`))
         .resolves.toBe(true);
       await expect(enrollment.enroll({ enrollmentToken: token, hostname: 'worker-1' }))
         .rejects.toMatchObject({ status: 401 });
@@ -75,7 +78,7 @@ describePg('server agent onboarding and removal', () => {
       await expect(enrollment.enroll({ enrollmentToken: rotated.enrollmentToken, hostname: 'worker-1' }))
         .rejects.toMatchObject({ status: 401 });
       // The running agent's credential survives an unused rotation.
-      await expect(new AgentCredentialVerifier(database).authenticate(`Bearer ${enrolled.credential}`))
+      await expect(verifier.authenticate(`Bearer ${enrolled.credential}`))
         .resolves.toBe(created.id);
     });
   });

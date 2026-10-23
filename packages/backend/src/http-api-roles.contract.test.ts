@@ -20,6 +20,7 @@ const OPERATOR_ROUTES = [
   'DELETE users/:param/server-grants/:param',
   'DELETE users/:param/shared-backend-grants/:param',
   'DELETE users/:param/storage-pool-grants/:param',
+  'GET admin/agent-rejections',
   'GET admin/catalog/grant-servers',
   'GET admin/catalog/groups',
   'GET admin/catalog/metric-servers',

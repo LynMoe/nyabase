@@ -105,6 +105,8 @@ describe('agent gateway upgrade', () => {
     for (let index = 0; index < 30; index += 1) expect(await attempt()).toMatch(/^HTTP\/1\.1 401/);
     expect(await attempt()).toMatch(/^HTTP\/1\.1 429/);
     expect(authenticate).toHaveBeenCalledTimes(30);
+    // The client address goes along, so a refused credential can be traced to its host.
+    expect(authenticate).toHaveBeenLastCalledWith('Bearer nyak.x.y', '198.51.100.7');
     gateway.onModuleDestroy();
   });
 
