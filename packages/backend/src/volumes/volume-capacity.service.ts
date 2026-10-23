@@ -285,8 +285,7 @@ export class VolumeCapacityService {
     if (!serverId) throw new BadRequestException('Local capacity requires a server');
     const pool = await transaction.selectFrom('infra.storage_pools')
       .selectAll().where('id', '=', poolId).executeTakeFirstOrThrow();
-    const grant = await requireServerAccess(transaction, ownerId, serverId);
-    await assertPoolGrant(transaction, ownerId, poolId);
+    const grant = await this.assertLocalCoverage(transaction, ownerId, serverId, poolId);
     const sums = await this.ownerServerCommittedBytes(ownerId, serverId, transaction);
     if (grant.diskBytes !== null && sums.root + sums.local + delta > grant.diskBytes) {
       throw new ConflictException({
@@ -300,6 +299,22 @@ export class VolumeCapacityService {
       });
     }
     await this.assertLocalPoolPhysicalCapacity(pool, poolId, serverId, delta, transaction);
+  }
+
+  /**
+   * The owner's current server and pool coverage of a local volume, needed
+   * for every grow, also one that stays within a pending shrink's
+   * reservation and so commits no new bytes. Returns the server grant.
+   */
+  async assertLocalCoverage(
+    transaction: Tx,
+    ownerId: string,
+    serverId: string,
+    poolId: string,
+  ): Promise<Awaited<ReturnType<typeof requireServerAccess>>> {
+    const grant = await requireServerAccess(transaction, ownerId, serverId);
+    await assertPoolGrant(transaction, ownerId, poolId);
+    return grant;
   }
 
   /** Physical capacity only, for administrators who bypass per-user grant limits. */
@@ -429,8 +444,7 @@ export class VolumeCapacityService {
       throw new BadRequestException('Local volume scope does not match the pool');
     }
     assertPoolMatchesLocalScope(lockedPool, scope);
-    await requireServerAccess(transaction, ownerId, scope.serverId);
-    await assertPoolGrant(transaction, ownerId, lockedPool.id);
+    await this.assertLocalCoverage(transaction, ownerId, scope.serverId, lockedPool.id);
     return {
       poolId: lockedPool.id,
       serverId: scope.serverId,

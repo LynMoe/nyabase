@@ -865,4 +865,44 @@ describePg('volume shrink reservations', () => {
         .toMatchObject({ size_bytes: '200', shrink_reserved_bytes: null });
     });
   });
+
+  it('growing back within a pending shrink still needs current server and pool coverage', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const ownerId = await seedUser(database);
+      const serverId = await seedServer(database);
+      const poolId = await insertLocalPool(database, serverId, 10_000);
+      await grantServer(database, { user: ownerId }, serverId, { diskBytes: 1_000 });
+      await grantPool(database, { user: ownerId }, poolId);
+      const volumeId = await seedVolume(database, { ownerId, poolId, serverId });
+      await database.updateTable('control.volumes').set({ size_bytes: 1_000, used_bytes: 100 })
+        .where('id', '=', volumeId).execute();
+      await database.insertInto('control.volume_placements').values({
+        volume_id: volumeId,
+        server_id: serverId,
+        pool_id: poolId,
+        catalog_state: 'present',
+        observed_revision: 1,
+      }).execute();
+      const service = makeService(database);
+      await service.patch(testActor(ownerId), volumeId, { expectedRevision: 1, sizeBytes: 200 });
+      expect(await reservationOf(database, volumeId))
+        .toMatchObject({ size_bytes: '200', shrink_reserved_bytes: '1000', revision: 2 });
+
+      // The pool grant is revoked: the grow commits no new bytes, but the
+      // owner is no longer covered.
+      await database.deleteFrom('iam.storage_pool_grants').where('pool_id', '=', poolId).execute();
+      await expect(service.patch(testActor(ownerId), volumeId, { expectedRevision: 2, sizeBytes: 600 }))
+        .rejects.toThrow(/Storage pool access is not granted/);
+      await grantPool(database, { user: ownerId }, poolId);
+      await database.deleteFrom('iam.server_grants').where('server_id', '=', serverId).execute();
+      await expect(service.patch(testActor(ownerId), volumeId, { expectedRevision: 2, sizeBytes: 600 }))
+        .rejects.toThrow(/Server storage access is not granted/);
+      expect(await reservationOf(database, volumeId)).toMatchObject({ size_bytes: '200', revision: 2 });
+
+      // Shrinking further needs no coverage.
+      await service.patch(testActor(ownerId), volumeId, { expectedRevision: 2, sizeBytes: 150 });
+      expect(await reservationOf(database, volumeId))
+        .toMatchObject({ size_bytes: '150', shrink_reserved_bytes: '1000', revision: 3 });
+    });
+  });
 });

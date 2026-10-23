@@ -298,6 +298,16 @@ export class LocalVolumesService {
       reservedBytes: nullableNumber(locked.shrink_reserved_bytes),
       requestedBytes: input.sizeBytes,
     });
+    // Coverage gates every grow by the owner; only bytes beyond the pending
+    // shrink's reservation are checked against grants and capacity.
+    if (access === 'owner' && input.sizeBytes > numberValue(locked.size_bytes)) {
+      await this.capacityRules.assertLocalCoverage(
+        transaction,
+        locked.owner_id,
+        locked.server_id!,
+        representativePoolId,
+      );
+    }
     if (reservation.committedDeltaBytes > 0) {
       if (access === 'admin') {
         await this.capacityRules.assertCapacityPhysical(
