@@ -11,11 +11,29 @@ import type {
   AuthUser,
   LoginCredentialSnapshot,
   NewRefreshSession,
+  RefreshRotationInput,
   RefreshRotationResult,
 } from './auth-persistence.js';
 
 type IamTransaction = Transaction<NyabaseDatabase>;
 const REFRESH_SESSION_PURGE_BATCH_SIZE = 128;
+/** A locked refresh session with its owner, as the rotation paths read it. */
+const SESSION_USER_COLUMNS = [
+  'token.id as token_id',
+  'token.user_id',
+  'token.expires_at',
+  'token.created_at as session_started_at',
+  'user.id',
+  'user.numeric_id',
+  'user.username',
+  'user.password_hash',
+  'user.display_name',
+  'user.status',
+  'user.auth_version',
+  'user.role',
+  'user.created_at',
+  'user.updated_at',
+] as const;
 
 interface UserRow {
   id: string;
@@ -99,6 +117,7 @@ export class IamAuthRepository implements AuthPersistence {
           hash: session.hash,
           previous_hash: null,
           previous_request_id_hash: null,
+          rotated_at: null,
           expires_at: expiresAt,
           revoked: false,
           created_at: now,
@@ -110,86 +129,35 @@ export class IamAuthRepository implements AuthPersistence {
     });
   }
 
-  rotateRefreshSession(input: {
-    hash: string;
-    requestIdHash: string;
-    expiresInMs: number;
-    maximumSessions: number;
-    successorHash: (sessionId: string) => string;
-  }): Promise<RefreshRotationResult> {
+  /**
+   * One session is one row whose hash rotates in place; `created_at` is the
+   * login time and survives every rotation. Each retired hash is kept in
+   * `iam.refresh_token_ancestors` until the session row goes away, so a
+   * replayed old token is recognised and takes the whole session down.
+   */
+  rotateRefreshSession(input: RefreshRotationInput): Promise<RefreshRotationResult> {
     return this.transactions.run(async (transaction) => {
       const current = await transaction
         .selectFrom('iam.refresh_tokens as token')
         .innerJoin('iam.users as user', 'user.id', 'token.user_id')
-        .select([
-          'token.id as token_id',
-          'token.user_id',
-          'token.hash',
-          'token.expires_at',
-          'user.id',
-          'user.numeric_id',
-          'user.username',
-          'user.password_hash',
-          'user.display_name',
-          'user.status',
-          'user.auth_version',
-          'user.role',
-          'user.created_at',
-          'user.updated_at',
-        ])
+        .select([...SESSION_USER_COLUMNS, 'token.hash as token_hash'])
         .where('token.hash', '=', input.hash)
         .where('token.revoked', '=', false)
         .forUpdate('token')
         .executeTakeFirst();
-
-      if (!current) {
-        const recovered = await transaction
-          .selectFrom('iam.refresh_tokens as token')
-          .innerJoin('iam.users as user', 'user.id', 'token.user_id')
-          .select([
-            'token.id as token_id',
-            'token.hash as token_hash',
-            'token.expires_at',
-            'user.id',
-            'user.numeric_id',
-            'user.username',
-            'user.password_hash',
-            'user.display_name',
-            'user.status',
-            'user.auth_version',
-            'user.role',
-            'user.created_at',
-            'user.updated_at',
-          ])
-          .where('token.previous_hash', '=', input.hash)
-          .where('token.previous_request_id_hash', '=', input.requestIdHash)
-          .where('token.revoked', '=', false)
-          .forUpdate('token')
-          .executeTakeFirst();
-        const recoveredNow = await this.databaseClock(transaction);
-        if (
-          !recovered
-          || recovered.status !== 'active'
-          || recovered.expires_at <= recoveredNow
-          || recovered.token_hash !== input.successorHash(recovered.token_id)
-        ) return { kind: 'invalid' };
-        return {
-          kind: 'recovered',
-          sessionId: recovered.token_id,
-          user: this.toUser(recovered as UserRow & { token_id: string }),
-        };
-      }
+      if (!current) return this.resolveRetiredRefreshToken(transaction, input);
       if (current.status !== 'active') return { kind: 'invalid' };
       // Sample time only after the candidate row lock has been acquired.
       // A waiter that crosses expiry while blocked must not rotate the row.
       const now = await this.databaseClock(transaction);
-      if (current.expires_at <= now) {
+      const sessionEnd = current.session_started_at.getTime() + input.absoluteMs;
+      if (current.expires_at <= now || sessionEnd <= now.getTime()) {
         await transaction.deleteFrom('iam.refresh_tokens')
           .where('id', '=', current.token_id)
           .execute();
         return { kind: 'invalid' };
       }
-      const expiresAt = new Date(now.getTime() + input.expiresInMs);
+      const expiresAt = new Date(Math.min(now.getTime() + input.idleMs, sessionEnd));
 
       await this.trimRefreshSessions(
         transaction,
@@ -198,12 +166,18 @@ export class IamAuthRepository implements AuthPersistence {
         input.maximumSessions - 1,
         current.token_id,
       );
+      await transaction
+        .insertInto('iam.refresh_token_ancestors')
+        .values({ hash: input.hash, session_id: current.token_id })
+        .onConflict((conflict) => conflict.column('hash').doNothing())
+        .execute();
       const updated = await transaction
         .updateTable('iam.refresh_tokens')
         .set({
           hash: input.successorHash(current.token_id),
           previous_hash: input.hash,
           previous_request_id_hash: input.requestIdHash,
+          rotated_at: now,
           expires_at: expiresAt,
         })
         .where('id', '=', current.token_id)
@@ -213,7 +187,8 @@ export class IamAuthRepository implements AuthPersistence {
       return {
         kind: 'rotated',
         sessionId: current.token_id,
-        user: this.toUser(current as UserRow & { token_id: string }),
+        user: this.toUser(current),
+        expiresInMs: expiresAt.getTime() - now.getTime(),
       };
     });
   }
@@ -241,6 +216,66 @@ export class IamAuthRepository implements AuthPersistence {
       await onDeleted?.(transaction, selected.user_id);
       return selected.user_id;
     });
+  }
+
+  /**
+   * The presented hash is not current. If a live session retired it:
+   *  - immediate predecessor + the same request id: the client lost the
+   *    response of that exact rotation; hand back the same successor;
+   *  - immediate predecessor + another request id within `reuseGraceMs` of
+   *    the rotation: two tabs refreshed concurrently with the shared cookie
+   *    (only possible without Web Locks, see the frontend's
+   *    `withCrossTabRefreshLock`); refuse the loser, keep the winner's session;
+   *  - anything else is reuse of a rotated-out token, i.e. two parties hold
+   *    the session: delete it (ancestors cascade) so neither keeps it.
+   */
+  private async resolveRetiredRefreshToken(
+    transaction: IamTransaction,
+    input: RefreshRotationInput,
+  ): Promise<RefreshRotationResult> {
+    const retired = await transaction
+      .selectFrom('iam.refresh_token_ancestors as ancestor')
+      .innerJoin('iam.refresh_tokens as token', 'token.id', 'ancestor.session_id')
+      .innerJoin('iam.users as user', 'user.id', 'token.user_id')
+      .select([
+        ...SESSION_USER_COLUMNS,
+        'token.hash as token_hash',
+        'token.previous_hash',
+        'token.previous_request_id_hash',
+        'token.rotated_at',
+      ])
+      .where('ancestor.hash', '=', input.hash)
+      .where('token.revoked', '=', false)
+      .forUpdate('token')
+      .executeTakeFirst();
+    if (!retired) return { kind: 'invalid' };
+    const now = await this.databaseClock(transaction);
+    if (retired.previous_hash === input.hash) {
+      if (retired.previous_request_id_hash === input.requestIdHash) {
+        if (
+          retired.status !== 'active'
+          || retired.expires_at <= now
+          || retired.token_hash !== input.successorHash(retired.token_id)
+        ) return { kind: 'invalid' };
+        return {
+          kind: 'recovered',
+          sessionId: retired.token_id,
+          user: this.toUser(retired),
+          expiresInMs: retired.expires_at.getTime() - now.getTime(),
+        };
+      }
+      if (
+        retired.rotated_at
+        && now.getTime() - retired.rotated_at.getTime() < input.reuseGraceMs
+      ) return { kind: 'superseded' };
+    }
+    await transaction
+      .deleteFrom('iam.refresh_tokens')
+      .where('id', '=', retired.token_id)
+      .execute();
+    const reuse = { userId: retired.user_id, sessionId: retired.token_id };
+    await input.onReuse?.(transaction, reuse);
+    return { kind: 'reused', ...reuse };
   }
 
   async revokeBrowserSessions(

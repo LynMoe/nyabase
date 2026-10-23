@@ -65,6 +65,25 @@ export interface IamUser {
   updatedAt: Date;
 }
 
+/**
+ * The generated password is written straight to stderr, not through the Nest
+ * logger: `server.logLevel=error` would drop a warn, and no later boot
+ * generates another one (an active admin then exists), so a filtered line
+ * locks the operator out. Development/test runtimes never generate one, and
+ * tests that force production stub `process.stderr.write`.
+ */
+function announceGeneratedAdminPassword(password: string): void {
+  process.stderr.write([
+    '',
+    '[nyabase] Created the administrator account "admin" with a generated password:',
+    `[nyabase]     ${password}`,
+    '[nyabase] It is shown only this once and never logged again. Sign in and change it now',
+    '[nyabase] (set auth.adminInitPassword / ADMIN_INIT_PASSWORD to choose it yourself).',
+    '',
+    '',
+  ].join('\n'));
+}
+
 @Injectable()
 export class UsersService {
   private readonly logger = new Logger(UsersService.name);
@@ -510,9 +529,7 @@ export class UsersService {
         displayName: 'Administrator',
         role: Role.Admin,
       }, { actorId: null });
-      if (generatedInitPassword) {
-        this.logger.warn(`Generated one-time admin password: ${initPassword}`);
-      }
+      if (generatedInitPassword) announceGeneratedAdminPassword(initPassword);
       return;
     } catch (error) {
       if (!this.isUniqueViolation(error) && !this.isUsernameConflict(error)) throw error;

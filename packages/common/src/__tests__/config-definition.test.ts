@@ -25,4 +25,17 @@ describe('control-plane config definition', () => {
       public: true,
     });
   });
+
+  it('lets only admins change browser-session lifetimes online', () => {
+    // Restart-required and secret settings are never edited online at all.
+    const auth = controlPlaneConfigManifest.filter((field) => field.key.startsWith('auth.')
+      && field.editable && !field.restartRequired && !field.secret);
+    expect(auth.map((field) => field.key).sort()).toEqual([
+      'auth.refreshTokenExpiresDays',
+      'auth.sessionMaxLifetimeDays',
+    ]);
+    expect(auth.every((field) => field.adminOnly)).toBe(true);
+    expect(controlPlaneConfigManifest.find((field) => field.key === 'auth.sessionMaxLifetimeDays'))
+      .toMatchObject({ defaultValue: 30, valueKind: 'number', restartRequired: false });
+  });
 });

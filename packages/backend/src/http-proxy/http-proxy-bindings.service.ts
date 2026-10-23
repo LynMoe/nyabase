@@ -227,10 +227,10 @@ export class HttpProxyBindingsService {
         });
       }
       const pool = await this.enabledPoolForHostname(transaction, hostname);
+      // Another user's container answers like a missing one.
       const container = await this.findContainer(transaction, dto.containerId);
-      if (!container) throw new NotFoundException('Container not found');
-      if (container.owner_id !== requesterId) {
-        throw new ForbiddenException('Container is not owned by current user');
+      if (!container || container.owner_id !== requesterId) {
+        throw new NotFoundException('Container not found');
       }
       await this.assertRequesterActive(transaction, requesterId);
       const bindingId = randomUUID();
@@ -285,9 +285,9 @@ export class HttpProxyBindingsService {
         .where('id', '=', id)
         .forUpdate()
         .executeTakeFirst();
-      if (!binding) throw new NotFoundException('Binding not found');
-      if (binding.owner_id !== requesterId) {
-        throw new ForbiddenException('Only binding owner can edit it');
+      // Only the owner edits; another user's binding answers like a missing one.
+      if (!binding || binding.owner_id !== requesterId) {
+        throw new NotFoundException('Binding not found');
       }
       await this.assertRequesterActive(transaction, requesterId);
       let hostname = binding.hostname;
@@ -305,9 +305,8 @@ export class HttpProxyBindingsService {
       let containerId = binding.container_id;
       if (dto.containerId !== undefined) {
         const container = await this.findContainer(transaction, dto.containerId);
-        if (!container) throw new NotFoundException('Container not found');
-        if (container.owner_id !== requesterId) {
-          throw new ForbiddenException('Container is not owned by current user');
+        if (!container || container.owner_id !== requesterId) {
+          throw new NotFoundException('Container not found');
         }
         containerId = container.id;
       }
@@ -357,9 +356,9 @@ export class HttpProxyBindingsService {
         .where('id', '=', id)
         .forUpdate()
         .executeTakeFirst();
-      if (!binding) throw new NotFoundException('Binding not found');
-      if (scope === 'mine' && binding.owner_id !== requesterId) {
-        throw new ForbiddenException('Only binding owner can delete it');
+      // Without the `scope=all` override another user's binding is not found.
+      if (!binding || (scope === 'mine' && binding.owner_id !== requesterId)) {
+        throw new NotFoundException('Binding not found');
       }
       await this.assertRequesterActive(transaction, requesterId);
       await releaseHostname(transaction, binding);

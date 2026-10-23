@@ -7,6 +7,7 @@ import {
   REFRESH_COOKIE_PATH,
   SECURE_REFRESH_COOKIE_NAME,
 } from './auth.controller.js';
+import { RefreshSupersededException } from './auth.service.js';
 
 const REQUEST_ID = 'a'.repeat(64);
 const user = {
@@ -21,7 +22,9 @@ const user = {
 function harness(options: { cookieSecure?: boolean } = {}) {
   const auth = {
     authenticateAndLogin: vi.fn(async () => ({ user, accessToken: 'access-1', refreshToken: 'r1' })),
-    refreshTokens: vi.fn(async () => ({ accessToken: 'access-2', refreshToken: 'r2', user })),
+    refreshTokens: vi.fn(async () => ({
+      accessToken: 'access-2', refreshToken: 'r2', user, cookieMaxAgeMs: 2 * 86_400_000,
+    })),
     logout: vi.fn(async () => 'user-1'),
     refreshCookieMaxAgeMs: vi.fn(() => 7 * 86_400_000),
   };
@@ -73,7 +76,11 @@ describe('AuthController refresh cookie transport', () => {
 
     expect(auth.refreshTokens).toHaveBeenCalledWith('r1', REQUEST_ID);
     expect(body).toEqual({ accessToken: 'access-2', user: expect.objectContaining({ id: 'user-1' }) });
-    expect(response.cookie).toHaveBeenCalledWith(SECURE_REFRESH_COOKIE_NAME, 'r2', expect.objectContaining({ httpOnly: true }));
+    // The cookie lives exactly as long as what is left of the session.
+    expect(response.cookie).toHaveBeenCalledWith(SECURE_REFRESH_COOKIE_NAME, 'r2', expect.objectContaining({
+      httpOnly: true,
+      maxAge: 2 * 86_400_000,
+    }));
   });
 
   it('rejects refresh without a cookie and clears a rejected cookie', async () => {
@@ -89,6 +96,18 @@ describe('AuthController refresh cookie transport', () => {
       response,
     )).rejects.toBeInstanceOf(UnauthorizedException);
     expect(response.clearCookie).toHaveBeenCalledWith(SECURE_REFRESH_COOKIE_NAME, expect.objectContaining({ path: '/' }));
+  });
+
+  it('keeps the cookie when a concurrent rotation already replaced it', async () => {
+    const { auth, controller, response } = harness();
+    auth.refreshTokens.mockRejectedValueOnce(new RefreshSupersededException());
+    await expect(controller.refresh(
+      { requestId: REQUEST_ID },
+      request({ cookie: `${SECURE_REFRESH_COOKIE_NAME}=r1` }),
+      response,
+    )).rejects.toBeInstanceOf(UnauthorizedException);
+    expect(response.clearCookie).not.toHaveBeenCalled();
+    expect(response.cookie).not.toHaveBeenCalled();
   });
 
   it('rejects the legacy body-borne refresh token', async () => {

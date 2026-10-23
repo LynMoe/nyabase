@@ -250,6 +250,8 @@ export enum AuditAction {
   RemoveGroupMember = 'group.member.remove',
   UserLogin = 'user.login',
   UserLogout = 'user.logout',
+  /** A rotated-out refresh token was presented again; its session was revoked. */
+  RefreshTokenReuse = 'user.refresh_token_reuse',
   CreateHttpProxyBinding = 'http_proxy.binding.create',
   UpdateHttpProxyBinding = 'http_proxy.binding.update',
   DeleteHttpProxyBinding = 'http_proxy.binding.delete',

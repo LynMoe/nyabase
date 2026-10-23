@@ -58,9 +58,15 @@ export interface IamRefreshTokenTable {
   hash: string;
   previous_hash: string | null;
   previous_request_id_hash: string | null;
+  rotated_at: Timestamp | null;
   expires_at: Timestamp;
   revoked: boolean;
   created_at: GeneratedTimestamp;
+}
+
+export interface IamRefreshTokenAncestorTable {
+  hash: string;
+  session_id: string;
 }
 
 export interface IamSshPublicKeyTable {
@@ -101,6 +107,7 @@ export interface NyabaseDatabase
   'iam.groups': IamGroupTable;
   'iam.group_members': IamGroupMemberTable;
   'iam.refresh_tokens': IamRefreshTokenTable;
+  'iam.refresh_token_ancestors': IamRefreshTokenAncestorTable;
   'iam.ssh_public_keys': IamSshPublicKeyTable;
   'interaction.ssh_proxy_host_keys': InteractionSshProxyHostKeyTable;
   'interaction.ssh_host_authorities': InteractionSshHostAuthorityTable;

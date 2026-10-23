@@ -4,6 +4,7 @@ import {
   HttpException,
   HttpStatus,
   Injectable,
+  Logger,
   UnauthorizedException,
 } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
@@ -34,6 +35,15 @@ export interface JwtPayload {
 }
 
 export const MAX_REFRESH_SESSIONS_PER_USER = 16;
+/**
+ * Tabs share the refresh cookie and serialize rotation with a Web Lock, so a
+ * retired token normally never comes back except as the exact retry of a lost
+ * response (same request id, recovered idempotently). Without Web Locks two
+ * tabs can race one rotation with different request ids; the loser presenting
+ * the immediately previous token this soon after the rotation is refused
+ * without revoking the session. Any other retired token is reuse.
+ */
+export const REFRESH_REUSE_GRACE_MS = 15_000;
 /** Failed logins per (client address bucket, username) per window. */
 export const MAX_LOGIN_FAILURES_PER_IP_USERNAME = 10;
 /** Failed logins per client address bucket (any usernames) per window. */
@@ -52,12 +62,23 @@ export function currentPasswordIncorrect(): ForbiddenException {
   });
 }
 
+/**
+ * The just-retired token lost a concurrent rotation. The shared cookie may
+ * already hold the winner's successor, so the response must not clear it.
+ */
+export class RefreshSupersededException extends UnauthorizedException {
+  constructor() {
+    super({ code: 'REFRESH_SUPERSEDED', message: 'Refresh token was already rotated' });
+  }
+}
+
 const MAX_LOGIN_USERNAME_CHARS = 256;
 const MAX_LOGIN_PASSWORD_CHARS = 1_024;
 const DUMMY_PASSWORD_HASH = '$argon2id$v=19$m=65536,t=3,p=4$DCw8KRwf+V7pMnhiRFOb6g$KSjgFxwH2WqyoDT2q5Hz0Z18Zv/+eAHbnRgKiC6dI5A';
 
 @Injectable()
 export class AuthService {
+  private readonly logger = new Logger(AuthService.name);
   // Anonymous logins and signed-in password re-checks get separate Argon2
   // capacity, so a login flood cannot block password changes or API tokens.
   private readonly loginGate = new PasswordVerificationGate();
@@ -154,13 +175,30 @@ export class AuthService {
     const result = await this.persistence.rotateRefreshSession({
       hash,
       requestIdHash,
-      expiresInMs: this.refreshExpiryDurationMs(),
+      ...this.sessionLifetimeMs(),
+      reuseGraceMs: REFRESH_REUSE_GRACE_MS,
       maximumSessions: MAX_REFRESH_SESSIONS_PER_USER,
       successorHash: (sessionId) => {
         successor = this.deriveRotatedRefreshToken(sessionId, hash, requestId);
         return this.tokenHash(successor);
       },
+      // The presenter may be the thief or the victim; attribute it to the system.
+      onReuse: (transaction, reuse) => this.audit.append(
+        transaction,
+        null,
+        AuditAction.RefreshTokenReuse,
+        reuse.userId,
+        'user',
+        { sessionId: reuse.sessionId },
+      ),
     });
+    if (result.kind === 'superseded') throw new RefreshSupersededException();
+    if (result.kind === 'reused') {
+      this.logger.warn(
+        `Refresh token reuse: revoked session ${result.sessionId} of user ${result.userId}`,
+      );
+      throw new UnauthorizedException('Invalid refresh token');
+    }
     if (result.kind === 'invalid') throw new UnauthorizedException('Invalid refresh token');
     if (result.kind === 'recovered') {
       successor = this.deriveRotatedRefreshToken(result.sessionId, hash, requestId);
@@ -169,11 +207,15 @@ export class AuthService {
       accessToken: this.signAccessToken(result.user),
       refreshToken: successor,
       user: result.user,
+      // What is left of this session; never past its absolute lifetime.
+      cookieMaxAgeMs: result.expiresInMs,
     };
   }
 
+  /** Cookie lifetime of a fresh login: the first expiry of a new session. */
   refreshCookieMaxAgeMs(): number {
-    return this.refreshExpiryDurationMs();
+    const { idleMs, absoluteMs } = this.sessionLifetimeMs();
+    return Math.min(idleMs, absoluteMs);
   }
 
   /**
@@ -276,7 +318,7 @@ export class AuthService {
     const user = await this.persistence.issueRefreshSession(userId, {
       id: uuidv4(),
       hash: this.tokenHash(rawRefresh),
-      expiresInMs: this.refreshExpiryDurationMs(),
+      expiresInMs: this.refreshCookieMaxAgeMs(),
     }, MAX_REFRESH_SESSIONS_PER_USER, credentialSnapshot, (transaction, issuedUser) =>
       this.audit.append(
         transaction,
@@ -297,8 +339,15 @@ export class AuthService {
     return this.jwtService.sign(payload);
   }
 
-  private refreshExpiryDurationMs(): number {
-    return this.config.get<number>('auth.refreshTokenExpiresDays') * 86_400_000;
+  /**
+   * Refreshing slides the expiry by the idle window, but never past login +
+   * the absolute lifetime: a stolen-and-refreshed session cannot live forever.
+   */
+  private sessionLifetimeMs(): { idleMs: number; absoluteMs: number } {
+    return {
+      idleMs: this.config.get<number>('auth.refreshTokenExpiresDays') * 86_400_000,
+      absoluteMs: this.config.get<number>('auth.sessionMaxLifetimeDays') * 86_400_000,
+    };
   }
 
   private tokenHash(raw: string): string {

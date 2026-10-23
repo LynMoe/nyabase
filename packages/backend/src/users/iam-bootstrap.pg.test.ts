@@ -1,8 +1,9 @@
 import { randomUUID } from 'node:crypto';
+import { Logger } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { Role, UserStatus } from '@nyabase/common';
 import type { Kysely } from 'kysely';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { AccessChangeNotifier, AccessResolverService } from '../iam/access-resolver.service.js';
 import { AuthService } from '../iam/auth.service.js';
 import { SessionRevocationService } from '../iam/session-revocation.service.js';
@@ -94,16 +95,56 @@ describePg('API IAM bootstrap', () => {
     ['production', false],
     ['development', true],
   ] as const)('uses the well-known admin password only for an explicit development runtime (%s)', async (nodeEnv, wellKnown) => {
-    await withPostgresTestDatabase(async ({ database }) => {
-      const context = createBootstrapContext(database, {
-        'runtime.nodeEnv': nodeEnv,
-        'auth.adminInitPassword': '',
+    // Production prints a generated password; keep it out of the test output.
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    try {
+      await withPostgresTestDatabase(async ({ database }) => {
+        const context = createBootstrapContext(database, {
+          'runtime.nodeEnv': nodeEnv,
+          'auth.adminInitPassword': '',
+        });
+        await context.app.onApplicationBootstrap();
+        const login = context.auth.authenticateAndLogin('admin', 'admin123', '127.0.0.1');
+        if (wellKnown) await expect(login).resolves.toMatchObject({ accessToken: expect.any(String) });
+        else await expect(login).rejects.toMatchObject({ status: 401 });
       });
-      await context.app.onApplicationBootstrap();
-      const login = context.auth.authenticateAndLogin('admin', 'admin123', '127.0.0.1');
-      if (wellKnown) await expect(login).resolves.toMatchObject({ accessToken: expect.any(String) });
-      else await expect(login).rejects.toMatchObject({ status: 401 });
-    });
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+
+  it('prints a generated admin password straight to stderr, whatever the log level, exactly once', async () => {
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const nestLogs = vi.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    try {
+      await withPostgresTestDatabase(async ({ database }) => {
+        const context = createBootstrapContext(database, {
+          'runtime.nodeEnv': 'production',
+          'server.logLevel': 'error',
+          'auth.adminInitPassword': '',
+        });
+        await context.app.onApplicationBootstrap();
+        const printed = stderr.mock.calls.map(([chunk]) => String(chunk)).join('');
+        const password = /^\[nyabase\] {5}([0-9a-f]{24})$/m.exec(printed)?.[1];
+        expect(password).toBeDefined();
+        expect(printed).toContain('shown only this once');
+        // The secret never goes through the (level-filtered) Nest logger.
+        expect(JSON.stringify(nestLogs.mock.calls)).not.toContain(password);
+        await expect(context.auth.authenticateAndLogin('admin', password!, '127.0.0.1'))
+          .resolves.toMatchObject({ accessToken: expect.any(String) });
+
+        // An active admin now exists: later boots generate and print nothing.
+        stderr.mockClear();
+        await createBootstrapContext(database, {
+          'runtime.nodeEnv': 'production',
+          'auth.adminInitPassword': '',
+        }).app.onApplicationBootstrap();
+        expect(stderr).not.toHaveBeenCalled();
+      });
+    } finally {
+      stderr.mockRestore();
+      nestLogs.mockRestore();
+    }
   });
 
   it('refuses to start when the reserved admin is disabled and no other active admin exists', async () => {
@@ -146,6 +187,7 @@ function createBootstrapContext(
         'auth.adminInitPassword': 'bootstrap-password',
         'auth.jwtSecret': 'bootstrap-jwt-secret-bootstrap-jwt-secret',
         'auth.refreshTokenExpiresDays': 7,
+        'auth.sessionMaxLifetimeDays': 30,
         ...overrides,
       };
       return values[key] as T;

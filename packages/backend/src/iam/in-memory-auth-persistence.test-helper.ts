@@ -6,6 +6,7 @@ import type {
   AuthUser,
   LoginCredentialSnapshot,
   NewRefreshSession,
+  RefreshRotationInput,
   RefreshRotationResult,
 } from './auth-persistence.js';
 
@@ -17,11 +18,16 @@ interface RefreshSession {
   userId: string;
   previousHash: string | null;
   previousRequestIdHash: string | null;
+  rotatedAt: Date | null;
+  /** Every hash this session rotated away from. */
+  ancestors: Set<string>;
   revoked: boolean;
 }
 
 /** Deterministic no-ORM unit port. PostgreSQL locking is covered by repository PG tests. */
 export class InMemoryAuthPersistenceTestAdapter implements AuthPersistence {
+  /** Tests move this clock to cross idle, absolute and grace boundaries. */
+  now: () => Date = () => new Date();
   private lease: Promise<void> = Promise.resolve();
   private readonly users = new Map<string, AuthUser>();
   private readonly refresh = new Map<string, RefreshSession>();
@@ -93,7 +99,7 @@ export class InMemoryAuthPersistenceTestAdapter implements AuthPersistence {
         || snapshot.passwordHash !== user.passwordHash
         || snapshot.authVersion !== user.authVersion
       )) return null;
-      const now = new Date();
+      const now = this.now();
       this.purge(now);
       this.trim(userId, maximumSessions - 1);
       this.refresh.set(session.id, {
@@ -104,45 +110,73 @@ export class InMemoryAuthPersistenceTestAdapter implements AuthPersistence {
         userId,
         previousHash: null,
         previousRequestIdHash: null,
+        rotatedAt: null,
+        ancestors: new Set(),
         revoked: false,
       });
       return user;
     });
   }
 
-  rotateRefreshSession(input: {
-    hash: string;
-    requestIdHash: string;
-    expiresInMs: number;
-    maximumSessions: number;
-    successorHash: (sessionId: string) => string;
-  }): Promise<RefreshRotationResult> {
+  /** Mirrors `IamAuthRepository.rotateRefreshSession`; `now` is the adapter clock. */
+  rotateRefreshSession(input: RefreshRotationInput): Promise<RefreshRotationResult> {
     return this.serialized(async () => {
-      const now = new Date();
-      this.purge(now);
+      const now = this.now();
       const current = [...this.refresh.values()].find(
-        (row) => row.hash === input.hash && !row.revoked && row.expiresAt > now,
+        (row) => row.hash === input.hash && !row.revoked,
       );
-      if (!current) {
-        const recovered = [...this.refresh.values()].find((row) =>
-          row.previousHash === input.hash
-          && row.previousRequestIdHash === input.requestIdHash
-          && !row.revoked
-          && row.expiresAt > now);
-        const user = recovered ? this.users.get(recovered.userId) : undefined;
-        if (!recovered || recovered.hash !== input.successorHash(recovered.id)
-          || !user || user.status !== UserStatus.Active) return { kind: 'invalid' };
-        return { kind: 'recovered', user, sessionId: recovered.id };
-      }
+      if (!current) return this.resolveRetired(input, now);
       const user = this.users.get(current.userId);
       if (!user || user.status !== UserStatus.Active) return { kind: 'invalid' };
+      const sessionEnd = current.createdAt.getTime() + input.absoluteMs;
+      if (current.expiresAt <= now || sessionEnd <= now.getTime()) {
+        this.refresh.delete(current.id);
+        return { kind: 'invalid' };
+      }
       this.trim(user.id, input.maximumSessions - 1, current.id);
+      current.ancestors.add(input.hash);
       current.previousHash = input.hash;
       current.previousRequestIdHash = input.requestIdHash;
+      current.rotatedAt = now;
       current.hash = input.successorHash(current.id);
-      current.expiresAt = new Date(now.getTime() + input.expiresInMs);
-      return { kind: 'rotated', user, sessionId: current.id };
+      current.expiresAt = new Date(Math.min(now.getTime() + input.idleMs, sessionEnd));
+      return {
+        kind: 'rotated',
+        user,
+        sessionId: current.id,
+        expiresInMs: current.expiresAt.getTime() - now.getTime(),
+      };
     });
+  }
+
+  private async resolveRetired(
+    input: RefreshRotationInput,
+    now: Date,
+  ): Promise<RefreshRotationResult> {
+    const retired = [...this.refresh.values()].find(
+      (row) => row.ancestors.has(input.hash) && !row.revoked,
+    );
+    if (!retired) return { kind: 'invalid' };
+    if (retired.previousHash === input.hash) {
+      if (retired.previousRequestIdHash === input.requestIdHash) {
+        const user = this.users.get(retired.userId);
+        if (!user || user.status !== UserStatus.Active || retired.expiresAt <= now
+          || retired.hash !== input.successorHash(retired.id)) return { kind: 'invalid' };
+        return {
+          kind: 'recovered',
+          user,
+          sessionId: retired.id,
+          expiresInMs: retired.expiresAt.getTime() - now.getTime(),
+        };
+      }
+      if (retired.rotatedAt && now.getTime() - retired.rotatedAt.getTime() < input.reuseGraceMs) {
+        return { kind: 'superseded' };
+      }
+    }
+    this.refresh.delete(retired.id);
+    const reuse = { userId: retired.userId, sessionId: retired.id };
+    await input.onReuse?.(undefined as never, reuse);
+    return { kind: 'reused', ...reuse };
   }
 
   deleteRefreshSessionByCurrentOrPreviousHash(hash: string): Promise<string | null> {

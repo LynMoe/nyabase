@@ -101,17 +101,33 @@ CREATE TABLE iam.refresh_tokens (
     hash character(64) NOT NULL,
     previous_hash character(64),
     previous_request_id_hash character(64),
+    rotated_at timestamp with time zone,
     expires_at timestamp with time zone NOT NULL,
     revoked boolean DEFAULT false NOT NULL,
     created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
     CONSTRAINT refresh_tokens_hash_check CHECK (hash ~ '^[0-9a-f]{64}$'),
     CONSTRAINT refresh_tokens_predecessor_shape_check
-        CHECK ((previous_hash IS NULL AND previous_request_id_hash IS NULL)
-            OR (previous_hash IS NOT NULL AND previous_request_id_hash IS NOT NULL))
+        CHECK ((previous_hash IS NULL AND previous_request_id_hash IS NULL AND rotated_at IS NULL)
+            OR (previous_hash IS NOT NULL AND previous_request_id_hash IS NOT NULL
+                AND rotated_at IS NOT NULL))
 );
 
 COMMENT ON COLUMN iam.refresh_tokens.previous_hash IS
   'One-step predecessor used only for exact response recovery and logout-after-rotation';
+COMMENT ON COLUMN iam.refresh_tokens.rotated_at IS
+  'When previous_hash was retired; bounds the concurrent-refresh grace window';
+COMMENT ON COLUMN iam.refresh_tokens.created_at IS
+  'Session start (login); rotation keeps it, auth.sessionMaxLifetimeDays counts from it';
+
+-- Every hash a session has rotated away from. Presenting one again (outside
+-- the immediate-predecessor recovery / grace paths) is refresh-token reuse:
+-- the whole session is deleted, and these rows go with it.
+CREATE TABLE iam.refresh_token_ancestors (
+    hash character(64) NOT NULL,
+    session_id uuid NOT NULL,
+    CONSTRAINT refresh_token_ancestors_hash_check CHECK (hash ~ '^[0-9a-f]{64}$'),
+    PRIMARY KEY (hash)
+);
 
 CREATE TABLE iam.ssh_public_keys (
     id uuid NOT NULL,
@@ -932,6 +948,9 @@ ALTER TABLE iam.group_members ADD CONSTRAINT group_members_group_id_user_id_key
     UNIQUE (group_id, user_id);
 ALTER TABLE iam.refresh_tokens ADD CONSTRAINT refresh_tokens_pkey PRIMARY KEY (id);
 ALTER TABLE iam.refresh_tokens ADD CONSTRAINT refresh_tokens_hash_key UNIQUE (hash);
+ALTER TABLE iam.refresh_token_ancestors
+    ADD CONSTRAINT refresh_token_ancestors_session_fkey
+    FOREIGN KEY (session_id) REFERENCES iam.refresh_tokens(id) ON DELETE CASCADE;
 ALTER TABLE iam.ssh_public_keys ADD CONSTRAINT ssh_public_keys_pkey PRIMARY KEY (id);
 -- A public key belongs to one user: the SSH proxy resolves the user from the key.
 ALTER TABLE iam.ssh_public_keys ADD CONSTRAINT ssh_public_keys_fingerprint_key
@@ -1113,6 +1132,8 @@ CREATE INDEX iam_refresh_tokens_user_active_idx
 CREATE INDEX iam_refresh_tokens_user_idx ON iam.refresh_tokens (user_id);
 CREATE UNIQUE INDEX iam_refresh_tokens_previous_hash_unique
     ON iam.refresh_tokens (previous_hash) WHERE previous_hash IS NOT NULL;
+CREATE INDEX iam_refresh_token_ancestors_session_idx
+    ON iam.refresh_token_ancestors (session_id);
 CREATE INDEX iam_ssh_public_keys_user_idx
     ON iam.ssh_public_keys (user_id, created_at, id);
 CREATE INDEX iam_users_status_idx ON iam.users (status, username);

@@ -127,6 +127,15 @@ describePg('System settings PostgreSQL authority', () => {
       await expect(database.transaction().execute((transaction) =>
         authority.update(transaction, operatorId, { 'audit.retentionMaxEntries': 20_000 }, initial.revision)))
         .rejects.toMatchObject({ response: expect.objectContaining({ code: 'ROLE_REQUIRED' }) });
+      // Session lifetimes decide how long a stolen session lives: admin only too.
+      for (const change of [
+        { 'auth.refreshTokenExpiresDays': 365 },
+        { 'auth.sessionMaxLifetimeDays': 365 },
+      ]) {
+        await expect(database.transaction().execute((transaction) =>
+          authority.update(transaction, operatorId, change, initial.revision)))
+          .rejects.toMatchObject({ response: expect.objectContaining({ code: 'ROLE_REQUIRED' }) });
+      }
       await expect(database.transaction().execute((transaction) =>
         authority.update(transaction, adminId, { 'audit.retentionMaxEntries': 1 }, initial.revision)))
         .rejects.toThrow('Invalid config value for audit.retentionMaxEntries');

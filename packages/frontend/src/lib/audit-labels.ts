@@ -84,6 +84,7 @@ const AUDIT_ACTION_LABELS: Record<string, string> = {
   [AuditAction.RemoveGroupMember]: '移除组成员',
   [AuditAction.UserLogin]: '用户登录',
   [AuditAction.UserLogout]: '用户登出',
+  [AuditAction.RefreshTokenReuse]: '刷新令牌重放，会话已撤销',
   [AuditAction.CreateHttpProxyBinding]: '创建 HTTP 发布',
   [AuditAction.UpdateHttpProxyBinding]: '更新 HTTP 发布',
   [AuditAction.DeleteHttpProxyBinding]: '删除 HTTP 发布',

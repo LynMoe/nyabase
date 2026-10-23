@@ -1,12 +1,14 @@
 import { HttpStatus, UnauthorizedException } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
-import { UserStatus } from '@nyabase/common';
+import { AuditAction, UserStatus } from '@nyabase/common';
 import {
   AuthService,
   MAX_LOGIN_FAILURES_PER_IP,
   MAX_LOGIN_FAILURES_PER_IP_USERNAME,
   MAX_REAUTH_FAILURES_PER_USER,
+  REFRESH_REUSE_GRACE_MS,
+  RefreshSupersededException,
 } from './auth.service.js';
 import { InMemoryAuthPersistenceTestAdapter } from './in-memory-auth-persistence.test-helper.js';
 import {
@@ -183,6 +185,100 @@ describe('AuthService re-authentication', () => {
   });
 });
 
+const DAY = 86_400_000;
+const requestId = (digit: string) => digit.repeat(64);
+
+describe('AuthService refresh sessions', () => {
+  async function signedIn() {
+    const persistence = new InMemoryAuthPersistenceTestAdapter();
+    let now = Date.parse('2026-01-01T00:00:00Z');
+    persistence.now = () => new Date(now);
+    const auditLog = audit();
+    const service = createAuth({ persistence, audit: auditLog });
+    const user = persistence.seedUser({ id: randomUUID(), username: 'alice' });
+    const { refreshToken } = await service.login(user);
+    return {
+      service,
+      persistence,
+      auditLog,
+      user,
+      first: refreshToken,
+      advance: (ms: number) => { now += ms; },
+    };
+  }
+
+  it('slides the idle expiry on refresh but never past the absolute lifetime', async () => {
+    const { service, persistence, first, advance } = await signedIn();
+    expect(service.refreshCookieMaxAgeMs()).toBe(7 * DAY);
+
+    let token = first;
+    // Refresh every six days: always inside the 7-day idle window.
+    for (let index = 1; index <= 3; index += 1) {
+      advance(6 * DAY);
+      const rotated = await service.refreshTokens(token, requestId(String(index)));
+      expect(rotated.cookieMaxAgeMs).toBe(7 * DAY);
+      token = rotated.refreshToken;
+    }
+    // Day 24 + 7 would overshoot the absolute end at day 30.
+    advance(6 * DAY);
+    const capped = await service.refreshTokens(token, requestId('4'));
+    expect(capped.cookieMaxAgeMs).toBe(6 * DAY);
+    expect(persistence.refreshRows()[0]?.createdAt.toISOString()).toBe('2026-01-01T00:00:00.000Z');
+
+    // Still active (refreshed six days ago), but the session is 30 days old.
+    advance(6 * DAY);
+    await expect(service.refreshTokens(capped.refreshToken, requestId('5')))
+      .rejects.toBeInstanceOf(UnauthorizedException);
+    expect(persistence.refreshRows()).toHaveLength(0);
+  });
+
+  it('returns the same successor for the exact retry of a lost response', async () => {
+    const { service, first, advance } = await signedIn();
+    const rotated = await service.refreshTokens(first, requestId('a'));
+    advance(10 * 60_000);
+    const retried = await service.refreshTokens(first, requestId('a'));
+    expect(retried.refreshToken).toBe(rotated.refreshToken);
+  });
+
+  it('refuses the loser of a concurrent rotation without revoking the session', async () => {
+    const { service, auditLog, first } = await signedIn();
+    const winner = await service.refreshTokens(first, requestId('a'));
+    const loser = service.refreshTokens(first, requestId('b'));
+    await expect(loser).rejects.toBeInstanceOf(RefreshSupersededException);
+    await expect(loser).rejects.toMatchObject({ response: { code: 'REFRESH_SUPERSEDED' } });
+    await expect(service.refreshTokens(winner.refreshToken, requestId('c')))
+      .resolves.toMatchObject({ refreshToken: expect.any(String) });
+    expect(auditLog.append).not.toHaveBeenCalledWith(
+      expect.anything(), expect.anything(), AuditAction.RefreshTokenReuse, expect.anything(),
+      expect.anything(), expect.anything(),
+    );
+  });
+
+  it('revokes the session and audits when a rotated-out token comes back', async () => {
+    const { service, persistence, auditLog, user, first, advance } = await signedIn();
+    const second = await service.refreshTokens(first, requestId('a'));
+    const third = await service.refreshTokens(second.refreshToken, requestId('b'));
+    const sessionId = persistence.refreshRows()[0]!.id;
+
+    // Past the grace window, the immediately previous token is reuse too.
+    advance(REFRESH_REUSE_GRACE_MS);
+    const replay = service.refreshTokens(second.refreshToken, requestId('c'));
+    await expect(replay).rejects.toBeInstanceOf(UnauthorizedException);
+    await expect(replay).rejects.not.toBeInstanceOf(RefreshSupersededException);
+    expect(auditLog.append).toHaveBeenCalledWith(
+      undefined,
+      null,
+      AuditAction.RefreshTokenReuse,
+      user.id,
+      'user',
+      { sessionId },
+    );
+    expect(persistence.refreshRows()).toHaveLength(0);
+    await expect(service.refreshTokens(third.refreshToken, requestId('d')))
+      .rejects.toBeInstanceOf(UnauthorizedException);
+  });
+});
+
 function consume(service: AuthService, ip: string, username: string) {
   return (service as unknown as {
     consumeLoginAttempt: (bucket: string, username: string) => unknown;
@@ -204,12 +300,13 @@ async function seededAuth(username: string, password: string) {
 function createAuth(options: {
   persistence?: InMemoryAuthPersistenceTestAdapter;
   monotonicNow?: () => number;
+  audit?: ReturnType<typeof audit>;
 } = {}) {
   return new AuthService(
     (options.persistence ?? new InMemoryAuthPersistenceTestAdapter()) as never,
     jwt(),
     config(),
-    audit(),
+    (options.audit ?? audit()) as never,
     { now: options.monotonicNow ?? (() => performance.now()) } as never,
   );
 }
@@ -226,11 +323,12 @@ function config() {
     get: (key: string) => {
       if (key === 'auth.jwtSecret') return 'test-jwt-secret-test-jwt-secret-32ch';
       if (key === 'auth.refreshTokenExpiresDays') return 7;
+      if (key === 'auth.sessionMaxLifetimeDays') return 30;
       return undefined;
     },
   } as never;
 }
 
 function audit() {
-  return { append: vi.fn().mockResolvedValue(undefined) } as never;
+  return { append: vi.fn().mockResolvedValue(undefined) };
 }

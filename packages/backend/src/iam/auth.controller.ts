@@ -9,7 +9,7 @@ import {
   ForbiddenException,
   UnauthorizedException,
 } from '@nestjs/common';
-import { AuthService } from './auth.service.js';
+import { AuthService, RefreshSupersededException } from './auth.service.js';
 import { CurrentUser, Public } from './decorators.js';
 import type { UserRecord } from './auth-persistence.js';
 import { AccessResolverService } from './access-resolver.service.js';
@@ -168,12 +168,17 @@ export class AuthController {
     try {
       rotated = await this.authService.refreshTokens(presented, requestId);
     } catch (error) {
-      if (error instanceof UnauthorizedException) clearRefreshCookie(response, this.cookieSecure());
+      // A superseded refresh lost a concurrent rotation: the cookie jar may
+      // already hold the winner's successor, which a clear would destroy.
+      if (
+        error instanceof UnauthorizedException
+        && !(error instanceof RefreshSupersededException)
+      ) clearRefreshCookie(response, this.cookieSecure());
       throw error;
     }
     setRefreshCookie(response, rotated.refreshToken, {
       secure: this.cookieSecure(),
-      maxAgeMs: this.authService.refreshCookieMaxAgeMs(),
+      maxAgeMs: rotated.cookieMaxAgeMs,
     });
     return { accessToken: rotated.accessToken, user: await this.userToDto(rotated.user) };
   }

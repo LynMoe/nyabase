@@ -91,6 +91,7 @@ async function setup(database: Kysely<NyabaseDatabase>) {
         'runtime.nodeEnv': 'test',
         'auth.jwtSecret': 'revocation-jwt-secret-revocation-jwt-secret',
         'auth.refreshTokenExpiresDays': 7,
+        'auth.sessionMaxLifetimeDays': 30,
       };
       return values[key] as T;
     },
