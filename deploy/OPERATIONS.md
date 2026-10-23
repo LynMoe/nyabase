@@ -1041,9 +1041,22 @@ from the product SLO and measured baseline, not from this example deployment.
   sessions in the same transaction and invalidates outstanding access tokens.
   SSH public keys are kept across a password change; adding one requires the
   current password, and removing unknown keys is up to the user.
-- Open browser consoles (`/ws/console`) close with WebSocket code `4401` when
-  their user is disabled or deleted, changes role, or changes (or has reset)
-  their password.
+- Open browser consoles (`/ws/console`) are bound to the browser session that
+  opened them. They close with WebSocket code `4401` when that session logs
+  out (in any tab) or is revoked for refresh-token reuse, and when their user
+  is disabled or deleted, changes role, or changes (or has reset) their
+  password. A console never outlives its credential: before the access token
+  expires the browser must re-authenticate it with a fresh token of the same
+  session, otherwise it closes with `4408`.
+- Login throttling is deliberately not per account, so nobody can lock a known
+  user (or `admin`) out: failures are limited only per (client address,
+  username) and per client address (IPv4 address or IPv6 /64, 10 and 30 per
+  5 minutes), plus the global Argon2 concurrency gate shared out per IPv4
+  address or IPv6 /48 (`iam/login-throttling.ts`). A distributed set of source
+  addresses can therefore still make many guesses per second against a known
+  username, and can saturate the gate so that legitimate logins get `429`.
+  Give every admin and operator account a long random password (a password
+  manager's generated secret, not a memorable one).
 - SSH public keys are globally unique: adding a key that any account already
   holds fails with `409 SSH_KEY_IN_USE` without revealing the owner.
 - Browser sessions keep the refresh secret in the `__Host-nyabase_refresh`
