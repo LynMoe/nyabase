@@ -144,7 +144,7 @@ Vite 通过 alias 将 `@nyabase/common` 指向 `src/index.ts`，但 `index.ts` �
    必须 idmap.isolated、网卡 `nyh*` + IPv4/MAC 过滤 + `security.port_isolation`，volatile 改回当前值；更新时与 Incus 当前值相同的配置键原样放行，白名单只管新增 / 改值的键，例如池 `volume.*` 默认值复制进卷的 `zfs.*`）；
    backend 生成的规格必须过得了它：`backend/src/agent-policy.contract.test.ts` 用真实的规格构建与 Incus 操作
    （容器、卷、镜像、预检 probe、控制台）经真实 `IncusClient` 送进 agent 的 `policy.ts`（按路径加载 agent 源码，
-   backend 不依赖 agent 包）；新增发往 Incus 的请求时把它的流程加进去。客户网卡统一用 `buildGuestNicDevice`。
+   backend 不依赖 agent 包）；新增发往 Incus 的请求时把它的流程加进去。客户网卡统一用 `buildGuestNicDevice`；MAC 由 IPv4 地址派生（`deriveGuestHwaddr`，`02:6e` + 四个地址字节），所以回收重用的地址仍是同一个 MAC（对端的邻居 / ARP 缓存远长于地址回收的 drain）。
    IPv6 拦截表 `bridge nyabase_guard` 是 agent 自己执行的不变量：policy 把会接通客户网卡的请求（start / restart /
    unfreeze、`start: true` 创建、给未停止实例新增或改网卡）标为 `needsIpv6Guard`，agent 转发前现场校验（必要时补回），
    不在位返回可重试的 `ipv6_guard_missing`（`AGENT_IPV6_GUARD_MISSING`）；状态经 hello / status 帧上报，

@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   buildDesiredInstanceSpec,
   deriveAttachmentDeviceName,
-  deriveInstanceHwaddr,
+  deriveGuestHwaddr,
   deriveNicHostName,
   formatCpuSet,
   deriveInstanceName,
@@ -113,7 +113,7 @@ describe('buildDesiredInstanceSpec', () => {
           nictype: 'bridged',
           parent: 'eno1',
           name: 'eth0',
-          hwaddr: deriveInstanceHwaddr(containerId),
+          hwaddr: '02:6e:c0:00:02:14',
           host_name: deriveNicHostName(containerId),
           'ipv4.address': '192.0.2.20',
           'security.ipv4_filtering': 'true',
@@ -149,6 +149,27 @@ describe('buildDesiredInstanceSpec', () => {
   it('puts every managed NIC behind the IPv6 guard prefix', () => {
     expect(deriveNicHostName(containerId)).toMatch(/^nyh[0-9a-f]{12}$/);
     expect(deriveNicHostName(containerId)).not.toBe(deriveNicHostName(serverId));
+  });
+
+  it('derives the guest MAC from its IPv4 address, not the container', () => {
+    expect(deriveGuestHwaddr('10.8.255.75')).toBe('02:6e:0a:08:ff:4b');
+    const other = '55555555-5555-4555-8555-555555555555';
+    const nic = (id: string, address: string) =>
+      buildDesiredInstanceSpec(input({ id, routedIp: address })).devices?.eth0?.hwaddr;
+    expect(nic(containerId, '192.0.2.20')).toBe(nic(other, '192.0.2.20'));
+    expect(nic(containerId, '192.0.2.20')).not.toBe(nic(containerId, '192.0.2.21'));
+    expect(deriveGuestHwaddr('0.0.0.1')).not.toBe(deriveGuestHwaddr('1.0.0.0'));
+    for (const address of ['192.0.2.20', '255.255.255.255', '0.0.0.0']) {
+      const first = Number.parseInt(deriveGuestHwaddr(address).slice(0, 2), 16);
+      expect(first & 0x01).toBe(0);
+      expect(first & 0x02).toBe(0x02);
+      expect(deriveGuestHwaddr(address)).toMatch(/^([0-9a-f]{2}:){5}[0-9a-f]{2}$/);
+    }
+    for (const bad of ['', '10.0.0', '10.0.0.256', '10.0.0.1/24', '::1', '010.0.0.1', containerId]) {
+      expect(() => deriveGuestHwaddr(bad)).toThrowError(
+        expect.objectContaining({ code: 'INVALID_INSTANCE_SPEC' }),
+      );
+    }
   });
 
   it('does not throttle network filesystem attachments', () => {

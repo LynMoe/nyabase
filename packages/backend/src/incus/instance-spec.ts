@@ -205,11 +205,17 @@ export function deriveNicHostName(instanceId: string): string {
   return `${MANAGED_NIC_HOST_NAME_PREFIX}${digest.slice(0, 12)}`;
 }
 
-export function deriveInstanceHwaddr(containerId: string): string {
-  const normalizedId = uuid32(containerId, 'container_id');
-  const digest = createHash('sha256').update(normalizedId, 'utf8').digest();
-  const bytes = [digest[0], digest[1], digest[2], digest[3], digest[4], digest[5]];
-  bytes[0] = (bytes[0] & 0xfc) | 0x02;
+/** Locally administered unicast prefix of every guest MAC (Docker uses 02:42). */
+const GUEST_HWADDR_PREFIX = [0x02, 0x6e] as const;
+
+/**
+ * Guest MAC = fixed prefix + the four IPv4 bytes. IPv4 claims are reused after
+ * the drain, but peers (proxies, gateways) keep IP→MAC neighbor entries far
+ * longer, so an address must always resolve to the same MAC.
+ */
+export function deriveGuestHwaddr(ipv4Address: string): string {
+  const address = validateIpv4(ipv4Address, 'guest_ipv4_address');
+  const bytes = [...GUEST_HWADDR_PREFIX, ...address.split('.').map(Number)];
   return bytes.map((byte) => byte.toString(16).padStart(2, '0')).join(':');
 }
 
@@ -221,8 +227,9 @@ export function deriveInstanceHwaddr(containerId: string): string {
  */
 export function buildGuestNicDevice(input: {
   readonly parentInterface: string;
-  /** The id the MAC address and host-side veth name derive from. */
+  /** The id the host-side veth name derives from. */
   readonly hardwareId: string;
+  /** The guest's address; also determines its MAC (see `deriveGuestHwaddr`). */
   readonly ipv4Address: string;
 }): Record<string, string> {
   return {
@@ -230,7 +237,7 @@ export function buildGuestNicDevice(input: {
     nictype: 'bridged',
     parent: input.parentInterface,
     name: 'eth0',
-    hwaddr: deriveInstanceHwaddr(input.hardwareId),
+    hwaddr: deriveGuestHwaddr(input.ipv4Address),
     host_name: deriveNicHostName(input.hardwareId),
     'ipv4.address': input.ipv4Address,
     'security.ipv4_filtering': 'true',
