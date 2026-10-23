@@ -5,7 +5,6 @@ import {
   ContainerPhase,
   ContainerStatus,
   type ContainerDto,
-  type CreateApiTokenRequest,
   type ExecSessionResponse,
   type IntentAcceptedDto,
   type SshClientConfigDto,
@@ -137,7 +136,7 @@ describe('container lifecycle and SSH through the ssh-proxy', () => {
     assert.match(await h.ssh(owner, restarted, 'uptime -s; echo restarted'), /restarted/);
   });
 
-  it('repairs SSH and opens a console session only for browser logins', async () => {
+  it('repairs SSH and opens a console session', async () => {
     const api = owner.session.api;
     // Repair wakes the SSH convergence; it is not an intent.
     const repaired = await api.post<{ woken: boolean }>(`/containers/${container.id}/actions/repair-ssh`);
@@ -147,11 +146,6 @@ describe('container lifecycle and SSH through the ssh-proxy', () => {
 
     const session = await api.post<ExecSessionResponse>(`/containers/${container.id}/exec-sessions`, {});
     assert.ok(session.sessionId && session.consoleUrl && session.expiresAt);
-    const token = await api.post<{ secret: string }>('/auth/tokens', {
-      name: 'console-denied', currentPassword: owner.password,
-    } satisfies CreateApiTokenRequest);
-    const viaToken = api.withToken(token.secret);
-    assert.equal(await viaToken.status('POST', `/containers/${container.id}/exec-sessions`, {}), 403);
   });
 
   it('rejects invalid creates before touching Incus', async () => {

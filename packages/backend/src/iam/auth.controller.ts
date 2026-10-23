@@ -4,23 +4,19 @@ import {
   Body,
   HttpCode,
   Get,
-  Delete,
-  Param,
   Req,
   Res,
   ForbiddenException,
   UnauthorizedException,
 } from '@nestjs/common';
 import { AuthService } from './auth.service.js';
-import { CurrentActor, CurrentUser, Public } from './decorators.js';
-import type { Actor } from './actor.js';
+import { CurrentUser, Public } from './decorators.js';
 import type { UserRecord } from './auth-persistence.js';
 import { AccessResolverService } from './access-resolver.service.js';
 import { NyabaseConfigService } from '../platform/config/nyabase-config.service.js';
 import {
   zLoginRequest,
   zRotateRefreshTokenRequest,
-  zCreateApiTokenRequest,
   UserDto,
 } from '@nyabase/common';
 
@@ -198,32 +194,5 @@ export class AuthController {
   @Get('me')
   async me(@CurrentUser() user: UserRecord) {
     return this.userToDto(user);
-  }
-
-  @Get('tokens')
-  async listTokens(@CurrentUser() user: UserRecord) {
-    const tokens = await this.authService.listApiTokens(user.id);
-    return tokens.map((t) => ({
-      id: t.id,
-      name: t.name,
-      lastUsedAt: t.lastUsedAt,
-      createdAt: t.createdAt,
-    }));
-  }
-
-  @Post('tokens')
-  async createToken(@CurrentActor() actor: Actor, @Body() body: unknown) {
-    const { name, currentPassword } = zCreateApiTokenRequest.parse(body);
-    const { entity, secret } = await this.authService.createApiToken(actor, name, currentPassword);
-    return {
-      token: { id: entity.id, name: entity.name, lastUsedAt: entity.lastUsedAt, createdAt: entity.createdAt },
-      secret,
-    };
-  }
-
-  @Delete('tokens/:id')
-  @HttpCode(204)
-  async deleteToken(@CurrentUser() user: UserRecord, @Param('id') id: string) {
-    await this.authService.deleteApiToken(user.id, id);
   }
 }

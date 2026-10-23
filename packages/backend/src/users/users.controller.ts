@@ -114,7 +114,7 @@ export class UsersController {
   ) {
     if (actor.userId !== id) throw new ForbiddenException();
     const dto = zAddSshKeyRequest.parse(body);
-    return this.sshKeys.addSshKey(id, dto.name, dto.keyText, actor.userId);
+    return this.sshKeys.addSshKey(actor, dto.name, dto.keyText, dto.currentPassword);
   }
 
   @Delete(':id/ssh-keys/:keyId')

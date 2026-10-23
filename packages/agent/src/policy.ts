@@ -460,6 +460,8 @@ function checkVolumeConfig(config: unknown): PolicyVerdict {
       continue;
     }
     if (key === 'size' || key.startsWith('block.') || key.startsWith('initial.')) continue;
+    // Ownership labels: inert to Incus, they let the Backend tell its volumes apart.
+    if (key.startsWith('user.nyabase.')) continue;
     return deny(`volume config ${key} is not allowed`);
   }
   return ALLOW;

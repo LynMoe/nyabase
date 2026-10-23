@@ -47,10 +47,10 @@ describe('user update controller boundaries', () => {
     const user = testActor('user-a');
     const keyText = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAFd/vaXN2I0jY5BiWgFdcK4lc66lU/wUQqmKHUgQzt3';
 
-    await controller.addSshKey('user-a', { name: 'laptop', keyText }, user);
+    await controller.addSshKey('user-a', { name: 'laptop', keyText, currentPassword: 'pw' }, user);
     await controller.deleteSshKey('user-a', 'key-a', user);
 
-    expect(addSshKey).toHaveBeenCalledWith('user-a', 'laptop', keyText, 'user-a');
+    expect(addSshKey).toHaveBeenCalledWith(user, 'laptop', keyText, 'pw');
     expect(deleteSshKey).toHaveBeenCalledWith('user-a', 'key-a', 'user-a');
   });
 });

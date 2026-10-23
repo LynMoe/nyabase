@@ -34,6 +34,8 @@ export async function ensureSharedCatalogOnServer(
     poolName: string;
     incusName: string;
     sizeBytes: string | number;
+    /** The shared backend that owns the volume (its label). */
+    ownerScope: string | null;
   },
 ): Promise<SharedCatalogEnsureResult> {
   try {
@@ -47,6 +49,7 @@ export async function ensureSharedCatalogOnServer(
     input.poolName,
     input.incusName,
     String(input.sizeBytes),
+    input.ownerScope,
   );
   return created ? 'posted' : 'missing';
 }

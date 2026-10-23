@@ -1,7 +1,7 @@
 import { JwtService } from '@nestjs/jwt';
 import { Role, UserStatus } from '@nyabase/common';
 import type { Kysely } from 'kysely';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { AccessChangeNotifier, AccessResolverService } from '../iam/access-resolver.service.js';
 import type { Actor } from '../iam/actor.js';
 import { testActor } from '../iam/actor.test-helper.js';
@@ -12,36 +12,50 @@ import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.
 import { MonotonicClock } from '../platform/monotonic-clock.js';
 import { withPostgresTestDatabase } from '../platform/persistence-pg/postgres-test-harness.js';
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
+import { UserSshKeysService } from './user-ssh-keys.service.js';
 import { UsersService } from './users.service.js';
 
 const describePg = process.env.NYABASE_TEST_DATABASE_URL ? describe : describe.skip;
 
+const SSH_KEY = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAFd/vaXN2I0jY5BiWgFdcK4lc66lU/wUQqmKHUgQzt3';
+
 describePg('credential revocation on password change, reset and account changes', () => {
-  it('deletes API tokens and refresh sessions when an admin resets the password', async () => {
+  it('ends refresh sessions but keeps SSH keys when an admin resets the password', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const context = await setup(database);
-      const secret = await context.mintToken();
+      await context.addKey();
       await context.auth.login({ id: context.user.id });
 
       await context.users.updateUser(context.user.id, { password: 'reset-password-1' }, context.admin.id);
 
-      expect(await context.credentialCounts()).toEqual({ apiTokens: 0, refreshTokens: 0 });
-      await expect(context.auth.validateApiToken(secret)).resolves.toBeNull();
+      expect(await context.credentialCounts()).toEqual({ refreshTokens: 0, sshKeys: 1 });
       expect(context.revoked).toEqual([context.user.id]);
     });
   });
 
-  it('deletes API tokens and refresh sessions when the user changes their own password', async () => {
+  it('ends refresh sessions but keeps SSH keys when the user changes their own password', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const context = await setup(database);
-      const secret = await context.mintToken();
+      await context.addKey();
       await context.auth.login({ id: context.user.id });
 
       await context.users.updateSelf(context.user.id, { password: 'changed-password-1' }, 'user-password-1');
 
-      expect(await context.credentialCounts()).toEqual({ apiTokens: 0, refreshTokens: 0 });
-      await expect(context.auth.validateApiToken(secret)).resolves.toBeNull();
+      expect(await context.credentialCounts()).toEqual({ refreshTokens: 0, sshKeys: 1 });
       expect(context.revoked).toEqual([context.user.id]);
+    });
+  });
+
+  it('adds an SSH key only after proving the current password', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const context = await setup(database);
+
+      await expect(context.sshKeys.addSshKey(context.userActor, 'k', SSH_KEY, 'wrong-password'))
+        .rejects.toMatchObject({ response: { code: 'CURRENT_PASSWORD_INCORRECT' } });
+      expect((await context.credentialCounts()).sshKeys).toBe(0);
+
+      await context.addKey();
+      expect((await context.credentialCounts()).sshKeys).toBe(1);
     });
   });
 
@@ -91,6 +105,15 @@ async function setup(database: Kysely<NyabaseDatabase>) {
   const sessions = new SessionRevocationService();
   const revoked: string[] = [];
   sessions.subscribe((userId) => revoked.push(userId));
+  const convergence = { reconcileUser: vi.fn().mockResolvedValue(undefined) };
+  const sshKeys = new UserSshKeysService(
+    database,
+    transactions,
+    convergence as never,
+    { notify: async () => undefined } as never,
+    audit as never,
+    auth,
+  );
   const users = new UsersService(
     database,
     transactions,
@@ -115,16 +138,18 @@ async function setup(database: Kysely<NyabaseDatabase>) {
     admin,
     user,
     revoked,
+    sshKeys,
+    userActor,
     adminActor: testActor(admin.id, Role.Admin),
-    async mintToken(): Promise<string> {
-      return (await auth.createApiToken(userActor, 'ci', 'user-password-1')).secret;
+    async addKey(): Promise<void> {
+      await sshKeys.addSshKey(userActor, 'laptop', SSH_KEY, 'user-password-1');
     },
     async credentialCounts() {
-      const [apiTokens, refreshTokens] = await Promise.all([
-        database.selectFrom('iam.api_tokens').select('id').where('user_id', '=', user.id).execute(),
+      const [refreshTokens, sshKeys] = await Promise.all([
         database.selectFrom('iam.refresh_tokens').select('id').where('user_id', '=', user.id).execute(),
+        database.selectFrom('iam.ssh_public_keys').select('id').where('user_id', '=', user.id).execute(),
       ]);
-      return { apiTokens: apiTokens.length, refreshTokens: refreshTokens.length };
+      return { refreshTokens: refreshTokens.length, sshKeys: sshKeys.length };
     },
   };
 }

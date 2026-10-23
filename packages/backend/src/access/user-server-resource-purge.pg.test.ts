@@ -25,7 +25,6 @@ import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.
 import { withPostgresTestDatabase } from '../platform/persistence-pg/postgres-test-harness.js';
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
 import { IntentRepository } from '../reconcile/intent.repository.js';
-import { ReconcileClaimRepository } from '../reconcile/reconcile-claim.repository.js';
 import { noopWake } from '../reconcile/reconcile-wake.test-helper.js';
 import { VolumesRepository } from '../volumes/volumes.repository.js';
 import { UserServerResourcePurgeService } from './user-server-resource-purge.service.js';
@@ -58,7 +57,7 @@ function purgeService(database: Kysely<NyabaseDatabase>): UserServerResourcePurg
     containers,
     new VolumesRepository(database),
     intents,
-    new ReconcileClaimRepository(database),
+    { forceDetach: vi.fn() } as never,
     audit as never,
   );
 }

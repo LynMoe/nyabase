@@ -164,7 +164,7 @@ describePg('server agent onboarding and removal', () => {
     });
   });
 
-  it('control-plane-cascades a referenced server without Incus and preserves peer shared catalogs', async () => {
+  it('refuses a server that still holds resources, then force-cascades it without Incus and preserves peer shared catalogs', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const actor = await seedUser(database, undefined, UserStatus.Active, Role.Operator);
       const ownerId = randomUUID();
@@ -505,7 +505,12 @@ describePg('server agent onboarding and removal', () => {
         { wake: vi.fn() } as never,
       );
 
-      await expect(service.delete(actor, serverS, 4)).resolves.toBeUndefined();
+      // Its instances would keep running with addresses handed out again: refused unless forced.
+      await expect(service.delete(actor, serverS, 4)).rejects.toMatchObject({
+        response: { code: 'SERVER_NOT_EMPTY', details: { containers: 1, localVolumes: 1 } },
+      });
+      expect(invalidate).not.toHaveBeenCalled();
+      await expect(service.delete(actor, serverS, 4, true)).resolves.toBeUndefined();
       expect(invalidate).toHaveBeenCalledWith('server_deleted');
       expect(
         await database.selectFrom('infra.servers').select('id').where('id', '=', serverS).executeTakeFirst(),

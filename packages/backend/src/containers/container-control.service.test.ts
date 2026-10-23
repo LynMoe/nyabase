@@ -556,10 +556,10 @@ describe('ContainerControlService actor authorization', () => {
     expect(list).toHaveBeenLastCalledWith({ ownerId: undefined, serverId: 'server-9' });
   });
 
-  it('requires a browser JWT for console admission', async () => {
+  it('requires a signed-in user for console admission', async () => {
     const harness = makeHarness();
     await expect(harness.service.createExecSession(
-      { ...owner, userId: actorId, authKind: 'api-token' as const },
+      SYSTEM_ACTOR,
       containerId,
       { command: ['/bin/sh'], tty: true, cols: 80, rows: 24 },
     )).rejects.toBeInstanceOf(ForbiddenException);

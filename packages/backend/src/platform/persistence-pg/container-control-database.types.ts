@@ -74,6 +74,14 @@ export interface ContainerNetworkClaimTable {
   cleanup_payload_json: ContainerJson<Record<string, unknown>> | null;
 }
 
+export interface OrphanSightingTable {
+  server_id: string;
+  kind: 'instance' | 'volume';
+  pool_name: string;
+  name: string;
+  first_seen_at: ContainerGeneratedTimestamp;
+}
+
 export interface ContainerSshRouteTable {
   container_id: string;
   server_id: string;
@@ -123,6 +131,7 @@ export interface ContainerControlDatabase {
   'control.user_cpu_sets': UserCpuSetTable;
   'control.container_network_claims': ContainerNetworkClaimTable;
   'control.container_ssh_routes': ContainerSshRouteTable;
+  'control.orphan_sightings': OrphanSightingTable;
   'control.intents': IntentTable;
   'control.reconcile_claims': ReconcileClaimTable;
 }

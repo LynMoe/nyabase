@@ -1,14 +1,13 @@
-import { ForbiddenException, HttpStatus, UnauthorizedException } from '@nestjs/common';
+import { HttpStatus, UnauthorizedException } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
-import { Role, UserStatus } from '@nyabase/common';
+import { UserStatus } from '@nyabase/common';
 import {
   AuthService,
   MAX_LOGIN_FAILURES_PER_IP,
   MAX_LOGIN_FAILURES_PER_IP_USERNAME,
   MAX_REAUTH_FAILURES_PER_USER,
 } from './auth.service.js';
-import type { Actor } from './actor.js';
 import { InMemoryAuthPersistenceTestAdapter } from './in-memory-auth-persistence.test-helper.js';
 import {
   clientAddressBucket,
@@ -162,39 +161,7 @@ describe('PasswordVerificationGate', () => {
   });
 });
 
-describe('AuthService API token creation', () => {
-  it('requires a browser session and the current password', async () => {
-    const { service, user, persistence } = await seededAuth('alice', 'correct-password');
-    const jwtActor: Actor = { userId: user.id, role: Role.User, authKind: 'jwt', authVersion: 0 };
-
-    await expect(service.createApiToken(
-      { ...jwtActor, authKind: 'api-token' },
-      'ci',
-      'correct-password',
-    )).rejects.toBeInstanceOf(ForbiddenException);
-    await expect(service.createApiToken(jwtActor, 'ci', 'wrong-password'))
-      .rejects.toMatchObject({ status: 403, response: { code: 'CURRENT_PASSWORD_INCORRECT' } });
-    expect(persistence.apiTokenRows()).toHaveLength(0);
-
-    const created = await service.createApiToken(jwtActor, 'ci', 'correct-password');
-    expect(created.secret).toMatch(/^[0-9a-f]{64}$/);
-    expect(persistence.apiTokenRows()).toHaveLength(1);
-  });
-
-  it('does not insert a token when the password changed after it was verified', async () => {
-    const { service, user, persistence } = await seededAuth('alice', 'correct-password');
-    const actor: Actor = { userId: user.id, role: Role.User, authKind: 'jwt', authVersion: 0 };
-    const findUserById = persistence.findUserById.bind(persistence);
-    vi.spyOn(persistence, 'findUserById').mockImplementation(async (id) => {
-      const snapshot = { ...(await findUserById(id))! };
-      persistence.updateUser(id, { passwordHash: 'rotated', authVersion: 1 });
-      return snapshot;
-    });
-    await expect(service.createApiToken(actor, 'ci', 'correct-password'))
-      .rejects.toBeInstanceOf(UnauthorizedException);
-    expect(persistence.apiTokenRows()).toHaveLength(0);
-  });
-
+describe('AuthService re-authentication', () => {
   it('keeps signed-in password checks available while logins saturate their gate', async () => {
     const { service, user } = await seededAuth('alice', 'correct-password');
     const loginGate = (service as unknown as { loginGate: PasswordVerificationGate }).loginGate;

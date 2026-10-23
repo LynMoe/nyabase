@@ -18,15 +18,6 @@ export interface AuthUser {
 /** The authenticated principal attached to a request (service-facing camelCase contract). */
 export type UserRecord = AuthUser;
 
-export interface AuthApiToken {
-  id: string;
-  userId: string;
-  name: string;
-  hash: string;
-  lastUsedAt: Date | null;
-  createdAt: Date;
-}
-
 export interface NewRefreshSession {
   id: string;
   hash: string;
@@ -70,29 +61,7 @@ export interface AuthPersistence {
     hash: string,
     onDeleted?: AuthTransactionHook<string>,
   ): Promise<string | null>;
-  validateApiToken(
-    hash: string,
-    now: Date,
-    touchIntervalMs: number,
-  ): Promise<AuthUser | null>;
-  createApiToken(
-    userId: string,
-    token: AuthApiToken,
-    maximumTokens: number,
-    credentialSnapshot: LoginCredentialSnapshot,
-    onCreated?: AuthTransactionHook<AuthApiToken>,
-  ): Promise<'created' | 'inactive-user' | 'capacity'>;
-  listApiTokens(userId: string): Promise<AuthApiToken[]>;
-  deleteApiToken(
-    userId: string,
-    tokenId: string,
-    onDeleted?: AuthTransactionHook<AuthApiToken>,
-  ): Promise<AuthApiToken | null>;
   revokeBrowserSessions(
-    transaction: Transaction<NyabaseDatabase>,
-    userId: string,
-  ): Promise<void>;
-  deleteUserCredentials(
     transaction: Transaction<NyabaseDatabase>,
     userId: string,
   ): Promise<void>;

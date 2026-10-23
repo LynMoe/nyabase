@@ -26,6 +26,7 @@ import {
   ReconcileClaimRepository,
 } from './reconcile-claim.repository.js';
 import { ReconcileWakeService } from './reconcile-wake.service.js';
+import { ResourceChains } from './resource-chains.js';
 import {
   asFailure,
   boundedErrorMessage,
@@ -68,6 +69,9 @@ export class ReconcileWorkerService implements OnApplicationBootstrap, OnModuleD
   private destroyPromise?: Promise<void>;
   /** Servers with a running event watcher. */
   private readonly eventWatchers = new Set<string>();
+  private readonly chains = new ResourceChains();
+  /** A wake arrived during the pass: intents it already tried get one more go. */
+  private retryAttempted = false;
 
   constructor(
     private readonly intents: IntentRepository,
@@ -111,6 +115,7 @@ export class ReconcileWorkerService implements OnApplicationBootstrap, OnModuleD
     if (this.destroyPromise) return this.destroyPromise;
     this.stopping = true;
     this.controller.abort();
+    this.chains.signal();
     try {
       this.unsubscribeWake?.();
     } catch (error) {
@@ -138,6 +143,9 @@ export class ReconcileWorkerService implements OnApplicationBootstrap, OnModuleD
     if (this.controller.signal.aborted) return Promise.resolve();
     if (this.runPromise) {
       this.rerunRequested = true;
+      this.retryAttempted = true;
+      // A pass waiting on slow work looks at the queue again right away.
+      this.chains.signal();
       return this.runPromise;
     }
     this.running = true;
@@ -213,17 +221,34 @@ export class ReconcileWorkerService implements OnApplicationBootstrap, OnModuleD
     }
   }
 
+  /**
+   * Resolves once the queue is drained and nothing it started still runs.
+   * While slow work runs, any finished chain, wake or due retry makes it list
+   * the queue again, so one slow Incus call never holds up the others.
+   */
   private async executeRunOnce(): Promise<void> {
+    // Intents handed to a chain in this pass. One left pending (parked
+    // resource, claim held elsewhere) is not retried when a chain finishes,
+    // only after a wake, as a fresh pass would.
+    const attempted = new Set<string>();
     try {
       do {
         this.rerunRequested = false;
+        if (this.retryAttempted) {
+          this.retryAttempted = false;
+          attempted.clear();
+        }
         if (this.controller.signal.aborted) return;
         await this.claims.reapExpired();
-        if (await this.drainReadyQueue()) {
+        if (await this.drainReadyQueue(attempted)) {
           this.rerunRequested = true;
           continue;
         }
         await this.armRetryTimer();
+        if (this.chains.size > 0) {
+          await this.chains.nextChange();
+          this.rerunRequested = true;
+        }
       } while (this.rerunRequested && !this.controller.signal.aborted);
     } catch (error) {
       if (this.isShutdownOrDriverClose(error)) {
@@ -235,26 +260,45 @@ export class ReconcileWorkerService implements OnApplicationBootstrap, OnModuleD
   }
 
   /**
-   * Process ready intents page by page. Intents skipped in this pass (parked
-   * resource, busy claim) are excluded from later pages so they cannot starve
-   * the rest. Returns true when the page budget ran out with work left.
+   * Hand ready intents to their resource chains page by page. Intents skipped
+   * in this pass (server at its concurrency limit) are excluded from later
+   * pages so they cannot starve the rest; the next pass picks them up. Returns
+   * true when the page budget ran out with work left.
    */
-  private async drainReadyQueue(): Promise<boolean> {
+  private async drainReadyQueue(attempted: Set<string>): Promise<boolean> {
     const seen = new Set<string>();
     for (let page = 0; page < QUEUE_MAX_PAGES; page += 1) {
       const { items } = await this.intents.listPending({
         limit: QUEUE_PAGE_SIZE,
         readyAt: new Date(),
-        excludeIds: [...seen],
+        excludeIds: [...new Set([...seen, ...attempted, ...this.chains.queuedIds])],
       });
       for (const intent of items) {
         if (this.controller.signal.aborted) return false;
+        if (seen.has(intent.id) || attempted.has(intent.id) || this.chains.queuedIds.has(intent.id)) continue;
         seen.add(intent.id);
-        await this.processIntent(intent);
+        while (this.chains.full && !this.chains.admits(intent)) {
+          await this.chains.anyIdle();
+          if (this.controller.signal.aborted) return false;
+        }
+        if (!this.chains.admits(intent)) continue;
+        attempted.add(intent.id);
+        this.enqueue(intent);
       }
       if (items.length < QUEUE_PAGE_SIZE) return false;
     }
     return true;
+  }
+
+  private enqueue(intent: IntentRecord): void {
+    const tail = this.chains.enqueue(intent, () => this.processIntent(intent).catch((error: unknown) => {
+      if (this.isShutdownOrDriverClose(error)) {
+        this.warnShutdown(`Reconcile intent ${intent.id}`, error);
+        return;
+      }
+      this.logger.error(`Reconcile intent ${intent.id} failed: ${boundedErrorMessage(error)}`);
+    }));
+    this.trackOperation(tail);
   }
 
   private finishRun(operation: Promise<void>): void {

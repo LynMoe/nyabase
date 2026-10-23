@@ -47,7 +47,6 @@ import {
   managedContainerIdentity,
   normalized,
   observeRootUsage,
-  orphanInstances,
   powerTransition,
   putManagedFields,
   readRequired,
@@ -94,6 +93,13 @@ type Loaded =
  * steps are private methods; the Incus operations are plain functions in
  * container-instance-ops and all SQL is in the store.
  */
+/** Root quota polls: 5 s doubling to a minute, about an hour in all. */
+const ROOT_QUOTA_MAX_ATTEMPTS = 64;
+
+export function rootQuotaRetryDelay(attemptCount: number): number {
+  return Math.min(60_000, 5_000 * 2 ** Math.min(4, Math.max(0, attemptCount - 1)));
+}
+
 @Injectable()
 export class ContainerReconciler implements ManagedReconciler, OnModuleInit {
   readonly resourceType = 'container' as const;
@@ -382,6 +388,7 @@ export class ContainerReconciler implements ManagedReconciler, OnModuleInit {
           poolName: attachment.pool_name,
           incusName: attachment.incus_name,
           sizeBytes: attachment.size_bytes,
+          ownerScope: attachment.shared_backend_id ?? null,
         });
         if (result === 'missing') {
           if (context.intent.attemptCount >= VOLUME_ADOPT_FAIL_AFTER_ATTEMPTS) {
@@ -456,7 +463,6 @@ export class ContainerReconciler implements ManagedReconciler, OnModuleInit {
   ): Promise<ActualInstance> {
     const actual = await this.findInstance(client, expectedName, row);
     if (!actual) {
-      await this.deleteManagedOrphans(client, row, context.intent);
       await this.auditMutate(context.intent, 'POST', '/1.0/instances', expectedName);
       await createInstance(client, desired, expectedName);
       await this.store.setInstanceName(row.id, expectedName);
@@ -545,25 +551,6 @@ export class ContainerReconciler implements ManagedReconciler, OnModuleInit {
     }
     await this.deleteInstance(client, actual.name, intent);
     return true;
-  }
-
-  /** Remove managed instances on the server that no live container row owns. */
-  private async deleteManagedOrphans(
-    client: IncusClientPort,
-    row: ContainerRow,
-    intent: IntentRecord,
-  ): Promise<void> {
-    const known = new Set(
-      (await this.store.listLiveContainerIds(row.server_id)).map((id) => normalized(id)),
-    );
-    const instances = await client.listInstances(2);
-    for (const document of orphanInstances(
-      instances.metadata as InstanceFull[],
-      row.server_id,
-      known,
-    )) {
-      await this.deleteInstance(client, document.name!, intent);
-    }
   }
 
   // --- power ------------------------------------------------------------------------
@@ -676,15 +663,15 @@ export class ContainerReconciler implements ManagedReconciler, OnModuleInit {
       observedUsage,
     );
     if (quota.pending) {
-      return {
-        outcome: 'retry',
-        failure: intentFailure(
-          'ROOT_QUOTA_PENDING',
-          'Incus has not finished applying the root filesystem quota',
-          { pendingSizeBytes: quota.pendingSizeBytes ?? row.root_size_bytes },
-        ),
-        retryAfterMs: 5_000,
-      };
+      const failure = intentFailure(
+        'ROOT_QUOTA_PENDING',
+        'Incus has not finished applying the root filesystem quota',
+        { pendingSizeBytes: quota.pendingSizeBytes ?? row.root_size_bytes },
+      );
+      // Every pass re-runs the guest network and SSH steps: back off, and
+      // give up (a user retry restarts it) instead of polling forever.
+      if (intent.attemptCount >= ROOT_QUOTA_MAX_ATTEMPTS) return { outcome: 'failed', failure };
+      return { outcome: 'retry', failure, retryAfterMs: rootQuotaRetryDelay(intent.attemptCount) };
     }
     if (
       running(verifiedState)

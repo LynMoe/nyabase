@@ -53,8 +53,6 @@ describe('queryKeys catalog', () => {
       .toEqual(queryKeys.users.admin);
     expect(queryKeys.grants.subject('users', 'abc')).toEqual(['grants', 'users', 'abc']);
     expect(queryKeys.meAccess).toEqual(['me', 'access']);
-    expect(queryKeys.apiTokens('u1')).toEqual(['api-tokens', 'u1']);
-    expect(queryKeys.apiTokens('u1')).not.toEqual(queryKeys.sshKeys('u1'));
     expect(queryKeys.publicSettings).toEqual(['public-settings']);
     expect(queryKeys.systemSettings).toEqual(['system-settings']);
     expect(queryKeys.catalog.users).toEqual(['catalog', 'users']);

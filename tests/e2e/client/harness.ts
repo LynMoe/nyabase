@@ -131,6 +131,7 @@ export class Harness {
     return user.session.api.post<SshPublicKeyDto>(`/users/${user.id}/ssh-keys`, {
       name: 'e2e',
       keyText: readFileSync(`${keyFile}.pub`, 'utf8').trim(),
+      currentPassword: user.password,
     });
   }
 

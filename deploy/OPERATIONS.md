@@ -529,13 +529,26 @@ rebuilding vmbr.
   and per client address — 30 per 5 minutes, IPv6 bucketed per `/64`. There is
   no account-wide lockout, so nobody can lock a user out by guessing from
   elsewhere. Wrong current-password entries by a signed-in user (password
-  change, API token creation) are limited to 10 per 5 minutes per user. Client
+  change, adding an SSH key) are limited to 10 per 5 minutes per user. Client
   addresses come from `server.trustedProxies` (see **TLS edge**).
 - Volume destroy and purge wait while the executing server is offline (normal
   failure backoff and retry) instead of dropping the volume rows; only when the
   server or pool no longer exists is the destroy treated as having no executor.
   Deleting a server keeps a shared volume that is being destroyed as long as
   another executor server for its backend exists, online or not.
+- Deleting a server removes it from the control plane only and never touches
+  its Incus. It is refused (`SERVER_NOT_EMPTY`) while the server still holds
+  containers or local volumes: delete those first, so the reconciler removes
+  them from the host. `DELETE /api/servers/:id?force=true` skips the check and
+  is only for a host that is gone for good or wiped; on a live host its
+  instances would keep running while their addresses are handed out again.
+- Incus instances and custom volumes that carry this installation's labels but
+  have no row (an instance `user.nyabase.server_id` of this server; a volume
+  `user.nyabase.scope` of this server or of the pool's shared backend) are
+  orphans. A full scan records each in `control.orphan_sightings`, force-stops
+  an orphan instance at once, and deletes an orphan only after it has been seen
+  for 7 days. Unlabelled `nyv-*` volumes (another installation on the same host,
+  or created by hand) are never deleted.
 - A server marked `unreachable` while its agent stays connected recovers on
   its own: the Backend probes Incus through the agent with backoff (15 s,
   doubling up to 5 min), restores `online` on success and wakes a full scan.
@@ -677,6 +690,12 @@ configure `restore_command` for the off-host WAL archive and set the required
 Promote only after schema compatibility, row-count/application invariants, and
 the desired recovery timestamp are verified.
 
+After restoring a database that is older than the hosts' state, every
+container and volume created after the backup is an orphan: its instances are
+stopped by the next full scan and everything is deleted 7 days later. Within
+those 7 days, decide per orphan (recreate the row, or copy data out and let it
+go); `control.orphan_sightings` lists them with `first_seen_at`.
+
 Record drill evidence instead of claiming an unmeasured RPO/RTO:
 
 ```text
@@ -778,13 +797,13 @@ from the product SLO and measured baseline, not from this example deployment.
   login limit blocks sign-in for everyone. Never trust a range that end users
   can send from directly. The proxy must overwrite, not append to, an
   untrusted inbound `X-Forwarded-For`.
-- API tokens can only be created from a signed-in browser (JWT) session and
-  require the current password (`currentPassword`); a request authenticated
-  with an API token cannot mint another one. Changing a password, or an
-  administrator resetting it, deletes all of that user's API tokens and
-  refresh sessions in the same transaction. Disabling a user ends their browser
-  sessions and suspends their API tokens, which work again only if the user is
-  re-enabled.
+- The panel is browser-only: there are no API tokens or API keys, and the only
+  credential the HTTP API accepts is the browser session's short-lived access
+  JWT (refreshed through the `HttpOnly` refresh cookie). Changing a password,
+  an administrator resetting it, or disabling the user deletes their refresh
+  sessions in the same transaction and invalidates outstanding access tokens.
+  SSH public keys are kept across a password change; adding one requires the
+  current password, and removing unknown keys is up to the user.
 - Open browser consoles (`/ws/console`) close with WebSocket code `4401` when
   their user is disabled or deleted, changes role, or changes (or has reset)
   their password.
@@ -848,11 +867,13 @@ from the product SLO and measured baseline, not from this example deployment.
 
 - 台账 `control.access_lapses`（`user_id, resource_kind, resource_id, lapsed_at, stopped_at, purged_at`）记录宽限。
   `lapsed_at` 恒为检测时刻（处理器开台账行的那一刻），之后不再变化，不从原授权的 `expires_at` 倒推。
-- 宽限内：停止该用户在该资源上运行中的容器（`stopped_at` 记第一次停机时间）；若之后又有期望运行的容器
-  （例如管理员用 `scope=all` 启动了它），每轮都会再次停机。不能新建、启动、挂载。
-- 宽限期满：清除该用户在该资源上的容器与卷（写 `purged_at`）；服务器 = 容器 + 本地卷，数据盘池 = 池上的卷及挂载它们的容器，
-  共享后端 = 后端上的卷及挂载它们的容器。清除后该用户在该资源上已无资源，台账行即被删除。
-- 宽限内覆盖恢复（重新授权或重新启用用户）：台账行被删除，宽限取消；已停机的容器不会自动启动。
+- 宽限开始即处置（`stopped_at` 记第一次处置时间）：
+  - 服务器：停止该用户在其上运行中的容器；
+  - 数据盘池 / 共享后端：把该用户在其上的卷从所有容器卸载（运行中的容器热拔，容器本身不停也不删）。
+  若之后处置被绕过（管理员用 `scope=all` 又启动了容器或又挂上了卷），每轮都会再次处置。宽限内不能新建、启动、挂载。
+- 宽限期满（清除前在 IAM 锁下复核覆盖）：清除该用户在该资源上的资源（写 `purged_at`）；服务器 = 容器 + 本地卷，
+  数据盘池 = 池上的卷，共享后端 = 后端上的卷（挂载过这些卷的容器保留）。清除后该用户在该资源上已无资源，台账行即被删除。
+- 宽限内覆盖恢复（重新授权或重新启用用户）：台账行被删除，宽限取消；已停机的容器不会自动启动，已卸载的卷需要用户手动重新挂载。
 - 处理器每分钟运行一次，并在 IAM 写操作与用户状态变更提交后立即唤醒；每个 (用户, 资源) 用 `reconcile_claims`
   租约（`resource_type = access_lapse`）串行。
 - 用户被禁用与撤销走同一条流程：其名下资源按检测时刻开宽限、立即停机，14 天后清除。删除账号仍要求其名下没有任何资源

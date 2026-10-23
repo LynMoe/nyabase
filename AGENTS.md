@@ -30,7 +30,8 @@ Vite 通过 alias 将 `@nyabase/common` 指向 `src/index.ts`，但 `index.ts` �
   （groups、ip-pools、catalog、metrics、ssh-proxy、system-settings）；
   `http-api-duplicate-routes.contract.test.ts` 断言不存在同名资源同时挂在两处。
 - 鉴权在 service 里：`@CurrentActor()`（`iam/actor.ts`）给出 `{ userId, role, authKind, authVersion }`，
-  `RolesGuard` 用 `JwtAuthGuard` 已加载的用户行（JWT 与 API token 两条路径都带 `role`）构造，不再额外查询。
+  `RolesGuard` 用 `JwtAuthGuard` 已加载的用户行（带 `role`）构造，不再额外查询。
+  唯一的凭据是浏览器会话的短期 access JWT（经 refresh cookie 续期）：没有 API token / API key，不要再加回来。
   service 方法签名是 `method(actor, ...)`，
   每个 service 只有一个私有的 `assertCanAccess(actor, row)`；不要再写 `ForUser/ForAdmin/ForSystem`
   包装或 `'user' | 'admin'` 参数。内部调用方（授权到期等）用 `SYSTEM_ACTOR`：没有用户行，`userId` 为 `null`，它写的 audit `actor_id` / intent `requested_by` 等归属一律为 NULL（前端显示「系统」）；
@@ -58,10 +59,12 @@ Vite 通过 alias 将 `@nyabase/common` 指向 `src/index.ts`，但 `index.ts` �
   "最后一个活跃管理员"保护（降级 / 禁用 / 删除 `role='admin' AND status='active'` 的最后一人被拒，`LAST_ACTIVE_ADMINISTRATOR`）。
   所有 IAM 写操作用 `lockIamPolicy`（advisory lock）串行化。
 - 撤销 = 立即到期：删除授权 / 移出组 / 删除组都不会被拒绝，IAM 写操作在 `afterCommit` 里通知 `AccessChangeNotifier`，
-  `access/access-lapse.processor.ts` 按台账 `control.access_lapses` 走同一条 14 天宽限 → 停机 → 清除流程（租约 `access_lapse`，
-  停机/清除复用 `UserServerResourcePurgeService` 的 `SYSTEM_ACTOR` 路径）。`lapsed_at` 恒为检测时间（处理器开台账行的那一刻），
-  不从原始授权行推断（否则会把撤销倒推到不相干的旧到期时间并立刻清除）。宽限内只要该 (用户, 资源) 后面还有 `power_intent='running'` 的容器
-  （例如管理员用 `scope=all` 又启动了它），每轮都会再次停机；`stopped_at` 保留第一次停机时间。
+  `access/access-lapse.processor.ts` 按台账 `control.access_lapses` 走同一条 14 天宽限 → 处置 → 清除流程（租约 `access_lapse`，
+  处置/清除复用 `UserServerResourcePurgeService` 的 `SYSTEM_ACTOR` 路径）。处置因资源而异：服务器 = 停止该用户在其上运行的容器
+  （含仍在 provisioning 的），期满删容器 + 本地卷；数据盘池 / 共享后端 = 立即把该用户在其上的卷从容器强制卸载
+  （`VolumeAttachmentsService.forceDetach`，运行中热拔，容器不停也不删），期满只删这些卷。`lapsed_at` 恒为检测时间（处理器开台账行的那一刻），
+  不从原始授权行推断（否则会把撤销倒推到不相干的旧到期时间并立刻清除）。宽限内只要处置被绕过（服务器上又有 `power_intent='running'` 的容器，
+  或池 / 后端上的卷又被挂上，例如管理员用 `scope=all`），每轮都会再次处置；`stopped_at` 保留第一次处置时间。清除前在 IAM 锁下复核覆盖。
 - 禁用用户 = 失去覆盖，与撤销同一条流程：覆盖只认 `iam.effective_*_access`（active 用户 + 当前授权），禁用后其名下资源按检测时间开宽限、立即停机，
   14 天后清除；宽限内重新启用则删台账行（容器不自动启动）。用户状态变更在 `afterCommit` 里通知 `AccessChangeNotifier`。
 - 宽限中（无当前覆盖）的用户不能新建、启动、挂载；已停机的容器在覆盖恢复后不会自动启动。
@@ -86,7 +89,10 @@ Vite 通过 alias 将 `@nyabase/common` 指向 `src/index.ts`，但 `index.ts` �
 
 8. 单进程：不使用 `LISTEN/NOTIFY` 或轮询来同步状态。reconcile 唤醒走进程内 `ReconcileWakeService`；在事务里创建 intent
    时用 `platform/post-commit.ts` 的 `afterCommit(executor, …)` 登记唤醒，事务必须经 `PgTransactionManager.run`（或
-   `executeWithPostCommit`）开启，提交后才触发，回滚/重试丢弃。worker 的周期全量扫描是兜底。系统设置只用 revision CAS
+   `executeWithPostCommit`）开启，提交后才触发，回滚/重试丢弃。worker 的周期全量扫描是兜底。
+   worker 按资源排队（`reconcile/resource-chains.ts`）：同一资源的 intent 严格按序、绝不并发（claim 按 worker 记，
+   同 worker 重入会续租，所以这道进程内互斥不能去掉），不同资源并发（全局 12、每服务器 4），一个慢操作不再拖住整个队列。
+   全量扫描先列 Incus 再读库；库里不认识的带本安装标签的实例 / 卷进 `control.orphan_sightings`，实例立即停机，7 天后才删。系统设置只用 revision CAS
    （冲突返回 409 + 当前值），没有内容 token 和定时轮询。
 9. Backend 不直连 Incus，也不主动连任何主机。每台服务器的 `nyabase-agent`（`packages/agent`）主动 wss 连
    `/ws/agent`（凭据 `nyak.<serverId>.<secret>`，库里只存 sha256），Incus 请求走 `incus.http` RPC、

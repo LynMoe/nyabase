@@ -24,6 +24,7 @@ import {
   createCustomVolume,
   deleteCatalog,
   deleteOrphanVolume,
+  labelledFor,
   destroyRetry,
   destroyRetryFromError,
   isNotFound,
@@ -34,6 +35,8 @@ import {
   verifyCustomVolume,
   type StorageVolume,
   type StorageVolumeState,
+  volumeLabels,
+  volumeOwnerScope,
 } from './volume-ops.js';
 import {
   VolumeReconcileStore,
@@ -192,7 +195,13 @@ export class VolumeReconciler implements ManagedReconciler, OnModuleInit {
       `/1.0/storage-pools/${row.placement_pool_name}/volumes`,
       row.incus_name,
     );
-    return createCustomVolume(client, row.placement_pool_name, row.incus_name, row.size_bytes);
+    return createCustomVolume(
+      client,
+      row.placement_pool_name,
+      row.incus_name,
+      row.size_bytes,
+      volumeOwnerScope(row),
+    );
   }
 
   /** Bring size and `security.shifted` in line with the desired state, then record the placement as present. */
@@ -218,6 +227,10 @@ export class VolumeReconciler implements ManagedReconciler, OnModuleInit {
     // An unmapped volume bypasses the uid shift every attached container relies on.
     const unmapped = config['security.unmapped'] !== undefined;
     delete config['security.unmapped'];
+    // The owner labels are what lets a later scan tell our orphans from anyone else's.
+    const labels = volumeLabels(volumeOwnerScope(row));
+    const unlabelled = Object.entries(labels).some(([key, value]) => config[key] !== value);
+    Object.assign(config, labels);
     const currentSize = asBytes(config.size);
     const desiredSize = BigInt(row.size_bytes);
     if (currentSize === null) {
@@ -256,6 +269,7 @@ export class VolumeReconciler implements ManagedReconciler, OnModuleInit {
     if (
       decision.action !== 'none'
       || unmapped
+      || unlabelled
       || config['security.shifted'] !== actual.config?.['security.shifted']
     ) {
       await this.auditMutate(
@@ -538,6 +552,7 @@ export class VolumeReconciler implements ManagedReconciler, OnModuleInit {
         poolName: executor.pool_name,
         incusName: volume.incus_name,
         sizeBytes: volume.size_bytes,
+        ownerScope: volumeOwnerScope(volume),
       });
       if (adopted === 'missing') {
         return destroyRetry(
@@ -596,7 +611,7 @@ export class VolumeReconciler implements ManagedReconciler, OnModuleInit {
     const inventory = await this.loadInventory(serverId, client, signal);
     await this.converge(serverId, client, inventory);
     if (!client) return;
-    await this.deleteOrphans(serverId, client, inventory, signal);
+    await this.quarantineOrphans(serverId, client, inventory, signal);
   }
 
   private async loadInventory(
@@ -612,8 +627,8 @@ export class VolumeReconciler implements ManagedReconciler, OnModuleInit {
         .map((pool) => pool.shared_backend_id)
         .filter((id): id is string => typeof id === 'string' && id.length > 0),
     )];
-    const rows = await store.listScanVolumes(serverId, shareableBackendIds);
-    const knownNames = await store.listKnownIncusNames();
+    // Incus first, rows second: a row always exists before its volume, so a
+    // volume created while the scan runs is never mistaken for an orphan.
     const listedByPool = new Map<string, readonly (StorageVolume | string)[]>();
     const listedByName = new Map<string, StorageVolume | string>();
     if (client) {
@@ -625,6 +640,8 @@ export class VolumeReconciler implements ManagedReconciler, OnModuleInit {
         }
       }
     }
+    const rows = await store.listScanVolumes(serverId, shareableBackendIds);
+    const knownNames = await store.listKnownIncusNames();
     const placements = await store.listPlacementsOnServer(serverId);
     const placementByVolume = new Map(placements.map((row) => [row.volume_id, row]));
     return { pools, rows, knownNames, listedByPool, listedByName, placementByVolume };
@@ -693,8 +710,12 @@ export class VolumeReconciler implements ManagedReconciler, OnModuleInit {
     }
   }
 
-  /** Delete Incus volumes that follow our naming but that no logical volume owns. */
-  private async deleteOrphans(
+  /**
+   * Incus volumes labelled as ours (this server, or this pool's shared
+   * backend) that no logical volume owns and nothing uses are quarantined:
+   * deleted only once the ledger has seen them for the whole quarantine.
+   */
+  private async quarantineOrphans(
     serverId: string,
     client: IncusClientPort,
     inventory: ScanInventory,
@@ -705,7 +726,11 @@ export class VolumeReconciler implements ManagedReconciler, OnModuleInit {
         .filter((row) => inventory.placementByVolume.has(row.id))
         .map((row) => row.incus_name),
     );
+    const orphans: Array<{ poolName: string; name: string }> = [];
     for (const pool of inventory.pools) {
+      const scopes = new Set([serverId, pool.shared_backend_id].filter(
+        (scope): scope is string => typeof scope === 'string',
+      ).map((scope) => scope.toLowerCase()));
       for (const volume of inventory.listedByPool.get(pool.incus_name) ?? []) {
         const name = storageVolumeName(volume);
         if (!MANAGED_VOLUME_NAME.test(name)) continue;
@@ -718,7 +743,24 @@ export class VolumeReconciler implements ManagedReconciler, OnModuleInit {
           continue;
         }
         if (typeof volume !== 'string' && (volume.used_by ?? []).length > 0) continue;
-        await deleteOrphanVolume(client, pool.incus_name, name, signal);
+        if (!labelledFor(volume, scopes)) continue;
+        orphans.push({ poolName: pool.incus_name, name });
+      }
+    }
+    const { fresh, due } = await this.store.orphans.sight(serverId, 'volume', orphans);
+    for (const orphan of fresh) {
+      this.logger.warn(
+        `Orphan volume ${orphan.poolName}/${orphan.name} on server ${serverId} has no volume row; `
+        + 'deleting it after the quarantine',
+      );
+    }
+    for (const orphan of due) {
+      try {
+        await deleteOrphanVolume(client, orphan.poolName, orphan.name, signal);
+        await this.store.orphans.forget(serverId, 'volume', orphan);
+        this.logger.warn(`Deleted orphan volume ${orphan.poolName}/${orphan.name} on server ${serverId}`);
+      } catch (error) {
+        this.logger.warn(`Orphan volume ${orphan.poolName}/${orphan.name} on server ${serverId}: ${String(error)}`);
       }
     }
   }

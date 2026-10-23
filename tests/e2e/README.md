@@ -72,7 +72,7 @@ types come from `@nyabase/common`, so DTO drift fails `pnpm e2e:check`.
 
 | File | Covers |
 | :--- | :--- |
-| `01-auth-sessions` | login, refresh rotation, logout, API tokens, password change, disabled user |
+| `01-auth-sessions` | login, refresh rotation, logout, no API tokens, password change, disabled user |
 | `02-servers-preflight` | agent connected, enrollment token rules, agent socket auth, preflight, proxies |
 | `03-images` | assignment status, user visibility, assignment removal |
 | `04-container-lifecycle` | create, memory limit, root resize, power, SSH via ssh-proxy, console, delete |

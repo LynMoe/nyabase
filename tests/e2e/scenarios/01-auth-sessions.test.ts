@@ -1,7 +1,7 @@
-// Login, refresh rotation, logout, API tokens and account lifecycle.
+// Login, refresh rotation, logout and account lifecycle; there are no API tokens.
 import assert from 'node:assert/strict';
 import { after, before, describe, it } from 'node:test';
-import { Role, UserStatus, type CreateApiTokenRequest, type UserDto } from '@nyabase/common';
+import { Role, UserStatus, type UserDto } from '@nyabase/common';
 import { Api, ApiError, login, refresh } from '../client/api.js';
 import { Harness, type TestUser } from '../client/harness.js';
 
@@ -62,25 +62,12 @@ describe('auth and sessions', () => {
     assert.equal((await failure(refresh(h.state.baseUrl, rotated.refreshCookie))).status, 401);
   });
 
-  it('issues, uses and revokes an API token', async () => {
+  it('has no API tokens: the browser session is the only credential', async () => {
     const api = user.session.api;
-    assert.equal(await api.status('POST', '/auth/tokens', { name: 'e2e' }), 400,
-      'minting a token needs the current password');
-    assert.equal(await api.status('POST', '/auth/tokens', {
-      name: 'e2e', currentPassword: 'definitely-wrong',
-    } satisfies CreateApiTokenRequest), 403, 'a wrong current password is not a session failure');
-    const created = await api.post<{ token: { id: string }; secret: string }>('/auth/tokens', {
-      name: 'e2e', currentPassword: user.password,
-    } satisfies CreateApiTokenRequest);
-    const viaToken = new Api(h.state.baseUrl, created.secret);
-    assert.equal((await viaToken.get<UserDto>('/auth/me')).id, user.id);
-    assert.equal(await viaToken.status('POST', '/auth/tokens', {
-      name: 'e2e-child', currentPassword: user.password,
-    } satisfies CreateApiTokenRequest), 403, 'an API token cannot mint another one');
-    const listed = await api.get<{ id: string }[]>('/auth/tokens');
-    assert.ok(listed.some((token) => token.id === created.token.id));
-    await api.delete(`/auth/tokens/${created.token.id}`);
-    assert.equal((await failure(viaToken.get('/auth/me'))).status, 401);
+    assert.equal(await api.status('GET', '/auth/tokens'), 404);
+    assert.equal(await api.status('POST', '/auth/tokens', { name: 'e2e', currentPassword: user.password }), 404);
+    assert.equal(await new Api(h.state.baseUrl, 'a'.repeat(64)).status('GET', '/auth/me'), 401,
+      'a 64-hex bearer is just an invalid JWT');
   });
 
   it('keeps ordinary users away from administration', async () => {
@@ -121,14 +108,10 @@ describe('auth and sessions', () => {
   it('changes a password with the current one and locks out a disabled user', async () => {
     const next = `${user.password}-next`;
     const api = user.session.api;
-    const token = await api.post<{ secret: string }>('/auth/tokens', {
-      name: 'before-password-change', currentPassword: user.password,
-    } satisfies CreateApiTokenRequest);
     assert.equal(await api.status('PATCH', `/users/${user.id}`, { password: next }), 400,
       'a password change without currentPassword is refused');
     await api.patch(`/users/${user.id}`, { password: next, currentPassword: user.password });
-    assert.equal(await new Api(h.state.baseUrl, token.secret).status('GET', '/auth/me'), 401,
-      'a password change deletes the API tokens');
+    assert.equal(await api.status('GET', '/auth/me'), 401, 'a password change ends the old session');
     assert.equal((await failure(login(h.state.baseUrl, user.username, user.password))).status, 401);
     const session = await login(h.state.baseUrl, user.username, next);
 

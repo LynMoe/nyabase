@@ -1,11 +1,9 @@
 import {
   BadRequestException,
-  ConflictException,
   ForbiddenException,
   HttpException,
   HttpStatus,
   Injectable,
-  NotFoundException,
   UnauthorizedException,
 } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
@@ -14,11 +12,10 @@ import { v4 as uuidv4 } from 'uuid';
 import { createHash, createHmac, randomBytes } from 'crypto';
 import { AuditAction, FailureCode, UserStatus } from '@nyabase/common';
 import { NyabaseConfigService } from '../platform/config/nyabase-config.service.js';
-import { type AuthApiToken, type AuthUser, isPgIamTransaction } from './auth-persistence.js';
+import { type AuthUser, isPgIamTransaction } from './auth-persistence.js';
 import { IamAuthRepository } from './iam-auth.repository.js';
 import { MonotonicClock } from '../platform/monotonic-clock.js';
 import { AuditService } from './audit.service.js';
-import type { Actor } from './actor.js';
 import {
   clientAddressBucket,
   LoginAttemptLimiter,
@@ -37,7 +34,6 @@ export interface JwtPayload {
 }
 
 export const MAX_REFRESH_SESSIONS_PER_USER = 16;
-export const MAX_API_TOKENS_PER_USER = 64;
 /** Failed logins per (client address bucket, username) per window. */
 export const MAX_LOGIN_FAILURES_PER_IP_USERNAME = 10;
 /** Failed logins per client address bucket (any usernames) per window. */
@@ -232,107 +228,12 @@ export class AuthService {
     return this.validateJwtPayload(payload);
   }
 
-  /** Throttle window for lastUsedAt updates: skip writes within this interval. */
-  private static readonly LAST_USED_UPDATE_INTERVAL_MS = 60_000;
-
-  /** Validate an API token; returns user if valid. */
-  async validateApiToken(rawToken: string): Promise<AuthUser | null> {
-    const hash = this.tokenHash(rawToken);
-    const now = new Date();
-    return this.persistence.validateApiToken(
-      hash,
-      now,
-      AuthService.LAST_USED_UPDATE_INTERVAL_MS,
-    );
-  }
-
-  /**
-   * Minting a long-lived credential needs a browser session and the current
-   * password: a leaked 15-minute access token or an API token alone cannot
-   * turn itself into a permanent one. The token is inserted only if the
-   * verified password and auth version are still current under the row lock.
-   */
-  async createApiToken(actor: Actor, name: string, currentPassword: string) {
-    if (actor.userId === null || actor.authKind !== 'jwt') {
-      throw new ForbiddenException({
-        code: 'API_TOKEN_REQUIRES_BROWSER_SESSION',
-        message: 'API tokens can only be created from a signed-in browser session',
-      });
-    }
-    const userId = actor.userId;
-    const normalizedName = name.trim();
-    if (normalizedName.length === 0 || normalizedName.length > 128) {
-      throw new BadRequestException('API token name must contain 1-128 non-whitespace characters');
-    }
-    const user = await this.persistence.findUserById(userId);
-    if (!user || user.status !== UserStatus.Active) {
-      throw new UnauthorizedException('User not found or disabled');
-    }
-    if (!await this.verifyCurrentPassword(user, currentPassword)) {
-      throw currentPasswordIncorrect();
-    }
-    const raw = randomBytes(32).toString('hex');
-    const entity: AuthApiToken = {
-      id: uuidv4(),
-      userId,
-      name: normalizedName,
-      hash: this.tokenHash(raw),
-      createdAt: new Date(),
-      lastUsedAt: null,
-    };
-    const created = await this.persistence.createApiToken(
-      userId,
-      entity,
-      MAX_API_TOKENS_PER_USER,
-      { id: user.id, passwordHash: user.passwordHash, authVersion: user.authVersion },
-      (transaction, token) => this.audit.append(
-        transaction,
-        userId,
-        AuditAction.CreateApiToken,
-        token.id,
-        'api_token',
-        { name: token.name },
-      ),
-    );
-    if (created === 'inactive-user') {
-      throw new UnauthorizedException('User not found or disabled');
-    }
-    if (created === 'capacity') {
-      throw new ConflictException({
-        code: 'API_TOKEN_CAPACITY_REACHED',
-        message: `At most ${MAX_API_TOKENS_PER_USER} API tokens are supported per user`,
-      });
-    }
-    return { entity, secret: raw };
-  }
-
-  async listApiTokens(userId: string) {
-    return this.persistence.listApiTokens(userId);
-  }
-
-  async deleteApiToken(userId: string, tokenId: string) {
-    const token = await this.persistence.deleteApiToken(
-      userId,
-      tokenId,
-      (transaction, deleted) => this.audit.append(
-        transaction,
-        userId,
-        AuditAction.DeleteApiToken,
-        deleted.id,
-        'api_token',
-        { name: deleted.name },
-      ),
-    );
-    if (!token) throw new NotFoundException('Token not found');
-    return token;
-  }
-
   async hashPassword(password: string): Promise<string> {
     return argon2.hash(password);
   }
 
   /**
-   * Re-authentication of a signed-in user (password change, API token mint).
+   * Re-authentication of a signed-in user (password change, SSH key).
    * Wrong entries are counted per user so a stolen access token cannot be
    * used to brute-force the password; a correct one gives its unit back.
    */
@@ -361,14 +262,6 @@ export class AuthService {
       throw new Error('IAM credential deletion requires a PostgreSQL/Kysely transaction');
     }
     await this.persistence.revokeBrowserSessions(manager, userId);
-  }
-
-  /** Refresh sessions and API tokens: a password change or reset ends every credential. */
-  async revokeAllCredentialsInTransaction(manager: unknown, userId: string): Promise<void> {
-    if (!isPgIamTransaction(manager)) {
-      throw new Error('IAM credential deletion requires a PostgreSQL/Kysely transaction');
-    }
-    await this.persistence.deleteUserCredentials(manager, userId);
   }
 
   private async issueRefreshSession(

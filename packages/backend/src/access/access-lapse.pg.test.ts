@@ -27,6 +27,7 @@ import { PgTransactionManager } from '../platform/persistence-pg/transaction.js'
 import { IntentRepository } from '../reconcile/intent.repository.js';
 import { ReconcileClaimRepository } from '../reconcile/reconcile-claim.repository.js';
 import { noopWake } from '../reconcile/reconcile-wake.test-helper.js';
+import { VolumeAttachmentsService } from '../volumes/volume-attachments.service.js';
 import { VolumesRepository } from '../volumes/volumes.repository.js';
 import { AccessLapseProcessor } from './access-lapse.processor.js';
 import { AccessLapseRepository } from './access-lapse.repository.js';
@@ -55,13 +56,25 @@ async function fixture(database: Kysely<NyabaseDatabase>) {
   };
   const audit = { append: vi.fn(async () => undefined) };
   const proxySnapshots = { notify: vi.fn(async () => undefined) };
+  const intents = new IntentRepository(database, noopWake());
+  const volumes = new VolumesRepository(database);
+  // The real force-detach: it only writes rows (attachment, revision, intent).
+  const attachments = new VolumeAttachmentsService(
+    volumes,
+    {} as never,
+    transactions,
+    intents,
+    database,
+    audit as never,
+    {} as never,
+  );
   const purge = new UserServerResourcePurgeService(
     transactions,
     new ContainerControlRepository(database),
     containers as never,
-    new VolumesRepository(database),
-    new IntentRepository(database, noopWake()),
-    claims,
+    volumes,
+    intents,
+    attachments,
     audit as never,
   );
   const processor = new AccessLapseProcessor(
@@ -474,7 +487,7 @@ describePg('access lapse processor', () => {
     });
   });
 
-  it('scopes a storage-pool lapse to containers using that pool and to that pool\'s volumes', async () => {
+  it('detaches a lapsed pool\'s volumes at once, keeps the containers, and destroys only the volumes after the grace', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const { processor, actions } = await fixture(database);
       const { userId, serverId, poolId, imageId } = await world(database);
@@ -490,32 +503,48 @@ describePg('access lapse processor', () => {
       });
       const lapsedVolume = await seedVolume(database, { ownerId: userId, poolId: lapsedPool, serverId });
       const keptVolume = await seedVolume(database, { ownerId: userId, poolId, serverId });
-      await seedAttachment(database, usesLapsedPool, lapsedVolume);
+      const lapsedAttachment = await seedAttachment(database, usesLapsedPool, lapsedVolume);
+      const keptAttachment = await seedAttachment(database, unrelated, keptVolume);
 
       await processor.process();
 
       const rows = await ledger(database, userId);
       expect(rows).toMatchObject([{ resource_kind: 'storage_pool', resource_id: lapsedPool }]);
-      expect(actions).toEqual([{ id: usesLapsedPool, action: 'stop', actorIsSystem: true }]);
-      expect(actions.some((entry) => entry.id === unrelated)).toBe(false);
-      expect(keptVolume).toBeDefined();
+      expect(rows[0]!.stopped_at).not.toBeNull();
+      // No container is stopped or deleted; the lapsed volume is unplugged.
+      expect(actions).toEqual([]);
+      expect(await bindStates(database)).toEqual(new Map([
+        [lapsedAttachment, 'detaching'],
+        [keptAttachment, 'attached'],
+      ]));
+      expect(await pendingDetaches(database, usesLapsedPool)).toEqual([lapsedAttachment]);
+      expect(await powerOf(database, usesLapsedPool)).toBe('running');
 
-      // After the grace: the pool's volume (and the containers using it) go, the rest stays.
+      // The reconciler unplugged it; an administrator attaches it again during the grace.
+      await database.deleteFrom('control.volume_attachments').where('id', '=', lapsedAttachment).execute();
+      const reattached = await seedAttachment(database, usesLapsedPool, lapsedVolume);
+      await processor.process();
+      expect((await bindStates(database)).get(reattached)).toBe('detaching');
+
+      // After the grace: the pool's volume is destroyed, the containers stay.
+      await database.deleteFrom('control.volume_attachments').where('id', '=', reattached).execute();
       await database.updateTable('control.access_lapses')
         .set({ lapsed_at: new Date(Date.now() - (GRANT_EXPIRY_GRACE_DAYS + 1) * DAY_MS) })
         .execute();
-      actions.length = 0;
       await processor.process();
-      expect(actions).toEqual([{ id: usesLapsedPool, action: 'delete', actorIsSystem: true }]);
+      expect(actions).toEqual([]);
       const remaining = await database.selectFrom('control.volumes')
         .select(['id', 'lifecycle_phase']).execute();
       expect(remaining.find((row) => row.id === keptVolume)?.lifecycle_phase).toBe('active');
-      expect(remaining.find((row) => row.id === lapsedVolume)?.lifecycle_phase)
+      expect(remaining.find((row) => row.id === lapsedVolume)?.lifecycle_phase ?? 'gone')
         .not.toBe('active');
+      expect(await database.selectFrom('control.containers').select('lifecycle_phase')
+        .where('id', 'in', [usesLapsedPool, unrelated]).execute())
+        .toEqual([{ lifecycle_phase: 'active' }, { lifecycle_phase: 'active' }]);
     });
   });
 
-  it('scopes a shared-backend lapse to that backend\'s volumes and their containers', async () => {
+  it('detaches a lapsed shared backend\'s volumes and destroys them, never the containers', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const { processor, actions } = await fixture(database);
       const { userId, serverId, poolId, imageId } = await world(database);
@@ -538,24 +567,72 @@ describePg('access lapse processor', () => {
       const keptVolume = await seedVolume(database, {
         ownerId: userId, poolId: null, serverId: null, sharedBackendId: otherBackendId,
       });
-      await seedAttachment(database, mounted, lapsedVolume);
-      await seedAttachment(database, other, keptVolume);
+      const lapsedAttachment = await seedAttachment(database, mounted, lapsedVolume);
+      const keptAttachment = await seedAttachment(database, other, keptVolume);
 
       await processor.process();
       expect(await ledger(database, userId)).toMatchObject([
         { resource_kind: 'shared_backend', resource_id: backendId },
       ]);
-      expect(actions).toEqual([{ id: mounted, action: 'stop', actorIsSystem: true }]);
+      expect(actions).toEqual([]);
+      expect(await bindStates(database)).toEqual(new Map([
+        [lapsedAttachment, 'detaching'],
+        [keptAttachment, 'attached'],
+      ]));
 
       await database.updateTable('control.access_lapses')
         .set({ lapsed_at: new Date(Date.now() - (GRACE_DAYS + 1) * DAY_MS) })
         .execute();
-      actions.length = 0;
       await processor.process();
-      expect(actions).toEqual([{ id: mounted, action: 'delete', actorIsSystem: true }]);
+      expect(actions).toEqual([]);
       const volumes = await database.selectFrom('control.volumes')
         .select(['id', 'lifecycle_phase']).execute();
       expect(volumes.find((row) => row.id === keptVolume)?.lifecycle_phase).toBe('active');
+      expect(volumes.find((row) => row.id === lapsedVolume)?.lifecycle_phase).toBe('deleting');
+    });
+  });
+
+  it('stops a running container of a lapsed server that is still provisioning', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const { processor, actions } = await fixture(database);
+      const { userId, serverId, poolId, imageId } = await world(database);
+      await grantServer(database, { user: userId }, serverId, { expiresAt: days(-1) });
+      const container = await seedContainer(database, {
+        ownerId: userId, serverId, poolId, imageId, running: true,
+      });
+      await database.updateTable('control.containers').set({ lifecycle_phase: 'provisioning' })
+        .where('id', '=', container).execute();
+
+      await processor.process();
+
+      expect(actions).toEqual([{ id: container, action: 'stop', actorIsSystem: true }]);
+    });
+  });
+
+  it('does not purge when coverage returns between the scan and the purge', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const { processor, actions } = await fixture(database);
+      const { userId, serverId, poolId, imageId } = await world(database);
+      await grantServer(database, { user: userId }, serverId, { expiresAt: days(-1) });
+      await seedContainer(database, { ownerId: userId, serverId, poolId, imageId });
+      await processor.process();
+      await database.updateTable('control.access_lapses')
+        .set({ lapsed_at: new Date(Date.now() - (GRACE_DAYS + 1) * DAY_MS) })
+        .execute();
+      // The scan still sees the pair uncovered; the grant lands right after it.
+      const lapses = (processor as unknown as { lapses: AccessLapseRepository }).lapses;
+      const inspect = lapses.inspect.bind(lapses);
+      vi.spyOn(lapses, 'inspect').mockImplementationOnce(async (key) => {
+        const scanned = await inspect(key);
+        await grantServer(database, { user: userId }, serverId);
+        return scanned;
+      });
+      actions.length = 0;
+
+      await processor.process();
+
+      expect(actions).toEqual([]);
+      expect((await ledger(database, userId))[0]?.purged_at ?? null).toBeNull();
     });
   });
 
@@ -665,4 +742,26 @@ async function groupOf(database: Kysely<NyabaseDatabase>, userId: string): Promi
   const group = await seedGroup(database);
   await addMember(database, group, userId);
   return group;
+}
+
+async function bindStates(database: Kysely<NyabaseDatabase>): Promise<Map<string, string>> {
+  const rows = await database.selectFrom('control.volume_attachments').select(['id', 'bind_state']).execute();
+  return new Map(rows.map((row) => [row.id, row.bind_state]));
+}
+
+async function pendingDetaches(database: Kysely<NyabaseDatabase>, containerId: string): Promise<unknown[]> {
+  const rows = await database.selectFrom('control.intents').select('request_json')
+    .where('resource_id', '=', containerId)
+    .where('status', '=', 'pending')
+    .execute();
+  return rows
+    .map((row) => row.request_json as { operation?: string; attachmentId?: string } | null)
+    .filter((request) => request?.operation === 'detach_volume')
+    .map((request) => request!.attachmentId);
+}
+
+async function powerOf(database: Kysely<NyabaseDatabase>, containerId: string): Promise<string> {
+  const row = await database.selectFrom('control.containers').select('power_intent')
+    .where('id', '=', containerId).executeTakeFirstOrThrow();
+  return row.power_intent;
 }

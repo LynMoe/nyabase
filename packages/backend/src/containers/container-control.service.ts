@@ -305,8 +305,8 @@ export class ContainerControlService {
     request: CreateExecSessionRequest,
     scope: ListScope = 'mine',
   ): Promise<{ sessionId: string; consoleUrl: string; expiresAt: string }> {
-    if (actor.authKind !== 'jwt') {
-      throw new ForbiddenException('Container console admission requires a browser JWT');
+    if (actor.userId === null) {
+      throw new ForbiddenException('Container console admission needs a signed-in user');
     }
     const row = await this.requireContainer(containerId);
     assertCanAccess(actor, row, scope);
@@ -419,7 +419,9 @@ export class ContainerControlService {
         transaction,
       );
       if (!updated) throw new ConflictException({ code: FailureCode.RevisionConflict });
-      if (nextPhase === ContainerPhase.Deleting || nextPhase === ContainerPhase.Failed) {
+      // A deleting container keeps its GPU claims until its row (and so its
+      // instance) is gone: a slow or parked delete must not hand the card on.
+      if (nextPhase === ContainerPhase.Failed) {
         await this.gpuClaims.releaseContainerClaims(containerId, transaction);
       }
       const kind = action === 'delete'
@@ -486,8 +488,7 @@ export class ContainerControlService {
         transaction,
       );
       if (!updated) throw new ConflictException({ code: FailureCode.RevisionConflict });
-      if (values.lifecycle_phase === ContainerPhase.Deleting
-        || values.lifecycle_phase === ContainerPhase.Failed) {
+      if (values.lifecycle_phase === ContainerPhase.Failed) {
         await this.gpuClaims.releaseContainerClaims(containerId, transaction);
       }
       const intent = await createContainerIntent(this.intents, {

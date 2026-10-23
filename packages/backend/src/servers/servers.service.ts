@@ -218,16 +218,33 @@ export class ServersService {
     return (await this.toDtos([row]))[0]!;
   }
 
-  async delete(actorId: string, id: string, expectedRevision?: number): Promise<void> {
+  /**
+   * Removes the server from the control plane only; nothing on its Incus is
+   * deleted. While the server still holds containers or local volumes this is
+   * refused: their instances would keep running with addresses the platform
+   * hands out again, and no later scan would ever see them. `force` is for a
+   * host that is gone for good (or wiped).
+   */
+  async delete(actorId: string, id: string, expectedRevision?: number, force = false): Promise<void> {
     await this.transactions.run(async (transaction) => {
       await assertActorRole(transaction, actorId, Role.Operator);
       const server = await this.findById(id, transaction);
       if (expectedRevision !== undefined && Number(server.revision) !== expectedRevision) {
         throw new ConflictException({ code: 'REVISION_CONFLICT' });
       }
+      const held = await countServerResources(transaction, id);
+      if (!force && (held.containers > 0 || held.localVolumes > 0)) {
+        throw new ConflictException({
+          code: 'SERVER_NOT_EMPTY',
+          message: 'Delete the containers and local volumes on this server first, '
+            + 'or force the removal if the host is gone for good',
+          details: held,
+        });
+      }
       await purgeServerControlPlane(transaction, this.audit, id);
       await this.audit.append(transaction, actorId, AuditAction.DeleteServer, id, 'server', {
         name: server.name,
+        ...(force ? { force: true, ...held } : {}),
       });
     });
     this.agents.disconnect(id, undefined, 'server deleted');
@@ -525,6 +542,23 @@ async function purgeGrantsAndInventory(transaction: Tx, serverId: string): Promi
     .execute();
   await transaction.deleteFrom('infra.storage_pools').where('server_id', '=', serverId).execute();
   await transaction.deleteFrom('infra.servers').where('id', '=', serverId).execute();
+}
+
+async function countServerResources(
+  transaction: Tx,
+  serverId: string,
+): Promise<{ containers: number; localVolumes: number }> {
+  const [containers, localVolumes] = await Promise.all([
+    transaction.selectFrom('control.containers')
+      .select(sql<number>`count(*)::integer`.as('count'))
+      .where('server_id', '=', serverId)
+      .executeTakeFirstOrThrow(),
+    transaction.selectFrom('control.volumes')
+      .select(sql<number>`count(*)::integer`.as('count'))
+      .where('server_id', '=', serverId)
+      .executeTakeFirstOrThrow(),
+  ]);
+  return { containers: containers.count, localVolumes: localVolumes.count };
 }
 
 /** Remove every control-plane row that depends on a server, in dependency order. */

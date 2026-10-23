@@ -171,6 +171,23 @@ describe('agent Incus policy', () => {
     expect((await check({ method: 'DELETE', path: '/1.0/storage-pools/default' })).allowed).toBe(false);
   });
 
+  it('accepts the platform ownership labels on volumes, but no other user keys', async () => {
+    const labels = { 'user.nyabase.managed': 'true', 'user.nyabase.scope': '0b9f3c7e-0000-4000-8000-000000000001' };
+    const create = { name: VOLUME, type: 'custom', config: { size: '1073741824', 'security.shifted': 'true', ...labels } };
+    expect((await check({ method: 'POST', path: '/1.0/storage-pools/default/volumes', body: body(create) })).allowed)
+      .toBe(true);
+    expect((await check({
+      method: 'PUT',
+      path: `/1.0/storage-pools/default/volumes/custom/${VOLUME}`,
+      body: body({ config: { size: '2147483648', 'security.shifted': 'true', ...labels } }),
+    }, { config: {} })).allowed).toBe(true);
+    expect((await check({
+      method: 'POST',
+      path: '/1.0/storage-pools/default/volumes',
+      body: body({ ...create, config: { ...create.config, 'user.other': 'x' } }),
+    })).allowed).toBe(false);
+  });
+
   it('refuses volume mounts over kernel pseudo-filesystems', async () => {
     const withMount = (path: string) => instanceDocument({
       devices: {

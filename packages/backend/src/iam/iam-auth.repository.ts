@@ -6,7 +6,6 @@ import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.
 import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
 import type {
-  AuthApiToken,
   AuthPersistence,
   AuthTransactionHook,
   AuthUser,
@@ -29,15 +28,6 @@ interface UserRow {
   role: string;
   created_at: Date;
   updated_at: Date;
-}
-
-interface ApiTokenRow {
-  id: string;
-  user_id: string;
-  name: string;
-  hash: string;
-  last_used_at: Date | null;
-  created_at: Date;
 }
 
 @Injectable()
@@ -253,141 +243,12 @@ export class IamAuthRepository implements AuthPersistence {
     });
   }
 
-  validateApiToken(
-    hash: string,
-    now: Date,
-    touchIntervalMs: number,
-  ): Promise<AuthUser | null> {
-    return this.transactions.run(async (transaction) => {
-      const row = await transaction
-        .selectFrom('iam.api_tokens as token')
-        .innerJoin('iam.users as user', 'user.id', 'token.user_id')
-        .select([
-          'token.id as token_id',
-          'token.last_used_at',
-          'user.id',
-          'user.numeric_id',
-          'user.username',
-          'user.password_hash',
-          'user.display_name',
-          'user.status',
-          'user.auth_version',
-          'user.role',
-          'user.created_at',
-          'user.updated_at',
-        ])
-        .where('token.hash', '=', hash)
-        .executeTakeFirst();
-      if (!row || row.status !== 'active') return null;
-      const elapsed = row.last_used_at
-        ? now.getTime() - row.last_used_at.getTime()
-        : Number.POSITIVE_INFINITY;
-      if (elapsed >= touchIntervalMs) {
-        const touched = await transaction
-          .updateTable('iam.api_tokens')
-          .set({ last_used_at: now })
-          .where('id', '=', row.token_id)
-          .where('hash', '=', hash)
-          .executeTakeFirst();
-        if (Number(touched.numUpdatedRows) !== 1) return null;
-      }
-      return this.toUser(row as UserRow & { token_id: string });
-    });
-  }
-
-  createApiToken(
-    userId: string,
-    token: AuthApiToken,
-    maximumTokens: number,
-    credentialSnapshot: LoginCredentialSnapshot,
-    onCreated?: AuthTransactionHook<AuthApiToken>,
-  ): Promise<'created' | 'inactive-user' | 'capacity'> {
-    return this.transactions.run(async (transaction) => {
-      const user = await transaction
-        .selectFrom('iam.users')
-        .select(['id', 'status', 'password_hash', 'auth_version'])
-        .where('id', '=', userId)
-        .forUpdate()
-        .executeTakeFirst();
-      // The password was verified against this exact credential generation;
-      // a concurrent password change/reset/disable must not let it through.
-      if (
-        !user
-        || user.status !== 'active'
-        || user.id !== credentialSnapshot.id
-        || user.password_hash !== credentialSnapshot.passwordHash
-        || user.auth_version !== credentialSnapshot.authVersion
-      ) return 'inactive-user';
-      const count = await transaction
-        .selectFrom('iam.api_tokens')
-        .select(sql<number>`count(*)::integer`.as('count'))
-        .where('user_id', '=', userId)
-        .executeTakeFirstOrThrow();
-      if (count.count >= maximumTokens) return 'capacity';
-      await transaction
-        .insertInto('iam.api_tokens')
-        .values({
-          id: token.id,
-          user_id: token.userId,
-          name: token.name,
-          hash: token.hash,
-          last_used_at: token.lastUsedAt,
-          created_at: token.createdAt,
-        })
-        .executeTakeFirstOrThrow();
-      await onCreated?.(transaction, token);
-      return 'created';
-    });
-  }
-
-  async listApiTokens(userId: string): Promise<AuthApiToken[]> {
-    const rows = await this.database
-      .selectFrom('iam.api_tokens')
-      .selectAll()
-      .where('user_id', '=', userId)
-      .orderBy('created_at', 'desc')
-      .orderBy('id', 'desc')
-      .execute();
-    return rows.map((row) => this.toApiToken(row as ApiTokenRow));
-  }
-
-  deleteApiToken(
-    userId: string,
-    tokenId: string,
-    onDeleted?: AuthTransactionHook<AuthApiToken>,
-  ): Promise<AuthApiToken | null> {
-    return this.transactions.run(async (transaction) => {
-      const row = await transaction
-        .deleteFrom('iam.api_tokens')
-        .where('id', '=', tokenId)
-        .where('user_id', '=', userId)
-        .returningAll()
-        .executeTakeFirst();
-      if (!row) return null;
-      const token = this.toApiToken(row as ApiTokenRow);
-      await onDeleted?.(transaction, token);
-      return token;
-    });
-  }
-
   async revokeBrowserSessions(
     transaction: IamTransaction,
     userId: string,
   ): Promise<void> {
     await transaction
       .deleteFrom('iam.refresh_tokens')
-      .where('user_id', '=', userId)
-      .execute();
-  }
-
-  async deleteUserCredentials(
-    transaction: IamTransaction,
-    userId: string,
-  ): Promise<void> {
-    await transaction.deleteFrom('iam.refresh_tokens')
-      .where('user_id', '=', userId)
-      .execute();
-    await transaction.deleteFrom('iam.api_tokens')
       .where('user_id', '=', userId)
       .execute();
   }
@@ -474,17 +335,6 @@ export class IamAuthRepository implements AuthPersistence {
       role: row.role as Role,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
-    };
-  }
-
-  private toApiToken(row: ApiTokenRow): AuthApiToken {
-    return {
-      id: row.id,
-      userId: row.user_id,
-      name: row.name,
-      hash: row.hash,
-      lastUsedAt: row.last_used_at,
-      createdAt: row.created_at,
     };
   }
 }

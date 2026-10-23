@@ -63,15 +63,6 @@ export interface IamRefreshTokenTable {
   created_at: GeneratedTimestamp;
 }
 
-export interface IamApiTokenTable {
-  id: string;
-  user_id: string;
-  name: string;
-  hash: string;
-  last_used_at: Timestamp | null;
-  created_at: GeneratedTimestamp;
-}
-
 export interface IamSshPublicKeyTable {
   id: string;
   user_id: string;
@@ -110,7 +101,6 @@ export interface NyabaseDatabase
   'iam.groups': IamGroupTable;
   'iam.group_members': IamGroupMemberTable;
   'iam.refresh_tokens': IamRefreshTokenTable;
-  'iam.api_tokens': IamApiTokenTable;
   'iam.ssh_public_keys': IamSshPublicKeyTable;
   'interaction.ssh_proxy_host_keys': InteractionSshProxyHostKeyTable;
   'interaction.ssh_host_authorities': InteractionSshHostAuthorityTable;

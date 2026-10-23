@@ -37,7 +37,12 @@ export class ServerRecoveryService implements OnModuleDestroy {
     if (this.timers.has(serverId) || !this.agents.isConnected(serverId)) return;
     const timer = setTimeout(() => {
       this.timers.delete(serverId);
-      void this.probe(serverId, delayMs);
+      // A database error (PG restart, failover) must not become an unhandled
+      // rejection: that would exit the whole process. Probe again later.
+      void this.probe(serverId, delayMs).catch((error: unknown) => {
+        this.logger.warn(`Recovery probe for ${serverId} errored: ${String(error)}`);
+        this.watch(serverId, Math.min(delayMs * 2, MAX_PROBE_DELAY_MS));
+      });
     }, delayMs);
     timer.unref?.();
     this.timers.set(serverId, timer);

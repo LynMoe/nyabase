@@ -293,11 +293,8 @@ export class UsersService {
       }
       const securityChanged = passwordHash !== undefined
         || (dto.status !== undefined && dto.status !== user.status);
-      // A reset password ends every credential, API tokens included; a status
-      // change ends browser sessions (a disabled user's API tokens are inert).
-      if (passwordHash !== undefined) {
-        await this.authService.revokeAllCredentialsInTransaction(transaction, id);
-      } else if (securityChanged) {
+      // A reset password or a status change ends every browser session.
+      if (securityChanged) {
         await this.authService.revokeBrowserSessionsInTransaction(transaction, id);
       }
       if (securityChanged || demoting) {
@@ -380,7 +377,6 @@ export class UsersService {
         });
       }
       await transaction.deleteFrom('iam.refresh_tokens').where('user_id', '=', userId).execute();
-      await transaction.deleteFrom('iam.api_tokens').where('user_id', '=', userId).execute();
       await transaction.deleteFrom('iam.ssh_public_keys').where('user_id', '=', userId).execute();
       await transaction.deleteFrom('iam.group_members').where('user_id', '=', userId).execute();
       await transaction.deleteFrom('iam.server_grants').where('user_id', '=', userId).execute();
@@ -442,7 +438,7 @@ export class UsersService {
         || user.status !== snapshot.status
       )) throw new UnauthorizedException('Credentials changed while the request was being processed');
       if (passwordHash !== undefined) {
-        await this.authService.revokeAllCredentialsInTransaction(transaction, id);
+        await this.authService.revokeBrowserSessionsInTransaction(transaction, id);
         afterCommit(transaction, () => this.sessions.revoke(id));
       }
       const updated = await transaction.updateTable('iam.users').set({

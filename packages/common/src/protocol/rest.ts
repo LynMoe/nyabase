@@ -27,7 +27,6 @@ export type {
   AddSshKeyRequest,
   AttachVolumeRequest,
   RotateServerEnrollmentRequest,
-  CreateApiTokenRequest,
   CreateContainerRequest,
   CreateGroupRequest,
   AddCatalogImageRequest,

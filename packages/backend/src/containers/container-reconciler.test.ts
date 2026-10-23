@@ -8,7 +8,7 @@ import {
   IncusError,
   type DesiredInstanceSpec,
 } from '../incus/index.js';
-import { ContainerReconciler } from './container-reconciler.service.js';
+import { ContainerReconciler, rootQuotaRetryDelay } from './container-reconciler.service.js';
 import { ContainerReconcileStore } from './container-reconcile.store.js';
 import {
   managedContainerIdentity,
@@ -744,6 +744,61 @@ describe('container reconciler full scan', () => {
     expect(cpuSets.releaseIdle).toHaveBeenCalledWith(SERVER_ID);
   });
 
+  it('stops an orphan instance at once and deletes it only when its quarantine is over', async () => {
+    const orphanId = '99999999-9999-4999-8999-999999999999';
+    const orphanName = deriveInstanceName(orphanId);
+    const orphan = {
+      name: orphanName,
+      config: {
+        'user.nyabase.managed': 'true',
+        'user.nyabase.container_id': orphanId,
+        'user.nyabase.server_id': SERVER_ID,
+      },
+      devices: {},
+      state: { status: 'Running', status_code: 101 },
+    };
+    const run = async (due: boolean) => {
+      const { reconciler, client } = scanHarness({
+        needsAttention: false,
+        lifecyclePhase: 'active',
+        powerIntent: 'running',
+        status: 'Running',
+      });
+      const listed = (await client.listInstances()).metadata;
+      const mocks = client as unknown as Record<string, ReturnType<typeof vi.fn>>;
+      mocks.listInstances!.mockResolvedValue(syncResponse([...listed, orphan]));
+      mocks.getInstanceState!.mockImplementation(async (name?: string) =>
+        syncResponse(name === orphanName ? orphan.state : listed[0]!.state));
+      mocks.getInstanceFull!.mockImplementation(async (name?: string) => {
+        if (name === orphanName) throw new IncusError('INCUS_NOT_FOUND', 'managed_failure');
+        return syncResponse(listed[0]);
+      });
+      const orphans = {
+        sight: vi.fn().mockResolvedValue({
+          fresh: [],
+          due: due ? [{ poolName: '', name: orphanName }] : [],
+        }),
+        forget: vi.fn().mockResolvedValue(undefined),
+      };
+      Object.assign((reconciler as unknown as { store: object }).store, { orphans });
+      await reconciler.scan(SERVER_ID, client as never, new AbortController().signal);
+      return { client, orphans };
+    };
+
+    const quarantined = await run(false);
+    expect(quarantined.orphans.sight).toHaveBeenCalledWith(SERVER_ID, 'instance', [{ poolName: '', name: orphanName }]);
+    expect(quarantined.client.updateInstanceState).toHaveBeenCalledWith(
+      orphanName,
+      { action: 'stop', force: true },
+      expect.anything(),
+    );
+    expect(quarantined.client.deleteInstance).not.toHaveBeenCalled();
+
+    const overdue = await run(true);
+    expect(overdue.client.deleteInstance).toHaveBeenCalledWith(orphanName, expect.anything());
+    expect(overdue.orphans.forget).toHaveBeenCalledWith(SERVER_ID, 'instance', { poolName: '', name: orphanName });
+  });
+
   it('skips needs_attention rows during scan enqueue', async () => {
     const { reconciler, client, ensurePending } = scanHarness({
       needsAttention: true,
@@ -1477,5 +1532,12 @@ describe('ContainerReconciler settlement', () => {
       keep: (candidate: { kind: string; request: Record<string, unknown> | null }) => boolean;
     };
     expect(options.keep({ kind: IntentKind.ContainerPower, request: { action: 'restart' } })).toBe(true);
+  });
+});
+
+describe('root quota polling', () => {
+  it('backs off from 5 s to a minute', () => {
+    expect([1, 2, 3, 4, 5, 6, 40].map(rootQuotaRetryDelay))
+      .toEqual([5_000, 10_000, 20_000, 40_000, 60_000, 60_000, 60_000]);
   });
 });

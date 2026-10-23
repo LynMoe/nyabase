@@ -2,7 +2,6 @@ import { UserStatus, Role } from '@nyabase/common';
 import type { Transaction } from 'kysely';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 import type {
-  AuthApiToken,
   AuthPersistence,
   AuthUser,
   LoginCredentialSnapshot,
@@ -26,8 +25,6 @@ export class InMemoryAuthPersistenceTestAdapter implements AuthPersistence {
   private lease: Promise<void> = Promise.resolve();
   private readonly users = new Map<string, AuthUser>();
   private readonly refresh = new Map<string, RefreshSession>();
-  private readonly apiTokens = new Map<string, AuthApiToken>();
-  beforeApiTokenTouch?: (token: AuthApiToken) => Promise<void>;
 
   seedUser(input: Partial<AuthUser> & Pick<AuthUser, 'id' | 'username'>): AuthUser {
     const now = new Date();
@@ -68,14 +65,6 @@ export class InMemoryAuthPersistenceTestAdapter implements AuthPersistence {
     const row = [...this.refresh.values()].find((item) => item.hash === hash);
     if (!row) throw new Error('Refresh session not found');
     Object.assign(row, changes);
-  }
-
-  apiTokenRows(): AuthApiToken[] {
-    return [...this.apiTokens.values()];
-  }
-
-  deleteApiTokenForTest(id: string): void {
-    this.apiTokens.delete(id);
   }
 
   runExclusiveForTest<T>(work: () => Promise<T>): Promise<T> {
@@ -167,71 +156,12 @@ export class InMemoryAuthPersistenceTestAdapter implements AuthPersistence {
     });
   }
 
-  validateApiToken(hash: string, now: Date, touchIntervalMs: number): Promise<AuthUser | null> {
-    return this.serialized(async () => {
-      const token = [...this.apiTokens.values()].find((item) => item.hash === hash);
-      if (!token) return null;
-      const user = this.users.get(token.userId);
-      if (!user || user.status !== UserStatus.Active) return null;
-      const elapsed = token.lastUsedAt
-        ? now.getTime() - token.lastUsedAt.getTime()
-        : Number.POSITIVE_INFINITY;
-      if (elapsed >= touchIntervalMs) {
-        await this.beforeApiTokenTouch?.(token);
-        if (!this.apiTokens.has(token.id)) return null;
-        token.lastUsedAt = now;
-      }
-      return user;
-    });
-  }
-
-  createApiToken(
-    userId: string,
-    token: AuthApiToken,
-    maximumTokens: number,
-    credentialSnapshot: LoginCredentialSnapshot,
-  ): Promise<'created' | 'inactive-user' | 'capacity'> {
-    return this.serialized(async () => {
-      const user = this.users.get(userId);
-      if (!user || user.status !== UserStatus.Active
-        || user.passwordHash !== credentialSnapshot.passwordHash
-        || user.authVersion !== credentialSnapshot.authVersion) return 'inactive-user';
-      if ([...this.apiTokens.values()].filter((item) => item.userId === userId).length
-        >= maximumTokens) return 'capacity';
-      this.apiTokens.set(token.id, token);
-      return 'created';
-    });
-  }
-
-  async listApiTokens(userId: string): Promise<AuthApiToken[]> {
-    return [...this.apiTokens.values()].filter((token) => token.userId === userId);
-  }
-
-  deleteApiToken(userId: string, tokenId: string): Promise<AuthApiToken | null> {
-    return this.serialized(async () => {
-      const token = this.apiTokens.get(tokenId);
-      if (!token || token.userId !== userId) return null;
-      this.apiTokens.delete(tokenId);
-      return token;
-    });
-  }
-
   async revokeBrowserSessions(
     _transaction: Transaction<NyabaseDatabase>,
     userId: string,
   ): Promise<void> {
     for (const row of this.refresh.values()) {
       if (row.userId === userId) this.refresh.delete(row.id);
-    }
-  }
-
-  async deleteUserCredentials(
-    transaction: Transaction<NyabaseDatabase>,
-    userId: string,
-  ): Promise<void> {
-    await this.revokeBrowserSessions(transaction, userId);
-    for (const token of this.apiTokens.values()) {
-      if (token.userId === userId) this.apiTokens.delete(token.id);
     }
   }
 

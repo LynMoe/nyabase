@@ -41,7 +41,7 @@ describe('RolesGuard', () => {
   it('builds the actor from the user row that authentication already loaded', () => {
     const context = makeContext(PlainController, 'open', '/api/containers', Role.Operator);
     const request = context.switchToHttp().getRequest();
-    request.authContext = { kind: 'jwt', authVersion: 7 };
+    request.authContext = { authVersion: 7 };
 
     expect(guard.canActivate(context)).toBe(true);
     expect(request.actor).toEqual({
@@ -50,16 +50,6 @@ describe('RolesGuard', () => {
       authKind: 'jwt',
       authVersion: 7,
     });
-  });
-
-  it('builds the actor for API tokens with the role of the token owner', () => {
-    const context = makeContext(PlainController, 'open', '/api/containers', Role.Admin);
-    const request = context.switchToHttp().getRequest();
-    request.authContext = { kind: 'api-token' };
-
-    guard.canActivate(context);
-
-    expect(request.actor).toMatchObject({ userId: 'user-a', authKind: 'api-token', role: Role.Admin });
   });
 
   it('refuses a /admin route without a declared role', () => {

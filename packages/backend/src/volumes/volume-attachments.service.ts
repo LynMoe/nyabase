@@ -24,7 +24,7 @@ import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
 import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
 import { acceptedIntent } from '../reconcile/accepted-intent.js';
-import { IntentRepository } from '../reconcile/intent.repository.js';
+import { IntentRepository, type IntentRecord } from '../reconcile/intent.repository.js';
 import { StoragePoolsRepository } from '../storage-pools/storage-pools.repository.js';
 import { VolumeDtoAssembler, type VolumeRow } from './volume-dtos.js';
 import {
@@ -302,39 +302,67 @@ export class VolumeAttachmentsService {
       if (!container) throw new NotFoundException('Container not found');
       assertCanAttach(actor, container, scope);
       await this.assertDetachableNow(transaction, attachment, container);
-      await this.repository.setAttachmentBindState(attachmentId, 'detaching', transaction);
-      const revision = Number(container.revision) + 1;
-      const updated = await transaction.updateTable('control.containers').set({
-        revision,
-        needs_attention: false,
-      })
-        .where('id', '=', container.id)
-        .where('revision', '=', container.revision)
-        .returning('id')
-        .executeTakeFirst();
-      if (!updated) {
-        throw new ConflictException({ code: FailureCode.RevisionConflict });
-      }
-      const intent = await this.intents.createPending({
-        kind: IntentKind.ContainerUpdate,
-        resourceType: IntentResourceType.Container,
-        resourceId: container.id,
-        serverId: container.server_id,
-        requestedBy: actorId,
-        targetRevision: revision,
-        request: { operation: 'detach_volume', attachmentId },
-      }, transaction);
-      await this.audit.append(
-        transaction,
-        actorId,
-        AuditAction.DetachVolume,
-        attachmentId,
-        'volume_attachment',
-        { containerId: container.id, volumeId: attachment.volume_id },
-      );
-      return intent;
+      return this.beginDetach(transaction, actorId, attachment, container, {});
     }, VOLUME_TX);
     return acceptedIntent(result);
+  }
+
+  /**
+   * Detaches whatever the container's power state: the owner lost access to
+   * the volume's pool or shared backend. The reconciler unplugs the disk from
+   * a running container live; the container itself is left alone. Returns
+   * null when the attachment is already going or its container is.
+   */
+  async forceDetach(actor: Actor, attachmentId: string): Promise<IntentRecord | null> {
+    return this.transactions.run(async (transaction) => {
+      const attachment = await this.repository.findAttachmentForUpdate(attachmentId, transaction);
+      if (!attachment || attachment.bind_state === 'detaching') return null;
+      const container = await transaction.selectFrom('control.containers').selectAll()
+        .where('id', '=', attachment.container_id).forUpdate().executeTakeFirst();
+      if (!container || container.lifecycle_phase === 'deleting') return null;
+      return this.beginDetach(transaction, actor.userId, attachment, container, { reason: 'access_lapse' });
+    }, VOLUME_TX);
+  }
+
+  /** Marks the attachment detaching, bumps the container revision and queues its update. */
+  private async beginDetach(
+    transaction: Tx,
+    actorId: string | null,
+    attachment: { id: string; volume_id: string },
+    container: { id: string; server_id: string; revision: number },
+    auditDetails: Record<string, unknown>,
+  ): Promise<IntentRecord> {
+    await this.repository.setAttachmentBindState(attachment.id, 'detaching', transaction);
+    const revision = Number(container.revision) + 1;
+    const updated = await transaction.updateTable('control.containers').set({
+      revision,
+      needs_attention: false,
+    })
+      .where('id', '=', container.id)
+      .where('revision', '=', container.revision)
+      .returning('id')
+      .executeTakeFirst();
+    if (!updated) {
+      throw new ConflictException({ code: FailureCode.RevisionConflict });
+    }
+    const intent = await this.intents.createPending({
+      kind: IntentKind.ContainerUpdate,
+      resourceType: IntentResourceType.Container,
+      resourceId: container.id,
+      serverId: container.server_id,
+      requestedBy: actorId,
+      targetRevision: revision,
+      request: { operation: 'detach_volume', attachmentId: attachment.id },
+    }, transaction);
+    await this.audit.append(
+      transaction,
+      actorId,
+      AuditAction.DetachVolume,
+      attachment.id,
+      'volume_attachment',
+      { containerId: container.id, volumeId: attachment.volume_id, ...auditDetails },
+    );
+    return intent;
   }
 
   /** A mounted (or mounting) attachment can only be removed while the container is stopped. */

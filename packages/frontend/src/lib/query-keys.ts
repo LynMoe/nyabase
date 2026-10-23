@@ -12,7 +12,6 @@ export const queryKeys = {
   catalog: { users: ['catalog', 'users'] as const },
   sshKeys: (userId: string) => ['ssh-keys', userId] as const,
   sshClientConfig: (userId: string) => ['ssh-client-config', userId] as const,
-  apiTokens: (userId: string) => ['api-tokens', userId] as const,
   audit: {
     list: (pageSize: number, offset: number, filter: { action?: string; targetType?: string } = {}) =>
       ['audit', pageSize, offset, filter.action ?? null, filter.targetType ?? null] as const,

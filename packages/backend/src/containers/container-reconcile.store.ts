@@ -10,6 +10,7 @@ import {
   type PhysicalSettlement,
 } from '../reconcile/intent.repository.js';
 import type { ResourceAuthority } from '../reconcile/managed-reconciler.js';
+import { OrphanSightingsStore } from '../reconcile/orphan-sightings.store.js';
 import { settleContainerIntent } from './container-rules.js';
 
 /** The desired container joined with its server, root pool, image and network claim. */
@@ -51,6 +52,8 @@ export interface ContainerAttachment {
   pool_name: string;
   size_bytes: string;
   shared: boolean;
+  /** The owning shared backend of a shared volume (its catalog label). */
+  shared_backend_id?: string | null;
   bind_state: 'attaching' | 'attached' | 'detaching';
 }
 
@@ -84,10 +87,15 @@ function composeAuthorizedKeys(
 /** Every SQL statement the container reconciler issues; the Incus-facing logic never touches Kysely. */
 @Injectable()
 export class ContainerReconcileStore {
+  /** Quarantine ledger of instances no row owns (full scan). */
+  readonly orphans: OrphanSightingsStore;
+
   constructor(
     @Inject(PG_DATABASE) private readonly database: Kysely<NyabaseDatabase>,
     private readonly intents: IntentRepository,
-  ) {}
+  ) {
+    this.orphans = new OrphanSightingsStore(database);
+  }
 
   // --- ManagedReconciler state -------------------------------------------------
 
@@ -273,6 +281,7 @@ export class ContainerReconcileStore {
         incus_name: row.incus_name,
         size_bytes: String(row.size_bytes),
         shared,
+        shared_backend_id: row.shared_backend_id,
         bind_state: row.bind_state ?? 'attached',
       };
       if (row.bind_state === 'detaching') {
@@ -445,17 +454,6 @@ export class ContainerReconcileStore {
   }
 
   // --- deletion ----------------------------------------------------------------
-
-  /** Normalised ids of the containers on a server that are not being deleted. */
-  async listLiveContainerIds(serverId: string): Promise<string[]> {
-    const rows = await this.database
-      .selectFrom('control.containers')
-      .select('id')
-      .where('server_id', '=', serverId)
-      .where('lifecycle_phase', '!=', 'deleting')
-      .execute();
-    return rows.map((item) => item.id);
-  }
 
   /** The instance is gone: park its address for reuse and drop the container row. */
   async releaseContainerState(row: ContainerRow): Promise<void> {

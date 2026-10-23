@@ -23,11 +23,10 @@ import { Page, PageHeader } from '../components/layout/page-header.js';
 import { TechnicalId } from '../components/refs/technical-id.js';
 import { toast } from '../hooks/use-toast.js';
 import { setPendingLoginReason, terminateBrowserSession } from '../lib/auth-session.js';
-import { ApiTokensPanel } from './profile-page/api-tokens-panel.js';
 import { SshClientConfigPanel } from './profile-page/ssh-client-config-panel.js';
 
 type PasswordErrors = Partial<Record<'currentPassword' | 'newPassword' | 'confirmPassword', string>>;
-type SshKeyErrors = Partial<Record<'name' | 'keyText', string>>;
+type SshKeyErrors = Partial<Record<'name' | 'keyText' | 'currentPassword', string>>;
 
 export default function ProfilePage() {
   const { user } = useAuthStore();
@@ -55,9 +54,6 @@ export default function ProfilePage() {
         <div className="xl:col-span-2">
           <SshClientConfigPanel userId={user.id} />
         </div>
-        <div className="xl:col-span-2">
-          <ApiTokensPanel userId={user.id} />
-        </div>
       </div>
     </Page>
   );
@@ -72,7 +68,7 @@ function PasswordPanel({ userId }: { userId: string }) {
           <ShieldCheck className="h-4 w-4 text-primary mt-1 shrink-0" />
           <div>
             <h2 className="text-base font-semibold text-foreground">登录密码</h2>
-            <p className="text-xs text-muted-foreground mt-0.5">修改后需要使用新密码重新登录，全部 API 令牌也会被吊销。</p>
+            <p className="text-xs text-muted-foreground mt-0.5">修改后需要使用新密码重新登录；SSH 公钥不受影响。</p>
           </div>
         </div>
         <Button size="sm" variant="outline" onClick={() => setOpen(true)} data-testid="change-password">
@@ -147,7 +143,7 @@ function ChangePasswordDialog({
       <DialogContent>
         <DialogHeader>
           <DialogTitle>修改密码</DialogTitle>
-          <DialogDescription>修改当前账号密码需要验证旧密码。成功后会退出并要求重新登录，全部 API 令牌会被吊销。</DialogDescription>
+          <DialogDescription>修改当前账号密码需要验证旧密码。成功后会退出并要求重新登录。SSH 公钥不会被删除：如果怀疑账号泄露，请同时检查下方的 SSH 公钥并删除不认识的公钥。</DialogDescription>
         </DialogHeader>
         <div className="space-y-3">
           <FormField id={curId} label="当前密码" error={errors.currentPassword}>
@@ -323,7 +319,7 @@ function AddSshKeyDialog({
   onOpenChange: (open: boolean) => void;
 }) {
   const qc = useQueryClient();
-  const [form, setForm] = useState({ name: '', keyText: '' });
+  const [form, setForm] = useState({ name: '', keyText: '', currentPassword: '' });
   const [errors, setErrors] = useState<SshKeyErrors>({});
   const [nameTouched, setNameTouched] = useState(false);
 
@@ -332,6 +328,7 @@ function AddSshKeyDialog({
     const parsed = zAddSshKeyRequest.safeParse({
       name: resolvedName,
       keyText: form.keyText.trim(),
+      currentPassword: form.currentPassword,
     });
     if (parsed.success) {
       if (form.name.trim() !== resolvedName) setForm((f) => ({ ...f, name: resolvedName }));
@@ -344,6 +341,7 @@ function AddSshKeyDialog({
       const field = issue.path[0];
       if (field === 'name' && !errs.name) errs.name = issue.message;
       if (field === 'keyText' && !errs.keyText) errs.keyText = issue.message;
+      if (field === 'currentPassword' && !errs.currentPassword) errs.currentPassword = '请输入当前密码';
     }
     setErrors(errs);
     return false;
@@ -353,13 +351,21 @@ function AddSshKeyDialog({
     mutationFn: () => api.post<SshPublicKeyDto>(`/users/${userId}/ssh-keys`, {
       name: resolveKeyName(form.name, form.keyText),
       keyText: form.keyText.trim(),
+      currentPassword: form.currentPassword,
     }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey });
       toast({ title: 'SSH 公钥已添加' });
       onSaved();
     },
-    onError: (e) => toast({ title: '添加失败', description: e.message, variant: 'destructive' }),
+    onError: (e) => {
+      setForm((f) => ({ ...f, currentPassword: '' }));
+      if (e instanceof ApiError && e.code === 'CURRENT_PASSWORD_INCORRECT') {
+        setErrors({ currentPassword: '当前密码不正确' });
+        return;
+      }
+      toast({ title: '添加失败', description: e.message, variant: 'destructive' });
+    },
   });
 
   return (
@@ -367,6 +373,7 @@ function AddSshKeyDialog({
       <DialogContent>
         <DialogHeader>
           <DialogTitle>添加公钥</DialogTitle>
+          <DialogDescription>公钥可以 root 身份登录你的全部容器，添加需要验证当前密码。修改密码不会删除公钥，不再使用的公钥请手动删除。</DialogDescription>
         </DialogHeader>
         <div className="space-y-3">
           <FormField id="ssh-key-text" label="公钥内容" error={errors.keyText}>
@@ -400,6 +407,16 @@ function AddSshKeyDialog({
               }}
               placeholder="留空则从公钥注释提取，或自动生成"
               aria-invalid={!!errors.name}
+            />
+          </FormField>
+          <FormField id="ssh-key-current-password" label="当前密码" error={errors.currentPassword}>
+            <Input
+              id="ssh-key-current-password"
+              type="password"
+              value={form.currentPassword}
+              onChange={(e) => setForm((f) => ({ ...f, currentPassword: e.target.value }))}
+              aria-invalid={!!errors.currentPassword}
+              autoComplete="current-password"
             />
           </FormField>
         </div>

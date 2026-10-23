@@ -5,6 +5,7 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  UnauthorizedException,
 } from '@nestjs/common';
 import type { Kysely } from 'kysely';
 import { sql } from 'kysely';
@@ -22,7 +23,9 @@ import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.
 import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
 import { assertActorRole } from '../iam/administration.js';
+import { requireUserId, type Actor } from '../iam/actor.js';
 import { AuditService } from '../iam/audit.service.js';
+import { AuthService, currentPasswordIncorrect } from '../iam/auth.service.js';
 import { ContainerSshConvergenceService } from '../containers/container-ssh.js';
 import { ProxySnapshotNotifierService } from '../proxy-snapshots/proxy-snapshot-notifier.service.js';
 
@@ -55,6 +58,7 @@ export class UserSshKeysService {
     private readonly containerSshConvergence: ContainerSshConvergenceService,
     private readonly proxySnapshots: ProxySnapshotNotifierService,
     private readonly auditService: AuditService,
+    private readonly authService: AuthService,
   ) {}
 
   async listSshKeys(userId: string): Promise<IamSshPublicKey[]> {
@@ -66,12 +70,19 @@ export class UserSshKeysService {
     return rows.map((row) => this.toSshKey(row));
   }
 
+  /**
+   * Adds a key for the signed-in user. A key reaches every one of the user's
+   * containers as root and outlives sessions, so like an API token it needs a
+   * browser session plus the current password, checked again under the row
+   * lock against the same credential generation.
+   */
   async addSshKey(
-    userId: string,
+    actor: Actor,
     name: string,
     keyText: string,
-    actorId: string,
+    currentPassword: string,
   ): Promise<IamSshPublicKey> {
+    const userId = requireUserId(actor);
     const normalizedName = name.trim();
     if (normalizedName.length === 0 || normalizedName.length > 128) {
       throw new BadRequestException(
@@ -87,14 +98,28 @@ export class UserSshKeysService {
     }
     const fingerprint = this.publicKeyFingerprint(normalizedKeyText)
       ?? createHash('sha256').update(normalizedKeyText).digest('hex');
+    const snapshot = await this.database.selectFrom('iam.users')
+      .select(['id', 'status', 'password_hash', 'auth_version'])
+      .where('id', '=', userId)
+      .executeTakeFirst();
+    if (!snapshot || snapshot.status !== UserStatus.Active) {
+      throw new ConflictException('SSH keys require an active user');
+    }
+    if (!await this.authService.verifyCurrentPassword(
+      { id: snapshot.id, passwordHash: snapshot.password_hash },
+      currentPassword,
+    )) {
+      throw currentPasswordIncorrect();
+    }
     const saved = await this.transactions.run(async (transaction) => {
-      if (actorId !== userId) {
-        await assertActorRole(transaction, actorId, Role.Admin);
-      }
       const user = await transaction.selectFrom('iam.users')
-        .select('status').where('id', '=', userId).forUpdate().executeTakeFirst();
+        .select(['status', 'password_hash', 'auth_version'])
+        .where('id', '=', userId).forUpdate().executeTakeFirst();
       if (!user || user.status !== UserStatus.Active) {
         throw new ConflictException('SSH keys require an active user');
+      }
+      if (user.password_hash !== snapshot.password_hash || user.auth_version !== snapshot.auth_version) {
+        throw new UnauthorizedException('Credentials changed while the request was being processed');
       }
       const count = await transaction.selectFrom('iam.ssh_public_keys')
         .select(sql<number>`count(*)::integer`.as('count'))
@@ -127,7 +152,7 @@ export class UserSshKeysService {
       const saved = this.toSshKey(row);
       await this.auditService.append(
         transaction,
-        actorId,
+        userId,
         AuditAction.AddUserSshPublicKey,
         saved.id,
         'ssh_public_key',
@@ -135,16 +160,7 @@ export class UserSshKeysService {
       );
       return saved;
     });
-    await this.notifyProxySnapshotsChanged('user-ssh-key-added');
-    try {
-      await this.containerSshConvergence.reconcileUser(userId);
-    } catch (error) {
-      this.logger.warn(
-        `SSH key change hook enqueue failed for ${userId}: ${
-          error instanceof Error ? error.message : String(error)
-        }`,
-      );
-    }
+    await this.afterKeysChanged(userId, 'user-ssh-key-added');
     return saved;
   }
 
@@ -185,7 +201,11 @@ export class UserSshKeysService {
       );
       return deleted;
     });
-    await this.notifyProxySnapshotsChanged('user-ssh-key-deleted');
+    await this.afterKeysChanged(userId, 'user-ssh-key-deleted');
+  }
+
+  private async afterKeysChanged(userId: string, reason: string): Promise<void> {
+    await this.notifyProxySnapshotsChanged(reason);
     try {
       await this.containerSshConvergence.reconcileUser(userId);
     } catch (error) {

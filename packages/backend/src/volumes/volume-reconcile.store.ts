@@ -3,6 +3,7 @@ import { sql, type Kysely } from 'kysely';
 import { IncusError } from '../incus/index.js';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
+import { OrphanSightingsStore } from '../reconcile/orphan-sightings.store.js';
 import { IntentRepository, type IntentFailure } from '../reconcile/intent.repository.js';
 import type { ResourceAuthority } from '../reconcile/managed-reconciler.js';
 import type { VolumeDriver } from './volume-rules.js';
@@ -52,11 +53,15 @@ export interface CatalogRow {
 @Injectable()
 export class VolumeReconcileStore {
   private readonly logger = new Logger(VolumeReconcileStore.name);
+  /** Quarantine ledger of volumes no row owns (full scan). */
+  readonly orphans: OrphanSightingsStore;
 
   constructor(
     @Inject(PG_DATABASE) private readonly database: Kysely<NyabaseDatabase>,
     private readonly intents: IntentRepository,
-  ) {}
+  ) {
+    this.orphans = new OrphanSightingsStore(database);
+  }
 
   // --- ManagedReconciler state -------------------------------------------------
 
@@ -82,7 +87,7 @@ export class VolumeReconcileStore {
       .execute();
   }
 
-  async markFailure(volumeId: string, failure: IntentFailure, attention: boolean): Promise<void> {
+  async markFailure(volumeId: string, failure: IntentFailure, _attention: boolean): Promise<void> {
     const code = failure.code.slice(0, 128);
     const current = await this.database
       .selectFrom('control.volumes')
@@ -99,15 +104,12 @@ export class VolumeReconcileStore {
       return;
     }
     // A failed shrink/ensure must surface on the volume card too, so the
-    // resource is flagged either way; only a parked failure also fails the phase.
-    const values = {
-      needs_attention: true,
-      failure_code: code,
-      ...(attention ? { lifecycle_phase: 'failed' as const } : {}),
-    };
+    // resource is flagged either way. Parking never changes the phase: the
+    // volume still exists (and stays attached), so it keeps counting against
+    // quota, and a user retry or the next desired-state edit releases it.
     await this.database
       .updateTable('control.volumes')
-      .set(values)
+      .set({ needs_attention: true, failure_code: code })
       .where('id', '=', volumeId)
       .where('lifecycle_phase', '!=', 'deleting')
       .execute();

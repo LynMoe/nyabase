@@ -410,9 +410,11 @@ describe('ReconcileWorkerService', () => {
     const first = setup.worker.runOnce();
     await vi.waitFor(() => expect(setup.listPending).toHaveBeenCalledTimes(1));
     const second = setup.worker.runOnce();
+    // The pass waiting on the slow intent lists the queue again at once.
+    await vi.waitFor(() => expect(setup.listPending).toHaveBeenCalledTimes(2));
     gate.resolve();
     await Promise.all([first, second]);
-    expect(setup.listPending).toHaveBeenCalledTimes(2);
+    expect(setup.listPending.mock.calls.length).toBeGreaterThanOrEqual(2);
   });
 
   it('pages past a full page, excluding intents it already handled', async () => {
@@ -423,12 +425,93 @@ describe('ReconcileWorkerService', () => {
     }));
     setup.listPending
       .mockResolvedValueOnce({ items: page(0, 100), nextCursor: null })
-      .mockResolvedValueOnce({ items: page(100, 3), nextCursor: null });
+      .mockResolvedValueOnce({ items: page(100, 3), nextCursor: null })
+      .mockResolvedValue({ items: [], nextCursor: null });
     await setup.worker.runOnce();
-    expect(setup.listPending).toHaveBeenCalledTimes(2);
     const second = setup.listPending.mock.calls[1]![0] as { excludeIds: string[] };
     expect(second.excludeIds).toHaveLength(100);
+    // One more look once the resource's chain went idle.
+    expect(setup.listPending).toHaveBeenCalledTimes(3);
     expect(setup.claims.claim).toHaveBeenCalledTimes(103);
+  });
+
+  it('runs other resources while one intent is slow, but never one resource twice at once', async () => {
+    const gate = deferred<void>();
+    const running = new Map<string, number>();
+    let overlap = false;
+    const order: string[] = [];
+    const reconcile = vi.fn(async ({ intent: current }: { intent: { id: string; resourceId: string } }) => {
+      const active = (running.get(current.resourceId) ?? 0) + 1;
+      running.set(current.resourceId, active);
+      if (active > 1) overlap = true;
+      order.push(current.id);
+      if (current.id === 'slow-1') await gate.promise;
+      running.set(current.resourceId, active - 1);
+      return { outcome: 'succeeded', observedRevision: 1 };
+    });
+    const setup = makeWorker({ reconcile: reconcile as never });
+    const other = '00000000-0000-4000-8000-0000000000aa';
+    setup.listPending
+      .mockResolvedValueOnce({
+        items: [
+          { ...intent(), id: 'slow-1' },
+          { ...intent(), id: 'slow-2' },
+          { ...intent(), id: 'fast-1', resourceId: other },
+        ],
+        nextCursor: null,
+      })
+      .mockResolvedValue({ items: [], nextCursor: null });
+
+    const pass = setup.worker.runOnce();
+    await vi.waitFor(() => expect(order).toEqual(['slow-1', 'fast-1']));
+    gate.resolve();
+    await pass;
+
+    expect(order).toEqual(['slow-1', 'fast-1', 'slow-2']);
+    expect(overlap).toBe(false);
+  });
+
+  it('caps how many resources of one server reconcile at once', async () => {
+    const gate = deferred<void>();
+    let active = 0;
+    let peak = 0;
+    const reconcile = vi.fn(async () => {
+      active += 1;
+      peak = Math.max(peak, active);
+      await gate.promise;
+      active -= 1;
+      return { outcome: 'succeeded', observedRevision: 1 };
+    });
+    const setup = makeWorker({ reconcile });
+    const items = Array.from({ length: 6 }, (_, index) => ({
+      ...intent(),
+      id: `intent-${index}`,
+      resourceId: `00000000-0000-4000-8000-00000000010${index}`,
+    }));
+    let listed = false;
+    setup.listPending.mockImplementation(async ({ excludeIds }: { excludeIds: string[] }) => {
+      if (!listed) {
+        listed = true;
+        return { items, nextCursor: null };
+      }
+      return { items: items.filter((item) => !excludeIds.includes(item.id)), nextCursor: null };
+    });
+
+    const pass = setup.worker.runOnce();
+    await vi.waitFor(() => expect(active).toBe(4));
+    gate.resolve();
+    await pass;
+
+    expect(peak).toBe(4);
+    expect(reconcile).toHaveBeenCalledTimes(6);
+  });
+
+  it('does not spin on an intent that stays pending after it was tried', async () => {
+    const setup = makeWorker({ needsAttention: true });
+    await setup.worker.runOnce();
+    // Listed, tried (parked resource: left pending), then one look after its chain went idle.
+    expect(setup.listPending).toHaveBeenCalledTimes(2);
+    expect(setup.claims.claim).not.toHaveBeenCalled();
   });
 
   it('arms a timer for the earliest scheduled retry', async () => {

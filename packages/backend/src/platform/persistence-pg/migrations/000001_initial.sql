@@ -113,17 +113,6 @@ CREATE TABLE iam.refresh_tokens (
 COMMENT ON COLUMN iam.refresh_tokens.previous_hash IS
   'One-step predecessor used only for exact response recovery and logout-after-rotation';
 
-CREATE TABLE iam.api_tokens (
-    id uuid NOT NULL,
-    user_id uuid NOT NULL REFERENCES iam.users(id) ON DELETE CASCADE,
-    name text NOT NULL,
-    hash character(64) NOT NULL,
-    last_used_at timestamp with time zone,
-    created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
-    CONSTRAINT api_tokens_hash_check CHECK (hash ~ '^[0-9a-f]{64}$'),
-    CONSTRAINT api_tokens_name_check CHECK (length(btrim(name)) BETWEEN 1 AND 128)
-);
-
 CREATE TABLE iam.ssh_public_keys (
     id uuid NOT NULL,
     user_id uuid NOT NULL REFERENCES iam.users(id) ON DELETE CASCADE,
@@ -672,6 +661,24 @@ COMMENT ON TABLE control.access_lapses IS
   'Grace ledger: a user owns resources on a server, pool or shared backend without current coverage. '
   'lapsed_at is fixed when the row is created; in-flight ownership is a reconcile_claims lease (resource_type access_lapse)';
 
+CREATE TABLE control.orphan_sightings (
+    server_id uuid NOT NULL REFERENCES infra.servers(id) ON DELETE CASCADE,
+    kind text NOT NULL,
+    pool_name text NOT NULL,
+    name text NOT NULL,
+    first_seen_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    CONSTRAINT orphan_sightings_kind_check
+        CHECK (kind = ANY (ARRAY['instance', 'volume'])),
+    CONSTRAINT orphan_sightings_pool_shape_check
+        CHECK ((kind = 'instance' AND pool_name = '') OR (kind = 'volume' AND pool_name <> '')),
+    PRIMARY KEY (server_id, kind, pool_name, name)
+);
+
+COMMENT ON TABLE control.orphan_sightings IS
+  'Orphan ledger: managed Incus instances/volumes that no row owns, keyed by the full scan that first saw them. '
+  'An orphan instance is stopped at once; either is deleted only after a holding period. '
+  'A database restored from a backup starts with no sightings, so nothing it does not know is deleted at once';
+
 CREATE TABLE control.intents (
     id uuid NOT NULL,
     kind text NOT NULL,
@@ -925,8 +932,6 @@ ALTER TABLE iam.group_members ADD CONSTRAINT group_members_group_id_user_id_key
     UNIQUE (group_id, user_id);
 ALTER TABLE iam.refresh_tokens ADD CONSTRAINT refresh_tokens_pkey PRIMARY KEY (id);
 ALTER TABLE iam.refresh_tokens ADD CONSTRAINT refresh_tokens_hash_key UNIQUE (hash);
-ALTER TABLE iam.api_tokens ADD CONSTRAINT api_tokens_pkey PRIMARY KEY (id);
-ALTER TABLE iam.api_tokens ADD CONSTRAINT api_tokens_hash_key UNIQUE (hash);
 ALTER TABLE iam.ssh_public_keys ADD CONSTRAINT ssh_public_keys_pkey PRIMARY KEY (id);
 -- A public key belongs to one user: the SSH proxy resolves the user from the key.
 ALTER TABLE iam.ssh_public_keys ADD CONSTRAINT ssh_public_keys_fingerprint_key
@@ -1100,8 +1105,6 @@ CREATE INDEX access_lapses_resource_idx ON control.access_lapses (resource_kind,
 CREATE INDEX reconcile_claims_lease_idx ON control.reconcile_claims (lease_expires_at);
 CREATE INDEX reconcile_claims_server_idx ON control.reconcile_claims (server_id);
 
-CREATE INDEX iam_api_tokens_user_created_idx
-    ON iam.api_tokens (user_id, created_at DESC, id);
 CREATE INDEX iam_group_members_user_idx ON iam.group_members (user_id, group_id);
 CREATE INDEX refresh_tokens_expiry_idx ON iam.refresh_tokens (expires_at);
 CREATE INDEX refresh_tokens_revoked_idx ON iam.refresh_tokens (id) WHERE revoked;
@@ -1250,11 +1253,13 @@ BEGIN
 END;
 $$;
 
+-- A deleting container keeps its claims: they go with the row (ON DELETE
+-- CASCADE) once the instance is gone, so a slow delete never shares a card.
 CREATE FUNCTION control.release_gpu_claims_on_terminal_phase() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
-  IF NEW.lifecycle_phase = ANY (ARRAY['failed', 'deleting'])
+  IF NEW.lifecycle_phase = 'failed'
      AND OLD.lifecycle_phase IS DISTINCT FROM NEW.lifecycle_phase THEN
     DELETE FROM control.container_gpu_claims WHERE container_id = NEW.id;
   END IF;

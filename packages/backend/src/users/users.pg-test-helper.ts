@@ -41,7 +41,6 @@ export async function usersPgFixture(
     hashPassword: vi.fn(async (password: string) => `hash:${password}`),
     verifyCurrentPassword: vi.fn().mockResolvedValue(true),
     revokeBrowserSessionsInTransaction: vi.fn().mockResolvedValue(undefined),
-    revokeAllCredentialsInTransaction: vi.fn().mockResolvedValue(undefined),
   };
   const sessions = new SessionRevocationService();
   const audit = { log: vi.fn().mockResolvedValue(undefined) };
@@ -50,6 +49,14 @@ export async function usersPgFixture(
   });
   const proxySnapshots = { notify: vi.fn().mockResolvedValue(undefined) };
   const convergence = { reconcileUser: vi.fn().mockResolvedValue(undefined) };
+  const sshKeys = new UserSshKeysService(
+    fixture.database,
+    transactions,
+    convergence as never,
+    proxySnapshots as never,
+    audit as never,
+    auth as never,
+  );
   const users = new UsersService(
     fixture.database,
     transactions,
@@ -60,13 +67,6 @@ export async function usersPgFixture(
     audit as never,
     changes,
     sessions,
-  );
-  const sshKeys = new UserSshKeysService(
-    fixture.database,
-    transactions,
-    convergence as never,
-    proxySnapshots as never,
-    audit as never,
   );
 
   const userRows = [];

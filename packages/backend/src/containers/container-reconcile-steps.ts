@@ -20,6 +20,7 @@ import {
   orphanInstances,
   powerTransition,
   running,
+  stopPhysicalInstance,
   toSpecAttachments,
   type ActualInstance,
   type InstanceFull,
@@ -130,21 +131,23 @@ export interface ContainerScanDeps {
   readonly logger: Pick<Logger, 'warn'>;
 }
 
-/** Full scan: queue update/delete intents for drifted containers and remove orphaned instances. */
+/** Full scan: queue update/delete intents for drifted containers and quarantine orphaned instances. */
 export async function scanServerContainers(
   deps: ContainerScanDeps,
   serverId: string,
   client: IncusClientPort,
   signal: AbortSignal,
 ): Promise<void> {
+  // Incus first, rows second: a row always exists before its instance, so an
+  // instance created while the scan runs is never mistaken for an orphan.
+  const instances = await client.listInstances(2, { signal });
+  const documents = instances.metadata as InstanceFull[];
   const rows = await deps.store.listScanContainers(serverId);
   const known = new Set(
     rows
       .filter((row) => row.lifecycle_phase !== 'deleting')
       .map((row) => normalized(row.id)),
   );
-  const instances = await client.listInstances(2, { signal });
-  const documents = instances.metadata as InstanceFull[];
   const byContainerId = new Map<string, ActualInstance>();
   for (const document of documents) {
     const identity = managedContainerIdentity(document);
@@ -172,10 +175,47 @@ export async function scanServerContainers(
       deps.logger.warn(`Full scan could not check container ${desired.id}: ${String(error)}`);
     }
   }
-  for (const document of orphanInstances(documents, serverId, known)) {
-    await deletePhysicalInstance(client, document.name!);
-  }
+  await quarantineOrphanInstances(deps, serverId, client, orphanInstances(documents, serverId, known));
   await deps.cpuSets.releaseIdle(serverId);
+}
+
+/**
+ * An instance labelled as ours that no row owns is stopped at once (it may
+ * hold an address the platform hands out again) but deleted only after the
+ * quarantine: after a database restore every newer container looks like this.
+ */
+async function quarantineOrphanInstances(
+  deps: ContainerScanDeps,
+  serverId: string,
+  client: IncusClientPort,
+  orphans: readonly InstanceFull[],
+): Promise<void> {
+  const { fresh, due } = await deps.store.orphans.sight(
+    serverId,
+    'instance',
+    orphans.map((document) => ({ poolName: '', name: document.name! })),
+  );
+  for (const orphan of fresh) {
+    deps.logger.warn(
+      `Orphan instance ${orphan.name} on server ${serverId} has no container row; `
+      + 'stopping it and deleting it after the quarantine',
+    );
+  }
+  const dueNames = new Set(due.map((orphan) => orphan.name));
+  for (const document of orphans) {
+    const name = document.name!;
+    try {
+      if (dueNames.has(name)) {
+        await deletePhysicalInstance(client, name);
+        await deps.store.orphans.forget(serverId, 'instance', { poolName: '', name });
+        deps.logger.warn(`Deleted orphan instance ${name} on server ${serverId} after the quarantine`);
+      } else {
+        await stopPhysicalInstance(client, name);
+      }
+    } catch (error) {
+      deps.logger.warn(`Orphan instance ${name} on server ${serverId}: ${String(error)}`);
+    }
+  }
 }
 
 /** Does the live instance differ from what the platform wants (name, power, managed fields)? */

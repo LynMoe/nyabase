@@ -17,7 +17,6 @@ export const AUDIT_RESOURCE_LABELS: Record<string, string> = {
   grant: '授权',
   system_settings: '系统设置',
   ssh_proxy: 'SSH 代理',
-  api_token: 'API 令牌',
   ssh_public_key: 'SSH 公钥',
 };
 
@@ -69,6 +68,7 @@ const AUDIT_ACTION_LABELS: Record<string, string> = {
   [AuditAction.DeleteSharedBackendGrant]: '删除共享存储授权',
   [AuditAction.GrantExpired]: '授权到期',
   [AuditAction.ExpiryStopContainers]: '到期停止容器',
+  [AuditAction.ExpiryDetachVolumes]: '到期卸载数据卷',
   [AuditAction.ExpiryPurgeResources]: '到期清理资源',
   [AuditAction.ContainerDriftCorrected]: '纠正容器配置漂移',
   [AuditAction.UpdateSystemSettings]: '更新系统设置',
@@ -84,8 +84,6 @@ const AUDIT_ACTION_LABELS: Record<string, string> = {
   [AuditAction.RemoveGroupMember]: '移除组成员',
   [AuditAction.UserLogin]: '用户登录',
   [AuditAction.UserLogout]: '用户登出',
-  [AuditAction.CreateApiToken]: '创建 API 令牌',
-  [AuditAction.DeleteApiToken]: '删除 API 令牌',
   [AuditAction.CreateHttpProxyBinding]: '创建 HTTP 发布',
   [AuditAction.UpdateHttpProxyBinding]: '更新 HTTP 发布',
   [AuditAction.DeleteHttpProxyBinding]: '删除 HTTP 发布',

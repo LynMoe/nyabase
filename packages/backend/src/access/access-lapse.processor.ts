@@ -31,11 +31,15 @@ const MAX_PAIRS_PER_PASS = 128;
  *
  *  - no ledger row yet: open it (`lapsed_at` = the detection time; never
  *    moved afterwards);
- *  - in grace and not stopped, or with a container running again (an
- *    administrator started it during the grace): stop the user's running
- *    containers there (`stopped_at` keeps the first stop time);
- *  - grace over and not purged: purge the user's containers and volumes there;
- *  - coverage back: delete the row (stopped containers are not restarted).
+ *  - in grace and not yet enforced, or exposed again (an administrator
+ *    started a container or re-attached a volume during the grace): on a
+ *    server, stop the user's running containers there; on a storage pool or
+ *    shared backend, detach the user's volumes there from their containers,
+ *    which keep running and are never deleted for it (`stopped_at` keeps the
+ *    first enforcement time);
+ *  - grace over and not purged: on a server, purge the user's containers and
+ *    local volumes there; on a pool or backend, destroy the user's volumes there;
+ *  - coverage back: delete the row (nothing is restarted or re-attached).
  *
  * Runs every minute and right after IAM writes commit (`AccessChangeNotifier`).
  * Each pair is leased through `ReconcileClaimRepository` (resource_type
@@ -152,7 +156,7 @@ export class AccessLapseProcessor implements OnModuleInit, OnModuleDestroy {
         case 'lapse':
           return await this.lapseAndAct(current, actor, lease.assertOwned.bind(lease));
         case 'stop':
-          return await this.stopContainers(current, actor, lease.assertOwned.bind(lease));
+          return await this.enforce(current, actor, lease.assertOwned.bind(lease));
         case 'purge':
           return await this.purgeResources(current, actor, lease.assertOwned.bind(lease));
         case 'none':
@@ -189,12 +193,13 @@ export class AccessLapseProcessor implements OnModuleInit, OnModuleDestroy {
     assertOwned();
     const opened = { ...candidate, lapse };
     const work = lapseWork(opened);
-    if (work === 'stop') return this.stopContainers(opened, actor, assertOwned);
+    if (work === 'stop') return this.enforce(opened, actor, assertOwned);
     if (work === 'purge') return this.purgeResources(opened, actor, assertOwned);
     return true;
   }
 
-  private async stopContainers(
+  /** Server: stop the containers. Pool or backend: detach the volumes. */
+  private async enforce(
     candidate: LapseCandidate,
     actor: Actor,
     assertOwned: () => void,
@@ -208,20 +213,10 @@ export class AccessLapseProcessor implements OnModuleInit, OnModuleDestroy {
         );
         break;
       case 'storage_pool':
-        await this.purge.stopRunningContainersForStoragePool(
-          actor,
-          candidate.userId,
-          candidate.resourceId,
-          this.workerId,
-        );
+        await this.purge.detachVolumesForStoragePool(actor, candidate.userId, candidate.resourceId);
         break;
       case 'shared_backend':
-        await this.purge.stopRunningContainersForSharedBackend(
-          actor,
-          candidate.userId,
-          candidate.resourceId,
-          this.workerId,
-        );
+        await this.purge.detachVolumesForSharedBackend(actor, candidate.userId, candidate.resourceId);
         break;
     }
     assertOwned();
@@ -244,6 +239,9 @@ export class AccessLapseProcessor implements OnModuleInit, OnModuleDestroy {
     actor: Actor,
     assertOwned: () => void,
   ): Promise<boolean> {
+    // Deleting is irreversible: re-read coverage under the IAM lock right
+    // before it, so a grant committed since the scan still saves the data.
+    if (!await this.lapses.stillUncovered(candidate)) return false;
     switch (candidate.kind) {
       case 'server':
         await this.purge.purge(actor, candidate.userId, candidate.resourceId);

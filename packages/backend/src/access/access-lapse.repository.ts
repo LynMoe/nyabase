@@ -24,8 +24,12 @@ export interface LapseKey {
 export interface LapseCandidate extends LapseKey {
   /** The user currently holds grant coverage of the resource (effective_*: active user, current grant). */
   covered: boolean;
-  /** The user has an active container with running power intent behind the resource (server: on it; pool/backend: attached to a volume there). */
-  hasRunning: boolean;
+  /**
+   * The lapse is not (or no longer) enforced: on a server, a container of the
+   * user there is meant to run; on a pool or backend, a volume of the user
+   * there is still attached to a container.
+   */
+  exposed: boolean;
   /** The ledger row, when the pair is in grace. */
   lapse: { lapsedAt: Date; stoppedAt: Date | null; purgedAt: Date | null } | null;
   /** Database clock at the time of the scan. */
@@ -44,9 +48,10 @@ export function lapseWork(candidate: LapseCandidate): LapseWork {
   if (!candidate.lapse) return 'lapse';
   const due = candidate.now.getTime() >= purgeDeadline(candidate.lapse.lapsedAt).getTime();
   if (due) return candidate.lapse.purgedAt === null ? 'purge' : 'none';
-  // Stop again whenever something runs: a container started during the grace
-  // (an administrator override) must not survive until the purge.
-  return candidate.lapse.stoppedAt === null || candidate.hasRunning ? 'stop' : 'none';
+  // Enforce again whenever it is exposed: a container started, or a volume
+  // re-attached, during the grace (an administrator override) must not
+  // survive until the purge.
+  return candidate.lapse.stoppedAt === null || candidate.exposed ? 'stop' : 'none';
 }
 
 /**
@@ -74,7 +79,7 @@ interface CandidateRow {
   kind: AccessLapseResourceKind;
   resource_id: string;
   covered: boolean;
-  has_running: boolean;
+  exposed: boolean;
   lapsed_at: Date | null;
   stopped_at: Date | null;
   purged_at: Date | null;
@@ -134,39 +139,40 @@ export class AccessLapseRepository {
         UNION ALL
         SELECT user_id, 'shared_backend', shared_backend_id
         FROM iam.effective_shared_backend_access
-      ), running AS (
-        -- Pairs behind which an active container is meant to run.
+      ), exposed AS (
+        -- Servers: a container (also one still provisioning) is meant to run.
         SELECT owner_id AS user_id, 'server' AS kind, server_id AS resource_id
         FROM control.containers
-        WHERE power_intent = 'running' AND lifecycle_phase = 'active'
+        WHERE power_intent = 'running' AND lifecycle_phase IN ('active', 'provisioning')
         UNION
+        -- Pools and backends: a volume is attached to a container, running or not.
         SELECT volume.owner_id, CASE WHEN volume.shared_backend_id IS NULL THEN 'storage_pool' ELSE 'shared_backend' END,
                coalesce(volume.shared_backend_id, volume.pool_id)
         FROM control.volume_attachments AS attachment
         JOIN control.volumes AS volume ON volume.id = attachment.volume_id
         JOIN control.containers AS container ON container.id = attachment.container_id
-        WHERE container.power_intent = 'running' AND container.lifecycle_phase = 'active'
+        WHERE attachment.bind_state <> 'detaching' AND container.lifecycle_phase <> 'deleting'
       ), candidate AS (
         SELECT owned.user_id, owned.kind, owned.resource_id,
                (coverage.user_id IS NOT NULL) AS covered,
-               (running.user_id IS NOT NULL) AS has_running,
+               (exposed.user_id IS NOT NULL) AS exposed,
                lapse.lapsed_at, lapse.stopped_at, lapse.purged_at
         FROM (${OWNED}) AS owned
         LEFT JOIN coverage
           ON coverage.user_id = owned.user_id
          AND coverage.kind = owned.kind
          AND coverage.resource_id = owned.resource_id
-        LEFT JOIN running
-          ON running.user_id = owned.user_id
-         AND running.kind = owned.kind
-         AND running.resource_id = owned.resource_id
+        LEFT JOIN exposed
+          ON exposed.user_id = owned.user_id
+         AND exposed.kind = owned.kind
+         AND exposed.resource_id = owned.resource_id
         LEFT JOIN control.access_lapses AS lapse
           ON lapse.user_id = owned.user_id
          AND lapse.resource_kind = owned.kind
          AND lapse.resource_id = owned.resource_id
       )
       SELECT candidate.user_id::text AS user_id, candidate.kind, candidate.resource_id::text AS resource_id,
-             candidate.covered, candidate.has_running, candidate.lapsed_at,
+             candidate.covered, candidate.exposed, candidate.lapsed_at,
              candidate.stopped_at, candidate.purged_at, clock_timestamp() AS now
       FROM candidate
       ${filter}
@@ -178,7 +184,7 @@ export class AccessLapseRepository {
       kind: row.kind,
       resourceId: row.resource_id,
       covered: row.covered,
-      hasRunning: row.has_running,
+      exposed: row.exposed,
       lapse: row.lapsed_at
         ? { lapsedAt: row.lapsed_at, stoppedAt: row.stopped_at, purgedAt: row.purged_at }
         : null,
@@ -212,6 +218,14 @@ export class AccessLapseRepository {
         .where('resource_id', '=', candidate.resourceId)
         .executeTakeFirstOrThrow();
       return { lapsedAt: row.lapsed_at, stoppedAt: row.stopped_at, purgedAt: row.purged_at };
+    });
+  }
+
+  /** The pair is still uncovered, read under the IAM lock (the last check before a purge). */
+  async stillUncovered(key: LapseKey): Promise<boolean> {
+    return this.transactions.run(async (transaction) => {
+      await lockIamPolicy(transaction);
+      return !await this.isCovered(transaction, key);
     });
   }
 

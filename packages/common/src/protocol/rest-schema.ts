@@ -185,12 +185,6 @@ export const zRotateRefreshTokenRequest = z.object({
   requestId: z.string().length(64).regex(SHA256_RE),
 }).strict();
 
-/** Minting a long-lived token re-checks the current password (browser sessions only). */
-export const zCreateApiTokenRequest = z.object({
-  name: z.string().trim().min(1).max(128),
-  currentPassword: z.string().min(1).max(1024),
-}).strict();
-
 export const zCreateUserRequest = z.object({
   username: z.string().min(2).max(64).regex(USERNAME_RE),
   password: z.string().min(8).max(256),
@@ -222,6 +216,9 @@ export const zAddSshKeyRequest = z.object({
     }
     return normalized;
   }),
+  // A key is a lasting credential into every container: minting one needs the
+  // password, like an API token, so a leaked short-lived session cannot.
+  currentPassword: z.string().min(1).max(1024),
 }).strict();
 
 // Server registration, connection, and bootstrap.
@@ -634,7 +631,6 @@ export const zPatchSystemSettingsRequest = z.object({
 
 export type LoginRequest = z.infer<typeof zLoginRequest>;
 export type RotateRefreshTokenRequest = z.infer<typeof zRotateRefreshTokenRequest>;
-export type CreateApiTokenRequest = z.infer<typeof zCreateApiTokenRequest>;
 export type CreateUserRequest = z.infer<typeof zCreateUserRequest>;
 export type UpdateUserRequest = z.infer<typeof zUpdateUserRequest>;
 export type AddSshKeyRequest = z.infer<typeof zAddSshKeyRequest>;
