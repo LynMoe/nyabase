@@ -61,8 +61,10 @@ host-published port: VictoriaMetrics' HTTP API, including its admin endpoints
 (deleting series, snapshots), has no authentication, so only the Backend
 reaches it over the internal `telemetry` network.
 
-The Backend starts after healthy PostgreSQL. PostgreSQL and VictoriaMetrics
-retain service healthchecks; the Backend does not wait for VictoriaMetrics and
+The Backend starts after healthy PostgreSQL and after the one-shot
+`postgres-app-role` service has created or checked its database role (see
+**Database roles**). PostgreSQL and VictoriaMetrics retain service
+healthchecks; the Backend does not wait for VictoriaMetrics and
 buffers unsent samples in a bounded in-memory queue.
 
 Useful probes:
@@ -802,11 +804,27 @@ and run its migrations at boot; it cannot read files or run programs on the
 PostgreSQL host (`COPY … TO PROGRAM`), touch other databases or create roles.
 The cluster superuser `postgres` (password `POSTGRES_PASSWORD`) is for
 operators only and is used from inside the `postgres` container (local
-connections there are trusted, so no password is needed). On the first start
-of an empty data volume the image runs `deploy/postgres-app-role.sh`, which
-creates the role with `NYABASE_DB_PASSWORD` and the database it owns. A
-production Backend connected as a superuser logs `Connected to PostgreSQL as a
-superuser` at boot.
+connections there are trusted, so no password is needed). A production Backend
+connected as a superuser logs `Connected to PostgreSQL as a superuser` at
+boot.
+
+The role and its database are not created by a PostgreSQL init hook, which
+runs only on the first start of an empty data volume and is skipped for good
+once that start failed. The one-shot Compose service `postgres-app-role` runs
+`deploy/postgres-app-role.sh` on every `docker compose up` that starts the
+Backend, which waits for it to succeed: it creates the role with
+`NYABASE_DB_PASSWORD` and the database it owns when either is missing, and
+fails when the role has more than `LOGIN` (a superuser, say) or the database
+belongs to someone else. It never changes an existing role, password
+included (see **Rotating secrets**). It connects over the `postgres`
+container's trusted loopback, and runs as root holding only
+`CAP_DAC_READ_SEARCH`, so it reads the script whatever mode the checkout gave
+it. When it fails, `docker compose up` reports `service "postgres-app-role"
+didn't complete successfully` and leaves the Backend stopped; read why with
+`docker compose --env-file .env logs postgres-app-role`, fix it, and run it
+again on its own with
+`docker compose --env-file .env run --rm postgres-app-role` (or just `up` the
+Backend again).
 
 Owning its tables, the Backend role can still alter them: audit events are
 append-only for the application (an update is rejected by a trigger, rows are
@@ -832,10 +850,9 @@ owner of every object). The old database stays as the rollback point.
 2. Stop the Backend (`docker compose --env-file .env stop backend`), then take
    and verify a logical backup with the current `pg_ops` setup (see **Logical
    backups**).
-3. Recreate the `postgres` container with the new environment and the init
-   script mount (the data volume is kept; the init script does not run on it),
-   then rename the superuser through a temporary one (a role cannot rename
-   itself) and set the old database aside:
+3. Recreate the `postgres` container with the new environment (the data
+   volume is kept), then rename the superuser through a temporary one (a role
+   cannot rename itself) and set the old database aside:
 
    ```bash
    docker compose --env-file .env up -d postgres
@@ -849,9 +866,9 @@ owner of every object). The old database stays as the rollback point.
      -c 'ALTER DATABASE nyabase RENAME TO nyabase_superuser_owned'
    ```
 
-4. Create the Backend role and its empty database with the script the image
-   runs on a new volume:
-   `docker compose --env-file .env exec -T postgres bash /docker-entrypoint-initdb.d/10-nyabase-app-role.sh`.
+4. Create the Backend role and its empty database with the same one-shot
+   service that `docker compose up` runs before the Backend:
+   `docker compose --env-file .env run --rm postgres-app-role`.
 5. Rewrite `$ops_dir/pgpass` with `NYABASE_DB_PASSWORD` (the one-time setup
    under **Backup and restore contract**), restore the backup into the new
    database and start the Backend:
@@ -865,8 +882,10 @@ owner of every object). The old database stays as the rollback point.
 6. Once readiness and the panel check out (and no superuser warning is
    logged), drop the old database:
    `pg_exec -U postgres -c 'DROP DATABASE nyabase_superuser_owned'`. To roll
-   back before that, stop the Backend, swap the two database names back and
-   point `DATABASE_URL` at the superuser `postgres` with `POSTGRES_PASSWORD`.
+   back before that, stop the Backend, swap the two database names back,
+   point `DATABASE_URL` at the superuser `postgres` with `POSTGRES_PASSWORD`
+   and start it with `docker compose --env-file .env up -d --no-deps backend`
+   (`postgres-app-role` refuses a `nyabase` database its role does not own).
 
 ## Backup and restore contract
 
@@ -915,7 +934,7 @@ every new shell, from `deploy/`):
 ops_dir="$HOME/nyabase-ops"
 backup_root=/srv/nyabase-backups
 pg_network=nyabase_control-plane
-pg_image="$(docker compose --env-file .env config --images | grep '^postgres:')"
+pg_image="$(docker compose --env-file .env config --images | grep '^postgres:' | sort -u)"
 
 pg_ops() {
   docker run --rm \

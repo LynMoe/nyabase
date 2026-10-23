@@ -44,7 +44,7 @@ const config = JSON.parse(readFileSync(process.argv[2], 'utf8'));
 const backend = config.services?.backend;
 if (!backend) throw new Error('rendered Compose config has no backend service');
 const serviceNames = Object.keys(config.services ?? {}).sort();
-const expectedServices = ['backend', 'postgres', 'victoriametrics'];
+const expectedServices = ['backend', 'postgres', 'postgres-app-role', 'victoriametrics'];
 if (JSON.stringify(serviceNames) !== JSON.stringify(expectedServices)) {
   throw new Error(
     `Compose services must be exactly ${expectedServices.join(', ')}, got ${serviceNames.join(', ')}`,
@@ -121,14 +121,45 @@ const postgres = config.services.postgres;
 if (postgres.environment?.POSTGRES_USER !== 'postgres') {
   throw new Error('the PostgreSQL superuser must be `postgres`, separate from the Backend role');
 }
-if (!postgres.environment?.NYABASE_DB_PASSWORD) {
-  throw new Error('postgres must receive NYABASE_DB_PASSWORD to create the Backend role');
+// The role and database are provisioned (idempotently) before every Backend
+// start, not by a one-shot init hook that a single failure skips for good.
+if ((postgres.volumes ?? []).some((volume) => volume.target?.startsWith('/docker-entrypoint-initdb.d'))) {
+  throw new Error('postgres must not depend on an init hook for the Backend role');
 }
-if (!(postgres.volumes ?? []).some((volume) => volume.type === 'bind'
+if ('NYABASE_DB_PASSWORD' in (postgres.environment ?? {})) {
+  throw new Error('postgres no longer needs NYABASE_DB_PASSWORD');
+}
+const appRole = config.services['postgres-app-role'];
+if (appRole.image !== postgres.image) throw new Error('postgres-app-role must use the postgres image');
+if (appRole.restart !== 'no') throw new Error('postgres-app-role is a one-shot and must not restart');
+if (appRole.network_mode !== 'service:postgres') {
+  throw new Error('postgres-app-role must reach PostgreSQL over its trusted loopback');
+}
+if (appRole.environment?.POSTGRES_USER !== 'postgres' || !appRole.environment?.NYABASE_DB_PASSWORD) {
+  throw new Error('postgres-app-role must receive POSTGRES_USER=postgres and NYABASE_DB_PASSWORD');
+}
+if ('POSTGRES_PASSWORD' in (appRole.environment ?? {})) {
+  throw new Error('postgres-app-role must not receive the superuser password');
+}
+if (appRole.depends_on?.postgres?.condition !== 'service_healthy') {
+  throw new Error('postgres-app-role must wait for a healthy postgres');
+}
+if (backend.depends_on?.['postgres-app-role']?.condition !== 'service_completed_successfully') {
+  throw new Error('backend must start only after postgres-app-role succeeded');
+}
+if (!(appRole.volumes ?? []).some((volume) => volume.type === 'bind'
   && volume.source.endsWith('/deploy/postgres-app-role.sh')
-  && volume.target.startsWith('/docker-entrypoint-initdb.d/')
-  && volume.read_only === true)) {
-  throw new Error('postgres does not mount postgres-app-role.sh as a read-only init script');
+  && volume.read_only === true
+  && appRole.entrypoint?.join(' ') === `bash ${volume.target}`)) {
+  throw new Error('postgres-app-role must run the read-only mounted postgres-app-role.sh');
+}
+// Root that can read the script whatever the checkout's mode, and nothing more.
+if (appRole.user !== '0:0'
+  || appRole.read_only !== true
+  || !appRole.cap_drop?.includes('ALL')
+  || JSON.stringify(appRole.cap_add) !== JSON.stringify(['DAC_READ_SEARCH'])
+  || !appRole.security_opt?.some((entry) => entry.startsWith('no-new-privileges'))) {
+  throw new Error('postgres-app-role must run read-only with only CAP_DAC_READ_SEARCH');
 }
 for (const name of ['POSTGRES_PASSWORD', 'POSTGRES_USER', 'NYABASE_DB_PASSWORD']) {
   if (name in backend.environment) throw new Error(`backend must not receive ${name}`);

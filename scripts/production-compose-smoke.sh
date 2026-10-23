@@ -19,6 +19,7 @@ smoke_project="nyabase-smoke-$$"
 smoke_env="$smoke_root/smoke.env"
 smoke_config="$smoke_root/config.yaml"
 smoke_override="$smoke_root/override.yaml"
+smoke_app_role="$smoke_root/postgres-app-role.sh"
 smoke_image="${NYABASE_SMOKE_IMAGE:-nyabase-backend:ci}"
 
 cleanup_smoke() {
@@ -65,6 +66,7 @@ trap cleanup_smoke EXIT
   echo 'VM_MIN_FREE_DISK_SPACE_BYTES=16MiB'
   echo "SMOKE_CONFIG_PATH=$smoke_config"
   echo "NYABASE_SMOKE_IMAGE=$smoke_image"
+  echo "SMOKE_APP_ROLE_PATH=$smoke_app_role"
 } >"$smoke_env"
 chmod 0600 "$smoke_env"
 
@@ -114,8 +116,15 @@ if ! chown 10001:10001 "$smoke_config" 2>/dev/null; then
 fi
 [[ "$(stat -c '%u:%g:%a' "$smoke_config")" == '10001:10001:400' ]]
 
+# A checkout made with umask 077: the role script is readable by its owner
+# only, never by the postgres image's own user.
+install -m 0600 deploy/postgres-app-role.sh "$smoke_app_role"
+
 cat >"$smoke_override" <<'YAML'
 services:
+  postgres-app-role:
+    volumes: !override
+      - ${SMOKE_APP_ROLE_PATH}:/opt/nyabase/postgres-app-role.sh:ro
   backend:
     image: ${NYABASE_SMOKE_IMAGE}
     build: !reset null
@@ -183,6 +192,11 @@ process.stdin.on("end", () => {
       )
       FROM pg_roles AS role WHERE role.rolname = 'nyabase'"
 )" == t ]]
+
+# Provisioning is idempotent: run again, it checks and changes nothing.
+app_role_output="$("${compose[@]}" run --rm --no-TTY postgres-app-role)"
+[[ "$app_role_output" == *'role nyabase (not a superuser) owns database nyabase'* ]]
+[[ "$app_role_output" != *created* ]]
 
 docker inspect "$("${compose[@]}" ps -q victoriametrics)" | node -e '
 let input = "";
