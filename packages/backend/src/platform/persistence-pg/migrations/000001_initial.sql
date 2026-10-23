@@ -179,6 +179,11 @@ CREATE TABLE infra.servers (
     agent_credential_hash text,
     agent_enrollment_token_hash text,
     agent_enrollment_expires_at timestamp with time zone,
+    -- The stored credential was minted from the outstanding enrollment token
+    -- and its agent has not authenticated with it yet: until then the token
+    -- stays usable (a lost enroll response is retried), and the first
+    -- successful control authentication clears both.
+    agent_credential_unconfirmed boolean DEFAULT false NOT NULL,
     agent_version text,
     agent_hostname text,
     agent_connected_at timestamp with time zone,
@@ -209,6 +214,9 @@ CREATE TABLE infra.servers (
         CHECK ((agent_enrollment_token_hash IS NULL AND agent_enrollment_expires_at IS NULL)
             OR (agent_enrollment_token_hash ~ '^[0-9a-f]{64}$'
                 AND agent_enrollment_expires_at IS NOT NULL)),
+    CONSTRAINT servers_agent_credential_unconfirmed_check
+        CHECK (NOT agent_credential_unconfirmed
+            OR (agent_credential_hash IS NOT NULL AND agent_enrollment_token_hash IS NOT NULL)),
     CONSTRAINT servers_reserved_cpus_check
         CHECK (array_position(reserved_cpus, NULL::integer) IS NULL
                AND 0 <= ALL (reserved_cpus)),
@@ -539,7 +547,8 @@ CREATE TABLE control.volume_attachments (
     created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
     updated_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
     CONSTRAINT volume_attachments_path_check
-        CHECK (container_path ~~ '/%' AND container_path <> '/' AND container_path !~ '[\000\r\n]'),
+        CHECK (container_path ~~ '/%' AND container_path <> '/' AND container_path !~ '[\000\r\n]'
+            AND container_path !~ '^/+(proc|sys|dev)(/|$)'),
     CONSTRAINT volume_attachments_device_name_check
         CHECK (device_name ~ '^nyd-[0-9a-f]{32}$'),
     CONSTRAINT volume_attachments_bind_state_check
@@ -884,6 +893,16 @@ CREATE TABLE interaction.ssh_proxy_host_keys (
     PRIMARY KEY (id)
 );
 
+-- Each user's SSH host certificate authority: it signs the host keys of that
+-- user's containers, so a user's known_hosts trusts only their own containers.
+CREATE TABLE interaction.ssh_host_authorities (
+    user_id uuid NOT NULL REFERENCES iam.users(id) ON DELETE CASCADE,
+    encrypted_private_key text NOT NULL,
+    public_key text NOT NULL,
+    created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    PRIMARY KEY (user_id)
+);
+
 CREATE INDEX audit_events_action_idx
     ON audit.events (action, occurred_at DESC, id DESC);
 CREATE INDEX audit_events_actor_idx
@@ -931,6 +950,9 @@ ALTER TABLE iam.shared_backend_grants ADD CONSTRAINT shared_backend_grants_pkey 
 
 ALTER TABLE control.containers ADD CONSTRAINT containers_server_id_name_key
     UNIQUE (server_id, name);
+-- Containers are reached by name through the SSH proxy (`ssh work.<suffix>`),
+-- which resolves names within the key holder's own containers.
+CREATE UNIQUE INDEX containers_owner_name_key ON control.containers (owner_id, lower(name));
 ALTER TABLE control.volumes ADD CONSTRAINT volumes_incus_name_key UNIQUE (incus_name);
 ALTER TABLE control.volume_attachments ADD CONSTRAINT volume_attachments_pkey PRIMARY KEY (id);
 ALTER TABLE control.container_network_claims ADD CONSTRAINT container_network_claims_pkey
@@ -1245,8 +1267,19 @@ CREATE FUNCTION infra.reject_disable_gpu_with_claims() RETURNS trigger
     AS $$
 BEGIN
   IF NEW.gpu_enabled = false AND OLD.gpu_enabled IS DISTINCT FROM false THEN
+    -- GPU stays on while any live container holds a card or carries the NVIDIA
+    -- runtime in its instance spec (gpuStateOccupies in gpu/instance-spec.ts):
+    -- dropping that contribution from a running instance would be drift that
+    -- only a stop can apply. Writers of claims/gpu_state lock this server row.
     IF EXISTS (
       SELECT 1 FROM control.container_gpu_claims WHERE server_id = NEW.id
+    ) OR EXISTS (
+      SELECT 1 FROM control.containers AS c
+      WHERE c.server_id = NEW.id
+        AND c.lifecycle_phase IN ('provisioning', 'active')
+        AND c.gpu_state IS NOT NULL
+        AND (c.gpu_state -> 'nvidiaRuntime' = 'true'::jsonb
+             OR jsonb_array_length(c.gpu_state -> 'pciAddresses') > 0)
     ) THEN
       RAISE EXCEPTION 'server % still has GPU claims', NEW.id
         USING ERRCODE = 'P0001',

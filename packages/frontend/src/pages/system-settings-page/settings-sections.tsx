@@ -289,6 +289,10 @@ const FIELD_LABELS: Record<string, { label: string; description: string }> = {
     label: 'SSH 代理公网端口',
     description: '用户通过 SSH 代理连接时使用的端口。',
   },
+  'ssh.proxyHostSuffix': {
+    label: '容器主机名后缀',
+    description: '用户通过 SSH 代理用 <容器名>.<后缀> 登录容器，容器主机证书也签发给这个名字。修改后用户已复制的 ssh_config 和 known_hosts 需要更新。',
+  },
   'containers.processLimit': {
     label: '进程数上限',
     description: '每个容器可同时存在的进程与线程总数（limits.processes），对所有容器统一生效。',

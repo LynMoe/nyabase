@@ -83,6 +83,7 @@ export const zSshProxySnapshot = z.object({
   validUntil: z.number().int().positive(),
   endpoint: zSshProxyEndpoint.nullable(),
   hostKey: zSshProxyHostKey,
+  hostSuffix: zAscii(200),
   users: z.array(zSshProxyUserSnapshot).max(MAX_PLATFORM_ACTIVE_USERS),
   servers: z.array(zSshProxyServerSnapshot).max(MAX_PLATFORM_SERVERS),
   images: z.array(zSshProxyImageSnapshot).max(MAX_PLATFORM_IMAGES),
@@ -139,6 +140,8 @@ export const zSshProxyStatusReport = z.object({
   lastSnapshotGeneration: zSafeCounter.nullable(),
   lastSnapshotAt: zProxyTimestampMs.nullable(),
   activeConnections: z.number().int().min(0).max(MAX_SSH_PROXY_STATUS_CONNECTIONS),
+  /** Connections counted in activeConnections whose details were left out to bound the frame. */
+  omittedConnections: z.number().int().min(0).max(MAX_SSH_PROXY_STATUS_CONNECTIONS),
   totalConnections: zSafeCounter,
   totalRejectedConnections: zSafeCounter,
   totalClosedConnections: zSafeCounter,
@@ -148,11 +151,11 @@ export const zSshProxyStatusReport = z.object({
   bandwidthOutBps: z.number().min(0).max(Number.MAX_SAFE_INTEGER),
   connections: z.array(zSshProxyConnectionInfo).max(MAX_SSH_PROXY_STATUS_CONNECTIONS),
 }).strict().superRefine((status, context) => {
-  if (status.activeConnections !== status.connections.length) {
+  if (status.activeConnections !== status.connections.length + status.omittedConnections) {
     context.addIssue({
       code: z.ZodIssueCode.custom,
       path: ['activeConnections'],
-      message: 'activeConnections must equal the bounded connection detail count',
+      message: 'activeConnections must equal the connection detail count plus omittedConnections',
     });
   }
 });
@@ -185,16 +188,53 @@ export type SshProxyBackendMessage =
   | { kind: 'disconnectAll'; payload: SshProxyDisconnectAllCommand }
   | { kind: 'pauseAdmit'; payload: SshProxyPauseAdmitCommand };
 
-/** Jump destination helpers for client UX (ProxyJump). */
-export function formatSshProxyJumpLogin(input: {
+// --- client configuration (ProxyJump) -------------------------------------------
+
+/** `work.nya`: how a container is addressed through the SSH proxy. */
+export function sshContainerHostName(containerName: string, hostSuffix: string): string {
+  const name = containerName.trim().toLowerCase();
+  const suffix = hostSuffix.trim().toLowerCase();
+  return suffix ? `${name}.${suffix}` : name;
+}
+
+/**
+ * `alice@ssh.example.com:2222` (no port for 22). The proxy authenticates by
+ * key alone; the login only labels the session in audit and status.
+ */
+export function formatSshProxyJump(input: { username: string; host: string; port: number }): string {
+  const host = input.host.includes(':') ? `[${input.host}]` : input.host;
+  return `${input.username}@${host}${input.port === 22 ? '' : `:${input.port}`}`;
+}
+
+/** One `~/.ssh/config` block that reaches every one of the user's containers by name. */
+export function formatSshClientConfig(input: {
   username: string;
-  containerName: string;
-  serverSlug?: string | null;
+  host: string;
+  port: number;
+  hostSuffix: string;
 }): string {
-  const username = input.username.trim().toLowerCase();
-  const containerName = input.containerName.trim().toLowerCase();
-  const serverSlug = input.serverSlug?.trim().toLowerCase() || null;
-  return serverSlug
-    ? `${username}.${serverSlug}.${containerName}`
-    : `${username}.${containerName}`;
+  return [
+    `Host *.${input.hostSuffix}`,
+    `  ProxyJump ${formatSshProxyJump(input)}`,
+  ].join('\n');
+}
+
+/**
+ * `~/.ssh/known_hosts` lines: the proxy's own host key, and the user's host
+ * certificate authority for every container name under the suffix.
+ */
+export function formatSshKnownHosts(input: {
+  host: string;
+  port: number;
+  hostSuffix: string;
+  proxyHostKey: string;
+  hostCertificateAuthority: string | null;
+}): string {
+  const keyOnly = (text: string) => text.trim().split(/\s+/).slice(0, 2).join(' ');
+  const host = input.port === 22 ? input.host : `[${input.host}]:${input.port}`;
+  const lines = [`${host} ${keyOnly(input.proxyHostKey)}`];
+  if (input.hostCertificateAuthority) {
+    lines.push(`@cert-authority *.${input.hostSuffix} ${keyOnly(input.hostCertificateAuthority)}`);
+  }
+  return lines.join('\n');
 }

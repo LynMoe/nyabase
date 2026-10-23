@@ -8,6 +8,8 @@ import {
   type CreateApiTokenRequest,
   type ExecSessionResponse,
   type IntentAcceptedDto,
+  type SshClientConfigDto,
+  type SshPublicKeyDto,
 } from '@nyabase/common';
 import { ApiError } from '../client/api.js';
 import { GIB, Harness, type TestUser } from '../client/harness.js';
@@ -18,6 +20,7 @@ describe('container lifecycle and SSH through the ssh-proxy', () => {
   let owner: TestUser;
   let stranger: TestUser;
   let container: ContainerDto;
+  let strangerContainer: ContainerDto;
 
   before(async () => {
     h = await Harness.start();
@@ -27,6 +30,10 @@ describe('container lifecycle and SSH through the ssh-proxy', () => {
     await h.addSshKey(stranger);
     await h.grantServer(owner, h.server);
     container = await h.createContainer(owner, h.server);
+    // The stranger has a reachable container of the same name (other case),
+    // so name routing is exercised past key authentication.
+    await h.grantServer(stranger, h.server);
+    strangerContainer = await h.createContainer(stranger, h.server, { name: container.name.toUpperCase() });
   });
   after(async () => h?.cleanup());
 
@@ -43,13 +50,56 @@ describe('container lifecycle and SSH through the ssh-proxy', () => {
     assert.equal(await owner.session.api.status('GET', '/containers?scope=all'), 403);
   });
 
-  it('logs in over the jump host as the owner and refuses everyone else', async () => {
+  it('logs in by name with a host certificate, by IP, and refuses everyone else', async () => {
+    // Strict host key checking against only the profile's known_hosts lines:
+    // the guest is trusted through the owner's host CA, never on first use.
     const out = await h.ssh(owner, container, 'echo nyabase-e2e-ok; id -un');
     assert.match(out, /nyabase-e2e-ok/);
     assert.match(out, new RegExp(container.ssh.loginUser));
-    // Another user's key is not admitted for the owner's container login.
-    await assert.rejects(h.ssh(stranger, container, 'true', `${owner.username}.${container.name}`));
-    await assert.rejects(h.ssh(stranger, container, 'true', `${stranger.username}.${container.name}`));
+    assert.equal(container.ssh.hostName, `${container.name.toLowerCase()}.${(await clientConfig(owner)).hostSuffix}`);
+    assert.match(
+      await h.ssh(owner, container, 'cat /etc/ssh/ssh_host_ed25519_key-cert.pub'),
+      /^ssh-ed25519-cert-v01@openssh\.com /,
+    );
+    assert.match(
+      await h.ssh(owner, container, 'echo by-ip', { target: container.routedIp!, strictHostKeys: false }),
+      /by-ip/,
+    );
+    // Names resolve among the key holder's own containers only: the same name
+    // takes the stranger to their own container, even with the owner's jump login.
+    const ownHost = (await h.ssh(owner, container, 'hostname')).trim();
+    assert.equal(ownHost, container.instanceName);
+    for (const jumpLogin of [undefined, `${owner.username}.${container.name}`]) {
+      const landed = (await h.ssh(stranger, container, 'hostname', { jumpLogin })).trim();
+      assert.equal(landed, strangerContainer.instanceName);
+    }
+    // The owner's address is refused to anyone else's key.
+    await assert.rejects(h.ssh(stranger, container, 'true', { target: container.routedIp!, strictHostKeys: false }));
+    // Another user's host CA does not vouch for this container.
+    await assert.rejects(h.ssh(owner, container, 'true', { knownHostsFrom: stranger }));
+  });
+
+  it('syncs platform keys inside a managed block and keeps the lines the user added', async () => {
+    const path = container.ssh.loginUser === 'root' ? '/root/.ssh/authorized_keys' : '.ssh/authorized_keys';
+    const extra = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl user-added';
+    await h.ssh(owner, container, `echo '${extra}' >> ${path}`);
+    const first = owner.keyFile!;
+    await h.addSshKey(owner);
+    // The new key reaches the guest by a sync; until then only the jump hop accepts it.
+    await pollUntil(async () => {
+      try {
+        return await h.ssh(owner, container, `cat ${path}`);
+      } catch {
+        return undefined;
+      }
+    }, { timeoutMs: 180_000, what: 'the second key to reach the guest' });
+    const file = await h.ssh(owner, container, `cat ${path}`);
+    assert.ok(file.includes(extra), 'the user-added line survives the sync');
+    assert.match(file, /# >>> nyabase: platform SSH keys/);
+    const keys = await owner.session.api.get<SshPublicKeyDto[]>(`/users/${owner.id}/ssh-keys`);
+    assert.equal(keys.length, 2);
+    for (const key of keys) assert.ok(file.includes(key.keyText.split(' ')[1]!), 'every platform key is in the block');
+    owner.keyFile = first;
   });
 
   it('changes the memory limit, keeps the CPU pinning, and grows the root disk', async () => {
@@ -141,3 +191,7 @@ describe('container lifecycle and SSH through the ssh-proxy', () => {
     }, { what: 'the SSH route to be withdrawn', timeoutMs: 180_000, intervalMs: 5_000 });
   });
 });
+
+function clientConfig(user: TestUser): Promise<SshClientConfigDto> {
+  return user.session.api.get<SshClientConfigDto>(`/users/${user.id}/ssh-client-config`);
+}

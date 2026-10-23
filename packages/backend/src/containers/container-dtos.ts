@@ -7,6 +7,7 @@ import {
   IntentResourceType,
   StoragePoolResizeFamily,
   parseContainerState,
+  sshContainerHostName,
   type ContainerDto,
   type VolumeAttachmentDto,
 } from '@nyabase/common';
@@ -203,6 +204,7 @@ export class ContainerDtoAssembler {
         status: route?.sshStatus ?? 'unknown',
         ready: route?.sshStatus === 'running' && actualStatus === ContainerStatus.Running,
         loginUser: image?.login_user ?? 'root',
+        hostName: sshContainerHostName(row.name, this.config.get<string>('ssh.proxyHostSuffix') ?? ''),
         proxyHost,
         proxyPort,
         observedAt: isoDate(route?.observedAt),

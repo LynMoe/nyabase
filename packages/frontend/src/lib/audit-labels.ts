@@ -41,6 +41,10 @@ const AUDIT_ACTION_LABELS: Record<string, string> = {
   [AuditAction.EnrollAgent]: 'Agent 接入',
   [AuditAction.RunServerPreflight]: '运行前置检查',
   [AuditAction.RegisterStoragePool]: '登记存储池',
+  [AuditAction.UpdateStoragePool]: '修改存储池',
+  [AuditAction.DiscoverStoragePools]: '发现存储池',
+  [AuditAction.UpdateSharedBackendExecutor]: '修改共享后端执行器',
+  [AuditAction.DiscoverSharedBackendExecutors]: '发现共享后端执行器',
   [AuditAction.CreateIpPool]: '创建 IP 池',
   [AuditAction.UpdateIpPool]: '更新 IP 池',
   [AuditAction.DeleteIpPool]: '删除 IP 池',
@@ -90,6 +94,7 @@ const AUDIT_ACTION_LABELS: Record<string, string> = {
   [AuditAction.DeleteHttpDomainPool]: '删除 HTTP 域名池',
   [AuditAction.DisconnectSshProxySessions]: '断开 SSH 代理会话',
   [AuditAction.RotateSshProxyHostKey]: '轮换 SSH 主机密钥',
+  [AuditAction.ResetSshHostAuthorities]: '重置容器主机证书 CA',
 };
 
 /** Filter options for the audit list, in label order. */

@@ -7,10 +7,8 @@ import {
 } from '@nestjs/common';
 import {
   IncusError,
-  matchBusyInstanceError,
   subscribeIncusEvents,
   type IncusClientPort,
-  type IncusFailureCode,
 } from '../incus/index.js';
 import { INCUS_CLIENT_FACTORY, type IncusClientFactory } from '../incus/incus-client.factory.js';
 import {
@@ -28,69 +26,23 @@ import {
   ReconcileClaimRepository,
 } from './reconcile-claim.repository.js';
 import { ReconcileWakeService } from './reconcile-wake.service.js';
-
-function asFailure(error: unknown): IntentFailure {
-  if (error instanceof IncusError) {
-    return {
-      code: error.code,
-      message: error.message,
-      details: error.details as Record<string, unknown>,
-    };
-  }
-  const message = error instanceof Error ? error.message : String(error);
-  return {
-    code: 'RECONCILE_FAILURE',
-    message: message.slice(0, 4096),
-    details: {},
-  };
-}
-
-function isIncusInstanceLockBusy(failure: IntentFailure): boolean {
-  if (failure.code !== 'INSTANCE_BUSY') return false;
-  const reason = failure.details?.reason;
-  if (reason === 'sshd_not_listening' || reason === 'guest_network_instance_not_ready') {
-    return false;
-  }
-  const action = failure.details?.action;
-  if (typeof action === 'string' && action.length > 0) return true;
-  const errorText = failure.details?.error;
-  return typeof errorText === 'string' && matchBusyInstanceError(errorText) !== undefined;
-}
-
-function isIncusError(error: unknown, code: IncusFailureCode): boolean {
-  return error instanceof IncusError && error.code === code;
-}
-
-function boundedRetryDelay(attemptCount: number): number {
-  const exponent = Math.min(6, Math.max(0, attemptCount));
-  return Math.min(60_000, 1_000 * (2 ** exponent));
-}
-
-const MAX_BACKGROUND_ERROR_LENGTH = 512;
-const BUSY_STRIKE_WINDOW_MS = 300_000;
-const BUSY_STRIKE_LIMIT = 5;
-
-function boundedErrorMessage(error: unknown): string {
-  const message = error instanceof Error ? error.message : String(error);
-  return message.length > MAX_BACKGROUND_ERROR_LENGTH
-    ? `${message.slice(0, MAX_BACKGROUND_ERROR_LENGTH - 3)}...`
-    : message;
-}
-
-function isClosedDatabaseDriverError(error: unknown): boolean {
-  const message = boundedErrorMessage(error).toLowerCase();
-  return message.includes('driver has already been destroyed')
-    || message.includes('driver has already been closed')
-    || message.includes('pool has already been closed')
-    || message.includes('connection has already been closed');
-}
-
-function isAbortLikeError(error: unknown): boolean {
-  if (!(error instanceof Error)) return false;
-  return error.name === 'AbortError'
-    || error.message === 'The operation was aborted'
-    || error.message === 'The operation was aborted.';
-}
+import {
+  asFailure,
+  boundedErrorMessage,
+  boundedRetryDelay,
+  BUSY_STRIKE_LIMIT,
+  BUSY_STRIKE_WINDOW_MS,
+  INTENT_PRUNE_INTERVAL_MS,
+  INTENT_PRUNE_MAX_BATCHES,
+  INTENT_RETENTION_MS,
+  isAbortLikeError,
+  isClosedDatabaseDriverError,
+  isIncusError,
+  isIncusInstanceLockBusy,
+  QUEUE_MAX_PAGES,
+  QUEUE_PAGE_SIZE,
+  trackedClient,
+} from './reconcile-worker-support.js';
 
 @Injectable()
 export class ReconcileWorkerService implements OnApplicationBootstrap, OnModuleDestroy {
@@ -102,7 +54,11 @@ export class ReconcileWorkerService implements OnApplicationBootstrap, OnModuleD
   private unsubscribeWake?: () => void;
   private scanTimer?: NodeJS.Timeout;
   private wakeTimer?: NodeJS.Timeout;
+  private retryTimer?: NodeJS.Timeout;
+  private retryTimerAt = Number.POSITIVE_INFINITY;
   private running = false;
+  private rerunRequested = false;
+  private lastPruneAt = 0;
   private scanning = false;
   private rescanRequested = false;
   private started = false;
@@ -110,7 +66,8 @@ export class ReconcileWorkerService implements OnApplicationBootstrap, OnModuleD
   private runPromise?: Promise<void>;
   private scanPromise?: Promise<void>;
   private destroyPromise?: Promise<void>;
-  private eventWatchers: Promise<void>[] = [];
+  /** Servers with a running event watcher. */
+  private readonly eventWatchers = new Set<string>();
 
   constructor(
     private readonly intents: IntentRepository,
@@ -130,6 +87,10 @@ export class ReconcileWorkerService implements OnApplicationBootstrap, OnModuleD
         // Desired state outside any one intent changed (grants, reserved CPUs, limits).
         this.requestFullScan();
         return;
+      }
+      if (payload.reason === 'reconnect' && payload.serverId) {
+        // A server enrolled after bootstrap gets its event watcher on first connect.
+        this.ensureEventWatcher(payload.serverId);
       }
       if (payload.reason === 'event' || payload.reason === 'reconnect') {
         this.scheduleWake(0);
@@ -159,17 +120,26 @@ export class ReconcileWorkerService implements OnApplicationBootstrap, OnModuleD
     }
     if (this.scanTimer) clearInterval(this.scanTimer);
     if (this.wakeTimer) clearTimeout(this.wakeTimer);
+    if (this.retryTimer) clearTimeout(this.retryTimer);
     this.scanTimer = undefined;
     this.wakeTimer = undefined;
+    this.retryTimer = undefined;
     this.destroyPromise = this.drainInFlight().then(() => {
-      this.eventWatchers = [];
+      this.eventWatchers.clear();
     });
     return this.destroyPromise;
   }
 
+  /**
+   * Drain the ready queue. A call while a pass is running does not get lost:
+   * the running pass makes one more round before its promise resolves.
+   */
   runOnce(): Promise<void> {
     if (this.controller.signal.aborted) return Promise.resolve();
-    if (this.runPromise) return this.runPromise;
+    if (this.runPromise) {
+      this.rerunRequested = true;
+      return this.runPromise;
+    }
     this.running = true;
     const operation = this.trackOperation(this.executeRunOnce());
     this.runPromise = operation;
@@ -187,6 +157,25 @@ export class ReconcileWorkerService implements OnApplicationBootstrap, OnModuleD
       this.startBackgroundRunOnce();
     }, delayMs);
     this.wakeTimer.unref?.();
+  }
+
+  /** Wake the queue when the earliest scheduled retry falls due. */
+  private async armRetryTimer(): Promise<void> {
+    if (this.stopping || this.controller.signal.aborted) return;
+    const next = await this.intents.nextRetryAt();
+    if (!next) return;
+    const at = next.getTime();
+    if (this.retryTimer && this.retryTimerAt <= at) return;
+    if (this.retryTimer) clearTimeout(this.retryTimer);
+    // Capped so a far-off retry is re-armed by the next pass instead of overflowing setTimeout.
+    const delayMs = Math.min(Math.max(0, at - Date.now()) + 5, 60_000);
+    this.retryTimerAt = Date.now() + delayMs;
+    this.retryTimer = setTimeout(() => {
+      this.retryTimer = undefined;
+      this.retryTimerAt = Number.POSITIVE_INFINITY;
+      this.startBackgroundRunOnce();
+    }, delayMs);
+    this.retryTimer.unref?.();
   }
 
   private startBackgroundFullScan(): void {
@@ -226,16 +215,16 @@ export class ReconcileWorkerService implements OnApplicationBootstrap, OnModuleD
 
   private async executeRunOnce(): Promise<void> {
     try {
-      if (this.controller.signal.aborted) return;
-      await this.claims.reapExpired();
-      const page = await this.intents.listPending({
-        limit: 100,
-        readyAt: new Date(),
-      });
-      for (const intent of page.items) {
-        if (this.controller.signal.aborted) break;
-        await this.processIntent(intent);
-      }
+      do {
+        this.rerunRequested = false;
+        if (this.controller.signal.aborted) return;
+        await this.claims.reapExpired();
+        if (await this.drainReadyQueue()) {
+          this.rerunRequested = true;
+          continue;
+        }
+        await this.armRetryTimer();
+      } while (this.rerunRequested && !this.controller.signal.aborted);
     } catch (error) {
       if (this.isShutdownOrDriverClose(error)) {
         this.warnShutdown('Reconcile queue pass', error);
@@ -245,10 +234,37 @@ export class ReconcileWorkerService implements OnApplicationBootstrap, OnModuleD
     }
   }
 
+  /**
+   * Process ready intents page by page. Intents skipped in this pass (parked
+   * resource, busy claim) are excluded from later pages so they cannot starve
+   * the rest. Returns true when the page budget ran out with work left.
+   */
+  private async drainReadyQueue(): Promise<boolean> {
+    const seen = new Set<string>();
+    for (let page = 0; page < QUEUE_MAX_PAGES; page += 1) {
+      const { items } = await this.intents.listPending({
+        limit: QUEUE_PAGE_SIZE,
+        readyAt: new Date(),
+        excludeIds: [...seen],
+      });
+      for (const intent of items) {
+        if (this.controller.signal.aborted) return false;
+        seen.add(intent.id);
+        await this.processIntent(intent);
+      }
+      if (items.length < QUEUE_PAGE_SIZE) return false;
+    }
+    return true;
+  }
+
   private finishRun(operation: Promise<void>): void {
     if (this.runPromise !== operation) return;
     this.runPromise = undefined;
     this.running = false;
+    if (this.rerunRequested) {
+      this.rerunRequested = false;
+      this.startBackgroundRunOnce();
+    }
   }
 
   private async processIntent(intent: IntentRecord): Promise<void> {
@@ -274,13 +290,15 @@ export class ReconcileWorkerService implements OnApplicationBootstrap, OnModuleD
 
     await this.claims.withLease(claim, async (lease) => {
       let client: IncusClientPort | undefined;
+      let tracked: ReturnType<typeof trackedClient> | undefined;
       try {
         if (!await this.isCurrentServerIntent(intent)) {
           await this.settleStaleIntent(intent);
           return;
         }
         if (serverId) {
-          client = await this.clients.get(serverId);
+          tracked = trackedClient(await this.clients.get(serverId));
+          client = tracked.client;
         }
         const reconciler = this.registry.forIntent(intent);
         if (!reconciler) {
@@ -300,7 +318,7 @@ export class ReconcileWorkerService implements OnApplicationBootstrap, OnModuleD
         });
         if (this.controller.signal.aborted) return;
         lease.assertOwned();
-        await this.applyOutcome(intent, outcome, serverId);
+        await this.applyOutcome(intent, outcome, tracked?.used() ? serverId : null);
       } catch (error) {
         if (this.controller.signal.aborted) {
           if (this.isShutdownOrDriverClose(error)) {
@@ -317,13 +335,25 @@ export class ReconcileWorkerService implements OnApplicationBootstrap, OnModuleD
     });
   }
 
+  /**
+   * `contactedServerId` is set only when the reconciler actually made an Incus
+   * call through the server's client; a stale or DB-only pass proves nothing
+   * about the agent and must not mark the server online.
+   */
   private async applyOutcome(
     intent: IntentRecord,
     outcome: ReconcileOutcome,
-    serverId: string | null,
+    contactedServerId: string | null,
   ): Promise<void> {
     if (outcome.stale) {
-      await this.settlePhysical(intent, intent.targetRevision, { outcome: 'succeeded' });
+      // Superseded: settle without touching the resource's status columns.
+      await this.settlePhysical(
+        intent,
+        outcome.observedRevision ?? intent.targetRevision,
+        outcome.outcome === 'failed' && outcome.failure
+          ? { outcome: 'failed', failure: outcome.failure }
+          : { outcome: 'succeeded' },
+      );
       return;
     }
     if (outcome.outcome === 'retry') {
@@ -361,8 +391,8 @@ export class ReconcileWorkerService implements OnApplicationBootstrap, OnModuleD
       outcome.observedRevision ?? intent.targetRevision,
       { outcome: 'succeeded' },
     );
-    if (serverId && intent.resourceType !== 'server') {
-      await this.markServer(serverId, 'online');
+    if (contactedServerId && intent.resourceType !== 'server') {
+      await this.markServer(contactedServerId, 'online');
     }
   }
 
@@ -505,6 +535,8 @@ export class ReconcileWorkerService implements OnApplicationBootstrap, OnModuleD
       if (this.controller.signal.aborted) return;
       // Registration starts a server as unknown. Only servers that have
       // completed onboarding may participate in background physical scans.
+      await this.startEventWatchers();
+      await this.pruneIntents();
       const serverIds = await this.registry.serverHealth().listOnlineServerIds();
       for (const serverId of serverIds) {
         if (this.controller.signal.aborted) return;
@@ -582,9 +614,8 @@ export class ReconcileWorkerService implements OnApplicationBootstrap, OnModuleD
 
   private async startEventWatchers(): Promise<void> {
     if (this.controller.signal.aborted) return;
-    let serverIds: readonly string[];
     try {
-      serverIds = await this.clients.listServerIds();
+      await this.ensureEventWatchers();
     } catch (error) {
       if (this.isShutdownOrDriverClose(error)) {
         this.warnShutdown('Reconcile event watcher startup', error);
@@ -593,15 +624,45 @@ export class ReconcileWorkerService implements OnApplicationBootstrap, OnModuleD
           `Reconcile event watcher startup failed: ${boundedErrorMessage(error)}`,
         );
       }
-      return;
     }
+  }
+
+  /** One watcher per registered server: new servers gain one, deleted servers' watchers end. */
+  private async ensureEventWatchers(): Promise<void> {
+    const serverIds = new Set(await this.clients.listServerIds());
     if (this.stopping || this.controller.signal.aborted) return;
-    this.eventWatchers = serverIds.map((serverId) => this.trackOperation(this.watchServer(serverId)));
+    for (const serverId of serverIds) this.ensureEventWatcher(serverId);
+    for (const serverId of [...this.eventWatchers]) {
+      if (!serverIds.has(serverId)) this.eventWatchers.delete(serverId);
+    }
+  }
+
+  private ensureEventWatcher(serverId: string): void {
+    if (this.stopping || this.controller.signal.aborted || this.eventWatchers.has(serverId)) return;
+    this.eventWatchers.add(serverId);
+    const watcher = this.trackOperation(this.watchServer(serverId));
+    void watcher.finally(() => this.eventWatchers.delete(serverId));
+  }
+
+  /** Hourly retention of settled intents (batched; the newest per resource is kept). */
+  private async pruneIntents(): Promise<void> {
+    if (Date.now() - this.lastPruneAt < INTENT_PRUNE_INTERVAL_MS) return;
+    this.lastPruneAt = Date.now();
+    const cutoff = new Date(Date.now() - INTENT_RETENTION_MS);
+    try {
+      for (let batch = 0; batch < INTENT_PRUNE_MAX_BATCHES; batch += 1) {
+        if (this.controller.signal.aborted) return;
+        if (await this.intents.pruneSettled(cutoff) === 0) return;
+      }
+    } catch (error) {
+      if (this.isShutdownOrDriverClose(error)) throw error;
+      this.logger.error(`Intent retention failed: ${boundedErrorMessage(error)}`);
+    }
   }
 
   private async watchServer(serverId: string): Promise<void> {
     try {
-      while (!this.stopping && !this.controller.signal.aborted) {
+      while (!this.stopping && !this.controller.signal.aborted && this.eventWatchers.has(serverId)) {
         try {
           // Keep the watcher from constructing an mTLS client for a server
           // whose onboarding connect intent has not established online state.

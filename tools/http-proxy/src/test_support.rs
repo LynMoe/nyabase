@@ -1,5 +1,6 @@
 use crate::config::ConnectionLimits;
 use crate::protocol::ProxySnapshot;
+use crate::request::ClientContext;
 use crate::runtime::Runtime;
 use crate::snapshot::Route;
 use proxy_common::clock::now_ms;
@@ -51,4 +52,11 @@ pub(crate) fn test_runtime() -> Arc<Runtime> {
         total_requests: AtomicU64::new(0),
         total_rejected_requests: AtomicU64::new(0),
     })
+}
+
+pub(crate) fn test_client() -> ClientContext {
+    ClientContext {
+        peer_ip: "192.0.2.10".parse().unwrap(),
+        https: false,
+    }
 }

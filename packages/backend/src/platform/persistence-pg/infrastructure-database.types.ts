@@ -35,6 +35,7 @@ export interface InfrastructureServerTable {
   agent_credential_hash: string | null;
   agent_enrollment_token_hash: string | null;
   agent_enrollment_expires_at: InfrastructureTimestamp | null;
+  agent_credential_unconfirmed: ColumnType<boolean, boolean | undefined, boolean>;
   agent_version: string | null;
   agent_hostname: string | null;
   agent_connected_at: InfrastructureTimestamp | null;

@@ -95,18 +95,26 @@ export class ContainerControlRepository {
       .executeTakeFirst();
   }
 
-  async nameTaken(
+  /** Which name rule a new container would break: unique per server, and per owner ignoring case. */
+  async nameConflict(
     serverId: string,
+    ownerId: string,
     name: string,
     executor: ContainerExecutor = this.database,
-  ): Promise<boolean> {
-    const row = await executor
+  ): Promise<'server' | 'owner' | null> {
+    const rows = await executor
       .selectFrom('control.containers')
-      .select('id')
-      .where('server_id', '=', serverId)
-      .where('name', '=', name)
-      .executeTakeFirst();
-    return Boolean(row);
+      .select(['server_id', 'name'])
+      .where((where) => where.or([
+        where.and([where('server_id', '=', serverId), where('name', '=', name)]),
+        where.and([
+          where('owner_id', '=', ownerId),
+          where(sql`lower(name)`, '=', name.toLowerCase()),
+        ]),
+      ]))
+      .execute();
+    if (rows.some((row) => row.server_id === serverId && row.name === name)) return 'server';
+    return rows.length > 0 ? 'owner' : null;
   }
 
   /**

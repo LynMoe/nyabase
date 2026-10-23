@@ -67,6 +67,9 @@ describe('RolesGuard', () => {
       .toThrow(ForbiddenException);
     expect(() => guard.canActivate(makeContext(PlainController, 'open', '/admin/users', Role.Admin)))
       .toThrow(ForbiddenException);
+    // Express matches routes case-insensitively.
+    expect(() => guard.canActivate(makeContext(PlainController, 'open', '/api/Admin/users', Role.Admin)))
+      .toThrow(ForbiddenException);
   });
 
   it('enforces the minimum role, with roles strictly nested', () => {

@@ -22,7 +22,11 @@ export class AgentRequestError extends Error {
 export interface AgentHandlers {
   hello(): Promise<AgentHello>;
   incusHttp(params: AgentIncusHttpParams, signal: AbortSignal): Promise<AgentIncusHttpResult>;
-  incusWebSocket(params: AgentIncusWebSocketParams, signal: AbortSignal): Promise<void>;
+  /**
+   * `signal` cancels the request; `session` ends with the control connection
+   * the request came on, and the bridged stream must not outlive it.
+   */
+  incusWebSocket(params: AgentIncusWebSocketParams, signal: AbortSignal, session: AbortSignal): Promise<void>;
   collectMetrics(signal: AbortSignal): Promise<AgentMetricsResult>;
 }
 
@@ -90,6 +94,7 @@ export class BackendConnection {
       });
       let welcomed = false;
       let alive = true;
+      const session = new AbortController();
       const welcomeTimer = setTimeout(() => socket.terminate(), WELCOME_TIMEOUT_MS);
       const heartbeat = setInterval(() => {
         if (!alive) {
@@ -141,7 +146,7 @@ export class BackendConnection {
           this.inFlight.get(frame.id)?.abort();
           return;
         }
-        this.serve(socket, frame);
+        this.serve(socket, frame, session.signal);
       });
       socket.once('unexpected-response', (_request, response) => {
         const code = response.statusCode === 401 || response.statusCode === 403
@@ -155,6 +160,7 @@ export class BackendConnection {
         clearTimeout(welcomeTimer);
         clearInterval(heartbeat);
         signal.removeEventListener('abort', abort);
+        session.abort();
         for (const controller of this.inFlight.values()) controller.abort();
         this.inFlight.clear();
       };
@@ -169,7 +175,7 @@ export class BackendConnection {
     });
   }
 
-  private serve(socket: WebSocket, request: AgentRequest): void {
+  private serve(socket: WebSocket, request: AgentRequest, session: AbortSignal): void {
     const limit = this.options.maxConcurrentRequests ?? 256;
     if (this.inFlight.has(request.id)) return;
     if (this.inFlight.size >= limit) {
@@ -178,7 +184,7 @@ export class BackendConnection {
     }
     const controller = new AbortController();
     this.inFlight.set(request.id, controller);
-    void this.dispatch(request, controller.signal)
+    void this.dispatch(request, controller.signal, session)
       .then((result) => send(socket, { type: 'response', id: request.id, ok: true, result }))
       .catch((error: unknown) => {
         if (error instanceof AgentRequestError) {
@@ -190,12 +196,12 @@ export class BackendConnection {
       .finally(() => this.inFlight.delete(request.id));
   }
 
-  private dispatch(request: AgentRequest, signal: AbortSignal): Promise<unknown> {
+  private dispatch(request: AgentRequest, signal: AbortSignal, session: AbortSignal): Promise<unknown> {
     switch (request.method) {
       case 'incus.http':
         return this.options.handlers.incusHttp(request.params, signal);
       case 'incus.ws':
-        return this.options.handlers.incusWebSocket(request.params, signal).then(() => ({}));
+        return this.options.handlers.incusWebSocket(request.params, signal, session).then(() => ({}));
       case 'metrics.collect':
         return this.options.handlers.collectMetrics(signal);
     }

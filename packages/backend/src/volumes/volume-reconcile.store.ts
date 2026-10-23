@@ -123,13 +123,8 @@ export class VolumeReconcileStore {
         .select(['id', 'owner_id'])
         .where('id', 'in', volumeIds)
         .execute();
-    const byId = new Map(rows.map((row) => [row.id, row]));
-    return new Map(volumeIds.map((id) => {
-      const row = byId.get(id);
-      return [id, {
-        ownerId: row?.owner_id ?? null,
-      }];
-    }));
+    // A deleted volume has no entry (see ResourceAuthority).
+    return new Map(rows.map((row) => [row.id, { ownerId: row.owner_id }]));
   }
 
   // --- full scan ---------------------------------------------------------------

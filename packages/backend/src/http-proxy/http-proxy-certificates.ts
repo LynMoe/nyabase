@@ -6,6 +6,7 @@ import {
   createPrivateKey,
   randomBytes,
   X509Certificate,
+  type KeyObject,
 } from 'crypto';
 import {
   HTTP_PROXY_SNAPSHOT_STALE_AFTER_MS,
@@ -83,7 +84,11 @@ export function validateCertificate(
       'Certificate expires before the proxy snapshot lease can safely drain',
     );
   }
-  if (cert.checkHost(wildcardDomain) !== wildcardDomain) {
+  if (!isX509v3(cert.raw)) {
+    throw new BadRequestException('Certificate must be an X.509 v3 certificate');
+  }
+  // The proxy (rustls/webpki) matches names only against subjectAltName.
+  if (cert.checkHost(wildcardDomain, { subject: 'never' }) !== wildcardDomain) {
     throw new BadRequestException(
       `Certificate does not cover wildcard domain ${wildcardDomain}`,
     );
@@ -116,21 +121,67 @@ export function certificateFields(
     );
   }
   const cert = validateCertificate(certificatePem, wildcardDomain);
+  let normalizedKeyPem: string;
   try {
     const privateKey = createPrivateKey(privateKeyPem);
+    assertProxySupportedKey(privateKey);
     if (!cert.checkPrivateKey(privateKey)) {
       throw new BadRequestException('Certificate and private key do not match');
     }
+    // PKCS#8 is the one encoding every proxy key loader accepts.
+    normalizedKeyPem = privateKey.export({ type: 'pkcs8', format: 'pem' }).toString();
   } catch (error) {
     if (error instanceof BadRequestException) throw error;
     throw new BadRequestException('Invalid private key PEM');
   }
   return {
     certificate_pem: certificatePem,
-    encrypted_private_key_pem: encryptPrivateKey(secret, privateKeyPem),
+    encrypted_private_key_pem: encryptPrivateKey(secret, normalizedKeyPem),
     certificate_fingerprint: cert.fingerprint256,
     certificate_not_after: new Date(cert.validTo),
   };
+}
+
+/**
+ * The HTTP proxy signs with ring through rustls, which only loads RSA
+ * 2048-4096, ECDSA P-256/P-384 and Ed25519 keys. Anything else would be
+ * accepted here and then make every proxy snapshot fail to load.
+ */
+function assertProxySupportedKey(key: KeyObject): void {
+  const details = key.asymmetricKeyDetails ?? {};
+  switch (key.asymmetricKeyType) {
+    case 'rsa': {
+      const bits = details.modulusLength ?? 0;
+      if (bits >= 2048 && bits <= 4096) return;
+      throw new BadRequestException('RSA private keys must be 2048 to 4096 bits');
+    }
+    case 'ec':
+      if (details.namedCurve === 'prime256v1' || details.namedCurve === 'secp384r1') return;
+      throw new BadRequestException('ECDSA private keys must use P-256 or P-384');
+    case 'ed25519':
+      return;
+    default:
+      throw new BadRequestException(
+        'Unsupported private key type; use RSA 2048-4096, ECDSA P-256/P-384 or Ed25519',
+      );
+  }
+}
+
+/** TBSCertificate starts with the explicit `[0] version` field only in v2/v3, and v3 encodes 2. */
+function isX509v3(der: Buffer): boolean {
+  let offset = 0;
+  const header = (): boolean => {
+    if (der[offset] !== 0x30) return false;
+    const first = der[offset + 1] ?? 0;
+    offset += 2 + (first & 0x80 ? first & 0x7f : 0);
+    return true;
+  };
+  if (!header() || !header()) return false;
+  return der[offset] === 0xa0
+    && der[offset + 1] === 0x03
+    && der[offset + 2] === 0x02
+    && der[offset + 3] === 0x01
+    && der[offset + 4] === 0x02;
 }
 
 /** TLS material that stays valid for longer than a snapshot lease can be in flight. */

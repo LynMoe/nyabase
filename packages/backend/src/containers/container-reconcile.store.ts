@@ -17,6 +17,8 @@ export interface ContainerRow {
   id: string;
   server_id: string;
   owner_id: string;
+  /** The user-facing name; the host certificate is issued for it. */
+  name: string;
   image_id: string;
   revision: number;
   image_fingerprint: string;
@@ -56,6 +58,12 @@ export interface SshFileObservation {
   readonly status: 'disabled' | 'container_stopped' | 'running' | 'error' | 'unknown';
   readonly lastError: string | null;
 }
+
+/** How long a scan intent that failed waits before the full scan queues it again. */
+const SCAN_FAILED_RETRY_AFTER_MS = {
+  'container.update': 60 * 60_000,
+  'container.delete': 15 * 60_000,
+} as const;
 
 /** Build guest authorized_keys from platform user public keys only (T3 jump). */
 function composeAuthorizedKeys(
@@ -100,6 +108,7 @@ export class ContainerReconcileStore {
     return row?.needs_attention === true;
   }
 
+  /** Only the current revision's success clears status; a stale pass leaves newer state alone. */
   async markSucceeded(containerId: string, revision: number): Promise<void> {
     await this.database
       .updateTable('control.containers')
@@ -111,14 +120,16 @@ export class ContainerReconcileStore {
         last_transition_at: sql<Date>`clock_timestamp()`,
       })
       .where('id', '=', containerId)
+      .where('revision', '=', revision)
       .execute();
   }
 
+  /** `attention` parks the container; a plain failure never un-parks it (only success or a retry does). */
   async markFailure(containerId: string, failure: IntentFailure, attention: boolean): Promise<void> {
     await this.database
       .updateTable('control.containers')
       .set({
-        needs_attention: attention,
+        ...(attention ? { needs_attention: true } : {}),
         failure_code: failure.code.slice(0, 128),
         failure_reason: failure.message.slice(0, 4096),
         last_transition_at: sql<Date>`clock_timestamp()`,
@@ -137,10 +148,8 @@ export class ContainerReconcileStore {
         .select(['id', 'owner_id'])
         .where('id', 'in', containerIds)
         .execute();
-    const owners = new Map(rows.map((row) => [row.id, row.owner_id]));
-    return new Map(containerIds.map((id) => [id, {
-      ownerId: owners.get(id) ?? null,
-    }]));
+    // A deleted container has no entry (see ResourceAuthority).
+    return new Map(rows.map((row) => [row.id, { ownerId: row.owner_id }]));
   }
 
   // --- desired state -----------------------------------------------------------
@@ -155,6 +164,7 @@ export class ContainerReconcileStore {
         'c.id as id',
         'c.server_id as server_id',
         'c.owner_id as owner_id',
+        'c.name as name',
         'c.image_id as image_id',
         'c.revision as revision',
         'c.image_fingerprint as image_fingerprint',
@@ -369,8 +379,10 @@ export class ContainerReconcileStore {
       .execute();
   }
 
+  /** Undo a shrink the instance cannot take, unless a newer revision already replaced it. */
   async revertImpossibleRootShrink(
     containerId: string,
+    revision: number,
     actualRootBytes: bigint,
     usedBytes: bigint | null,
     failureCode: string,
@@ -384,6 +396,7 @@ export class ContainerReconcileStore {
         failure_code: failureCode.slice(0, 128),
       })
       .where('id', '=', containerId)
+      .where('revision', '=', revision)
       .where('lifecycle_phase', 'not in', ['deleting', 'failed'])
       .execute();
   }
@@ -397,6 +410,9 @@ export class ContainerReconcileStore {
     ssh: SshFileObservation,
     usedBytes: bigint | null,
   ): Promise<void> {
+    // Guarded on the revision this pass reconciled and a live phase: a delete
+    // (or any newer revision) accepted meanwhile is never overwritten, and the
+    // only phase transition here is provisioning -> active.
     await this.database
       .updateTable('control.containers')
       .set({
@@ -406,11 +422,13 @@ export class ContainerReconcileStore {
         failure_code: null,
         failure_reason: null,
         last_transition_at: sql<Date>`clock_timestamp()`,
-        lifecycle_phase: row.lifecycle_phase === 'provisioning' ? 'active' : row.lifecycle_phase,
-        ...(usedBytes === null ? {} : { root_used_bytes: usedBytes.toString() }),
+        lifecycle_phase: 'active',
       })
       .where('id', '=', row.id)
+      .where('revision', '=', row.revision)
+      .where('lifecycle_phase', 'in', ['provisioning', 'active'])
       .execute();
+    if (usedBytes !== null) await this.recordRootUsage(row.id, usedBytes);
     await this.database
       .updateTable('control.container_ssh_routes')
       .set({
@@ -508,6 +526,12 @@ export class ContainerReconcileStore {
       serverId: desired.server_id,
       targetRevision: desired.revision,
       reuseSettled: false,
+      // A scan intent that failed for this revision is not re-queued by every
+      // 60 s scan (each pass would also audit the drift and the Incus PUT
+      // again); a newer revision or a user retry runs it at once, and the scan
+      // itself tries again only after a back-off, so transient failures still heal.
+      reuseFailed: true,
+      reuseFailedSettledAfter: new Date(Date.now() - SCAN_FAILED_RETRY_AFTER_MS[kind]),
       request: { source: 'full_scan', idempotencyKey: 'physical:scan' },
     });
   }

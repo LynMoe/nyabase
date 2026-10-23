@@ -1,5 +1,7 @@
+import { isIP } from 'node:net';
 import {
   GUEST_IPV6_DISABLE_SYSCTLS,
+  isForbiddenContainerMountPath,
   MANAGED_ATTACHMENT_DEVICE_PATTERN,
   MANAGED_INSTANCE_NAME_PATTERN,
   MANAGED_NIC_HOST_NAME_PATTERN,
@@ -218,7 +220,7 @@ function checkInstanceCreate(raw: Buffer | undefined): PolicyVerdict {
   if (body.type !== undefined && body.type !== 'container') return deny('only containers may be created');
   const source = body.source;
   if (!isRecord(source) || source.type !== 'image') return deny('instances may only be created from an image');
-  const sourceProblem = fieldsProblem(source, INSTANCE_SOURCE_FIELDS, 'instance source');
+  const sourceProblem = fieldsProblem(source, INSTANCE_SOURCE_FIELDS, 'instance source') ?? imageServerProblem(source);
   if (sourceProblem) return deny(sourceProblem);
   if (isRecord(body.config) && Object.keys(body.config).some((key) => key.startsWith('volatile.'))) {
     return deny('volatile keys may not be set on create');
@@ -372,7 +374,17 @@ function checkDisk(name: string, device: Readonly<Record<string, string>>): Poli
   }
   if (!MANAGED_ATTACHMENT_DEVICE_PATTERN.test(name)) return deny(`disk ${name} is not a nyabase attachment`);
   if (!MANAGED_VOLUME_NAME_PATTERN.test(device.source ?? '')) return deny(`disk ${name} must mount a nyabase volume`);
-  if (!device.path?.startsWith('/') || device.path === '/') return deny(`disk ${name} path is malformed`);
+  const path = device.path ?? '';
+  if (
+    !path.startsWith('/')
+    || path === '/'
+    || /[\u0000-\u001f\u007f]/.test(path)
+    || path.split('/').some((segment) => segment === '.' || segment === '..')
+  ) {
+    return deny(`disk ${name} path is malformed`);
+  }
+  // A writable volume over a kernel pseudo-filesystem is a runtime escape vector.
+  if (isForbiddenContainerMountPath(path)) return deny(`disk ${name} must not be mounted under /proc, /sys or /dev`);
   return ALLOW;
 }
 
@@ -429,6 +441,10 @@ async function checkStoragePools(
     `/1.0/storage-pools/${encodeURIComponent(pool)}/volumes/custom/${encodeURIComponent(name!)}`,
   );
   if (!current) return deny('volume to update does not exist');
+  // PUT replaces the whole config: leaving security.shifted out would drop it.
+  if (method === 'PUT' && (!isRecord(body.config) || body.config['security.shifted'] !== 'true')) {
+    return deny('volumes must stay shifted');
+  }
   const verdict = checkVolumeConfig(body.config ?? {});
   if (!verdict.allowed) return verdict;
   return withCurrentVolatile(body, stringMap(current.config));
@@ -468,13 +484,46 @@ function checkImages(request: PolicyRequest, rest: readonly string[]): PolicyVer
       if (!isRecord(source) || source.type !== 'image' || typeof source.server !== 'string') {
         return deny('images may only be pulled from a remote image server');
       }
-      const problem = fieldsProblem(source, IMAGE_SOURCE_FIELDS, 'image source');
+      const problem = fieldsProblem(source, IMAGE_SOURCE_FIELDS, 'image source') ?? imageServerProblem(source);
       return problem ? deny(problem) : forward(body);
     });
   }
   if (rest.length !== 1 || !IMAGE_FINGERPRINT_PATTERN.test(rest[0]!)) return deny('image path is malformed');
   return method === 'DELETE' ? ALLOW : deny('images support read and delete');
 }
+
+/**
+ * Incus fetches from a remote image server itself, from the host's network:
+ * without this a compromised Backend could point it at anything the host can
+ * reach. Only simplestreams over https to a public DNS name is allowed; IP
+ * literals (in any spelling the URL parser accepts) and local-only names are
+ * refused. A name that resolves to a private address is not caught here.
+ */
+export function imageServerProblem(source: Record<string, unknown>): string | undefined {
+  if (source.server === undefined) return undefined;
+  if (typeof source.server !== 'string') return 'image source server must be a string';
+  if (source.protocol !== 'simplestreams') return 'remote images must use the simplestreams protocol';
+  let url: URL;
+  try {
+    url = new URL(source.server);
+  } catch {
+    return 'image source server must be a URL';
+  }
+  if (url.protocol !== 'https:') return 'image source server must use https';
+  if (url.username || url.password) return 'image source server must not carry credentials';
+  const host = url.hostname.replace(/^\[|\]$/g, '').replace(/\.$/, '').toLowerCase();
+  if (isIP(host) !== 0) return 'image source server must be a DNS name, not an IP address';
+  if (
+    !host.includes('.')
+    || host === 'localhost'
+    || LOCAL_ONLY_SUFFIXES.some((suffix) => host.endsWith(suffix))
+  ) {
+    return 'image source server must be a public host';
+  }
+  return undefined;
+}
+
+const LOCAL_ONLY_SUFFIXES = ['.localhost', '.local', '.internal', '.home.arpa', '.lan'];
 
 function checkOperations(method: AgentIncusHttpMethod, rest: readonly string[]): PolicyVerdict {
   const [id, leaf, ...tail] = rest;

@@ -83,6 +83,7 @@ function createService(
       transactions as never,
       database as never,
       storagePools as never,
+      { append: vi.fn(), log: vi.fn() } as never,
     ),
     repository,
     transactions,
@@ -101,7 +102,8 @@ describe('SharedBackendsService registration guards', () => {
     const user = testActor('44444444-4444-4444-8444-444444444444');
     await expect(service.list(user, 'all')).rejects.toBeInstanceOf(ForbiddenException);
     await expect(service.get(user, baseRow.id, 'all')).rejects.toBeInstanceOf(ForbiddenException);
-    await expect(service.list(testActor('g', Role.Operator), 'all')).resolves.toBeDefined();
+    const operatorView = await service.list(testActor('g', Role.Operator), 'all');
+    expect(operatorView.every((backend) => backend.executors === undefined)).toBe(true);
     await expect(service.get(testActor('g', Role.Operator), baseRow.id, 'all'))
       .rejects.toBeInstanceOf(ForbiddenException);
   });
@@ -159,7 +161,7 @@ describe('SharedBackendsService registration guards', () => {
   it('normalizes registration identity and FSID before persistence', async () => {
     const { service, repository } = createService();
 
-    const result = await service.create({
+    const result = await service.create('actor-1', {
       name: 'ceph',
       identityKey: '  cephfs:ceph/pool/data ',
       cephFsid: 'AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA',
@@ -182,7 +184,7 @@ describe('SharedBackendsService registration guards', () => {
       findByIdentityForUpdate: vi.fn().mockResolvedValue(baseRow),
     });
 
-    await expect(service.create({
+    await expect(service.create('actor-1', {
       name: 'other',
       identityKey: baseRow.identity_key,
       cephFsid: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
@@ -199,7 +201,7 @@ describe('SharedBackendsService registration guards', () => {
       hasDependencies: vi.fn().mockResolvedValue(true),
     });
 
-    await expect(service.patch(baseRow.id, {
+    await expect(service.patch('actor-1', baseRow.id, {
       expectedRevision: 1,
       cephFsid: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
     })).rejects.toBeInstanceOf(ConflictException);
@@ -229,7 +231,7 @@ describe('SharedBackendsService registration guards', () => {
       list: vi.fn().mockResolvedValue([{ ...baseRow, server_ids: [], has_online_executor: false }]),
     });
 
-    await expect(service.delete(baseRow.id)).resolves.toBeUndefined();
+    await expect(service.delete('actor-1', baseRow.id)).resolves.toBeUndefined();
     expect(repository.hasDependencies).toHaveBeenCalledWith(baseRow.id, expect.anything());
     expect(repository.delete).toHaveBeenCalledWith(baseRow.id, expect.anything());
   });
@@ -239,7 +241,7 @@ describe('SharedBackendsService registration guards', () => {
       hasDependencies: vi.fn().mockResolvedValue(true),
     });
 
-    await expect(service.delete(baseRow.id)).rejects.toMatchObject({
+    await expect(service.delete('actor-1', baseRow.id)).rejects.toMatchObject({
       response: expect.objectContaining({
         code: FailureCode.SharedBackendInUse,
       }),

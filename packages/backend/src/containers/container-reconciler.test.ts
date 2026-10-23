@@ -21,9 +21,13 @@ import type { IntentRecord } from '../reconcile/intent.repository.js';
 import type { ReconcileRunContext } from '../reconcile/managed-reconciler.js';
 import {
   IncusContainerSshStateAdapter,
+  MANAGED_KEYS_BEGIN,
+  MANAGED_KEYS_END,
+  reconcileSshFile,
   sshFileMetadataMatches,
   sshFileNeedsReconcile,
   sshObservation,
+  withManagedKeys,
 } from './container-ssh.js';
 
 /** The reconciler's private SQL store, where the tests intercept data access. */
@@ -111,6 +115,59 @@ describe('container reconciliation identity and power policy', () => {
       { ...desiredMetadata, uid: 1001 },
       desiredMetadata,
     )).toBe(false);
+  });
+
+  it('rewrites only the managed authorized_keys block and keeps the user lines', () => {
+    const platform = 'ssh-ed25519 AAAAplatform alice';
+    const block = `${MANAGED_KEYS_BEGIN}\n${platform}\n${MANAGED_KEYS_END}\n`;
+    expect(withManagedKeys('', platform)).toBe(block);
+    const user = 'ssh-ed25519 AAAAdeploy ci\n';
+    const written = withManagedKeys(user, platform);
+    expect(written).toBe(`ssh-ed25519 AAAAdeploy ci\n${block}`);
+    expect(withManagedKeys(written, platform)).toBe(written);
+    // Keys removed: the block goes, the user's key stays.
+    expect(withManagedKeys(written, null)).toBe(user);
+    // The block moves to the end; a missing end marker drops everything after the start.
+    expect(withManagedKeys(`${block}ssh-rsa AAAAlater\n`, 'ssh-ed25519 AAAAnew'))
+      .toBe(`ssh-rsa AAAAlater\n${MANAGED_KEYS_BEGIN}\nssh-ed25519 AAAAnew\n${MANAGED_KEYS_END}\n`);
+    expect(withManagedKeys(`ssh-rsa AAAAkeep\n${MANAGED_KEYS_BEGIN}\nssh-ed25519 AAAAstale\n`, null))
+      .toBe('ssh-rsa AAAAkeep\n');
+    expect(withManagedKeys('', null)).toBe('');
+  });
+
+  it('removes revoked platform keys from the guest and creates no file without keys', async () => {
+    const sshState = new IncusContainerSshStateAdapter();
+    const files = new Map<string, string>();
+    vi.spyOn(sshState, 'readAuthorizedKeys').mockImplementation(async (_client, _name, path) => {
+      const body = files.get(path);
+      if (path === '/home/dev/.ssh/authorized_keys') return { body: Buffer.from('/home/dev/dotfiles/keys'), type: 'symlink' } as never;
+      return body === undefined ? null : { body: Buffer.from(body, 'latin1'), uid: 0, gid: 0, mode: 0o600, type: 'file' } as never;
+    });
+    const write = vi.spyOn(sshState, 'writeAuthorizedKeys')
+      .mockImplementation(async (_client, _name, path, content) => { files.set(path, Buffer.from(content).toString('latin1')); });
+    const row = { login_user: 'root', ssh_public_key: null } as never;
+    const signal = new AbortController().signal;
+    await expect(reconcileSshFile(sshState, {} as never, row, 'nyc-x', false, signal))
+      .resolves.toEqual({ status: 'disabled', lastError: null });
+    expect(write).not.toHaveBeenCalled();
+
+    files.set('/root/.ssh/authorized_keys', `ssh-rsa AAAAmine\n${withManagedKeys('', 'ssh-ed25519 AAAAold')}`);
+    await expect(reconcileSshFile(sshState, {} as never, row, 'nyc-x', false, signal))
+      .resolves.toEqual({ status: 'disabled', lastError: null });
+    expect(files.get('/root/.ssh/authorized_keys')).toBe('ssh-rsa AAAAmine\n');
+
+    // Bytes that are not UTF-8 in a user line survive the rewrite unchanged.
+    files.set('/root/.ssh/authorized_keys', 'ssh-rsa AAAAmine caf\xe9\n');
+    const withKey = { login_user: 'root', ssh_public_key: 'ssh-ed25519 AAAAnew' } as never;
+    await reconcileSshFile(sshState, {} as never, withKey, 'nyc-x', false, signal);
+    expect(files.get('/root/.ssh/authorized_keys')).toBe(`ssh-rsa AAAAmine caf\xe9\n${withManagedKeys('', 'ssh-ed25519 AAAAnew')}`);
+
+    // A symlinked authorized_keys is never written through.
+    write.mockClear();
+    const linked = { login_user: 'dev', ssh_public_key: 'ssh-ed25519 AAAAnew' } as never;
+    await expect(reconcileSshFile(sshState, {} as never, linked, 'nyc-x', false, signal))
+      .resolves.toEqual({ status: 'error', lastError: 'authorized_keys_not_a_file' });
+    expect(write).not.toHaveBeenCalled();
   });
 
   it('records a visible error when sshd is missing after key convergence', () => {
@@ -375,7 +432,7 @@ describe('container reconciler §15.1 fixture-driven Incus mocks', () => {
       attachments: [attachment(ATTACH_ADD, VOLUME_ADD, '/data/add', 'attaching')],
     });
     const outcome = await reconciler.reconcile(context(client, { targetRevision: 2 }));
-    expect(outcome).toEqual({ outcome: 'succeeded', observedRevision: 2 });
+    expect(outcome).toEqual({ outcome: 'succeeded', observedRevision: 2, stale: true });
     expect(client.readModifyWriteInstance).not.toHaveBeenCalled();
     expect(client.getStorageVolume).not.toHaveBeenCalled();
   });
@@ -794,7 +851,7 @@ const TEST_LIMITS = {
 };
 
 /** CPU sets, limits and the IAM change bus the reconciler needs beyond its store. */
-function runtimeDeps(): [never, never, never, never] {
+function runtimeDeps(): [never, never, never, never, never] {
   const configValues: Record<string, number> = {
     'containers.processLimit': TEST_LIMITS.processes,
     'containers.networkIngressMbit': TEST_LIMITS.networkIngressMbit,
@@ -811,7 +868,8 @@ function runtimeDeps(): [never, never, never, never] {
     { get: (key: string) => configValues[key] },
     { onChange: vi.fn() },
     { wake: vi.fn() },
-  ] as [never, never, never, never];
+    { certify: vi.fn().mockResolvedValue(null) },
+  ] as [never, never, never, never, never];
 }
 
 function desiredFrom(options: HarnessOptions): DesiredInstanceSpec {
@@ -986,6 +1044,8 @@ async function harness(options: HarnessOptions) {
     renameInstance: vi.fn(async () => syncResponse({})),
     deleteInstance: vi.fn(async () => syncResponse({})),
     execInstance: vi.fn(async () => syncResponse({ return: 0 })),
+    // A guest without authorized_keys: the SSH step has nothing to manage.
+    getFile: vi.fn(async () => { throw new IncusError('INCUS_NOT_FOUND', 'managed_failure'); }),
     getStorageVolume: vi.fn(async () => syncResponse({ name: 'volume' })),
     createStorageVolume: vi.fn(async () => syncResponse({})),
     getStorageVolumeState: vi.fn(async () => syncResponse({ usage: {} })),
@@ -1152,6 +1212,207 @@ function context(client: unknown, intentOverrides: Partial<IntentRecord> = {}): 
   };
 }
 
+/** Make the harness instance follow start/stop/restart like Incus would. */
+function followPower(setup: Awaited<ReturnType<typeof harness>>) {
+  let boots = 0;
+  const actions: string[] = [];
+  (setup.client.updateInstanceState as ReturnType<typeof vi.fn>).mockImplementation(async (
+    _name: string,
+    body: { action: string },
+  ) => {
+    actions.push(body.action);
+    const state = setup.store.document.state as Record<string, unknown>;
+    if (body.action === 'stop') {
+      setup.store.document.state = { ...state, status: 'Stopped', status_code: 102 } as never;
+    } else {
+      boots += 1;
+      setup.store.document.state = {
+        ...state,
+        status: 'Running',
+        status_code: 101,
+        started_at: `2026-08-07T16:00:0${boots}.000Z`,
+      } as never;
+    }
+    return syncResponse({});
+  });
+  return actions;
+}
+
+function mockRow(setup: Awaited<ReturnType<typeof harness>>, overrides: Record<string, unknown>) {
+  (storeOf(setup.reconciler) as unknown as { readContainer: ReturnType<typeof vi.fn> })
+    .readContainer.mockResolvedValue({
+      ...containerRow({ status: 'Running', powerIntent: 'running' }),
+      ...overrides,
+    });
+}
+
+describe('container reconciler: changes that need a stopped instance never block power-off', () => {
+  const gpuDrift = { config: { 'nvidia.runtime': 'true' } };
+
+  it('stops first, then removes leftover GPU config, when the container should be stopped', async () => {
+    const setup = await harness({ status: 'Running', powerIntent: 'stopped', documentExtras: gpuDrift });
+    const actions = followPower(setup);
+    const outcome = await setup.reconciler.reconcile(context(setup.client, {
+      kind: IntentKind.ContainerPower,
+      request: { action: 'stop', operation: 'stop' },
+    }));
+    expect(outcome).toEqual({ outcome: 'succeeded', observedRevision: 3 });
+    expect(actions).toEqual(['stop']);
+    expect(setup.putBodies).toHaveLength(1);
+    expect(setup.putBodies[0]!.config['nvidia.runtime']).toBeUndefined();
+  });
+
+  it('still refuses a GPU change on a container that should keep running', async () => {
+    const setup = await harness({ status: 'Running', powerIntent: 'running', documentExtras: gpuDrift });
+    const actions = followPower(setup);
+    const outcome = await setup.reconciler.reconcile(context(setup.client));
+    expect(outcome).toMatchObject({ outcome: 'failed', failure: { code: 'GPU_MUTATION_REQUIRES_STOP' } });
+    expect(actions).toEqual([]);
+    expect(setup.putBodies).toHaveLength(0);
+  });
+
+  it('applies a GPU change during a restart: stop, PUT, start, proven by started_at', async () => {
+    const setup = await harness({ status: 'Running', powerIntent: 'running', documentExtras: gpuDrift });
+    (setup.store.document.state as Record<string, unknown>).started_at = '2026-08-07T15:00:00.000Z';
+    const actions = followPower(setup);
+    const outcome = await setup.reconciler.reconcile(context(setup.client, {
+      kind: IntentKind.ContainerPower,
+      request: { action: 'restart', operation: 'restart' },
+      baseline: { startedAt: '2026-08-07T15:00:00.000Z' },
+    }));
+    expect(outcome).toEqual({ outcome: 'succeeded', observedRevision: 3 });
+    expect(actions).toEqual(['stop', 'start']);
+    expect(setup.putBodies).toHaveLength(1);
+  });
+
+  it('stops before an accepted block-backed root shrink instead of failing the stop', async () => {
+    const setup = await harness({
+      status: 'Running',
+      powerIntent: 'stopped',
+      rootResizeFamily: 'block_backed',
+      rootSizeBytes: 5_000_000_000,
+      documentExtras: {
+        devices: { root: { type: 'disk', path: '/', pool: ROOT_POOL, size: '10000000000' } },
+      },
+    });
+    const actions = followPower(setup);
+    const outcome = await setup.reconciler.reconcile(context(setup.client));
+    expect(outcome).toEqual({ outcome: 'succeeded', observedRevision: 3 });
+    expect(actions).toEqual(['stop']);
+    expect(setup.putBodies[0]!.devices.root!.size).toBe('5000000000');
+  });
+});
+
+describe('container reconciler: superseded intents', () => {
+  it('carries a superseded restart forward onto the current revision', async () => {
+    const setup = await harness({ status: 'Running', powerIntent: 'running' });
+    (setup.store.document.state as Record<string, unknown>).started_at = '2026-08-07T15:00:00.000Z';
+    const actions = followPower(setup);
+    const outcome = await setup.reconciler.reconcile(context(setup.client, {
+      kind: IntentKind.ContainerPower,
+      targetRevision: 2,
+      request: { action: 'restart', operation: 'restart' },
+      baseline: { startedAt: '2026-08-07T15:00:00.000Z' },
+    }));
+    expect(outcome).toEqual({ outcome: 'succeeded', observedRevision: 3 });
+    expect(actions).toEqual(['restart']);
+  });
+
+  it('settles a restart replaced by a later stop as failed, never as succeeded', async () => {
+    const setup = await harness({ status: 'Stopped', powerIntent: 'stopped' });
+    const outcome = await setup.reconciler.reconcile(context(setup.client, {
+      kind: IntentKind.ContainerPower,
+      targetRevision: 2,
+      request: { action: 'restart', operation: 'restart' },
+      baseline: { startedAt: null },
+    }));
+    expect(outcome).toMatchObject({ outcome: 'failed', stale: true, failure: { code: 'RESTART_SUPERSEDED' } });
+    expect(setup.client.updateInstanceState).not.toHaveBeenCalled();
+  });
+
+  it('deletes a deleting container even from an intent older than its revision', async () => {
+    const setup = await harness({ status: 'Stopped', powerIntent: 'stopped' });
+    mockRow(setup, { lifecycle_phase: 'deleting', power_intent: 'stopped' });
+    const release = vi.spyOn(
+      storeOf(setup.reconciler) as unknown as { releaseContainerState: () => Promise<void> },
+      'releaseContainerState',
+    ).mockResolvedValue(undefined);
+    let present = true;
+    setup.client.deleteInstance.mockImplementation(async () => {
+      present = false;
+      return syncResponse({});
+    });
+    setup.client.getInstanceFull.mockImplementation(async () => {
+      if (!present) throw new IncusError('INCUS_NOT_FOUND', 'managed_failure');
+      return syncResponse(setup.store.document);
+    });
+    const outcome = await setup.reconciler.reconcile(context(setup.client, { targetRevision: 1 }));
+    expect(outcome).toEqual({ outcome: 'succeeded', observedRevision: 3 });
+    expect(setup.client.deleteInstance).toHaveBeenCalledOnce();
+    expect(release).toHaveBeenCalledOnce();
+  });
+
+  it('treats a delete whose row is already gone as done (lease lost after the delete)', async () => {
+    const setup = await harness({ status: 'Stopped', powerIntent: 'stopped' });
+    (storeOf(setup.reconciler) as unknown as { readContainer: ReturnType<typeof vi.fn> })
+      .readContainer.mockResolvedValue(undefined);
+    const outcome = await setup.reconciler.reconcile(context(setup.client, { kind: IntentKind.ContainerDelete }));
+    expect(outcome).toEqual({ outcome: 'succeeded', observedRevision: 3, stale: true });
+    expect(setup.client.getInstanceFull).not.toHaveBeenCalled();
+  });
+});
+
+describe('container reconciler: bounded SSH readiness wait', () => {
+  const key = 'ssh-ed25519 AAAA fixture';
+
+  async function sshHarness() {
+    const setup = await harness({ status: 'Running', powerIntent: 'running' });
+    mockRow(setup, { ssh_public_key: key });
+    const sshState = (setup.reconciler as unknown as { sshState: IncusContainerSshStateAdapter }).sshState;
+    vi.spyOn(sshState, 'readAuthorizedKeys').mockResolvedValue({
+      body: Buffer.from(withManagedKeys('', key)),
+      uid: 0,
+      gid: 0,
+      mode: 0o600,
+      type: 'file',
+    } as never);
+    vi.spyOn(sshState, 'probeSshd').mockResolvedValue('unknown');
+    return setup;
+  }
+
+  it('lets only a fresh create wait for sshd', async () => {
+    const setup = await sshHarness();
+    const outcome = await setup.reconciler.reconcile(context(setup.client, {
+      kind: IntentKind.ContainerCreate,
+      createdAt: new Date().toISOString(),
+    }));
+    expect(outcome).toMatchObject({ outcome: 'retry', failure: { code: 'SSH_DAEMON_PENDING' } });
+  });
+
+  it('settles a create after the wait, and any other intent at once, with sshd still not listening', async () => {
+    const setup = await sshHarness();
+    const persist = (setup.reconciler as unknown as { persistObservation: ReturnType<typeof vi.fn> })
+      .persistObservation;
+    const old = await setup.reconciler.reconcile(context(setup.client, {
+      kind: IntentKind.ContainerCreate,
+      createdAt: new Date(Date.now() - 10 * 60_000).toISOString(),
+    }));
+    expect(old).toEqual({ outcome: 'succeeded', observedRevision: 3 });
+    const update = await setup.reconciler.reconcile(context(setup.client, {
+      createdAt: new Date().toISOString(),
+    }));
+    expect(update).toEqual({ outcome: 'succeeded', observedRevision: 3 });
+    expect(persist).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      expect.anything(),
+      false,
+      { status: 'unknown', lastError: 'sshd_not_listening' },
+      expect.anything(),
+    );
+  });
+});
+
 describe('ContainerReconciler resource status', () => {
   function statusReconciler(sets: Record<string, unknown>[]) {
     return new ContainerReconciler(new ContainerReconcileStore({
@@ -1183,10 +1444,11 @@ describe('ContainerReconciler resource status', () => {
     expect(sets[0]).not.toHaveProperty('lifecycle_phase');
   });
 
-  it('records a non-parking failure without needs_attention', async () => {
+  it('records a non-parking failure without touching needs_attention (a park survives it)', async () => {
     const sets: Record<string, unknown>[] = [];
     await statusReconciler(sets).markFailure(CONTAINER_ID, { code: 'X', message: 'm' }, false);
-    expect(sets[0]).toMatchObject({ needs_attention: false, failure_code: 'X' });
+    expect(sets[0]).toMatchObject({ failure_code: 'X' });
+    expect(sets[0]).not.toHaveProperty('needs_attention');
   });
 });
 

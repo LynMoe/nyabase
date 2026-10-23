@@ -9,13 +9,14 @@ import {
   MAX_REAUTH_FAILURES_PER_USER,
 } from './auth.service.js';
 import type { Actor } from './actor.js';
-import { clientAddressBucket } from './client-address.js';
 import { InMemoryAuthPersistenceTestAdapter } from './in-memory-auth-persistence.test-helper.js';
-import { LOGIN_ATTEMPT_WINDOW_MS, LoginAttemptLimiter } from './login-attempt-limiter.js';
 import {
+  clientAddressBucket,
+  LOGIN_ATTEMPT_WINDOW_MS,
+  LoginAttemptLimiter,
   PasswordVerificationBusyError,
   PasswordVerificationGate,
-} from './password-verification-gate.js';
+} from './login-throttling.js';
 
 const rateLimited = expect.objectContaining({
   status: HttpStatus.TOO_MANY_REQUESTS,
@@ -52,6 +53,9 @@ describe('AuthService login limiter', () => {
     expect(clientAddressBucket('::ffff:192.0.2.1')).toBe('192.0.2.1');
     expect(clientAddressBucket('192.0.2.1')).toBe('192.0.2.1');
     expect(clientAddressBucket('not-an-ip')).toBe('unknown');
+    expect(clientAddressBucket('2001:db8:1:2::1', 48)).toBe('2001:db8:1::/48');
+    expect(clientAddressBucket('2001:db8:1:ffff::1', 48)).toBe(clientAddressBucket('2001:db8:1:2::1', 48));
+    expect(clientAddressBucket('192.0.2.1', 48)).toBe('192.0.2.1');
 
     const service = createAuth();
     for (let i = 0; i < MAX_LOGIN_FAILURES_PER_IP_USERNAME; i += 1) {
@@ -189,6 +193,18 @@ describe('AuthService API token creation', () => {
     await expect(service.createApiToken(actor, 'ci', 'correct-password'))
       .rejects.toBeInstanceOf(UnauthorizedException);
     expect(persistence.apiTokenRows()).toHaveLength(0);
+  });
+
+  it('keeps signed-in password checks available while logins saturate their gate', async () => {
+    const { service, user } = await seededAuth('alice', 'correct-password');
+    const loginGate = (service as unknown as { loginGate: PasswordVerificationGate }).loginGate;
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const blockers = Array.from({ length: 4 }, (_, index) =>
+      loginGate.run(`ip:flood-${index}`, () => held));
+    await expect(service.verifyCurrentPassword(user, 'correct-password')).resolves.toBe(true);
+    release();
+    await Promise.all(blockers);
   });
 
   it('throttles wrong current-password entries per user', async () => {

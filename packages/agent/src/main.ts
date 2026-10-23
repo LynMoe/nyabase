@@ -3,16 +3,15 @@ import { join } from 'node:path';
 import { createAgentHandlers } from './agent.js';
 import { BackendConnection } from './backend-connection.js';
 import { LinuxNodeMetricsCollector } from './collector.js';
-import { controlUrl, loadAgentConfig, type AgentConfig } from './config.js';
+import { controlUrl, loadAgentConfig } from './config.js';
 import { collectContainerCgroupMetrics } from './container-cgroup.js';
 import { CredentialStore } from './credential-store.js';
-import { EnrollmentRejectedError, enroll } from './enroll.js';
+import { enroll, enrollUntilAccepted } from './enroll.js';
 import { collectNvidiaGpuMetrics } from './gpu-collector.js';
 import { LocalIncus } from './incus-local.js';
 import { Ipv6Guard } from './ipv6-guard.js';
 
 const GUARD_INTERVAL_MS = 30_000;
-const ENROLL_RETRY_MS = 10_000;
 
 function log(message: string): void {
   console.log(`[nyabase-agent] ${message}`);
@@ -27,26 +26,6 @@ function agentVersion(): string {
   }
 }
 
-/** Exchange the enrollment token, retrying transport failures; a rejection is final. */
-async function enrollUntilAccepted(config: AgentConfig, store: CredentialStore, signal: AbortSignal): Promise<string> {
-  if (!config.enrollmentToken) {
-    throw new Error('No stored credential and NYABASE_AGENT_ENROLLMENT_TOKEN is not set');
-  }
-  while (!signal.aborted) {
-    try {
-      const result = await enroll(config, config.enrollmentToken);
-      await store.write(result.credential);
-      log(`enrolled as server ${result.serverId}`);
-      return result.credential;
-    } catch (error) {
-      if (error instanceof EnrollmentRejectedError) throw error;
-      log(`enrollment failed, retrying: ${error instanceof Error ? error.message : String(error)}`);
-      await new Promise((resolve) => setTimeout(resolve, ENROLL_RETRY_MS));
-    }
-  }
-  throw new Error('stopped before enrollment completed');
-}
-
 async function main(): Promise<void> {
   const config = await loadAgentConfig();
   const controller = new AbortController();
@@ -55,7 +34,14 @@ async function main(): Promise<void> {
   process.once('SIGTERM', shutdown);
 
   const store = new CredentialStore(config.stateDir);
-  let credential = await store.read() ?? await enrollUntilAccepted(config, store, controller.signal);
+  const exchange = (token: string): ReturnType<typeof enroll> => enroll(config, token);
+  const enrollFromEnvironment = (): Promise<string> => {
+    if (!config.enrollmentToken) {
+      throw new Error('No stored credential and NYABASE_AGENT_ENROLLMENT_TOKEN is not set');
+    }
+    return enrollUntilAccepted(config.enrollmentToken, controller.signal, { exchange, store, log });
+  };
+  let credential = await store.read() ?? await enrollFromEnvironment();
 
   const guard = new Ipv6Guard();
   const ensureGuard = async (): Promise<void> => {
@@ -86,7 +72,7 @@ async function main(): Promise<void> {
     onCredentialRejected: async () => {
       if (!config.enrollmentToken) return;
       try {
-        const result = await enroll(config, config.enrollmentToken);
+        const result = await exchange(config.enrollmentToken);
         await store.write(result.credential);
         credential = result.credential;
         log(`re-enrolled as server ${result.serverId}`);

@@ -6,6 +6,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import {
+  AuditAction,
   FailureCode,
   StoragePoolDriver,
   type SharedBackendExecutorDiscoverResult,
@@ -13,6 +14,7 @@ import {
   type StorageDiscoverIssueDto,
 } from '@nyabase/common';
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
+import { AuditService } from '../iam/audit.service.js';
 import { StoragePoolDiscoveryService, toDiscoverIssue } from './storage-pool-discovery.service.js';
 import { toExecutorDto } from './storage-pool-dtos.js';
 import { StoragePoolsRepository } from './storage-pools.repository.js';
@@ -26,6 +28,7 @@ export class SharedBackendExecutorsService {
     private readonly repository: StoragePoolsRepository,
     private readonly transactions: PgTransactionManager,
     private readonly discovery: StoragePoolDiscoveryService,
+    private readonly audit: AuditService,
   ) {}
 
   async listExecutors(backendId: string): Promise<SharedBackendExecutorDto[]> {
@@ -53,6 +56,7 @@ export class SharedBackendExecutorsService {
 
   /** Rediscover pools on one server (or every online server) and report identity conflicts. */
   async discoverExecutors(
+    actorId: string,
     backendId: string,
     serverId?: string,
   ): Promise<SharedBackendExecutorDiscoverResult> {
@@ -87,6 +91,11 @@ export class SharedBackendExecutorsService {
         this.logger.warn(`SERVER_UNREACHABLE serverId=${id} ${klass}: ${message}`);
       }
     }
+    // Discovery may remap pools to backends; record who triggered it.
+    await this.audit.log(actorId, AuditAction.DiscoverSharedBackendExecutors, backendId, 'shared_backend', {
+      serverIds,
+      identityConflicts: identityConflicts.length,
+    });
     return {
       executors: await this.listExecutors(backendId),
       identityConflicts,
@@ -94,6 +103,7 @@ export class SharedBackendExecutorsService {
   }
 
   async patchExecutor(
+    actorId: string,
     backendId: string,
     executorId: string,
     input: {
@@ -131,7 +141,10 @@ export class SharedBackendExecutorsService {
           throw new ConflictException({ code: FailureCode.RevisionConflict });
         }
         if (input.registered !== current.registered && !input.registered) {
-          if (await this.repository.hasDependencies(executorId, transaction)) {
+          if (
+            await this.repository.hasDependencies(executorId, transaction)
+            || await this.repository.isLastExecutorOfBackendWithVolumes(executorId, backendId, transaction)
+          ) {
             throw new ConflictException({
               code: FailureCode.StoragePoolInUse,
               message: 'Storage pool registration or backend mapping cannot change while referenced',
@@ -143,6 +156,11 @@ export class SharedBackendExecutorsService {
           shareable: true,
         }, transaction);
         if (!row) throw new ConflictException({ code: FailureCode.RevisionConflict });
+        await this.audit.append(transaction, actorId, AuditAction.UpdateSharedBackendExecutor, executorId, 'storage_pool', {
+          sharedBackendId: backendId,
+          serverId: current.server_id,
+          registered: input.registered,
+        });
         if (row.shared_backend_id) {
           await this.repository.refreshSharedBackendCapacity(row.shared_backend_id, transaction);
         }

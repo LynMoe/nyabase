@@ -278,3 +278,44 @@ async fn one_client_ip_cannot_exhaust_pre_auth_slots() {
     );
     listener.task.abort();
 }
+
+#[tokio::test]
+async fn pre_auth_sockets_cannot_fill_the_whole_pool() {
+    let mut config = test_config();
+    config.max_connections = 8;
+    config.max_preauth_connections = 2;
+    let listener = start_public_listener(config).await;
+
+    // Different addresses, so only the pre-auth cap can refuse the third.
+    let mut first = connect_from("127.0.0.1", listener.address).await;
+    let mut second = connect_from("127.0.0.2", listener.address).await;
+    assert!(read_banner(&mut first).await.is_some());
+    assert!(read_banner(&mut second).await.is_some());
+    let mut third = connect_from("127.0.0.3", listener.address).await;
+    assert!(read_banner(&mut third).await.is_none());
+    listener.task.abort();
+}
+
+#[test]
+fn authentication_releases_the_pre_auth_slot_but_not_the_connection_slot() {
+    use proxy_common::conn_limit::{ConnectionLimiter, LimitSettings};
+    let limiter = ConnectionLimiter::new(LimitSettings {
+        global: 4,
+        per_client: 4,
+        per_site: 4,
+        pending: 1,
+    });
+    let peer: std::net::SocketAddr = "127.0.0.1:2700".parse().unwrap();
+    let mut permit = limiter.try_acquire(peer.ip()).unwrap();
+    let (connection, _) = ConnectionState::new(1, peer);
+    connection.hold_pending(permit.take_pending());
+    assert_eq!(limiter.pending_available(), 0);
+    assert!(limiter.try_acquire(peer.ip()).is_err());
+
+    let public_key = crate::snapshot::parse_authorized_key(ALICE_KEY).unwrap();
+    connection.set_authenticated("alice", &public_key, "user-a", "alice", None);
+    assert_eq!(limiter.pending_available(), 1);
+    assert_eq!(limiter.active_for(peer.ip()), 1);
+    drop(permit);
+    assert_eq!(limiter.active_for(peer.ip()), 0);
+}

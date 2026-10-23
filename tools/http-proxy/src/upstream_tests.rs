@@ -1,6 +1,6 @@
 use super::*;
 use crate::config::MAX_UPSTREAM_UPGRADE_HEADER_BYTES;
-use crate::listener::handle_connection_with_fixed_request_deadline;
+use crate::listener::handle_connection;
 use crate::request::{find_header_end, read_request_head, request_plan, RequestMode};
 use crate::snapshot::SnapshotStore;
 use crate::test_support::*;
@@ -30,7 +30,7 @@ fn validates_the_upstream_websocket_handshake_before_relay() {
 
 fn websocket_test_plan() -> (Vec<u8>, String) {
     let plan = request_plan(
-            b"GET /socket HTTP/1.1\r\nHost: app.example.test\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n",
+            b"GET /socket HTTP/1.1\r\nHost: app.example.test\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n", &test_client()
         )
         .unwrap();
     let RequestMode::WebSocket { expected_accept } = plan.mode else {
@@ -175,15 +175,20 @@ async fn websocket_tunnel_closes_when_route_authority_is_revoked() {
     let route = test_route(upstream_port);
     let store = Arc::new(SnapshotStore::default());
     store.store(test_snapshot(1, 30_000, vec![route])).unwrap();
-    let runtime = test_runtime();
+    // An ordinary-request idle timeout far below the test's pauses must not
+    // apply to an upgraded tunnel.
+    let runtime = Arc::new({
+        let mut runtime = Arc::try_unwrap(test_runtime()).ok().unwrap();
+        runtime.limits.idle = Duration::from_millis(10);
+        runtime
+    });
     let (mut client, proxy_side) = tokio::io::duplex(4096);
     let handler_store = store.clone();
-    let handler = tokio::spawn(handle_connection_with_fixed_request_deadline(
+    let handler = tokio::spawn(handle_connection(
         proxy_side,
         "127.0.0.1:12345".parse().unwrap(),
         handler_store,
         runtime,
-        Duration::from_millis(10),
     ));
     client
             .write_all(b"GET /socket HTTP/1.1\r\nHost: app.example.test\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n")
@@ -197,7 +202,7 @@ async fn websocket_tunnel_closes_when_route_authority_is_revoked() {
     time::sleep(Duration::from_millis(30)).await;
     assert!(
         !handler.is_finished(),
-        "WebSocket tunnel inherited the ordinary HTTP request deadline"
+        "WebSocket tunnel inherited the ordinary HTTP request idle timeout"
     );
 
     store.store(test_snapshot(2, 30_000, Vec::new())).unwrap();
@@ -222,7 +227,7 @@ async fn early_websocket_bytes_are_rejected_as_smuggling() {
     let header_end = header.len();
     let mut received = header.clone();
     received.extend_from_slice(b"early-frame");
-    let plan = request_plan(&header).unwrap();
+    let plan = request_plan(&header, &test_client()).unwrap();
     let (mut client, mut proxy_side) = tokio::io::duplex(1024);
     let error = proxy_request(
         &mut proxy_side,
@@ -363,4 +368,139 @@ async fn a_slow_drip_request_body_hits_the_body_deadline() {
         .unwrap()
         .starts_with("HTTP/1.1 408 Request Timeout"));
     upstream.await.unwrap();
+}
+
+/// Accepts one request, returns everything it received up to `until`, then
+/// answers 200 and closes.
+async fn recording_upstream(listener: TcpListener, until: &'static [u8]) -> Vec<u8> {
+    let (mut socket, _) = listener.accept().await.unwrap();
+    let mut received = Vec::new();
+    let mut buf = [0_u8; 1024];
+    while !received.ends_with(until) {
+        let n = socket.read(&mut buf).await.unwrap();
+        assert!(n > 0, "upstream saw EOF before {until:?}: {received:?}");
+        received.extend_from_slice(&buf[..n]);
+    }
+    socket
+        .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+        .await
+        .unwrap();
+    socket.shutdown().await.unwrap();
+    received
+}
+
+async fn start_with_upstream(
+    until: &'static [u8],
+) -> (
+    tokio::io::DuplexStream,
+    tokio::task::JoinHandle<anyhow::Result<()>>,
+    tokio::task::JoinHandle<Vec<u8>>,
+) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream_port = listener.local_addr().unwrap().port();
+    let upstream = tokio::spawn(recording_upstream(listener, until));
+    let store = Arc::new(SnapshotStore::default());
+    store
+        .store(test_snapshot(1, 30_000, vec![test_route(upstream_port)]))
+        .unwrap();
+    let (client, proxy_side) = tokio::io::duplex(4096);
+    let handler = tokio::spawn(handle_connection(
+        proxy_side,
+        "203.0.113.9:4000".parse().unwrap(),
+        store,
+        test_runtime(),
+    ));
+    (client, handler, upstream)
+}
+
+#[tokio::test]
+async fn expect_100_continue_gets_an_interim_response_before_the_body() {
+    let (mut client, handler, upstream) = start_with_upstream(b"\r\n\r\nping").await;
+    client
+        .write_all(b"POST /upload HTTP/1.1\r\nHost: app.example.test\r\nContent-Length: 4\r\nExpect: 100-continue\r\n\r\n")
+        .await
+        .unwrap();
+    // Like curl: send nothing until the interim response arrives.
+    let interim = time::timeout(Duration::from_secs(1), read_response_head(&mut client))
+        .await
+        .expect("no 100 Continue")
+        .unwrap();
+    assert_eq!(interim, b"HTTP/1.1 100 Continue\r\n\r\n");
+    client.write_all(b"ping").await.unwrap();
+    let mut response = Vec::new();
+    client.read_to_end(&mut response).await.unwrap();
+    assert!(String::from_utf8(response).unwrap().ends_with("\r\n\r\nok"));
+    handler.await.unwrap().unwrap();
+    let received = String::from_utf8(upstream.await.unwrap()).unwrap();
+    assert!(
+        !received.to_ascii_lowercase().contains("expect"),
+        "{received}"
+    );
+    assert!(
+        received.contains("X-Forwarded-For: 203.0.113.9\r\n"),
+        "{received}"
+    );
+}
+
+#[tokio::test]
+async fn chunked_uploads_are_rechunked_to_the_upstream() {
+    let (mut client, handler, upstream) = start_with_upstream(b"0\r\n\r\n").await;
+    client
+        .write_all(b"POST /git-receive-pack HTTP/1.1\r\nHost: app.example.test\r\nTransfer-Encoding: chunked\r\nX-Forwarded-For: 10.6.6.6\r\n\r\n5;x=y\r\nhello\r\n")
+        .await
+        .unwrap();
+    time::sleep(Duration::from_millis(20)).await;
+    client
+        .write_all(b"6\r\n world\r\n0\r\nX-Trailer: t\r\n\r\n")
+        .await
+        .unwrap();
+    let mut response = Vec::new();
+    client.read_to_end(&mut response).await.unwrap();
+    assert!(String::from_utf8(response)
+        .unwrap()
+        .starts_with("HTTP/1.1 200 OK"));
+    handler.await.unwrap().unwrap();
+    let received = String::from_utf8(upstream.await.unwrap()).unwrap();
+    let (head, body) = received.split_once("\r\n\r\n").unwrap();
+    assert!(head.contains("Transfer-Encoding: chunked"), "{head}");
+    assert!(head.contains("X-Forwarded-For: 203.0.113.9"), "{head}");
+    assert!(!head.contains("10.6.6.6"), "{head}");
+    assert_eq!(body, "5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n");
+}
+
+#[tokio::test]
+async fn malformed_chunked_upload_is_rejected_and_never_completed_upstream() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream_port = listener.local_addr().unwrap().port();
+    let upstream = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut received = Vec::new();
+        let _ = socket.read_to_end(&mut received).await;
+        received
+    });
+    let store = Arc::new(SnapshotStore::default());
+    store
+        .store(test_snapshot(1, 30_000, vec![test_route(upstream_port)]))
+        .unwrap();
+    let (mut client, proxy_side) = tokio::io::duplex(4096);
+    let handler = tokio::spawn(handle_connection(
+        proxy_side,
+        "127.0.0.1:12345".parse().unwrap(),
+        store,
+        test_runtime(),
+    ));
+    // A smuggled second request hidden behind a bare-LF chunk size.
+    client
+        .write_all(b"POST / HTTP/1.1\r\nHost: app.example.test\r\nTransfer-Encoding: chunked\r\n\r\n0\n\r\nGET /admin HTTP/1.1\r\nHost: app.example.test\r\n\r\n")
+        .await
+        .unwrap();
+    let mut response = Vec::new();
+    client.read_to_end(&mut response).await.unwrap();
+    assert!(String::from_utf8(response)
+        .unwrap()
+        .starts_with("HTTP/1.1 400 Bad Request"));
+    assert!(handler.await.unwrap().is_err());
+    let received = String::from_utf8(upstream.await.unwrap()).unwrap();
+    assert!(!received.contains("/admin"), "{received}");
+    assert!(!received.ends_with("0\r\n\r\n"), "{received}");
 }

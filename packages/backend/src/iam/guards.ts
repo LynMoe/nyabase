@@ -105,7 +105,8 @@ export class RolesGuard implements CanActivate {
 }
 
 function isAdminNamespace(request: { originalUrl?: string; url?: string }): boolean {
-  const path = (request.originalUrl ?? request.url ?? '').split('?')[0];
+  // Express routes match case-insensitively, so `/api/Admin/...` reaches the same handlers.
+  const path = (request.originalUrl ?? request.url ?? '').split('?')[0].toLowerCase();
   return path === '/admin' || path.startsWith('/admin/')
     || path === '/api/admin' || path.startsWith('/api/admin/');
 }

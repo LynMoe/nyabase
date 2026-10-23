@@ -53,6 +53,7 @@ const OPERATOR_ROUTES = [
   'PATCH servers/:param',
   'PATCH servers/:param/gpu',
   'POST admin/ssh-proxy/disconnect-all',
+  'POST admin/ssh-proxy/host-authorities/reset',
   'POST admin/ssh-proxy/host-key/rotate',
   'POST http-proxy/domain-pools',
   'POST images',

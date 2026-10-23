@@ -405,6 +405,20 @@ export const zPatchVolumeRequest = z.object({
   'At least one volume field is required',
 );
 
+/**
+ * Kernel pseudo-filesystems a tenant-writable volume must never shadow: a
+ * volume mounted over /proc (or /sys, /dev) lets the tenant plant files the
+ * runtime trusts (CVE-2019-16884 class). The Agent policy and a DB CHECK
+ * refuse the same roots.
+ */
+export const FORBIDDEN_CONTAINER_MOUNT_ROOTS = ['/proc', '/sys', '/dev'] as const;
+
+/** True for a container path equal to or under a forbidden root (repeated slashes and `.` ignored). */
+export function isForbiddenContainerMountPath(path: string): boolean {
+  const normalized = `/${path.split('/').filter((part) => part !== '' && part !== '.').join('/')}`;
+  return FORBIDDEN_CONTAINER_MOUNT_ROOTS.some((root) => normalized === root || normalized.startsWith(`${root}/`));
+}
+
 export const zAttachVolumeRequest = z.object({
   volumeId: zResourceIdentity,
   containerPath: z.string().trim().min(2).max(4_096)
@@ -412,7 +426,8 @@ export const zAttachVolumeRequest = z.object({
     .refine((value) => value !== '/', 'Container path must not be root')
     .refine((value) => !value.split('/').some((part) => part === '.' || part === '..'),
       'Container path must not contain dot segments')
-    .refine((value) => !/[\0\r\n]/.test(value), 'Container path contains invalid control characters'),
+    .refine((value) => !/[\0\r\n]/.test(value), 'Container path contains invalid control characters')
+    .refine((value) => !isForbiddenContainerMountPath(value), 'Container path must not be under /proc, /sys or /dev'),
   readOnly: z.boolean(),
 }).strict();
 

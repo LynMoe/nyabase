@@ -116,6 +116,11 @@ Vite 通过 alias 将 `@nyabase/common` 指向 `src/index.ts`，但 `index.ts` �
 前端：页面或组件超过体量时拆成与页面同名的目录（`pages/foo-page.tsx` + `pages/foo-page/*`，hooks 用 `use-*.ts`），
 读取源码文本的 surface 测试用 `lib/read-source.test-helper.ts` 的 `readSource` / `readSourceDir`。
 
+SSH 代理按公钥认证、按名路由：direct-tcpip 目标是容器 IP 或 `<容器名>[.<ssh.proxyHostSuffix>]`，只在持钥用户自己的容器里解析
+（所以容器名按所有者忽略大小写唯一，`containers_owner_name_key`）。快照只下发有可达路由的用户 / 容器。每个用户一个主机证书 CA
+（`ssh-host-ca/`，只依赖 platform；`SshKeyCryptoService` 在 `platform/`），reconciler 在 sshd 就绪后签发确定性的主机证书并写 sshd drop-in，
+尽力而为、不让 intent 失败；guest 的 `authorized_keys` 只改标记块内的内容。
+
 GPU 是平台内置功能（`gpu/` 模块、`common/src/gpu/`、agent 的 `gpu-collector`），不存在扩展框架。
 
 ## Schema 规则（上线前）

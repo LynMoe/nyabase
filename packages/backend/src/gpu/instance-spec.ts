@@ -8,12 +8,24 @@ export const GPU_DEVICE_PREFIXES = ['gpu'] as const;
 const EMPTY_CONTRIBUTION: InstanceSpecContribution = { config: {}, devices: {} };
 
 /**
- * Pure projection of `control.containers.gpu_state`. Missing or empty state
- * yields nothing; create-time defaults are applied at admission, not here.
+ * Whether a stored `gpu_state` puts anything into the instance spec. Runtime
+ * off with no cards is the Incus default and contributes nothing, so such a
+ * container does not occupy GPU (the same predicate guards disabling GPU in
+ * `infra.reject_disable_gpu_with_claims`).
+ */
+export function gpuStateOccupies(state: unknown): boolean {
+  const parsed = parseContainerState(state);
+  return parsed !== null && (parsed.nvidiaRuntime || parsed.pciAddresses.length > 0);
+}
+
+/**
+ * Pure projection of `control.containers.gpu_state`. Missing, empty or
+ * runtime-off-without-cards state yields nothing; create-time defaults are
+ * applied at admission, not here.
  */
 export function gpuInstanceSpec(state: unknown): InstanceSpecContribution {
   const parsed = parseContainerState(state);
-  if (!parsed) return EMPTY_CONTRIBUTION;
+  if (!parsed || !gpuStateOccupies(parsed)) return EMPTY_CONTRIBUTION;
 
   const config: Record<string, string> = {
     'nvidia.runtime': String(parsed.nvidiaRuntime),

@@ -20,7 +20,10 @@ export function ContainerConsole({ container, scope }: { container: ContainerDto
   const [status, setStatus] = useState<ConsoleStatus>('idle');
   const [error, setError] = useState<string | null>(null);
   const [reload, setReload] = useState(0);
-  const token = useAuthStore((state) => state.accessToken);
+  // Subscribe only to signed-in-ness: a token refresh must not tear down a live shell.
+  const signedIn = useAuthStore((state) => state.accessToken !== null);
+  const consoleEnabled = container.actions.console.enabled;
+  const consoleMessage = container.actions.console.message;
 
   const cleanup = useCallback(() => {
     disposablesRef.current.forEach((disposable) => disposable.dispose());
@@ -38,9 +41,9 @@ export function ContainerConsole({ container, scope }: { container: ContainerDto
       cleanup();
       setStatus('connecting');
       setError(null);
-      if (!token || !container.actions.console.enabled || !mountRef.current) {
+      if (!signedIn || !consoleEnabled || !mountRef.current) {
         setStatus('error');
-        setError(!token ? '登录已失效，请重新登录。' : container.actions.console.message ?? '当前容器不能打开控制台。');
+        setError(!signedIn ? '登录已失效，请重新登录。' : consoleMessage ?? '当前容器不能打开控制台。');
         return;
       }
       try {
@@ -75,7 +78,7 @@ export function ContainerConsole({ container, scope }: { container: ContainerDto
         const socket = new WebSocket(resolved.toString());
         socketRef.current = socket;
         socket.addEventListener('open', () => {
-          socket.send(JSON.stringify({ type: 'auth', token }));
+          socket.send(JSON.stringify({ type: 'auth', token: useAuthStore.getState().accessToken }));
         });
         socket.addEventListener('message', (event) => {
           try {
@@ -133,7 +136,7 @@ export function ContainerConsole({ container, scope }: { container: ContainerDto
     };
     void connect();
     return () => { cancelled = true; cleanup(); };
-  }, [cleanup, container.actions.console, container.id, reload, token]);
+  }, [cleanup, consoleEnabled, consoleMessage, container.id, reload, signedIn]);
 
   const statusLabel: Record<ConsoleStatus, string> = {
     idle: '未连接',

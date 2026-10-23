@@ -17,6 +17,24 @@ import { ConsoleSessionService, type ConsoleSession } from './console-session.se
 const MAX_CONSOLE_FRAME_BYTES = 256 * 1024;
 const AUTH_TIMEOUT_MS = 10_000;
 /**
+ * Output queued towards a browser that does not read (e.g. `yes` with the tab
+ * stalled). The Incus exec stream cannot be paused through the agent tunnel, so
+ * past this cap the console is closed instead of buffering without bound.
+ */
+export const MAX_CONSOLE_BUFFERED_BYTES = 4 * 1024 * 1024;
+/** Close code sent when the browser fell too far behind the console output. */
+export const CONSOLE_CLOSE_BACKPRESSURE = 4413;
+const CLOSE_GRACE_MS = 1_000;
+
+/** Browser-facing text per error code; internal error messages never leave the backend. */
+const CONSOLE_ERROR_MESSAGES: Readonly<Record<string, string>> = {
+  CONSOLE_BRIDGE_FAILED: 'The console connection failed',
+  CONSOLE_SESSION_INVALID: 'Console session is invalid',
+  CONSOLE_SESSION_REVOKED: 'The session was revoked',
+  CONSOLE_FRAME_INVALID: 'Invalid console frame',
+  CONSOLE_OUTPUT_OVERFLOW: 'The console output was not read fast enough; reconnect to continue',
+};
+/**
  * Close code sent when the user's sessions were revoked (disabled, deleted,
  * role changed, password changed or reset) while the console was open.
  */
@@ -58,7 +76,8 @@ export class ConsoleBridgeGateway implements OnModuleInit, OnModuleDestroy {
     this.wss.on('connection', (socket, request) => {
       socket.on('error', (error) => this.logger.warn(`Console bridge error: ${error.message}`));
       void this.handle(socket, request).catch((error: unknown) => {
-        this.sendError(socket, 'CONSOLE_BRIDGE_FAILED', error);
+        this.logger.warn(`Console bridge failed: ${error instanceof Error ? error.message : String(error)}`);
+        this.sendError(socket, 'CONSOLE_BRIDGE_FAILED');
         socket.close(1011);
       });
     });
@@ -82,7 +101,7 @@ export class ConsoleBridgeGateway implements OnModuleInit, OnModuleDestroy {
     const user = await this.auth.validateAccessToken(auth);
     const session = await this.sessions.claim(sessionId, user.id, user.authVersion);
     if (!session) {
-      this.sendError(socket, 'CONSOLE_SESSION_INVALID', new Error('Console session is invalid'));
+      this.sendError(socket, 'CONSOLE_SESSION_INVALID');
       socket.close(1008);
       return;
     }
@@ -141,7 +160,7 @@ export class ConsoleBridgeGateway implements OnModuleInit, OnModuleDestroy {
   }
 
   private closeRevoked(socket: WebSocket): void {
-    this.sendError(socket, 'CONSOLE_SESSION_REVOKED', new Error('The session was revoked'));
+    this.sendError(socket, 'CONSOLE_SESSION_REVOKED');
     if (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING) {
       socket.close(CONSOLE_CLOSE_SESSION_REVOKED, 'session revoked');
     }
@@ -161,7 +180,7 @@ export class ConsoleBridgeGateway implements OnModuleInit, OnModuleDestroy {
           : typeof data === 'string'
             ? data
             : String(data);
-        browser.send(JSON.stringify({
+        this.sendBounded(browser, physical, JSON.stringify({
           type: 'data',
           data: text,
           stderr: fd === '2',
@@ -169,7 +188,7 @@ export class ConsoleBridgeGateway implements OnModuleInit, OnModuleDestroy {
       });
       socket.on('close', () => {
         if (browser.readyState === WebSocket.OPEN) {
-          browser.send(JSON.stringify({ type: 'eof', exitCode: null }));
+          this.sendBounded(browser, physical, JSON.stringify({ type: 'eof', exitCode: null }));
         }
       });
       socket.on('error', (error: unknown) => {
@@ -177,6 +196,29 @@ export class ConsoleBridgeGateway implements OnModuleInit, OnModuleDestroy {
         if (browser.readyState === WebSocket.OPEN) browser.close(1011);
       });
     }
+  }
+
+  /**
+   * Send console output unless the browser has fallen behind by more than the
+   * cap; then stop the exec stream and close the console with a clear code.
+   */
+  private sendBounded(
+    browser: WebSocket,
+    physical: IncusExecWebSocketSession,
+    encoded: string,
+  ): void {
+    if (browser.readyState !== WebSocket.OPEN) return;
+    if (browser.bufferedAmount + Buffer.byteLength(encoded) > MAX_CONSOLE_BUFFERED_BYTES) {
+      this.logger.warn(`Console closed for backpressure; bufferedAmount=${browser.bufferedAmount}`);
+      physical.close();
+      browser.close(CONSOLE_CLOSE_BACKPRESSURE, 'console output overflow');
+      // The close frame queues behind the unread output; do not wait on a stalled reader.
+      setTimeout(() => {
+        if (browser.readyState !== WebSocket.CLOSED) browser.terminate();
+      }, CLOSE_GRACE_MS).unref?.();
+      return;
+    }
+    browser.send(encoded);
   }
 
   private handleBrowserFrame(
@@ -188,7 +230,7 @@ export class ConsoleBridgeGateway implements OnModuleInit, OnModuleDestroy {
     try {
       message = JSON.parse(raw.toString());
     } catch {
-      this.sendError(browser, 'CONSOLE_FRAME_INVALID', new Error('Invalid console frame'));
+      this.sendError(browser, 'CONSOLE_FRAME_INVALID');
       return;
     }
     if (!message || typeof message !== 'object' || Array.isArray(message)) return;
@@ -240,12 +282,13 @@ export class ConsoleBridgeGateway implements OnModuleInit, OnModuleDestroy {
     return sessionId && /^[0-9a-f-]{36}$/i.test(sessionId) ? sessionId : null;
   }
 
-  private sendError(socket: WebSocket, code: string, error: unknown): void {
+  private sendError(socket: WebSocket, code: keyof typeof CONSOLE_ERROR_MESSAGES): void {
     if (socket.readyState !== WebSocket.OPEN) return;
+    if (socket.bufferedAmount > MAX_CONSOLE_BUFFERED_BYTES) return;
     socket.send(JSON.stringify({
       type: 'error',
       code,
-      message: error instanceof Error ? error.message : String(error),
+      message: CONSOLE_ERROR_MESSAGES[code] ?? 'Console error',
     }));
   }
 }

@@ -2,6 +2,7 @@ use crate::config::{MAX_REQUEST_BODY_BYTES, MAX_REQUEST_HEADER_BYTES};
 use anyhow::{anyhow, Context, Result};
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
+use std::net::IpAddr;
 use tokio::io::{AsyncRead, AsyncReadExt};
 
 pub(crate) async fn read_request_head<S: AsyncRead + Unpin>(inbound: &mut S) -> Result<Vec<u8>> {
@@ -32,18 +33,51 @@ pub(crate) fn find_header_end(bytes: &[u8]) -> Option<usize> {
         .map(|offset| offset + 4)
 }
 
+/// What the proxy itself knows about the client, written to the upstream in
+/// place of any client-supplied forwarding headers.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ClientContext {
+    pub(crate) peer_ip: IpAddr,
+    pub(crate) https: bool,
+}
+
 pub(crate) struct RequestPlan {
     pub(crate) host: String,
     pub(crate) header: Vec<u8>,
     pub(crate) mode: RequestMode,
+    /// The client sent `Expect: 100-continue` on an HTTP/1.1 request with a
+    /// body; the proxy answers `100 Continue` itself and strips the header.
+    pub(crate) expect_continue: bool,
 }
 
 pub(crate) enum RequestMode {
-    FixedBody { body_len: usize },
-    WebSocket { expected_accept: String },
+    FixedBody {
+        body_len: usize,
+    },
+    /// `Transfer-Encoding: chunked`: decoded strictly and re-chunked to the
+    /// upstream by `chunked::forward_chunked_body`.
+    ChunkedBody,
+    WebSocket {
+        expected_accept: String,
+    },
 }
 
-pub(crate) fn request_plan(header: &[u8]) -> Result<RequestPlan> {
+/// Request headers that describe the client hop. The proxy is the public
+/// edge, so whatever the client sent here is untrusted and is replaced.
+pub(crate) fn is_forwarding_header(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    name == "forwarded" || name == "x-real-ip" || name.starts_with("x-forwarded-")
+}
+
+pub(crate) fn forwarding_headers(client: &ClientContext, host_authority: &str) -> String {
+    let ip = client.peer_ip.to_canonical();
+    let proto = if client.https { "https" } else { "http" };
+    format!(
+        "X-Forwarded-For: {ip}\r\nX-Forwarded-Proto: {proto}\r\nX-Forwarded-Host: {host_authority}\r\nX-Real-IP: {ip}\r\n"
+    )
+}
+
+pub(crate) fn request_plan(header: &[u8], client: &ClientContext) -> Result<RequestPlan> {
     let text = std::str::from_utf8(header).context("request header is not UTF-8")?;
     let mut lines = text.split("\r\n");
     let request_line = lines
@@ -62,8 +96,11 @@ pub(crate) fn request_plan(header: &[u8]) -> Result<RequestPlan> {
         return Err(anyhow!("CONNECT tunneling is disabled"));
     }
     let mut content_length = None;
+    let mut transfer_encoding = None;
+    let mut expect = None;
     let mut host_count = 0;
     let mut host = None;
+    let mut host_authority = String::new();
     let mut connection = None;
     let mut upgrade = None;
     let mut websocket_key = None;
@@ -86,9 +123,25 @@ pub(crate) fn request_plan(header: &[u8]) -> Result<RequestPlan> {
         if name.eq_ignore_ascii_case("host") {
             host_count += 1;
             host = Some(normalize_host_authority(value)?);
+            host_authority = value.trim().to_string();
         }
-        if name.eq_ignore_ascii_case("transfer-encoding") || name.eq_ignore_ascii_case("expect") {
-            return Err(anyhow!("streaming request bodies are disabled"));
+        if name.eq_ignore_ascii_case("transfer-encoding") {
+            if transfer_encoding
+                .replace(value.trim().to_string())
+                .is_some()
+            {
+                return Err(anyhow!("duplicate Transfer-Encoding header"));
+            }
+            continue;
+        }
+        if name.eq_ignore_ascii_case("expect") {
+            if expect.replace(value.trim().to_string()).is_some() {
+                return Err(anyhow!("duplicate Expect header"));
+            }
+            continue;
+        }
+        if is_forwarding_header(name) {
+            continue;
         }
         if name.eq_ignore_ascii_case("content-length") {
             if content_length.is_some() {
@@ -161,6 +214,29 @@ pub(crate) fn request_plan(header: &[u8]) -> Result<RequestPlan> {
     if host_count != 1 {
         return Err(anyhow!("exactly one Host header is required"));
     }
+    let chunked = match transfer_encoding.as_deref() {
+        None => false,
+        // Only the plain `chunked` coding: a list ("gzip, chunked"), a
+        // repeated coding or anything else is ambiguous framing.
+        Some(value) if value.eq_ignore_ascii_case("chunked") => true,
+        Some(_) => return Err(anyhow!("only Transfer-Encoding: chunked is supported")),
+    };
+    if chunked && content_length.is_some() {
+        return Err(anyhow!(
+            "Transfer-Encoding and Content-Length must not both be present"
+        ));
+    }
+    if chunked && request_parts[2] != "HTTP/1.1" {
+        return Err(anyhow!("Transfer-Encoding requires HTTP/1.1"));
+    }
+    let expect_continue = match expect.as_deref() {
+        None => false,
+        Some(value) if value.eq_ignore_ascii_case("100-continue") => {
+            // HTTP/1.0 clients cannot expect an interim response.
+            request_parts[2] == "HTTP/1.1"
+        }
+        Some(_) => return Err(anyhow!("unsupported Expect header")),
+    };
     let connection_has_upgrade = match connection.as_deref() {
         Some(value) => header_has_token(value, "upgrade")?,
         None => false,
@@ -173,8 +249,11 @@ pub(crate) fn request_plan(header: &[u8]) -> Result<RequestPlan> {
         {
             return Err(anyhow!("WebSocket upgrade requires GET over HTTP/1.1"));
         }
-        if content_length.is_some() {
-            return Err(anyhow!("WebSocket upgrade must not include Content-Length"));
+        if content_length.is_some() || chunked {
+            return Err(anyhow!("WebSocket upgrade must not include a request body"));
+        }
+        if expect.is_some() {
+            return Err(anyhow!("WebSocket upgrade must not include Expect"));
         }
         if !connection_has_upgrade {
             return Err(anyhow!("WebSocket Connection token is missing"));
@@ -195,6 +274,7 @@ pub(crate) fn request_plan(header: &[u8]) -> Result<RequestPlan> {
         if decoded.len() != 16 {
             return Err(anyhow!("Sec-WebSocket-Key is invalid"));
         }
+        rewritten.push_str(&forwarding_headers(client, &host_authority));
         rewritten.push_str("Upgrade: websocket\r\nConnection: Upgrade\r\n\r\n");
         RequestMode::WebSocket {
             expected_accept: tokio_tungstenite::tungstenite::handshake::derive_accept_key(
@@ -202,15 +282,29 @@ pub(crate) fn request_plan(header: &[u8]) -> Result<RequestPlan> {
             ),
         }
     } else {
-        rewritten.push_str("Connection: close\r\n\r\n");
-        RequestMode::FixedBody {
-            body_len: content_length.unwrap_or(0),
+        rewritten.push_str(&forwarding_headers(client, &host_authority));
+        if chunked {
+            rewritten.push_str("Transfer-Encoding: chunked\r\n");
         }
+        rewritten.push_str("Connection: close\r\n\r\n");
+        if chunked {
+            RequestMode::ChunkedBody
+        } else {
+            RequestMode::FixedBody {
+                body_len: content_length.unwrap_or(0),
+            }
+        }
+    };
+    let has_body = match mode {
+        RequestMode::FixedBody { body_len } => body_len > 0,
+        RequestMode::ChunkedBody => true,
+        RequestMode::WebSocket { .. } => false,
     };
     Ok(RequestPlan {
         host: host.context("Host header is empty or invalid")?,
         header: rewritten.into_bytes(),
         mode,
+        expect_continue: expect_continue && has_body,
     })
 }
 

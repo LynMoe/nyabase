@@ -24,6 +24,7 @@ import { isoDate, numberValue } from '../platform/domain-utils.js';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
+import { lockIpPoolTopology } from '../platform/persistence-pg/advisory-locks.js';
 import { AuditService } from '../iam/audit.service.js';
 
 function stringArray(value: string[] | string | null | undefined): string[] {
@@ -105,6 +106,7 @@ export class IpPoolsService {
     }
     try {
       const row = await this.transactions.run(async (transaction) => {
+        await lockIpPoolTopology(transaction);
         await this.assertNoCidrOverlap(cidr, undefined, transaction);
         await this.assertServersExist(input.serverIds, transaction);
         const created = await this.repository.insert({
@@ -196,7 +198,24 @@ export class IpPoolsService {
                 details: { poolId: id, claimCount },
               });
             }
+            await lockIpPoolTopology(transaction);
             await this.assertNoCidrOverlap(nextCidr, id, transaction);
+          }
+          const currentReserved = new Set(stringArray(current.reserved_ips));
+          const newlyBlocked = [
+            ...(nextGateway !== current.gateway ? [nextGateway] : []),
+            ...nextReserved.filter((address) => !currentReserved.has(address)),
+          ];
+          if (newlyBlocked.length > 0) {
+            const claimed = new Set(await this.repository.listClaimAddresses(current.cidr, transaction));
+            const taken = newlyBlocked.filter((address) => claimed.has(address));
+            if (taken.length > 0) {
+              throw new ConflictException({
+                code: FailureCode.IpPoolInUse,
+                message: 'gateway and reservedIps cannot take addresses already claimed by containers',
+                details: { poolId: id, addresses: taken.slice(0, 16) },
+              });
+            }
           }
           if (
             input.allocationCidr !== undefined

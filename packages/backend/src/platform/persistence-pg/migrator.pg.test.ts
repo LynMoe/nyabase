@@ -1,3 +1,7 @@
+import { copyFile, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { Pool } from 'pg';
 import { describe, expect, it } from 'vitest';
 import { pgMigrationsDirectory } from './persistence-pg.module.js';
 import { runSqlMigrations } from './migrator.js';
@@ -61,6 +65,25 @@ describePg('PostgreSQL migration lock boundary', () => {
         pgMigrationsDirectory(),
         { lockTimeoutMs: 500, retryIntervalMs: 10 },
       )).resolves.toEqual([]);
+    });
+  });
+
+  it('lets an appended migration outlast the pool statement timeouts', async () => {
+    await withPostgresTestDatabase(async ({ connectionString }) => {
+      const directory = await mkdtemp(join(tmpdir(), 'nyabase-migrations-'));
+      // The production pool shape: request-sized server and client deadlines.
+      const tight = new Pool({ connectionString, max: 2, statement_timeout: 100, query_timeout: 100 });
+      try {
+        await copyFile(join(pgMigrationsDirectory(), '000001_initial.sql'), join(directory, '000001_initial.sql'));
+        await writeFile(join(directory, '000002_slow.sql'), 'SELECT pg_sleep(0.4);');
+        const applied = await runSqlMigrations(tight, directory);
+        expect(applied.map((migration) => migration.version)).toEqual(['000002']);
+        // The lifted limits were transaction-local.
+        await expect(tight.query('SELECT pg_sleep(0.4)')).rejects.toThrow();
+      } finally {
+        await tight.end();
+        await rm(directory, { recursive: true, force: true });
+      }
     });
   });
 });

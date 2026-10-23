@@ -30,6 +30,17 @@ export function dialBackendStream(url: string, credential: string, ca?: Buffer):
   });
 }
 
+export interface BridgeOptions {
+  /** The control session the stream belongs to; the bridge closes when it ends. */
+  readonly session?: AbortSignal;
+  /**
+   * Ping `right` (the Backend side) this often and drop the bridge when a
+   * ping goes unanswered, so a half-open link cannot keep an idle exec (and
+   * the shell behind it) alive forever.
+   */
+  readonly heartbeatMs?: number;
+}
+
 /**
  * Relay frames both ways, preserving text/binary, until either side closes.
  * `held` are frames `left` received before the bridge existed; they go first.
@@ -38,16 +49,39 @@ export function bridgeSockets(
   left: WebSocket,
   right: WebSocket,
   held: { readonly frames: ReadonlyArray<[RawData, boolean]>; readonly closed: boolean } = { frames: [], closed: false },
+  options: BridgeOptions = {},
 ): void {
   let closed = false;
-  const closeBoth = (code: number, reason: string): void => {
+  let alive = true;
+  const heartbeat = options.heartbeatMs
+    ? setInterval(() => {
+      if (!alive) {
+        // A half-open peer never completes a close handshake.
+        right.terminate();
+        closeBoth(1001, 'stream peer stopped answering');
+        return;
+      }
+      alive = false;
+      if (right.readyState === WebSocket.OPEN) right.ping();
+    }, options.heartbeatMs)
+    : undefined;
+  const endOfSession = (): void => closeBoth(1001, 'agent control connection closed');
+  function closeBoth(code: number, reason: string): void {
     if (closed) return;
     closed = true;
+    if (heartbeat) clearInterval(heartbeat);
+    options.session?.removeEventListener('abort', endOfSession);
     for (const socket of [left, right]) {
       if (socket.readyState === WebSocket.OPEN) socket.close(code, reason);
-      else socket.terminate();
+      else if (socket.readyState !== WebSocket.CLOSED) socket.terminate();
     }
+  }
+  const markAlive = (): void => {
+    alive = true;
   };
+  right.on('pong', markAlive);
+  right.on('ping', markAlive);
+  right.on('message', markAlive);
   const forward = (from: WebSocket, to: WebSocket): void => {
     from.on('message', (data, isBinary) => {
       if (to.readyState !== WebSocket.OPEN) return;
@@ -65,6 +99,8 @@ export function bridgeSockets(
   }
   forward(left, right);
   forward(right, left);
+  if (options.session?.aborted) endOfSession();
+  else options.session?.addEventListener('abort', endOfSession, { once: true });
   if (held.closed || left.readyState === WebSocket.CLOSED) closeBoth(1000, 'incus closed the stream');
 }
 

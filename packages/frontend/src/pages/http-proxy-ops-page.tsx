@@ -32,6 +32,7 @@ export default function HttpProxyOpsPage() {
   const canManagePools = canViewStatus;
   const [poolForm, setPoolForm] = useState<HttpDomainPoolDto | 'create' | null>(null);
   const [deletePool, setDeletePool] = useState<HttpDomainPoolDto | null>(null);
+  const [deleteBinding, setDeleteBinding] = useState<HttpProxyBindingDto | null>(null);
 
   const statusQuery = useQuery({
     queryKey: queryKeys.httpProxy.adminStatus,
@@ -62,6 +63,15 @@ export default function HttpProxyOpsPage() {
       toast({ title: '域名池已删除' });
       setDeletePool(null);
       void qc.invalidateQueries({ queryKey: queryKeys.httpProxy.adminDomainPools });
+    },
+    onError: (error) => toast({ title: '删除失败', description: httpProxyErrorMessage(error), variant: 'destructive' }),
+  });
+  const removeBinding = useMutation({
+    mutationFn: (id: string) => api.delete<unknown>(`/http-proxy/bindings/${id}?scope=all`),
+    onSuccess: () => {
+      toast({ title: '发布绑定已删除' });
+      setDeleteBinding(null);
+      void qc.invalidateQueries({ queryKey: queryKeys.httpProxy.adminBindings });
     },
     onError: (error) => toast({ title: '删除失败', description: httpProxyErrorMessage(error), variant: 'destructive' }),
   });
@@ -108,7 +118,7 @@ export default function HttpProxyOpsPage() {
                 onEdit={setPoolForm}
                 onDelete={setDeletePool}
               />
-              {Array.isArray(allBindings) ? <AllBindingsCard bindings={allBindings} /> : null}
+              {Array.isArray(allBindings) ? <AllBindingsCard bindings={allBindings} onDelete={setDeleteBinding} /> : null}
             </div>
           )}
         </QueryView>
@@ -130,6 +140,16 @@ export default function HttpProxyOpsPage() {
         pendingLabel="删除中..."
         pending={removePool.isPending}
         onConfirm={() => { if (deletePool) removePool.mutate(deletePool.id); }}
+      />
+      <ConfirmDialog
+        open={Boolean(deleteBinding)}
+        onOpenChange={(open) => { if (!open) setDeleteBinding(null); }}
+        title="删除发布绑定？"
+        description={`将删除用户「${deleteBinding?.ownerUsername}」的发布「${deleteBinding?.hostname}」。主机名会在排空后才可再次使用。`}
+        confirmLabel="确认删除"
+        pendingLabel="删除中..."
+        pending={removeBinding.isPending}
+        onConfirm={() => { if (deleteBinding) removeBinding.mutate(deleteBinding.id); }}
       />
     </Page>
   );

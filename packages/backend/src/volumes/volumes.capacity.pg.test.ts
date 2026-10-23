@@ -677,6 +677,7 @@ describePg('volume capacity locking and scope exclusions', () => {
         poolsRepository,
         transactionManager,
         new StoragePoolDiscoveryService(poolsRepository, transactionManager, {} as never),
+        { append: vi.fn().mockResolvedValue(undefined), log: vi.fn() } as never,
       );
 
       const results = await Promise.allSettled([
@@ -685,7 +686,7 @@ describePg('volume capacity locking and scope exclusions', () => {
           sizeBytes: 600,
           scope: { kind: 'shared', sharedBackendId: backendId },
         }),
-        storageService.patchExecutor(backendId, poolId, {
+        storageService.patchExecutor(userId, backendId, poolId, {
           expectedRevision: 1,
           registered: true,
         }),

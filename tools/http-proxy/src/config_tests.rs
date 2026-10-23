@@ -9,15 +9,20 @@ fn http_limits_and_status_interval_are_hard_bounded() {
         assert!(DEFAULT_MAX_CONNECTIONS == 4_096);
         assert!(DEFAULT_MAX_CONNECTIONS_PER_IP == 64);
         assert!(DEFAULT_MAX_CONNECTIONS <= MAX_CONNECTIONS_LIMIT);
-        assert!(DEFAULT_BODY_DEADLINE_MS < REQUEST_LIFETIME_DEADLINE.as_millis() as u64);
+        assert!(DEFAULT_BODY_DEADLINE_MS <= MAX_BODY_DEADLINE_MS);
+        assert!(DEFAULT_IDLE_TIMEOUT_MS >= MIN_IDLE_TIMEOUT_MS);
+        assert!(DEFAULT_IDLE_TIMEOUT_MS <= MAX_IDLE_TIMEOUT_MS);
+        // The pending pool must leave room for established connections.
+        assert!(DEFAULT_MAX_PENDING_CONNECTIONS < DEFAULT_MAX_CONNECTIONS);
+        assert!(DEFAULT_MAX_CONNECTIONS_PER_IPV6_48 <= MAX_CONNECTIONS_LIMIT);
         assert!(DEFAULT_CONTROL_HOLD_MS <= MAX_CONTROL_HOLD_MS);
     }
     assert!(validate_ms("NYABASE_HTTP_CONTROL_HOLD_MS", 0, 0, MAX_CONTROL_HOLD_MS).is_ok());
     let error = validate_ms(
         "NYABASE_HTTP_BODY_DEADLINE_MS",
-        REQUEST_LIFETIME_DEADLINE.as_millis() as u64 + 1,
+        MAX_BODY_DEADLINE_MS + 1,
         MIN_BODY_DEADLINE_MS,
-        REQUEST_LIFETIME_DEADLINE.as_millis() as u64,
+        MAX_BODY_DEADLINE_MS,
     )
     .unwrap_err();
     assert!(error.to_string().contains("NYABASE_HTTP_BODY_DEADLINE_MS"));

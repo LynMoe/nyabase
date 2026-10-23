@@ -25,6 +25,7 @@ export default function SshProxyPage() {
   const canManageSettings = canViewStatus;
   const [disconnectOpen, setDisconnectOpen] = useState(false);
   const [rotateOpen, setRotateOpen] = useState(false);
+  const [resetOpen, setResetOpen] = useState(false);
   const statusQuery = useQuery({
     queryKey: queryKeys.sshProxy.status,
     queryFn: () => api.get<SshProxyAdminStatus>('/admin/ssh-proxy/status'),
@@ -43,9 +44,10 @@ export default function SshProxyPage() {
   const { data, isFetching, refetch } = statusQuery;
   const { isFetching: hostKeyFetching, refetch: refetchHostKey } = hostKeyQuery;
 
-  const { disconnectAll, rotateHostKey } = useSshProxyMutations({
+  const { disconnectAll, rotateHostKey, resetHostAuthorities } = useSshProxyMutations({
     onDisconnected: () => setDisconnectOpen(false),
     onRotated: () => setRotateOpen(false),
+    onAuthoritiesReset: () => setResetOpen(false),
   });
 
   const status = data ?? emptyStatus;
@@ -94,6 +96,8 @@ export default function SshProxyPage() {
           rotating={rotateHostKey.isPending}
           onRefresh={() => refetchHostKey()}
           onRotate={() => setRotateOpen(true)}
+          resettingAuthorities={resetHostAuthorities.isPending}
+          onResetAuthorities={() => setResetOpen(true)}
         />
       )}
 
@@ -119,6 +123,18 @@ export default function SshProxyPage() {
           pendingLabel="确认轮换"
           pending={rotateHostKey.isPending}
           onConfirm={() => rotateHostKey.mutate()}
+        />
+      )}
+      {canManageSettings && (
+        <ConfirmDialog
+          open={resetOpen}
+          onOpenChange={setResetOpen}
+          title="重置所有容器主机证书 CA？"
+          description="只在 ssh.keyEncryptionSecret 丢失、容器证书无法再签发时使用。每个用户都会得到新的 CA，所有容器重新签发主机证书；用户需要到个人资料页重新复制 known_hosts 中的 @cert-authority 行。"
+          confirmLabel="确认重置"
+          pendingLabel="确认重置"
+          pending={resetHostAuthorities.isPending}
+          onConfirm={() => resetHostAuthorities.mutate()}
         />
       )}
     </Page>

@@ -38,6 +38,7 @@ describe('bounded SSH proxy snapshots', () => {
         fingerprint: 'fingerprint',
         generation: 1,
       },
+      hostSuffix: 'nya',
       users: [],
       servers: [{
         id,
@@ -76,6 +77,7 @@ describe('bounded SSH proxy snapshots', () => {
       validUntil: 120_000,
       endpoint: null,
       hostKey: { privateKey: 'key', publicKey: 'key', fingerprint: 'fingerprint', generation: 1 },
+      hostSuffix: 'nya',
       users: [],
       servers: [],
       images: [{ id: '😀'.repeat(32), sshEnabled: true }],
@@ -97,6 +99,7 @@ describe('bounded SSH proxy snapshots', () => {
         fingerprint: repeated('f', 128),
         generation: 1,
       },
+      hostSuffix: repeated('s', 200),
       users: Array.from({ length: MAX_PLATFORM_ACTIVE_USERS }, () => ({
         id,
         username: repeated('n', 64),

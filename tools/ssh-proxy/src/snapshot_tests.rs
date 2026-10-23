@@ -103,6 +103,67 @@ fn public_key_auth_matches_snapshot_user_keys_for_any_login() {
 }
 
 #[test]
+fn resolves_direct_tcpip_targets_by_container_name_within_the_owner() {
+    let snapshot = fixture_snapshot();
+    for target in ["solo", "SOLO", "solo.nya", "Solo.NYA.", "10.0.0.4"] {
+        let route = snapshot
+            .resolve_owned_route_for_user_target("user-a", target)
+            .unwrap_or_else(|reason| panic!("{target}: {reason}"));
+        assert_eq!(route.container_id, "container-c", "{target}");
+        assert_eq!(route.routed_ip, "10.0.0.4", "{target}");
+    }
+    // user-b owns another `solo`, never alice's.
+    let foreign = snapshot
+        .resolve_owned_route_for_user_target("user-b", "solo.nya")
+        .unwrap();
+    assert_eq!(foreign.container_id, "container-f");
+    assert_eq!(
+        snapshot
+            .resolve_owned_route_for_user_target("user-b", "10.0.0.4")
+            .unwrap_err(),
+        RejectReason::RouteNotFound,
+    );
+}
+
+#[test]
+fn rejects_ambiguous_inactive_and_malformed_name_targets() {
+    let snapshot = fixture_snapshot();
+    let resolve = |target: &str| {
+        snapshot
+            .resolve_owned_route_for_user_target("user-a", target)
+            .unwrap_err()
+    };
+    assert_eq!(resolve("work.nya"), RejectReason::AmbiguousContainer);
+    assert_eq!(resolve("sleeping.nya"), RejectReason::RouteNotFound);
+    assert_eq!(resolve("gpu"), RejectReason::RouteNotFound);
+    assert_eq!(resolve("missing.nya"), RejectReason::RouteNotFound);
+    for target in ["solo.other", "a.solo.nya", "-solo", "", ".nya", "so_lo"] {
+        assert_eq!(resolve(target), RejectReason::InvalidTarget, "{target:?}");
+    }
+}
+
+#[test]
+fn indexes_only_active_users_and_refuses_a_shared_key() {
+    let mut proxy = fixture_proxy_snapshot(7);
+    proxy.users[1].public_keys = vec![ALICE_KEY.to_string()];
+    let disabled_holder = RoutingSnapshot::from_snapshot(proxy.clone()).unwrap();
+    let alice = parse_authorized_key(ALICE_KEY).unwrap();
+    assert_eq!(
+        disabled_holder
+            .find_active_user_by_public_key(&alice)
+            .unwrap()
+            .id,
+        "user-a"
+    );
+    proxy.users[1].status = "active".to_string();
+    let shared = RoutingSnapshot::from_snapshot(proxy).unwrap();
+    assert_eq!(
+        shared.find_active_user_by_public_key(&alice).unwrap_err(),
+        RejectReason::AmbiguousUser,
+    );
+}
+
+#[test]
 fn rejects_inactive_routes_with_stopped_ssh_or_missing_instance() {
     let mut snapshot = fixture_snapshot();
     let route = snapshot

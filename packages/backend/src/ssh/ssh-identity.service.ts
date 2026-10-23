@@ -7,7 +7,7 @@ import type { Kysely, Transaction } from 'kysely';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
-import { SshKeyCryptoService } from './ssh-key-crypto.service.js';
+import { SshKeyCryptoService } from '../platform/ssh-key-crypto.service.js';
 import { SshKeygenService } from './ssh-keygen.service.js';
 
 export type SshIdentityTransaction = Transaction<NyabaseDatabase>;
@@ -44,11 +44,22 @@ export class SshIdentityService {
   async ensureProxyHostKey(
     authorize?: (transaction: SshIdentityTransaction) => Promise<void>,
   ): Promise<DecryptedSshProxyHostKey> {
+    return this.withPrivateKey(await this.ensureHostKeyRow(authorize));
+  }
+
+  /**
+   * The stored host key without decrypting it, so the summary and rotation
+   * keep working when ssh.keyEncryptionSecret no longer opens the old key:
+   * rotating is the recovery path after that secret was lost.
+   */
+  private async ensureHostKeyRow(
+    authorize?: (transaction: SshIdentityTransaction) => Promise<void>,
+  ): Promise<SshProxyHostKey> {
     const existing = await this.transactions.run(async (transaction) => {
       await authorize?.(transaction);
       return this.selectHostKey(transaction);
     });
-    if (existing) return this.withPrivateKey(existing);
+    if (existing) return existing;
 
     // ssh-keygen and encryption are deliberately outside the database
     // transaction. Concurrent initializers race only on the singleton insert.
@@ -78,20 +89,22 @@ export class SshIdentityService {
         'SSH proxy host key initialization lost its singleton race',
       );
     }
-    // Decrypt the persisted winner. A losing initializer must never return its
+    // Return the persisted winner. A losing initializer must never return its
     // discarded candidate private key.
-    return this.withPrivateKey(winner);
+    return winner;
   }
 
   async getProxyHostKeySummary(
     authorize?: (transaction: SshIdentityTransaction) => Promise<void>,
   ): Promise<{
+    publicKey: string;
     fingerprint: string;
     generation: number;
     rotatedAt: Date;
   }> {
-    const key = await this.ensureProxyHostKey(authorize);
+    const key = await this.ensureHostKeyRow(authorize);
     return {
+      publicKey: key.publicKey,
       fingerprint: key.fingerprint,
       generation: key.generation,
       rotatedAt: key.rotatedAt,
@@ -105,7 +118,7 @@ export class SshIdentityService {
       key: SshProxyHostKey,
     ) => Promise<void>,
   ): Promise<DecryptedSshProxyHostKey> {
-    const existing = await this.ensureProxyHostKey(authorize);
+    const existing = await this.ensureHostKeyRow(authorize);
     const generated = await this.keygen.generateEd25519(
       `nyabase-ssh-proxy-host:${existing.generation + 1}`,
     );

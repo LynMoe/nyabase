@@ -9,6 +9,11 @@ export interface AgentPresenceListener {
   disconnected(serverId: string): void | Promise<void>;
 }
 
+/** An authenticated control socket whose agent has not finished hello yet. */
+export interface PendingControlSocket {
+  close(code: number, reason: string): void;
+}
+
 /** Close codes the Backend sends on agent control sockets. */
 export const AGENT_CLOSE_CREDENTIAL_REJECTED = 4401;
 export const AGENT_CLOSE_REPLACED = 4409;
@@ -22,6 +27,7 @@ export const AGENT_CLOSE_REPLACED = 4409;
 export class AgentRegistry {
   private readonly logger = new Logger(AgentRegistry.name);
   private readonly connections = new Map<string, AgentConnection>();
+  private readonly pending = new Map<string, Set<PendingControlSocket>>();
   private readonly listeners = new Set<AgentPresenceListener>();
   readonly streams = new AgentStreamBroker();
 
@@ -41,8 +47,32 @@ export class AgentRegistry {
     this.notify((listener) => listener.disconnected(connection.serverId));
   }
 
-  /** Drop the server's agent, e.g. after its credential was replaced or the server deleted. */
+  /**
+   * Track a control socket between upgrade and registration so `disconnect`
+   * reaches it too; the returned function stops tracking it.
+   */
+  trackPending(serverId: string, socket: PendingControlSocket): () => void {
+    let sockets = this.pending.get(serverId);
+    if (!sockets) {
+      sockets = new Set();
+      this.pending.set(serverId, sockets);
+    }
+    sockets.add(socket);
+    return () => {
+      const current = this.pending.get(serverId);
+      if (!current?.delete(socket)) return;
+      if (current.size === 0) this.pending.delete(serverId);
+    };
+  }
+
+  /**
+   * Drop the server's agent, e.g. after its credential was replaced or the
+   * server deleted, including sockets still on their way to registering.
+   */
   disconnect(serverId: string, code = AGENT_CLOSE_CREDENTIAL_REJECTED, reason = 'credential revoked'): void {
+    const pending = this.pending.get(serverId);
+    this.pending.delete(serverId);
+    for (const socket of pending ?? []) socket.close(code, reason);
     const connection = this.connections.get(serverId);
     if (!connection) return;
     connection.close(code, reason);

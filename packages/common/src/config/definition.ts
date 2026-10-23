@@ -21,6 +21,8 @@ export interface ConfigFieldDefinition<T = unknown> {
   sourceOrder: ConfigSourceOrder;
   secret: boolean;
   editable: boolean;
+  /** Only admins may change it online (operators see it read-only). */
+  adminOnly?: boolean;
   restartRequired: boolean;
   public: boolean;
   label: string;
@@ -61,9 +63,18 @@ const trustedProxies = z.string().trim().refine(
   'Expected comma-separated IP addresses, CIDRs, or loopback/linklocal/uniquelocal',
 );
 const port = z.coerce.number().int().min(1).max(65_535);
+/** One or more lower-case DNS labels, not an IPv4 address or a single number. */
+const sshHostSuffix = z.string().trim().toLowerCase().max(200)
+  .regex(/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)*[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/)
+  .refine((value) => !/^[0-9.]+$/.test(value), 'The suffix must not look like an address');
 const positiveInt = z.coerce.number().int().positive();
 const positiveDays = z.coerce.number().int().positive();
 const nonNegativeInt = z.coerce.number().int().nonnegative();
+/** 0 disables the limit; otherwise at least `minimum`, so one edit cannot wipe the audit log. */
+const disabledOrAtLeast = (minimum: number) => nonNegativeInt.refine(
+  (value) => value === 0 || value >= minimum,
+  `Expected 0 (disabled) or at least ${minimum}`,
+);
 const postgresUrl = z.string().trim().refine(
   (value) => /^postgres(?:ql)?:\/\/[^/\s]+\/[^?\s]+(?:\?.*)?$/.test(value),
   'Expected a PostgreSQL connection URL',
@@ -125,7 +136,8 @@ export const controlPlaneConfigDefinitions = [
     key: 'server.listenAddress',
     yamlPath: 'server.listenAddress',
     env: 'LISTEN_ADDRESS',
-    defaultValue: '',
+    // Fail closed: the Backend speaks plain HTTP and belongs behind a TLS edge on the same host.
+    defaultValue: '127.0.0.1',
     schema: optionalString,
     valueKind: 'string',
     secret: false,
@@ -133,7 +145,7 @@ export const controlPlaneConfigDefinitions = [
     restartRequired: true,
     public: false,
     label: 'HTTP listen address',
-    description: 'Address the backend binds. Empty listens on all interfaces. Lab should use 127.0.0.1 so the panel is only the edge proxy.',
+    description: 'Address the backend binds (default 127.0.0.1, behind the TLS edge). Use 0.0.0.0 to listen on all interfaces, as the Compose container does.',
   }),
   field({
     key: 'server.corsOrigin',
@@ -537,28 +549,30 @@ export const controlPlaneConfigDefinitions = [
     yamlPath: 'audit.retentionDays',
     env: 'AUDIT_RETENTION_DAYS',
     defaultValue: 180,
-    schema: nonNegativeInt,
+    schema: disabledOrAtLeast(30),
     valueKind: 'number',
     secret: false,
     editable: true,
+    adminOnly: true,
     restartRequired: false,
     public: false,
     label: 'Audit retention days',
-    description: 'Number of days to keep audit logs. Set to 0 to disable age-based cleanup.',
+    description: 'Number of days to keep audit logs (at least 30). Set to 0 to disable age-based cleanup. Admin only.',
   }),
   field({
     key: 'audit.retentionMaxEntries',
     yamlPath: 'audit.retentionMaxEntries',
     env: 'AUDIT_RETENTION_MAX_ENTRIES',
     defaultValue: 100_000,
-    schema: nonNegativeInt,
+    schema: disabledOrAtLeast(10_000),
     valueKind: 'number',
     secret: false,
     editable: true,
+    adminOnly: true,
     restartRequired: false,
     public: false,
     label: 'Audit max entries',
-    description: 'Maximum number of audit logs to keep. Set to 0 to disable count-based cleanup.',
+    description: 'Maximum number of audit logs to keep (at least 10000). Set to 0 to disable count-based cleanup. Admin only.',
   }),
   field({
     key: 'metrics.victoriaMetricsUrl',
@@ -659,6 +673,21 @@ export const controlPlaneConfigDefinitions = [
     description: 'Port users should use when connecting through the SSH proxy.',
   }),
   field({
+    key: 'ssh.proxyHostSuffix',
+    yamlPath: 'ssh.proxyHostSuffix',
+    env: 'SSH_PROXY_HOST_SUFFIX',
+    defaultValue: 'nya',
+    schema: sshHostSuffix,
+    valueKind: 'string',
+    secret: false,
+    editable: true,
+    restartRequired: false,
+    public: true,
+    label: 'SSH container host suffix',
+    description:
+      'Containers are reached as <name>.<suffix> through the SSH proxy and carry host certificates for that name. Changing it breaks the ssh_config and known_hosts lines users already copied.',
+  }),
+  field({
     key: 'ssh.proxySnapshotStaleMs',
     yamlPath: 'ssh.proxySnapshotStaleMs',
     env: 'SSH_PROXY_SNAPSHOT_STALE_MS',
@@ -687,6 +716,7 @@ export const controlPlaneConfigManifest = controlPlaneConfigDefinitions.map((def
   sourceOrder: [...definition.sourceOrder],
   secret: definition.secret,
   editable: definition.editable,
+  adminOnly: definition.adminOnly === true,
   restartRequired: definition.restartRequired,
   public: definition.public,
   label: definition.label,

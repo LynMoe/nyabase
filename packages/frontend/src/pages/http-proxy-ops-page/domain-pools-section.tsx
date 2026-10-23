@@ -110,7 +110,10 @@ export function DomainPoolsCard({
   );
 }
 
-export function AllBindingsCard({ bindings }: { bindings: HttpProxyBindingDto[] }) {
+export function AllBindingsCard({ bindings, onDelete }: {
+  bindings: HttpProxyBindingDto[];
+  onDelete: (binding: HttpProxyBindingDto) => void;
+}) {
   return (
     <SectionCard title="全部发布绑定" flush={bindings.length > 0}>
       {bindings.length === 0 ? (
@@ -125,6 +128,7 @@ export function AllBindingsCard({ bindings }: { bindings: HttpProxyBindingDto[] 
               <TableHead>端口</TableHead>
               <TableHead>HTTPS</TableHead>
               <TableHead>状态</TableHead>
+              <TableHead className="w-12" />
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -142,6 +146,11 @@ export function AllBindingsCard({ bindings }: { bindings: HttpProxyBindingDto[] 
                   {binding.warningReasons.length > 0 && (
                     <p className="mt-1 text-xs text-destructive">{httpProxyWarningLabel(binding.warningReasons)}</p>
                   )}
+                </TableCell>
+                <TableCell>
+                  <Button variant="ghost" size="icon" className="h-8 w-8 text-muted-foreground" aria-label="删除发布绑定" onClick={() => onDelete(binding)}>
+                    <Trash2 className="h-4 w-4" />
+                  </Button>
                 </TableCell>
               </TableRow>
             ))}

@@ -1,8 +1,10 @@
+use crate::chunked::forward_chunked_body;
+use crate::config::MAX_REQUEST_BODY_BYTES;
 use crate::config::{
     MAX_UPSTREAM_UPGRADE_HEADER_BYTES, UPSTREAM_CONNECT_DEADLINE, UPSTREAM_UPGRADE_HEADER_DEADLINE,
 };
 use crate::listener::reject;
-use crate::relay::relay_with_idle_timeout;
+use crate::relay::{client_abort, copy_with_idle_timeout, relay_with_idle_timeout};
 use crate::request::{
     find_header_end, header_has_token, initial_body_bytes_allowed, invalid_header_value,
     is_http_token, RequestMode, RequestPlan,
@@ -29,10 +31,22 @@ pub(crate) async fn proxy_request<S: AsyncRead + AsyncWrite + Unpin>(
                 inbound,
                 runtime,
                 route,
-                received,
-                header_end,
-                plan.header,
-                body_len,
+                &received[header_end..],
+                &plan.header,
+                RequestBody::Fixed(body_len),
+                plan.expect_continue,
+            )
+            .await
+        }
+        RequestMode::ChunkedBody => {
+            proxy_single_request(
+                inbound,
+                runtime,
+                route,
+                &received[header_end..],
+                &plan.header,
+                RequestBody::Chunked,
+                plan.expect_continue,
             )
             .await
         }
@@ -56,34 +70,54 @@ pub(crate) async fn proxy_request<S: AsyncRead + AsyncWrite + Unpin>(
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum RequestBody {
+    Fixed(usize),
+    Chunked,
+}
+
 pub(crate) async fn proxy_single_request<S: AsyncRead + AsyncWrite + Unpin>(
     inbound: &mut S,
     runtime: &Runtime,
     route: &Route,
-    received: Vec<u8>,
-    header_end: usize,
-    header: Vec<u8>,
-    body_len: usize,
+    initial_body: &[u8],
+    header: &[u8],
+    body: RequestBody,
+    expect_continue: bool,
 ) -> Result<()> {
-    let initial_body = &received[header_end..];
-    if !initial_body_bytes_allowed(body_len, initial_body.len()) {
-        reject(inbound, runtime, "400 Bad Request").await?;
-        return Err(anyhow!(
-            "pipelined or cross-host follow-up request is forbidden"
-        ));
+    if let RequestBody::Fixed(body_len) = body {
+        if !initial_body_bytes_allowed(body_len, initial_body.len()) {
+            reject(inbound, runtime, "400 Bad Request").await?;
+            return Err(anyhow!(
+                "pipelined or cross-host follow-up request is forbidden"
+            ));
+        }
     }
 
     let mut upstream = connect_upstream(inbound, runtime, route).await?;
+    if expect_continue {
+        // The upstream never sees `Expect`, so the proxy grants it here,
+        // once the route is authorized and the upstream is reachable.
+        inbound.write_all(b"HTTP/1.1 100 Continue\r\n\r\n").await?;
+        inbound.flush().await?;
+    }
     // The body is streamed, not buffered, so a connection costs bounded
     // memory; the whole-body budget stops a slow drip from holding the
-    // connection and its upstream socket for the full request lifetime.
+    // connection and its upstream socket indefinitely.
     match time::timeout(
         runtime.limits.body_deadline,
-        forward_request(inbound, &mut upstream, &header, initial_body, body_len),
+        forward_request(inbound, &mut upstream, header, initial_body, body),
     )
     .await
     {
-        Ok(result) => result?,
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            if matches!(body, RequestBody::Chunked) && error.downcast_ref::<io::Error>().is_none() {
+                // Invalid chunked framing (not a socket error) gets an answer.
+                let _ = reject(inbound, runtime, "400 Bad Request").await;
+            }
+            return Err(error);
+        }
         Err(_) => {
             reject(inbound, runtime, "408 Request Timeout").await?;
             return Err(anyhow!("request body deadline exceeded"));
@@ -92,9 +126,15 @@ pub(crate) async fn proxy_single_request<S: AsyncRead + AsyncWrite + Unpin>(
     // Never half-close the upstream here: Node's HTTP server (and others with
     // `allowHalfOpen` off) treats the FIN as an aborted request and drops the
     // response. The request carries `Connection: close`, so the upstream
-    // closes once it has answered.
-    io::copy(&mut upstream, inbound).await?;
-    inbound.shutdown().await?;
+    // closes once it has answered. The response is often close-delimited, so
+    // any failure from here on must reset the client, not close it cleanly.
+    copy_with_idle_timeout(&mut upstream, inbound, runtime.limits.idle)
+        .await
+        .map_err(|error| client_abort(format!("response relay failed: {error}")))?;
+    inbound
+        .shutdown()
+        .await
+        .map_err(|error| client_abort(format!("response shutdown failed: {error}")))?;
     Ok(())
 }
 
@@ -103,13 +143,20 @@ async fn forward_request<S, U>(
     upstream: &mut U,
     header: &[u8],
     initial_body: &[u8],
-    body_len: usize,
+    body: RequestBody,
 ) -> Result<()>
 where
     S: AsyncRead + Unpin,
     U: AsyncWrite + Unpin,
 {
     upstream.write_all(header).await?;
+    let body_len = match body {
+        RequestBody::Fixed(body_len) => body_len,
+        RequestBody::Chunked => {
+            return forward_chunked_body(inbound, upstream, initial_body, MAX_REQUEST_BODY_BYTES)
+                .await;
+        }
+    };
     upstream.write_all(initial_body).await?;
     let remaining = (body_len - initial_body.len()) as u64;
     if remaining > 0 {

@@ -14,9 +14,11 @@ interface DisconnectAllResult {
 export function useSshProxyMutations({
   onDisconnected,
   onRotated,
+  onAuthoritiesReset,
 }: {
   onDisconnected: () => void;
   onRotated: () => void;
+  onAuthoritiesReset: () => void;
 }) {
   const qc = useQueryClient();
   const disconnectAll = useMutation({
@@ -51,5 +53,21 @@ export function useSshProxyMutations({
     }),
   });
 
-  return { disconnectAll, rotateHostKey };
+  const resetHostAuthorities = useMutation({
+    mutationFn: () => api.post<{ reset: number }>('/admin/ssh-proxy/host-authorities/reset'),
+    onSuccess: (result) => {
+      onAuthoritiesReset();
+      toast({
+        title: '容器证书 CA 已重置',
+        description: `重置了 ${result.reset} 个用户的 CA，所有容器正在后台重新签发证书。`,
+      });
+    },
+    onError: (error) => toast({
+      title: '重置失败',
+      description: errorMessage(error),
+      variant: 'destructive',
+    }),
+  });
+
+  return { disconnectAll, rotateHostKey, resetHostAuthorities };
 }

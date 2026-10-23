@@ -87,6 +87,10 @@ pub(crate) struct ProxySnapshot {
     pub(crate) stale_after_ms: u64,
     pub(crate) valid_until: u64,
     pub(crate) host_key: ProxyHostKey,
+    /// Absent from an older Backend: then only bare names resolve, instead of
+    /// the whole snapshot (and every session) being refused.
+    #[serde(default)]
+    pub(crate) host_suffix: String,
     pub(crate) users: Vec<ProxyUser>,
     pub(crate) servers: Vec<ProxyServer>,
     pub(crate) images: Vec<ProxyImage>,

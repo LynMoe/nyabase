@@ -8,6 +8,7 @@ use std::time::Instant;
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 
+mod chunked;
 mod config;
 mod control;
 mod listener;
@@ -53,8 +54,7 @@ async fn main() -> Result<()> {
     });
     let (status_tx, status_rx) = mpsc::channel(32);
     // HTTP and HTTPS listeners share one pool so the caps are per process.
-    let connection_slots =
-        ConnectionLimiter::new(config.max_connections, config.max_connections_per_ip);
+    let connection_slots = ConnectionLimiter::new(config.connection_limits());
     let mut tasks = JoinSet::new();
 
     spawn_supervised(

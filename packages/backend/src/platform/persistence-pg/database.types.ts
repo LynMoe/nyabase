@@ -81,6 +81,13 @@ export interface IamSshPublicKeyTable {
   created_at: GeneratedTimestamp;
 }
 
+export interface InteractionSshHostAuthorityTable {
+  user_id: string;
+  encrypted_private_key: string;
+  public_key: string;
+  created_at: GeneratedTimestamp;
+}
+
 export interface InteractionSshProxyHostKeyTable {
   id: 'singleton';
   encrypted_private_key: string;
@@ -106,4 +113,5 @@ export interface NyabaseDatabase
   'iam.api_tokens': IamApiTokenTable;
   'iam.ssh_public_keys': IamSshPublicKeyTable;
   'interaction.ssh_proxy_host_keys': InteractionSshProxyHostKeyTable;
+  'interaction.ssh_host_authorities': InteractionSshHostAuthorityTable;
 }

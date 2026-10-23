@@ -210,7 +210,8 @@ export class ContainerControlService {
         });
       }
       if (access === 'admin') await this.assertAdminInTransaction(transaction, actor);
-      const enabled = await this.gpuClaims.isEnabled(current.server_id, transaction);
+      // Share-locks the server row: a concurrent GPU disable waits for this write.
+      const enabled = await this.gpuClaims.lockEnabled(current.server_id, transaction);
       if (!enabled) {
         throw new ConflictException({
           code: FailureCode.GpuNotEnabled,
@@ -356,7 +357,15 @@ export class ContainerControlService {
       const current = await this.repository.lock(containerId, transaction);
       if (!current) throw new NotFoundException('Container not found');
       const access = assertCanAccess(actor, current, scope);
-      const grant = await this.enforceInTransaction(transaction, actor, current, access);
+      // Stopping or deleting only shrinks what the owner uses, so it needs no
+      // current coverage: an owner in the grace period can still do both.
+      const grant = await this.enforceInTransaction(
+        transaction,
+        actor,
+        current,
+        access,
+        action === 'stop' || action === 'delete' ? 'optional' : 'required',
+      );
       // A restart of a container whose stop is not yet observed also flips the
       // intent back to running, so it is admitted exactly like a start.
       if (grant && (action === 'start' || action === 'restart')
@@ -538,18 +547,23 @@ export class ContainerControlService {
   }
 
   /**
-   * Owners must still hold a live server grant, administrators must still hold
-   * the role; the system needs neither. Returns the owner's grant.
+   * Owners must still hold a live server grant (unless `coverage` is
+   * `optional`, for actions that never grow usage), administrators must still
+   * hold the role; the system needs neither. Returns the owner's grant.
    */
   private async enforceInTransaction(
     transaction: Transaction<NyabaseDatabase>,
     actor: Actor,
     container: { server_id: string },
     level: ContainerAccess,
+    coverage: 'required' | 'optional' = 'required',
   ): Promise<ServerAccess | null> {
     if (level === 'admin') await this.assertAdminInTransaction(transaction, actor);
-    if (level === 'owner') return this.requireLiveGrant(transaction, actor, container);
-    return null;
+    if (level !== 'owner') return null;
+    if (coverage === 'optional') {
+      return resolveServerAccess(transaction, requireUserId(actor), container.server_id);
+    }
+    return this.requireLiveGrant(transaction, actor, container);
   }
 
   /**

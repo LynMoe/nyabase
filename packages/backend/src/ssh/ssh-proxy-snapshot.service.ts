@@ -12,6 +12,7 @@ import {
   type SshProxyEndpoint,
   type SshProxyInstanceRouteSnapshot,
   type SshProxySnapshot,
+  type SshProxySnapshotSummaryDto,
 } from '@nyabase/common';
 import {
   ContainerControlRepository,
@@ -31,9 +32,27 @@ function normalizeRouteRuntimeStatus(value: string | null | undefined): Containe
   return ContainerStatus.Unknown;
 }
 
+function groupKeysByUser(rows: readonly { user_id: string; key_text: string }[]): Map<string, string[]> {
+  const byUser = new Map<string, string[]>();
+  for (const row of rows) byUser.set(row.user_id, [...(byUser.get(row.user_id) ?? []), row.key_text]);
+  return byUser;
+}
+
+const EMPTY_SUMMARY: SshProxySnapshotSummaryDto = {
+  generation: 0,
+  builtAt: null,
+  bytes: 0,
+  maxBytes: MAX_SSH_PROXY_SNAPSHOT_BYTES,
+  users: 0,
+  routes: 0,
+  failedAt: null,
+  error: null,
+};
+
 @Injectable()
 export class SshProxySnapshotService {
   private generation = 0;
+  private summary: SshProxySnapshotSummaryDto | null = null;
 
   constructor(
     private readonly transactions: PgTransactionManager,
@@ -42,7 +61,25 @@ export class SshProxySnapshotService {
     private readonly config: NyabaseConfigService,
   ) {}
 
+  /** The last build's size and counts, or why it failed, for the admin status page. */
+  lastSummary(): SshProxySnapshotSummaryDto | null {
+    return this.summary;
+  }
+
   async buildSnapshot(): Promise<SshProxySnapshot> {
+    try {
+      return await this.build();
+    } catch (error) {
+      this.summary = {
+        ...(this.summary ?? EMPTY_SUMMARY),
+        failedAt: new Date().toISOString(),
+        error: error instanceof Error ? error.message : String(error),
+      };
+      throw error;
+    }
+  }
+
+  private async build(): Promise<SshProxySnapshot> {
     const hostKey = await this.identities.ensureProxyHostKey();
     return this.transactions.run(async (transaction) => {
       const clock = await sql<{ now: Date }>`
@@ -72,29 +109,20 @@ export class SshProxySnapshotService {
           this.containers.listRoutes({}, transaction),
           loadServerAccessKeys(transaction),
         ]);
-      const publicKeysByUser = new Map<string, string[]>();
-      for (const key of publicKeys) {
-        const list = publicKeysByUser.get(key.user_id) ?? [];
-        list.push(key.key_text);
-        publicKeysByUser.set(key.user_id, list);
-      }
+      const publicKeysByUser = groupKeysByUser(publicKeys);
       const serverById = new Map(servers.map((server) => [server.id, server]));
       const imageIds = new Set(images.map((image) => image.id));
-      const claims = await this.containers.activeNetworkClaims(
-        {
-          addresses: routes
-            .map((route) => route.routedIp)
-            .filter((ip): ip is string => Boolean(ip)),
-        },
-        transaction,
-      );
+      const claims = await this.containers.activeNetworkClaims({
+        addresses: routes.map((route) => route.routedIp).filter((ip): ip is string => Boolean(ip)),
+      }, transaction);
       const claimByAddress = new Map(claims.map((claim) => [claim.address, claim]));
       const staleAfterMs = this.config.get<number>('ssh.proxySnapshotStaleMs');
-      const visibleContainers = containers.filter((container) =>
-        container.instance_name
-        && access.has(`${container.owner_id}\0${container.server_id}`));
+      const visibleContainers = new Map(containers
+        .filter((container) => container.instance_name
+          && access.has(`${container.owner_id}\0${container.server_id}`))
+        .map((container) => [container.id, container]));
       const safeRoutes = routes.filter((route) => {
-        const container = visibleContainers.find((row) => row.id === route.containerId);
+        const container = visibleContainers.get(route.containerId);
         const server = container ? serverById.get(container.server_id) : undefined;
         const claim = route.routedIp ? claimByAddress.get(route.routedIp) : undefined;
         const age = now.getTime() - route.observedAt.getTime();
@@ -117,16 +145,22 @@ export class SshProxySnapshotService {
           // the proxy snapshot lease window (routes refresh on reconciler notify).
           && age >= -PROXY_SNAPSHOT_MAX_CLOCK_SKEW_MS
         );
-      }).map((route) => this.routeSnapshot(
-        route,
-        normalizeRouteRuntimeStatus(route.runtimeStatus),
-      ));
-      const userRows: SshProxySnapshot['users'] = users.map((user) => ({
-        id: user.id,
-        username: user.username,
-        status: user.status as UserStatus,
-        publicKeys: publicKeysByUser.get(user.id) ?? [],
-      }));
+      });
+      // Only what a routable login can use: the proxy refuses every other key
+      // and target anyway, and leaving the rest out keeps the snapshot far from
+      // its size cap as users and stopped containers accumulate.
+      const routedContainers = safeRoutes.map((route) => visibleContainers.get(route.containerId)!);
+      const routedOwners = new Set(routedContainers.map((container) => container.owner_id));
+      const routedServers = new Set(routedContainers.map((container) => container.server_id));
+      const routedImages = new Set(routedContainers.map((container) => container.image_id));
+      const userRows: SshProxySnapshot['users'] = users
+        .filter((user) => routedOwners.has(user.id))
+        .map((user) => ({
+          id: user.id,
+          username: user.username,
+          status: user.status as UserStatus,
+          publicKeys: publicKeysByUser.get(user.id) ?? [],
+        }));
       const nextGeneration = this.generation + 1;
       const snapshot = zSshProxySnapshot.parse({
         generation: nextGeneration,
@@ -140,25 +174,29 @@ export class SshProxySnapshotService {
           fingerprint: hostKey.fingerprint,
           generation: hostKey.generation,
         },
+        hostSuffix: this.hostSuffix(),
         users: userRows,
-        servers: servers.map((server) => ({
+        servers: servers.filter((server) => routedServers.has(server.id)).map((server) => ({
           id: server.id,
           slug: server.slug,
           name: server.name,
           status: server.status as ServerStatus,
         })),
-        images: images.map((image) => ({ id: image.id, sshEnabled: true })),
-        containers: visibleContainers.flatMap((container) => container.instance_name
-          ? [{
-              id: container.id,
-              ownerId: container.owner_id,
-              serverId: container.server_id,
-              imageId: container.image_id,
-              name: container.name,
-              instanceName: container.instance_name,
-            }]
-          : []),
-        routes: safeRoutes,
+        images: images
+          .filter((image) => routedImages.has(image.id))
+          .map((image) => ({ id: image.id, sshEnabled: true })),
+        containers: routedContainers.map((container) => ({
+          id: container.id,
+          ownerId: container.owner_id,
+          serverId: container.server_id,
+          imageId: container.image_id,
+          name: container.name,
+          instanceName: container.instance_name!,
+        })),
+        routes: safeRoutes.map((route) => this.routeSnapshot(
+          route,
+          normalizeRouteRuntimeStatus(route.runtimeStatus),
+        )),
       });
       const encodedBytes = Buffer.byteLength(JSON.stringify({
         ts: Number.MAX_SAFE_INTEGER,
@@ -166,11 +204,28 @@ export class SshProxySnapshotService {
         payload: snapshot,
       }));
       if (encodedBytes > MAX_SSH_PROXY_SNAPSHOT_BYTES) {
-        throw new Error(`SSH proxy snapshot exceeds ${MAX_SSH_PROXY_SNAPSHOT_BYTES} bytes`);
+        throw new Error(
+          `SSH proxy snapshot is ${encodedBytes} bytes, over the ${MAX_SSH_PROXY_SNAPSHOT_BYTES} byte limit`,
+        );
       }
       this.generation = nextGeneration;
+      this.summary = {
+        generation: nextGeneration,
+        builtAt: now.toISOString(),
+        bytes: encodedBytes,
+        maxBytes: MAX_SSH_PROXY_SNAPSHOT_BYTES,
+        users: snapshot.users.length,
+        routes: snapshot.routes.length,
+        failedAt: null,
+        error: null,
+      };
       return snapshot;
     }, { isolationLevel: 'repeatable read' });
+  }
+
+  /** The DNS suffix of container hostnames (`work.<suffix>`), lower-cased. */
+  hostSuffix(): string {
+    return this.config.get<string>('ssh.proxyHostSuffix').trim().toLowerCase();
   }
 
   endpoint(): SshProxyEndpoint | null {

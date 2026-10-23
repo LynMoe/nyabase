@@ -2,7 +2,12 @@ import { EventEmitter } from 'node:events';
 import { randomUUID } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
 import { SessionRevocationService } from '../iam/session-revocation.service.js';
-import { CONSOLE_CLOSE_SESSION_REVOKED, ConsoleBridgeGateway } from './console-bridge.gateway.js';
+import {
+  CONSOLE_CLOSE_BACKPRESSURE,
+  CONSOLE_CLOSE_SESSION_REVOKED,
+  ConsoleBridgeGateway,
+  MAX_CONSOLE_BUFFERED_BYTES,
+} from './console-bridge.gateway.js';
 import { EphemeralStore } from '../platform/ephemeral-store.js';
 import { ConsoleSessionService, type ConsoleSession } from './console-session.service.js';
 
@@ -11,6 +16,8 @@ const CLOSED = 3;
 
 class FakeSocket extends EventEmitter {
   readyState = OPEN;
+  bufferedAmount = 0;
+  readonly terminate = vi.fn();
   readonly send = vi.fn();
   readonly close = vi.fn((_code?: number) => {
     if (this.readyState === CLOSED) return;
@@ -21,7 +28,10 @@ class FakeSocket extends EventEmitter {
 
 function harness() {
   const revocations = new SessionRevocationService();
-  const physical = { sockets: {}, close: vi.fn() };
+  const physical: { sockets: Record<string, EventEmitter>; close: ReturnType<typeof vi.fn> } = {
+    sockets: {},
+    close: vi.fn(),
+  };
   const users = new Map<string, { id: string; authVersion: number }>();
   const sessions = {
     claim: vi.fn(async (sessionId: string, actorId: string): Promise<ConsoleSession> => ({
@@ -111,6 +121,43 @@ describe('console bridge session revocation', () => {
     expect(alice.socket.close).not.toHaveBeenCalled();
     alice.socket.close(1000);
     await alice.handled;
+  });
+});
+
+describe('console bridge backpressure and error text', () => {
+  it('closes the console instead of buffering output for a browser that does not read', async () => {
+    const setup = harness();
+    const stdout = new EventEmitter();
+    setup.physical.sockets = { '1': stdout };
+    const alice = await setup.connect('alice');
+    await vi.waitFor(() => expect(sentTypes(alice.socket)).toContain('ready'));
+
+    stdout.emit('message', Buffer.from('y\n'));
+    expect(sentTypes(alice.socket)).toEqual(['ready', 'data']);
+
+    alice.socket.bufferedAmount = MAX_CONSOLE_BUFFERED_BYTES;
+    stdout.emit('message', Buffer.from('y\n'));
+    expect(sentTypes(alice.socket)).toEqual(['ready', 'data']);
+    expect(alice.socket.close).toHaveBeenCalledWith(CONSOLE_CLOSE_BACKPRESSURE, 'console output overflow');
+    expect(setup.physical.close).toHaveBeenCalled();
+    await alice.handled;
+  });
+
+  it('never sends internal error messages to the browser', async () => {
+    const setup = harness();
+    setup.sessions.openExec.mockRejectedValueOnce(new Error('connect ECONNREFUSED 10.0.0.5:8443'));
+    const alice = await setup.connect('alice');
+    await expect(alice.handled).rejects.toThrow('ECONNREFUSED');
+    // The connection handler answers that rejection with the fixed text for its code.
+    (setup.gateway as unknown as { sendError(socket: FakeSocket, code: string): void })
+      .sendError(alice.socket, 'CONSOLE_BRIDGE_FAILED');
+    const frames = alice.socket.send.mock.calls.map(([raw]) => String(raw));
+    expect(frames.join('\n')).not.toContain('ECONNREFUSED');
+    expect(JSON.parse(frames.at(-1)!)).toEqual({
+      type: 'error',
+      code: 'CONSOLE_BRIDGE_FAILED',
+      message: 'The console connection failed',
+    });
   });
 });
 

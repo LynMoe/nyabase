@@ -8,7 +8,7 @@ import { AGENT_CONTROL_PATH, AGENT_STREAM_PATH } from '@nyabase/common';
 import { AppModule } from './app.module.js';
 import { NyabaseConfigService } from './platform/config/nyabase-config.service.js';
 import { RouteIdPipe, SpaFallbackFilter, ZodExceptionFilter } from './platform/http-filters.js';
-import { securityHeaders, trustProxySetting } from './platform/http-security.js';
+import { securityHeaders, trustProxySetting, warnOnUntrustedForwarding } from './platform/http-security.js';
 import { RuntimeLifecycleService } from './health/runtime-lifecycle.service.js';
 import { ConsoleBridgeGateway } from './containers/console-bridge.gateway.js';
 import { SshProxyGateway } from './ssh/ssh-proxy-gateway.js';
@@ -35,7 +35,9 @@ async function bootstrap() {
   app.useLogger(logLevelsUpTo(config.get<LogLevel>('server.logLevel')));
 
   app.setGlobalPrefix('api');
-  app.set('trust proxy', trustProxySetting(config.get<string>('server.trustedProxies')));
+  const trustedProxies = trustProxySetting(config.get<string>('server.trustedProxies'));
+  app.set('trust proxy', trustedProxies);
+  app.use(warnOnUntrustedForwarding(trustedProxies, (message) => logger.warn(message)));
   app.use(securityHeaders());
   app.useGlobalFilters(new ZodExceptionFilter());
   // forbidNonWhitelisted: throw 400 on extra properties so clients learn

@@ -8,6 +8,7 @@ export type AdvisoryLockExecutor = Kysely<NyabaseDatabase> | Transaction<Nyabase
 export const INFRASTRUCTURE_ADVISORY_NAMESPACE = 1_856_214_885;
 const SERVER_ONBOARDING_ADVISORY_KEY = 5;
 const IMAGE_CAPACITY_ADVISORY_KEY = 6;
+const IP_POOL_TOPOLOGY_ADVISORY_KEY = 7;
 
 /** Transaction-scoped lock serializing server admission and removal. */
 export async function lockServerOnboarding(executor: AdvisoryLockExecutor): Promise<void> {
@@ -22,6 +23,18 @@ export async function lockImageCapacity(executor: AdvisoryLockExecutor): Promise
   await sql`select pg_advisory_xact_lock(
     ${INFRASTRUCTURE_ADVISORY_NAMESPACE},
     ${IMAGE_CAPACITY_ADVISORY_KEY}
+  )`.execute(executor);
+}
+
+/**
+ * Transaction-scoped lock serializing IP pool CIDR changes. The overlap check
+ * reads every pool, so two overlapping pools (a /16 and a /24 inside it) have
+ * different network keys and only this lock keeps them from both committing.
+ */
+export async function lockIpPoolTopology(executor: AdvisoryLockExecutor): Promise<void> {
+  await sql`select pg_advisory_xact_lock(
+    ${INFRASTRUCTURE_ADVISORY_NAMESPACE},
+    ${IP_POOL_TOPOLOGY_ADVISORY_KEY}
   )`.execute(executor);
 }
 

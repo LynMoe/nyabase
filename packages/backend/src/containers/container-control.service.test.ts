@@ -134,6 +134,7 @@ function makeHarness() {
     {} as never,
     {
       isEnabled: vi.fn().mockResolvedValue(false),
+      lockEnabled: vi.fn().mockResolvedValue(false),
       forContainer: vi.fn(),
       health: vi.fn(),
       releaseContainerClaims: vi.fn().mockResolvedValue(undefined),
@@ -230,6 +231,24 @@ describe('ContainerControlService intent boundary', () => {
     })).rejects.toThrow('Server access was revoked');
     expect(harness.repository.updateDesired).not.toHaveBeenCalled();
     expect(harness.intents.createPending).not.toHaveBeenCalled();
+  });
+
+  it('lets an owner in the grace period stop and delete, but not start or restart', async () => {
+    for (const action of ['stop', 'delete'] as const) {
+      const harness = makeHarness();
+      resolveServerAccessMock.mockResolvedValueOnce(null);
+      await expect(harness.service.action(owner, containerId, action)).resolves.toMatchObject({
+        status: 'pending',
+      });
+      expect(harness.intents.createPending).toHaveBeenCalledOnce();
+    }
+    for (const action of ['start', 'restart'] as const) {
+      const harness = makeHarness();
+      resolveServerAccessMock.mockResolvedValueOnce(null);
+      await expect(harness.service.action(owner, containerId, action))
+        .rejects.toThrow('Server access was revoked');
+      expect(harness.intents.createPending).not.toHaveBeenCalled();
+    }
   });
 
   it('stores the observed started_at baseline for restart without calling Incus', async () => {

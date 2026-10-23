@@ -79,6 +79,7 @@ describe('scope=all needs the resource role', () => {
     const bindings = bare(HttpProxyBindingsService, 3);
     const pools = bare(HttpDomainPoolsService, 4);
     await expect(bindings.listBindings(user, 'all', true)).rejects.toBeInstanceOf(ForbiddenException);
+    await expect(bindings.deleteBinding(user, 'b1', 'all')).rejects.toBeInstanceOf(ForbiddenException);
     await expect(pools.listPools(user, 'all')).rejects.toBeInstanceOf(ForbiddenException);
   });
 

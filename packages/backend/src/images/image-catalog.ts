@@ -13,6 +13,14 @@ export type CatalogEntry = {
   description: string;
 };
 
+/**
+ * Hosts are amd64 (the agent, GPU support and the e2e lab all assume it) and
+ * the platform does not record a per-server architecture, so the catalog only
+ * offers amd64 builds. Otherwise the same alias resolves to whichever
+ * architecture the source lists first and pins that fingerprint.
+ */
+export const CATALOG_ARCHITECTURES: ReadonlySet<string> = new Set(['amd64', 'x86_64']);
+
 type SimplestreamsItem = {
   ftype?: string;
   sha256?: string;
@@ -76,6 +84,7 @@ export function parseSimplestreamsProducts(body: unknown): CatalogEntry[] {
   }
   const entries: CatalogEntry[] = [];
   for (const product of Object.values(products)) {
+    if (product.arch !== undefined && !CATALOG_ARCHITECTURES.has(String(product.arch).toLowerCase())) continue;
     const aliases = String(product.aliases ?? '')
       .split(',')
       .map((item) => item.trim())

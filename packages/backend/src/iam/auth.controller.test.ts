@@ -1,7 +1,12 @@
 import { ForbiddenException, UnauthorizedException } from '@nestjs/common';
 import { describe, expect, it, vi } from 'vitest';
-import { AuthController } from './auth.controller.js';
-import { readRefreshCookie, REFRESH_COOKIE_NAME, REFRESH_COOKIE_PATH } from './refresh-cookie.js';
+import {
+  AuthController,
+  readRefreshCookie,
+  REFRESH_COOKIE_NAME,
+  REFRESH_COOKIE_PATH,
+  SECURE_REFRESH_COOKIE_NAME,
+} from './auth.controller.js';
 
 const REQUEST_ID = 'a'.repeat(64);
 const user = {
@@ -34,7 +39,7 @@ function request(headers: Record<string, string> = {}) {
 }
 
 describe('AuthController refresh cookie transport', () => {
-  it('sets the refresh secret only as a scoped HttpOnly cookie on login', async () => {
+  it('sets the refresh secret only as a __Host- HttpOnly cookie on login', async () => {
     const { controller, response } = harness();
     const body = await controller.login({ username: 'alice', password: 'pw' }, request(), response);
 
@@ -42,11 +47,11 @@ describe('AuthController refresh cookie transport', () => {
     expect(body.accessToken).toBe('access-1');
     expect(body.user).toMatchObject({ role: 'operator' });
     expect(body.user).not.toHaveProperty('capabilities');
-    expect(response.cookie).toHaveBeenCalledWith(REFRESH_COOKIE_NAME, 'r1', {
+    expect(response.cookie).toHaveBeenCalledWith(SECURE_REFRESH_COOKIE_NAME, 'r1', {
       httpOnly: true,
       secure: true,
       sameSite: 'strict',
-      path: REFRESH_COOKIE_PATH,
+      path: '/',
       maxAge: 7 * 86_400_000,
     });
   });
@@ -54,20 +59,21 @@ describe('AuthController refresh cookie transport', () => {
   it('honors auth.cookieSecure=false for plain-HTTP development', async () => {
     const { controller, response } = harness({ cookieSecure: false });
     await controller.login({ username: 'alice', password: 'pw' }, request(), response);
-    expect(response.cookie.mock.calls[0][2]).toMatchObject({ secure: false, httpOnly: true });
+    expect(response.cookie.mock.calls[0][0]).toBe(REFRESH_COOKIE_NAME);
+    expect(response.cookie.mock.calls[0][2]).toMatchObject({ secure: false, httpOnly: true, path: REFRESH_COOKIE_PATH });
   });
 
   it('rotates from the cookie and returns the user without the successor secret', async () => {
     const { auth, controller, response } = harness();
     const body = await controller.refresh(
       { requestId: REQUEST_ID },
-      request({ cookie: `other=x; ${REFRESH_COOKIE_NAME}=r1` }),
+      request({ cookie: `other=x; ${SECURE_REFRESH_COOKIE_NAME}=r1` }),
       response,
     );
 
     expect(auth.refreshTokens).toHaveBeenCalledWith('r1', REQUEST_ID);
     expect(body).toEqual({ accessToken: 'access-2', user: expect.objectContaining({ id: 'user-1' }) });
-    expect(response.cookie).toHaveBeenCalledWith(REFRESH_COOKIE_NAME, 'r2', expect.objectContaining({ httpOnly: true }));
+    expect(response.cookie).toHaveBeenCalledWith(SECURE_REFRESH_COOKIE_NAME, 'r2', expect.objectContaining({ httpOnly: true }));
   });
 
   it('rejects refresh without a cookie and clears a rejected cookie', async () => {
@@ -79,24 +85,24 @@ describe('AuthController refresh cookie transport', () => {
     auth.refreshTokens.mockRejectedValueOnce(new UnauthorizedException('Invalid refresh token'));
     await expect(controller.refresh(
       { requestId: REQUEST_ID },
-      request({ cookie: `${REFRESH_COOKIE_NAME}=stale` }),
+      request({ cookie: `${SECURE_REFRESH_COOKIE_NAME}=stale` }),
       response,
     )).rejects.toBeInstanceOf(UnauthorizedException);
-    expect(response.clearCookie).toHaveBeenCalledWith(REFRESH_COOKIE_NAME, expect.objectContaining({ path: REFRESH_COOKIE_PATH }));
+    expect(response.clearCookie).toHaveBeenCalledWith(SECURE_REFRESH_COOKIE_NAME, expect.objectContaining({ path: '/' }));
   });
 
   it('rejects the legacy body-borne refresh token', async () => {
     const { controller, response } = harness();
     await expect(controller.refresh(
       { refreshToken: 'r1', requestId: REQUEST_ID },
-      request({ cookie: `${REFRESH_COOKIE_NAME}=r1` }),
+      request({ cookie: `${SECURE_REFRESH_COOKIE_NAME}=r1` }),
       response,
     )).rejects.toThrow();
   });
 
   it('revokes the cookie session and clears the cookie on logout', async () => {
     const { auth, controller, response } = harness();
-    await controller.logout(request({ cookie: `${REFRESH_COOKIE_NAME}=r1` }), response);
+    await controller.logout(request({ cookie: `${SECURE_REFRESH_COOKIE_NAME}=r1` }), response);
     expect(auth.logout).toHaveBeenCalledWith('r1');
     expect(response.clearCookie).toHaveBeenCalled();
 
@@ -107,7 +113,7 @@ describe('AuthController refresh cookie transport', () => {
 
   it('requires the auth intent header on every cookie endpoint', async () => {
     const { auth, controller, response } = harness();
-    const crossSite = { headers: { cookie: `${REFRESH_COOKIE_NAME}=r1` }, ip: '10.0.0.1' };
+    const crossSite = { headers: { cookie: `${SECURE_REFRESH_COOKIE_NAME}=r1` }, ip: '10.0.0.1' };
     await expect(controller.login({ username: 'a', password: 'b' }, crossSite, response))
       .rejects.toBeInstanceOf(ForbiddenException);
     await expect(controller.refresh({ requestId: REQUEST_ID }, crossSite, response))
@@ -122,10 +128,18 @@ describe('AuthController refresh cookie transport', () => {
 
 describe('readRefreshCookie', () => {
   it('ignores missing, foreign, and malformed cookies', () => {
-    expect(readRefreshCookie({ headers: {} })).toBeNull();
-    expect(readRefreshCookie({ headers: { cookie: 'nyabase_refreshX=a' } })).toBeNull();
-    expect(readRefreshCookie({ headers: { cookie: `${REFRESH_COOKIE_NAME}=a%20b` } })).toBeNull();
-    expect(readRefreshCookie({ headers: { cookie: `${REFRESH_COOKIE_NAME}=${'f'.repeat(96)}` } }))
+    expect(readRefreshCookie({ headers: {} }, true)).toBeNull();
+    expect(readRefreshCookie({ headers: { cookie: 'nyabase_refreshX=a' } }, true)).toBeNull();
+    expect(readRefreshCookie({ headers: { cookie: `${SECURE_REFRESH_COOKIE_NAME}=a%20b` } }, true)).toBeNull();
+    expect(readRefreshCookie({ headers: { cookie: `${SECURE_REFRESH_COOKIE_NAME}=${'f'.repeat(96)}` } }, true))
       .toBe('f'.repeat(96));
+  });
+
+  it('does not let a sibling-domain cookie shadow the panel session', () => {
+    // A tenant site can plant `nyabase_refresh` for the parent domain, never `__Host-…`.
+    const planted = `${REFRESH_COOKIE_NAME}=attacker; ${SECURE_REFRESH_COOKIE_NAME}=!; ${SECURE_REFRESH_COOKIE_NAME}=${'e'.repeat(64)}`;
+    expect(readRefreshCookie({ headers: { cookie: planted } }, true)).toBe('e'.repeat(64));
+    expect(readRefreshCookie({ headers: { cookie: `${REFRESH_COOKIE_NAME}=attacker` } }, true)).toBeNull();
+    expect(readRefreshCookie({ headers: { cookie: `${REFRESH_COOKIE_NAME}=dev` } }, false)).toBe('dev');
   });
 });

@@ -60,6 +60,9 @@ describePg('server agent onboarding and removal', () => {
         .resolves.toBe(created.id);
       await expect(new AgentCredentialVerifier(database).authenticate('Bearer nyak.x.y')).resolves.toBeUndefined();
       expect(agents.disconnect).toHaveBeenCalledWith(created.id);
+      // The token is spent by the agent's first control authentication.
+      await expect(new AgentCredentialVerifier(database).confirmControl(created.id, `Bearer ${enrolled.credential}`))
+        .resolves.toBe(true);
       await expect(enrollment.enroll({ enrollmentToken: token, hostname: 'worker-1' }))
         .rejects.toMatchObject({ status: 401 });
 

@@ -7,6 +7,7 @@ use crate::session::ProxySshSession;
 use crate::snapshot::SnapshotStore;
 use anyhow::{anyhow, Context, Result};
 use futures_util::future::Abortable;
+use proxy_common::accept::accept_retrying;
 use proxy_common::conn_limit::{ConnectionLimiter, ConnectionPermit, LimitRejection};
 use russh::{MethodKind, MethodSet};
 use std::future::Future;
@@ -37,9 +38,15 @@ pub(crate) async fn serve_public(
     control: Arc<ControlPlane>,
     telemetry: TelemetrySender,
 ) -> Result<()> {
-    let limiter = ConnectionLimiter::new(config.max_connections, config.max_connections_per_ip);
+    let limiter = ConnectionLimiter::new(config.connection_limits());
     loop {
-        let (stream, peer) = listener.accept().await?;
+        let (stream, peer) = accept_retrying(
+            || listener.accept(),
+            |error, delay| {
+                warn!(%error, retry_ms = delay.as_millis() as u64, "SSH proxy accept failed");
+            },
+        )
+        .await;
         // The permit is held by the connection task until the session ends,
         // so one address cannot exhaust the pool before authenticating.
         let permit = match limiter.try_acquire(peer.ip()) {
@@ -50,6 +57,8 @@ pub(crate) async fn serve_public(
                 let result = match limit {
                     LimitRejection::Global => "rejected_limit",
                     LimitRejection::PerClient => "rejected_client_limit",
+                    LimitRejection::PerSite => "rejected_site_limit",
+                    LimitRejection::Pending => "rejected_preauth_limit",
                 };
                 emit_metric(
                     &telemetry,
@@ -94,7 +103,7 @@ pub(crate) async fn serve_public(
 async fn serve_connection(
     stream: TcpStream,
     peer: SocketAddr,
-    _permit: ConnectionPermit,
+    mut permit: ConnectionPermit,
     admit: bool,
     store: Arc<SnapshotStore>,
     control: Arc<ControlPlane>,
@@ -105,6 +114,10 @@ async fn serve_connection(
     let auth_timeout = config.auth_timeout;
     if admit {
         let (connection, abort_registration) = runtime.register_connection(peer);
+        // The pre-auth slot moves to the connection, which drops it once
+        // public-key authentication succeeds; the main slot stays here.
+        connection.hold_pending(permit.take_pending());
+        let _permit = permit;
         let _cleanup = ConnectionCleanup {
             runtime: runtime.clone(),
             id: connection.id.clone(),
@@ -148,6 +161,8 @@ async fn serve_connection(
         }
         return;
     }
+    // Never authenticates, so it keeps its pre-auth slot to the end.
+    let _permit = permit;
     runtime.record_rejected_connection();
     let (connection, _abort_registration) = ConnectionState::new(0, peer);
     let connection = Arc::new(connection);

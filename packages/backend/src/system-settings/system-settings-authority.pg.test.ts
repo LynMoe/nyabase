@@ -117,6 +117,32 @@ describePg('System settings PostgreSQL authority', () => {
     });
   });
 
+  it('keeps audit retention admin-only and refuses values that would wipe the log', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const operatorId = await seedActor(database, 'operator');
+      const adminId = await seedActor(database, 'admin');
+      const authority = makeAuthority(database, makeConfig(), databaseAudit());
+      const initial = await authority.initialize();
+
+      await expect(database.transaction().execute((transaction) =>
+        authority.update(transaction, operatorId, { 'audit.retentionMaxEntries': 20_000 }, initial.revision)))
+        .rejects.toMatchObject({ response: expect.objectContaining({ code: 'ROLE_REQUIRED' }) });
+      await expect(database.transaction().execute((transaction) =>
+        authority.update(transaction, adminId, { 'audit.retentionMaxEntries': 1 }, initial.revision)))
+        .rejects.toThrow('Invalid config value for audit.retentionMaxEntries');
+      await expect(database.transaction().execute((transaction) =>
+        authority.update(transaction, adminId, { 'audit.retentionDays': 1 }, initial.revision)))
+        .rejects.toThrow('Invalid config value for audit.retentionDays');
+      const next = await database.transaction().execute((transaction) =>
+        authority.update(transaction, adminId, { 'audit.retentionMaxEntries': 0 }, initial.revision));
+      expect(next.values['audit.retentionMaxEntries']).toBe(0);
+      // Operators keep editing the rest.
+      await expect(database.transaction().execute((transaction) =>
+        authority.update(transaction, operatorId, { 'branding.title': 'Ops' }, next.revision)))
+        .resolves.toMatchObject({ revision: next.revision + 1 });
+    });
+  });
+
   it('rejects a stale revision with the committed value so the client can resolve it', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const actorId = await seedActor(database);
@@ -246,6 +272,7 @@ function makeAuthority(
     config,
     audit as never,
     { broadcastSnapshot: vi.fn().mockResolvedValue(undefined) } as never,
+    { startReconcileAllHostCertificates: vi.fn() } as never,
   );
 }
 
@@ -299,17 +326,19 @@ async function appendAudit(
 
 async function seedActor(
   database: Kysely<NyabaseDatabase>,
+  role: 'admin' | 'operator' = 'admin',
 ): Promise<string> {
   const id = randomUUID();
   await database
     .insertInto('iam.users')
     .values({
       id,
-      numeric_id: 100,
+      numeric_id: role === 'admin' ? 100 : 101,
       username: `settings-${id.slice(0, 8)}`,
       password_hash: 'unused',
       display_name: 'Settings Admin',
       status: 'active',
+      role,
       auth_version: 1,
     })
     .executeTakeFirstOrThrow();

@@ -10,7 +10,9 @@ import {
   AuditAction,
   controlPlaneConfigDefinitions,
   getControlPlaneConfigDefinition,
+  Role,
 } from '@nyabase/common';
+import { assertActorRole } from '../iam/administration.js';
 import { AuditService } from '../iam/audit.service.js';
 import {
   NyabaseConfigService,
@@ -18,6 +20,7 @@ import {
 } from '../platform/config/nyabase-config.service.js';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
+import { ContainerSshConvergenceService } from '../containers/container-ssh.js';
 import { SshProxyGateway } from '../ssh/ssh-proxy-gateway.js';
 
 const MAX_SAFE_REVISION = BigInt(Number.MAX_SAFE_INTEGER);
@@ -50,6 +53,7 @@ export class SystemSettingsAuthorityService implements OnApplicationBootstrap {
     private readonly config: NyabaseConfigService,
     private readonly audit: AuditService,
     private readonly sshProxyGateway: SshProxyGateway,
+    private readonly containerSsh: ContainerSshConvergenceService,
   ) {}
 
   async onApplicationBootstrap(): Promise<void> {
@@ -155,6 +159,9 @@ export class SystemSettingsAuthorityService implements OnApplicationBootstrap {
       ) {
         throw new BadRequestException(`Config key is not editable: ${key}`);
       }
+      if (definition.adminOnly) {
+        await assertActorRole(transaction, actorId, Role.Admin);
+      }
       if (this.config.field(definition.key).envValuePresent) {
         throw new BadRequestException(
           `Config key is overridden by environment: ${key}`,
@@ -218,9 +225,14 @@ export class SystemSettingsAuthorityService implements OnApplicationBootstrap {
    */
   async committed(snapshot: AuthoritativeSystemSettingsSnapshot): Promise<void> {
     const previous = this.config.revision();
+    const previousSuffix = this.config.get<string>('ssh.proxyHostSuffix');
     const applied = this.config.applyAuthoritativeSnapshot(snapshot);
     if (applied && snapshot.revision > previous) {
       await this.broadcastSshSnapshot('local-commit');
+      if (this.config.get<string>('ssh.proxyHostSuffix') !== previousSuffix) {
+        // Host certificates name `<container>.<suffix>`: re-sign them all, in the background.
+        this.containerSsh.startReconcileAllHostCertificates();
+      }
     }
   }
 

@@ -59,10 +59,12 @@ function makeController() {
   return { controller, config, authority, accessResolver };
 }
 
+const ADMIN = { userId: 'actor-a', role: 'admin', authKind: 'jwt', authVersion: 1 };
+
 describe('SystemSettingsController', () => {
   it('patches through the caller PostgreSQL authority transaction', async () => {
     const { controller, authority, accessResolver } = makeController();
-    const result = await controller.patchSettings({ id: 'actor-a' } as never, {
+    const result = await controller.patchSettings({ id: 'actor-a' } as never, ADMIN as never, {
       expectedRevision: 1,
       values: { 'branding.title': 'Lab Console' },
     });
@@ -89,7 +91,7 @@ describe('SystemSettingsController', () => {
     accessResolver.runWithActorRole.mockRejectedValueOnce(
       new Error('authority revoked'),
     );
-    await expect(controller.patchSettings({ id: 'actor-a' } as never, {
+    await expect(controller.patchSettings({ id: 'actor-a' } as never, ADMIN as never, {
       expectedRevision: 1,
       values: { 'branding.title': 'Unauthorized' },
     })).rejects.toThrow('authority revoked');
@@ -108,7 +110,7 @@ describe('SystemSettingsController', () => {
     );
     let response: unknown;
     try {
-      await controller.patchSettings({ id: 'actor-a' } as never, {
+      await controller.patchSettings({ id: 'actor-a' } as never, ADMIN as never, {
         expectedRevision: 1,
         values: { 'branding.title': 'Stale' },
       });
@@ -126,8 +128,8 @@ describe('SystemSettingsController', () => {
 
   it('serves the admin settings snapshot from the live in-process config', () => {
     const { controller, authority } = makeController();
-    expect(controller.getSettings()).toMatchObject({ revision: 1 });
+    expect(controller.getSettings(ADMIN as never)).toMatchObject({ revision: 1 });
     expect(authority.refreshFromPostgres).not.toHaveBeenCalled();
-    expect(controller.getSettings()).not.toHaveProperty('snapshotToken');
+    expect(controller.getSettings(ADMIN as never)).not.toHaveProperty('snapshotToken');
   });
 });

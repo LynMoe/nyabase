@@ -19,15 +19,13 @@ import { IamAuthRepository } from './iam-auth.repository.js';
 import { MonotonicClock } from '../platform/monotonic-clock.js';
 import { AuditService } from './audit.service.js';
 import type { Actor } from './actor.js';
-import { clientAddressBucket } from './client-address.js';
 import {
+  clientAddressBucket,
   LoginAttemptLimiter,
-  type LoginAttemptReservation,
-} from './login-attempt-limiter.js';
-import {
   PasswordVerificationBusyError,
   PasswordVerificationGate,
-} from './password-verification-gate.js';
+  type LoginAttemptReservation,
+} from './login-throttling.js';
 
 export interface JwtPayload {
   sub: string;
@@ -64,7 +62,10 @@ const DUMMY_PASSWORD_HASH = '$argon2id$v=19$m=65536,t=3,p=4$DCw8KRwf+V7pMnhiRFOb
 
 @Injectable()
 export class AuthService {
-  private readonly passwordGate = new PasswordVerificationGate();
+  // Anonymous logins and signed-in password re-checks get separate Argon2
+  // capacity, so a login flood cannot block password changes or API tokens.
+  private readonly loginGate = new PasswordVerificationGate();
+  private readonly reauthGate = new PasswordVerificationGate();
   private readonly loginAttempts: LoginAttemptLimiter;
 
   constructor(
@@ -90,7 +91,7 @@ export class AuthService {
       ? user.passwordHash
       : DUMMY_PASSWORD_HASH;
     const valid = password.length <= MAX_LOGIN_PASSWORD_CHARS
-      && await this.verifyPasswordBounded(holder, candidateHash, password);
+      && await this.verifyPasswordBounded(this.loginGate, holder, candidateHash, password);
     if (!valid || !user || user.status !== UserStatus.Active) {
       throw new UnauthorizedException('Invalid credentials');
     }
@@ -107,7 +108,7 @@ export class AuthService {
     const reservations = this.consumeLoginAttempt(bucket, username);
     let snapshot: AuthUser;
     try {
-      snapshot = await this.validateUser(username, password, `ip:${bucket}`);
+      snapshot = await this.validateUser(username, password, `ip:${clientAddressBucket(clientIp, 48)}`);
     } catch (error) {
       // A busy Argon2 gate is not a failed guess.
       if (error instanceof HttpException && error.getStatus() === HttpStatus.TOO_MANY_REQUESTS) {
@@ -346,7 +347,7 @@ export class AuthService {
     if (!reservations) throw this.tooManyRequests('Too many incorrect password attempts');
     let valid: boolean;
     try {
-      valid = await this.verifyPasswordBounded(`user:${user.id}`, user.passwordHash, password);
+      valid = await this.verifyPasswordBounded(this.reauthGate, `user:${user.id}`, user.passwordHash, password);
     } catch (error) {
       this.loginAttempts.release(reservations);
       throw error;
@@ -427,12 +428,13 @@ export class AuthService {
   }
 
   private async verifyPasswordBounded(
+    gate: PasswordVerificationGate,
     holder: string,
     hash: string,
     password: string,
   ): Promise<boolean> {
     try {
-      return await this.passwordGate.run(holder, () => argon2.verify(hash, password));
+      return await gate.run(holder, () => argon2.verify(hash, password));
     } catch (error) {
       if (error instanceof PasswordVerificationBusyError) {
         throw this.tooManyRequests('Password verification capacity is temporarily exhausted');

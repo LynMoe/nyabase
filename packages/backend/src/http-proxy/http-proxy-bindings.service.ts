@@ -46,6 +46,9 @@ import {
 } from './http-proxy-state.js';
 
 const MAX_HTTP_HOSTNAME_RESERVATIONS = MAX_HTTP_PROXY_ROUTES * 2;
+/** One user cannot exhaust the platform-wide binding or hostname capacity. */
+export const MAX_HTTP_PROXY_BINDINGS_PER_USER = 32;
+export const MAX_HTTP_HOSTNAME_RESERVATIONS_PER_USER = MAX_HTTP_PROXY_BINDINGS_PER_USER * 2;
 const HOSTNAME_RESERVATION_GC_BATCH = 256;
 
 /**
@@ -101,6 +104,19 @@ async function reserveHostname(
     throw new ConflictException({
       code: 'HTTP_HOSTNAME_RESERVATION_CAPACITY_REACHED',
       message: `At most ${MAX_HTTP_HOSTNAME_RESERVATIONS} active or draining hostnames are supported`,
+    });
+  }
+  // Draining hostnames count too: create/delete churn must not crowd others out.
+  const owned = await transaction
+    .selectFrom('interaction.http_hostname_reservations')
+    .select((expression) => expression.fn.countAll<string>().as('count'))
+    .where('owner_id', '=', ownerId)
+    .executeTakeFirstOrThrow();
+  if (Number(owned.count) >= MAX_HTTP_HOSTNAME_RESERVATIONS_PER_USER) {
+    throw new ConflictException({
+      code: 'HTTP_HOSTNAME_RESERVATION_USER_LIMIT_REACHED',
+      message: `At most ${MAX_HTTP_HOSTNAME_RESERVATIONS_PER_USER} active or draining hostnames per user; `
+        + 'released hostnames become free again after they drain',
     });
   }
   try {
@@ -202,6 +218,12 @@ export class HttpProxyBindingsService {
         throw new ConflictException({
           code: 'HTTP_PROXY_BINDING_CAPACITY_REACHED',
           message: `At most ${MAX_HTTP_PROXY_ROUTES} HTTP proxy bindings are supported`,
+        });
+      }
+      if (await this.bindingCount(transaction, requesterId) >= MAX_HTTP_PROXY_BINDINGS_PER_USER) {
+        throw new ConflictException({
+          code: 'HTTP_PROXY_BINDING_USER_LIMIT_REACHED',
+          message: `At most ${MAX_HTTP_PROXY_BINDINGS_PER_USER} HTTP proxy bindings per user`,
         });
       }
       const pool = await this.enabledPoolForHostname(transaction, hostname);
@@ -324,7 +346,9 @@ export class HttpProxyBindingsService {
     return (await this.bindingDtos([saved], requesterId, false, this.database))[0]!;
   }
 
-  async deleteBinding(actor: Actor, id: string): Promise<void> {
+  /** `scope=all` is the operator override, e.g. to clear another user's abusive bindings. */
+  async deleteBinding(actor: Actor, id: string, scope: ListScope = 'mine'): Promise<void> {
+    assertListScope(actor, scope, Role.Operator);
     const requesterId = requireUserId(actor);
     await runSerializable(this.transactions, async (transaction) => {
       const binding = await transaction
@@ -334,7 +358,7 @@ export class HttpProxyBindingsService {
         .forUpdate()
         .executeTakeFirst();
       if (!binding) throw new NotFoundException('Binding not found');
-      if (binding.owner_id !== requesterId) {
+      if (scope === 'mine' && binding.owner_id !== requesterId) {
         throw new ForbiddenException('Only binding owner can delete it');
       }
       await this.assertRequesterActive(transaction, requesterId);
@@ -349,6 +373,7 @@ export class HttpProxyBindingsService {
         AuditAction.DeleteHttpProxyBinding,
         id,
         'http_proxy_binding',
+        { hostname: binding.hostname, ownerId: binding.owner_id },
       );
     });
   }
@@ -512,11 +537,12 @@ export class HttpProxyBindingsService {
       .executeTakeFirst();
   }
 
-  private async bindingCount(executor: HttpExecutor): Promise<number> {
-    const row = await executor
+  private async bindingCount(executor: HttpExecutor, ownerId?: string): Promise<number> {
+    let query = executor
       .selectFrom('interaction.http_proxy_bindings')
-      .select((expression) => expression.fn.countAll<string>().as('count'))
-      .executeTakeFirstOrThrow();
+      .select((expression) => expression.fn.countAll<string>().as('count'));
+    if (ownerId) query = query.where('owner_id', '=', ownerId);
+    const row = await query.executeTakeFirstOrThrow();
     return Number(row.count);
   }
 }

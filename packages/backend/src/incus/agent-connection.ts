@@ -36,6 +36,8 @@ interface PendingStream {
   readonly resolve: (socket: BufferedStreamSocket) => void;
   readonly reject: (error: unknown) => void;
   readonly timer: NodeJS.Timeout;
+  /** Drops the caller's abort listener; its signal may outlive many streams. */
+  readonly detach: () => void;
 }
 
 /** Hands agent-opened stream sockets to the Backend request waiting for them. */
@@ -48,15 +50,17 @@ export class AgentStreamBroker {
   ): { readonly streamId: string; readonly socket: Promise<BufferedStreamSocket> } {
     const streamId = randomUUID();
     const socket = new Promise<BufferedStreamSocket>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.pending.delete(streamId);
-        reject(new IncusError('INCUS_TIMEOUT', 'retry', { phase: 'connect', reason: 'agent_stream_timeout' }));
-      }, AGENT_STREAM_CONNECT_TIMEOUT_MS + 5_000);
-      this.pending.set(streamId, { owner, resolve, reject, timer });
-      signal?.addEventListener('abort', () => this.fail(streamId, new IncusError('INCUS_TIMEOUT', 'retry', {
+      const abort = (): void => this.fail(streamId, new IncusError('INCUS_TIMEOUT', 'retry', {
         phase: 'connect',
         reason: 'aborted',
-      })), { once: true });
+      }));
+      const detach = (): void => signal?.removeEventListener('abort', abort);
+      const timer = setTimeout(() => {
+        this.fail(streamId, new IncusError('INCUS_TIMEOUT', 'retry', { phase: 'connect', reason: 'agent_stream_timeout' }));
+      }, AGENT_STREAM_CONNECT_TIMEOUT_MS + 5_000);
+      this.pending.set(streamId, { owner, resolve, reject, timer, detach });
+      if (signal?.aborted) abort();
+      else signal?.addEventListener('abort', abort, { once: true });
     });
     return { streamId, socket };
   }
@@ -70,9 +74,15 @@ export class AgentStreamBroker {
     if (!pending || pending.owner.serverId !== serverId || !pending.owner.isOpen) return false;
     this.pending.delete(streamId);
     clearTimeout(pending.timer);
+    pending.detach();
     pending.owner.adopt(socket);
     pending.resolve(new BufferedStreamSocket(socket));
     return true;
+  }
+
+  /** Streams still waiting for their agent socket (for tests and diagnostics). */
+  get pendingCount(): number {
+    return this.pending.size;
   }
 
   fail(streamId: string, error: unknown): void {
@@ -80,6 +90,7 @@ export class AgentStreamBroker {
     if (!pending) return;
     this.pending.delete(streamId);
     clearTimeout(pending.timer);
+    pending.detach();
     pending.reject(error);
   }
 }
@@ -122,7 +133,7 @@ export class AgentConnection implements StreamOwner {
   }
 
   async request(request: IncusTunnelRequest): Promise<IncusTunnelResponse> {
-    const result = zAgentIncusHttpResult.parse(await this.call('incus.http', {
+    const result = parseAgentResult(zAgentIncusHttpResult, 'incus.http', await this.call('incus.http', {
       method: request.method,
       path: request.path,
       headers: request.headers,
@@ -155,7 +166,7 @@ export class AgentConnection implements StreamOwner {
   }
 
   async collectMetrics(timeoutMs: number, signal?: AbortSignal): Promise<string> {
-    return zAgentMetricsResult.parse(await this.call('metrics.collect', {}, timeoutMs, signal)).text;
+    return parseAgentResult(zAgentMetricsResult, 'metrics.collect', await this.call('metrics.collect', {}, timeoutMs, signal)).text;
   }
 
   /** Route one agent frame that is not hello; returns false for a protocol violation. */
@@ -237,4 +248,15 @@ export class AgentConnection implements StreamOwner {
       this.socket.send(JSON.stringify(frame));
     }
   }
+}
+
+/**
+ * A malformed agent reply is an upstream fault, not the caller's input: a raw
+ * ZodError would reach the global filter and answer 400 INVALID_INPUT with
+ * internal schema paths.
+ */
+function parseAgentResult<T>(schema: { safeParse(value: unknown): { success: true; data: T } | { success: false } }, call: string, value: unknown): T {
+  const parsed = schema.safeParse(value);
+  if (!parsed.success) throw new IncusError('INCUS_INVALID_RESPONSE', 'managed_failure', { reason: 'agent_result', call });
+  return parsed.data;
 }

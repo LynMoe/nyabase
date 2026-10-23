@@ -1,20 +1,24 @@
-use crate::config::{REQUEST_HEADER_DEADLINE, REQUEST_LIFETIME_DEADLINE, TLS_HANDSHAKE_DEADLINE};
-use crate::request::{find_header_end, read_request_head, request_plan, RequestMode};
+use crate::config::{REQUEST_HEADER_DEADLINE, TLS_HANDSHAKE_DEADLINE};
+use crate::relay::{client_abort, is_client_abort};
+use crate::request::{
+    find_header_end, read_request_head, request_plan, ClientContext, RequestMode,
+};
 use crate::runtime::{ActiveConnectionGuard, Runtime};
 use crate::snapshot::{RouteAuthorization, SnapshotCertResolver, SnapshotStore};
 use crate::upstream::proxy_request;
 use anyhow::{anyhow, Context, Result};
-use proxy_common::conn_limit::ConnectionLimiter;
+use proxy_common::accept::accept_retrying;
+use proxy_common::conn_limit::{ConnectionLimiter, PendingPermit};
 use std::net::SocketAddr;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::watch;
 use tokio::time;
 use tokio_rustls::TlsAcceptor;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 pub(crate) async fn http_listener(
     listen: String,
@@ -47,10 +51,16 @@ pub(crate) async fn serve_http(
         None
     };
     loop {
-        let (stream, peer) = listener.accept().await?;
+        let (stream, peer) = accept_retrying(
+            || listener.accept(),
+            |error, delay| {
+                warn!(%error, retry_ms = delay.as_millis() as u64, "HTTP proxy accept failed");
+            },
+        )
+        .await;
         // Admission happens before TLS or any read, and the permit lives
         // until the connection (or its upgraded tunnel) ends.
-        let permit = match connection_slots.try_acquire(peer.ip()) {
+        let mut permit = match connection_slots.try_acquire(peer.ip()) {
             Ok(permit) => permit,
             Err(limit) => {
                 runtime
@@ -65,21 +75,45 @@ pub(crate) async fn serve_http(
         let runtime = runtime.clone();
         let acceptor = acceptor.clone();
         tokio::spawn(async move {
+            // The pending slot covers the TLS handshake and the request head.
+            let pending = permit.take_pending();
             let _active = ActiveConnectionGuard::new(runtime.clone(), permit);
+            let accepted = Accepted {
+                peer,
+                https: acceptor.is_some(),
+                pending,
+            };
             let result = if let Some(acceptor) = acceptor {
                 match accept_tls_with_deadline(&acceptor, stream, TLS_HANDSHAKE_DEADLINE).await {
-                    Ok(tls_stream) => {
-                        handle_connection(tls_stream, peer, store, runtime.clone()).await
+                    Ok(mut tls_stream) => {
+                        let result =
+                            handle_accepted(&mut tls_stream, accepted, store, runtime.clone())
+                                .await;
+                        reset_if_aborted(&result, tls_stream.get_ref().0);
+                        result
                     }
                     Err(error) => Err(anyhow!(error)),
                 }
             } else {
-                handle_connection(stream, peer, store, runtime.clone()).await
+                let mut stream = stream;
+                let result = handle_accepted(&mut stream, accepted, store, runtime.clone()).await;
+                reset_if_aborted(&result, &stream);
+                result
             };
             if let Err(error) = result {
                 debug!(%peer, %error, "request handling failed");
             }
         });
+    }
+}
+
+/// SO_LINGER 0 makes the close that follows send RST, so a client whose
+/// response was cut short sees an error instead of a clean end of body.
+fn reset_if_aborted(result: &Result<()>, stream: &TcpStream) {
+    if let Err(error) = result {
+        if is_client_abort(error) {
+            let _ = stream.set_zero_linger();
+        }
     }
 }
 
@@ -97,8 +131,17 @@ where
     }
 }
 
+/// One accepted client connection.
+pub(crate) struct Accepted {
+    pub(crate) peer: SocketAddr,
+    pub(crate) https: bool,
+    /// Pre-header slot, released once the request head has been read.
+    pub(crate) pending: Option<PendingPermit>,
+}
+
+#[cfg(test)]
 pub(crate) async fn handle_connection<S>(
-    inbound: S,
+    mut inbound: S,
     peer: SocketAddr,
     store: Arc<SnapshotStore>,
     runtime: Arc<Runtime>,
@@ -106,90 +149,82 @@ pub(crate) async fn handle_connection<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    handle_connection_with_fixed_request_deadline(
-        inbound,
+    let accepted = Accepted {
         peer,
-        store,
-        runtime,
-        REQUEST_LIFETIME_DEADLINE,
-    )
-    .await
+        https: false,
+        pending: None,
+    };
+    handle_accepted(&mut inbound, accepted, store, runtime).await
 }
 
-pub(crate) async fn handle_connection_with_fixed_request_deadline<S>(
-    mut inbound: S,
-    _peer: SocketAddr,
+pub(crate) async fn handle_accepted<S>(
+    inbound: &mut S,
+    accepted: Accepted,
     store: Arc<SnapshotStore>,
     runtime: Arc<Runtime>,
-    fixed_request_deadline: Duration,
 ) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
     runtime.total_requests.fetch_add(1, Ordering::Relaxed);
-    let head = match time::timeout(REQUEST_HEADER_DEADLINE, read_request_head(&mut inbound)).await {
+    let head = match time::timeout(REQUEST_HEADER_DEADLINE, read_request_head(&mut *inbound)).await
+    {
         Ok(Ok(head)) => head,
         Ok(Err(error)) => return Err(error),
         Err(_) => return Err(anyhow!("request header deadline exceeded")),
     };
+    drop(accepted.pending);
     let Some(header_end) = find_header_end(&head) else {
         return Err(anyhow!("request header terminator is missing"));
     };
-    let plan = match request_plan(&head[..header_end]) {
+    let client = ClientContext {
+        peer_ip: accepted.peer.ip(),
+        https: accepted.https,
+    };
+    let plan = match request_plan(&head[..header_end], &client) {
         Ok(plan) => plan,
         Err(error) => {
-            reject(&mut inbound, &runtime, "400 Bad Request").await?;
+            reject(inbound, &runtime, "400 Bad Request").await?;
             return Err(error);
         }
     };
     let host = plan.host.clone();
     let mut changes = store.subscribe();
     let Some(authorization) = store.authorize_route(&host) else {
-        reject(&mut inbound, &runtime, "404 Not Found").await?;
+        reject(inbound, &runtime, "404 Not Found").await?;
         return Ok(());
     };
     if !store.authorization_is_current(&authorization) {
-        reject(&mut inbound, &runtime, "404 Not Found").await?;
+        reject(inbound, &runtime, "404 Not Found").await?;
         return Ok(());
     }
 
     let is_websocket = matches!(&plan.mode, RequestMode::WebSocket { .. });
+    // Neither kind has a total lifetime: an upgraded tunnel is bounded by its
+    // own idle timeout, an ordinary request by the body deadline and the
+    // request idle timeout (both inside `proxy_request`). Both end at once
+    // when the route lease lapses or the route is revoked.
     let proxy = proxy_request(
-        &mut inbound,
+        inbound,
         &runtime,
         &authorization.route,
         head,
         header_end,
         plan,
     );
-    if is_websocket {
-        // An upgraded tunnel is a connection, not a bounded HTTP request.
-        // Its connect/handshake stages retain their own deadlines, while the
-        // established relay remains governed by route lease/revocation, the
-        // bidirectional idle timeout and peer EOF rather than the ordinary
-        // request lifetime.
-        tokio::select! {
-            biased;
-            _ = wait_until_route_revoked(&store, &authorization, &mut changes) => {
-                return Err(anyhow!("HTTP route authorization was revoked"));
-            }
-            result = proxy => result?,
+    tokio::select! {
+        biased;
+        _ = wait_until_route_revoked(&store, &authorization, &mut changes) => {
+            return Err(client_abort("HTTP route authorization was revoked"));
         }
-    } else {
-        tokio::select! {
-            biased;
-            _ = wait_until_route_revoked(&store, &authorization, &mut changes) => {
-                return Err(anyhow!("HTTP route authorization was revoked"));
-            }
-            result = time::timeout(fixed_request_deadline, proxy) => {
-                match result {
-                    Ok(result) => result?,
-                    Err(_) => return Err(anyhow!("request lifetime deadline exceeded")),
-                }
-            }
-        }
+        result = proxy => result?,
     }
-    debug!(binding_id = %authorization.route.binding_id, hostname = %host, "proxied request");
+    debug!(
+        binding_id = %authorization.route.binding_id,
+        hostname = %host,
+        is_websocket,
+        "proxied request"
+    );
     Ok(())
 }
 

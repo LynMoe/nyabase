@@ -91,7 +91,7 @@ describe('SQL migration discovery', () => {
 
   it('rejects an empty or compatibility-style product manifest', async () => {
     expect(() => assertFreshInitialMigrationManifest([]))
-      .toThrow('exactly one fresh migration');
+      .toThrow('must start with the fresh baseline');
     expect(() => assertFreshInitialMigrationManifest([{
       version: '000002',
       name: 'compatibility',

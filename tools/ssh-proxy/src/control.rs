@@ -24,6 +24,36 @@ use tracing::{debug, info, warn};
 
 pub(crate) const BACKEND_CONTROL_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// The Backend's `maxPayload` for this WebSocket; a larger frame closes the
+/// link with 1009, so such a frame is never sent.
+pub(crate) const BACKEND_CONTROL_MAX_FRAME_BYTES: usize = 1024 * 1024;
+
+/// Encodes the periodic status frame. `SshProxyStatusReport::bounded` keeps it
+/// far below the frame limit; should it ever exceed it anyway, the details
+/// are dropped (counted as omitted) rather than losing the control link.
+pub(crate) fn encode_status_frame(runtime: &ProxyRuntime) -> Result<String> {
+    let mut payload = runtime.status_report();
+    let encoded = serde_json::to_string(&ClientEnvelope {
+        ts: now_ms(),
+        kind: "status",
+        payload: &payload,
+    })?;
+    if encoded.len() <= BACKEND_CONTROL_MAX_FRAME_BYTES {
+        return Ok(encoded);
+    }
+    warn!(
+        bytes = encoded.len(),
+        "SSH proxy status frame over the control limit; sending counts only"
+    );
+    payload.connections.clear();
+    payload.omitted_connections = payload.active_connections;
+    Ok(serde_json::to_string(&ClientEnvelope {
+        ts: now_ms(),
+        kind: "status",
+        payload: &payload,
+    })?)
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ControlMode {
     Empty,
@@ -282,14 +312,9 @@ pub(crate) async fn run_backend_once(
     loop {
         tokio::select! {
             _ = status_tick.tick() => {
-                let envelope = ClientEnvelope {
-                    ts: now_ms(),
-                    kind: "status",
-                    payload: runtime.status_report(),
-                };
                 send_control_frame(
                     &mut write,
-                    Message::Text(serde_json::to_string(&envelope)?.into()),
+                    Message::Text(encode_status_frame(runtime)?.into()),
                     BACKEND_CONTROL_WRITE_TIMEOUT,
                 ).await?;
             }

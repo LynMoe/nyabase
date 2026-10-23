@@ -138,6 +138,7 @@ export class ContainerCreateService {
   /** Lock the target server and image and refuse a missing, duplicate-named or unavailable target. */
   private async lockCreateTargets(
     transaction: Tx,
+    ownerId: string,
     request: CreateContainerRequest,
   ): Promise<{ server: ServerRow; image: ImageRow & { fingerprint: string } }> {
     const server = await transaction.selectFrom('infra.servers')
@@ -145,10 +146,13 @@ export class ContainerCreateService {
       .where('id', '=', request.serverId)
       .forUpdate()
       .executeTakeFirst() as ServerRow | undefined;
-    if (await this.repository.nameTaken(request.serverId, request.name, transaction)) {
+    const conflict = await this.repository.nameConflict(request.serverId, ownerId, request.name, transaction);
+    if (conflict) {
       throw new ConflictException({
         code: FailureCode.InvalidInput,
-        message: 'A container with this name already exists on the server',
+        message: conflict === 'server'
+          ? 'A container with this name already exists on the server'
+          : 'You already have a container with this name (names are unique per user, ignoring case)',
         details: { serverId: request.serverId, name: request.name },
       });
     }
@@ -344,7 +348,7 @@ export class ContainerCreateService {
   ) {
     const userId = requireUserId(actor);
     const ownerId = userId;
-    const { server, image } = await this.lockCreateTargets(transaction, request);
+    const { server, image } = await this.lockCreateTargets(transaction, ownerId, request);
     const access = await this.resolveCreateAccess(transaction, userId, request, image);
     await lockOwnerServerQuota(transaction, ownerId, request.serverId);
     if (request.powerIntent === ContainerPowerIntent.Running) {

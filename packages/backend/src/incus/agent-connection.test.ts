@@ -1,4 +1,4 @@
-import { EventEmitter } from 'node:events';
+import { EventEmitter, getEventListeners } from 'node:events';
 import { describe, expect, it, vi } from 'vitest';
 import WebSocket from 'ws';
 import type { AgentHello } from '@nyabase/common';
@@ -184,6 +184,31 @@ describe('agent connection RPC', () => {
       .toBe(false);
   });
 
+  it('leaves no listener on a long-lived abort signal once each stream settles', async () => {
+    const { socket, broker, agent } = connection();
+    const lifetime = new AbortController();
+    for (let index = 0; index < 20; index += 1) {
+      const opening = agent.openWebSocket('/1.0/events', lifetime.signal);
+      const request = socket.lastRequest();
+      broker.accept(String(request.params.streamId), SERVER_ID, new FakeSocket() as unknown as WebSocket);
+      agent.handleFrame({ type: 'response', id: request.id, ok: true, result: {} });
+      await opening;
+    }
+    const failing = agent.openWebSocket('/1.0/events', lifetime.signal).catch((error) => error);
+    agent.handleFrame({ type: 'response', id: socket.lastRequest().id, ok: false, error: { code: 'internal', message: 'x' } });
+    await failing;
+    expect(getEventListeners(lifetime.signal, 'abort')).toHaveLength(0);
+    expect(broker.pendingCount).toBe(0);
+  });
+
+  it('fails a stream at once when its signal is already aborted', async () => {
+    const broker = new AgentStreamBroker();
+    const aborted = AbortSignal.abort();
+    const { socket } = broker.expect({ serverId: SERVER_ID, isOpen: true, adopt: vi.fn() }, aborted);
+    await expect(socket).rejects.toMatchObject({ code: 'INCUS_TIMEOUT' });
+    expect(broker.pendingCount).toBe(0);
+  });
+
   it('treats an agent-side failure as retryable without calling the server unreachable', async () => {
     const { socket, agent } = connection();
     const pending = agent.request({ method: 'GET', path: '/1.0', headers: {}, timeoutMs: 1_000 });
@@ -228,5 +253,17 @@ describe('agent registry', () => {
     expect(registry.isConnected(SERVER_ID)).toBe(false);
     await new Promise((resolve) => setImmediate(resolve));
     expect(events).toEqual([`up:${SERVER_ID}`, `up:${SERVER_ID}`, `down:${SERVER_ID}`]);
+  });
+
+  it('closes sockets that have not registered yet on disconnect', () => {
+    const registry = new AgentRegistry();
+    const early = { close: vi.fn() };
+    const left = { close: vi.fn() };
+    registry.trackPending(SERVER_ID, early);
+    const untrack = registry.trackPending(SERVER_ID, left);
+    untrack();
+    registry.disconnect(SERVER_ID, 4401, 'credential revoked');
+    expect(early.close).toHaveBeenCalledWith(4401, 'credential revoked');
+    expect(left.close).not.toHaveBeenCalled();
   });
 });

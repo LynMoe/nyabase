@@ -24,6 +24,7 @@ import { TechnicalId } from '../components/refs/technical-id.js';
 import { toast } from '../hooks/use-toast.js';
 import { setPendingLoginReason, terminateBrowserSession } from '../lib/auth-session.js';
 import { ApiTokensPanel } from './profile-page/api-tokens-panel.js';
+import { SshClientConfigPanel } from './profile-page/ssh-client-config-panel.js';
 
 type PasswordErrors = Partial<Record<'currentPassword' | 'newPassword' | 'confirmPassword', string>>;
 type SshKeyErrors = Partial<Record<'name' | 'keyText', string>>;
@@ -51,6 +52,9 @@ export default function ProfilePage() {
       <div className="grid grid-cols-1 items-start gap-4 xl:grid-cols-[minmax(0,0.9fr)_minmax(0,1.4fr)]">
         <PasswordPanel userId={user.id} />
         <SshKeysPanel userId={user.id} />
+        <div className="xl:col-span-2">
+          <SshClientConfigPanel userId={user.id} />
+        </div>
         <div className="xl:col-span-2">
           <ApiTokensPanel userId={user.id} />
         </div>

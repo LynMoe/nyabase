@@ -39,6 +39,8 @@ function intent(overrides: Partial<IntentRecord> = {}): IntentRecord {
 
 
 interface Authority { ownerId: string | null }
+/** `missing`: the resource was deleted, so the registry knows no authority for it. */
+type AuthorityOption = Authority | 'missing';
 
 function controller(options: {
   list?: ReturnType<typeof vi.fn>;
@@ -46,7 +48,7 @@ function controller(options: {
   retry?: ReturnType<typeof vi.fn>;
   /** Live role as seen by the in-transaction re-check. */
   liveRole?: Role;
-  authority?: Authority;
+  authority?: AuthorityOption;
 }) {
   const intents = {
     list: options.list ?? vi.fn().mockResolvedValue({ items: [], nextCursor: null }),
@@ -73,7 +75,7 @@ function controller(options: {
   const registry = {
     forResource: vi.fn(() => ({
       resourceAuthorities: vi.fn(async (ids: readonly string[]) =>
-        new Map(ids.map((id) => [id, authority]))),
+        new Map(authority === 'missing' ? [] : ids.map((id) => [id, authority]))),
     })),
   };
   return {
@@ -223,9 +225,12 @@ describe('IntentsController GET /intents', () => {
 });
 
 describe('IntentsController GET /intents/:id and retry', () => {
-  it('shows an intent to its requester and its resource owner, whatever their role', async () => {
+  it('shows an intent to its resource owner whatever their role, and to its requester only with the role', async () => {
     const mine = intent({ requestedBy: USER_ID });
-    const { controller: byRequester } = controller({ findById: vi.fn().mockResolvedValue(mine) });
+    const { controller: byRequester } = controller({
+      findById: vi.fn().mockResolvedValue(mine),
+      authority: { ownerId: USER_ID },
+    });
     await expect(byRequester.get(mine.id, testActor(USER_ID))).resolves.toMatchObject({ id: mine.id });
 
     const foreign = intent();
@@ -258,12 +263,76 @@ describe('IntentsController GET /intents/:id and retry', () => {
       .rejects.toBeInstanceOf(NotFoundException);
   });
 
-  it('retries your own failed intent without any role check', async () => {
+  it('hides an intent you requested on someone else\'s resource once you lost the role', async () => {
+    // An operator issued it with scope=all against another user's container, then was demoted.
+    const issued = intent({ requestedBy: USER_ID, resourceType: IntentResourceType.Container });
+    const retried = intent({ id: '00000000-0000-4000-8000-000000000099', status: IntentStatus.Pending, failure: null, failureCode: null });
+    const demoted = controller({
+      findById: vi.fn().mockResolvedValue(issued),
+      retry: vi.fn().mockResolvedValue(retried),
+      authority: { ownerId: OTHER_ID },
+    });
+    await expect(demoted.controller.get(issued.id, testActor(USER_ID))).rejects.toBeInstanceOf(NotFoundException);
+    await expect(demoted.controller.retry(issued.id, testActor(USER_ID), {}))
+      .rejects.toBeInstanceOf(NotFoundException);
+    expect(demoted.intents.retry).not.toHaveBeenCalled();
+
+    // Still an operator: visible, and the retry re-checks the role in a transaction.
+    const operator = controller({
+      findById: vi.fn().mockResolvedValue(issued),
+      retry: vi.fn().mockResolvedValue(retried),
+      authority: { ownerId: OTHER_ID },
+      liveRole: Role.Operator,
+    });
+    await expect(operator.controller.get(issued.id, testActor(USER_ID, Role.Operator)))
+      .resolves.toMatchObject({ id: issued.id });
+    await expect(operator.controller.retry(issued.id, testActor(USER_ID, Role.Operator), {}))
+      .resolves.toMatchObject({ id: retried.id });
+    expect(operator.access.runWithActorRole).toHaveBeenCalled();
+
+    // Demoted between the guard and the retry: 404, nothing mutated.
+    const raced = controller({
+      findById: vi.fn().mockResolvedValue(issued),
+      authority: { ownerId: OTHER_ID },
+      liveRole: Role.User,
+    });
+    await expect(raced.controller.retry(issued.id, testActor(USER_ID, Role.Operator), {}))
+      .rejects.toBeInstanceOf(NotFoundException);
+    expect(raced.intents.retry).not.toHaveBeenCalled();
+  });
+
+  it('keeps the intents of a resource you deleted visible to you', async () => {
+    const deleted = intent({ requestedBy: USER_ID, kind: IntentKind.ContainerDelete, resourceType: IntentResourceType.Container });
+    const gone = controller({
+      findById: vi.fn().mockResolvedValue(deleted),
+      list: vi.fn().mockResolvedValue({ items: [deleted], nextCursor: null }),
+      authority: 'missing',
+    });
+    await expect(gone.controller.get(deleted.id, testActor(USER_ID))).resolves.toMatchObject({ id: deleted.id });
+    await expect(gone.controller.list(testActor(USER_ID), {})).resolves.toMatchObject({ items: [{ id: deleted.id }] });
+    const stranger = controller({ findById: vi.fn().mockResolvedValue(deleted), authority: 'missing' });
+    await expect(stranger.controller.get(deleted.id, testActor(OTHER_ID))).rejects.toBeInstanceOf(NotFoundException);
+  });
+
+  it('drops intents you requested on someone else\'s resource from your list once you lost the role', async () => {
+    const issued = intent({ requestedBy: USER_ID, resourceType: IntentResourceType.Container });
+    const list = () => vi.fn().mockResolvedValue({ items: [issued], nextCursor: null });
+    const demoted = controller({ list: list(), authority: { ownerId: OTHER_ID } });
+    await expect(demoted.controller.list(testActor(USER_ID), {})).resolves.toMatchObject({ items: [] });
+    const owner = controller({ list: list(), authority: { ownerId: USER_ID } });
+    await expect(owner.controller.list(testActor(USER_ID), {})).resolves.toMatchObject({ items: [{ id: issued.id }] });
+    const operator = controller({ list: list(), authority: { ownerId: OTHER_ID } });
+    await expect(operator.controller.list(testActor(USER_ID, Role.Operator), {}))
+      .resolves.toMatchObject({ items: [{ id: issued.id }] });
+  });
+
+  it('retries a failed intent on your own resource without any role check', async () => {
     const own = intent({ requestedBy: USER_ID });
     const retried = intent({ id: '00000000-0000-4000-8000-000000000099', status: IntentStatus.Pending, failure: null, failureCode: null });
     const { controller: c, intents, access } = controller({
       findById: vi.fn().mockResolvedValue(own),
       retry: vi.fn().mockResolvedValue(retried),
+      authority: { ownerId: USER_ID },
     });
     const result = await c.retry(own.id, testActor(USER_ID), {});
     expect(result.id).toBe(retried.id);
@@ -273,7 +342,10 @@ describe('IntentsController GET /intents/:id and retry', () => {
 
   it('only retries failed intents', async () => {
     const pending = intent({ requestedBy: USER_ID, status: IntentStatus.Pending });
-    const { controller: c, intents } = controller({ findById: vi.fn().mockResolvedValue(pending) });
+    const { controller: c, intents } = controller({
+      findById: vi.fn().mockResolvedValue(pending),
+      authority: { ownerId: USER_ID },
+    });
     await expect(c.retry(pending.id, testActor(USER_ID), {})).rejects.toBeInstanceOf(ConflictException);
     expect(intents.retry).not.toHaveBeenCalled();
   });

@@ -5,7 +5,7 @@ export type AuthStatus = 'checking' | 'authenticated' | 'anonymous' | 'error';
 
 /**
  * Tab-local, memory-only session. The refresh secret lives in the HttpOnly
- * `nyabase_refresh` cookie, so nothing here is persisted: a reload starts in
+ * `__Host-nyabase_refresh` cookie, so nothing here is persisted: a reload starts in
  * `checking` and recovers the access token through the cookie.
  */
 export interface AuthState {

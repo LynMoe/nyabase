@@ -102,7 +102,9 @@ export class NyabaseConfigService implements OnModuleInit {
         envValuePresent: resolved.envValuePresent,
         defaultValue: maskIfSecret(definition.secret, resolved.defaultValue),
         secret: definition.secret,
-        editable: definition.editable && !definition.restartRequired,
+        // An env value outranks the database row, so an online edit would be refused.
+        editable: definition.editable && !definition.restartRequired && !resolved.envValuePresent,
+        adminOnly: definition.adminOnly === true,
         restartRequired: definition.restartRequired,
         public: definition.public,
         label: definition.label,
@@ -119,7 +121,9 @@ export class NyabaseConfigService implements OnModuleInit {
         title: this.get<string>('branding.title'),
         description: this.get<string>('branding.description'),
       },
-      sshProxy: host && port ? { host, port } : null,
+      sshProxy: host && port
+        ? { host, port, hostSuffix: this.get<string>('ssh.proxyHostSuffix').trim().toLowerCase() }
+        : null,
     };
   }
 
@@ -217,10 +221,13 @@ export class NyabaseConfigService implements OnModuleInit {
       throw new Error('auth.jwtSecret must be set to a strong secret in production');
     }
     const keySecret = this.get<string>('ssh.keyEncryptionSecret')?.trim() ?? '';
-    if (!keySecret) {
+    if (keySecret.length < 32) {
       throw new Error(
-        'ssh.keyEncryptionSecret must be set to a dedicated secret in production',
+        'ssh.keyEncryptionSecret must be set to a dedicated secret of at least 32 characters in production',
       );
+    }
+    if (keySecret === this.get<string>('auth.jwtSecret')?.trim()) {
+      throw new Error('ssh.keyEncryptionSecret must differ from auth.jwtSecret');
     }
     this.assertProductionConfigFileMode();
   }

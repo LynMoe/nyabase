@@ -17,6 +17,19 @@ use tracing::{debug, info, warn};
 
 pub(crate) const SSH_PROXY_PAUSE_REJECT_DESCRIPTION: &str = "Nyabase jump unavailable";
 
+/// Longest SSH login the proxy accepts. A jump-format login is at most
+/// `user.server.container` (3 × 64 + 2); this also matches the status
+/// report's `login` bound in `@nyabase/common`.
+pub(crate) const MAX_SSH_LOGIN_BYTES: usize = 256;
+
+/// A login is stored, logged and reported, so anything other than short
+/// printable ASCII is refused before any key lookup.
+pub(crate) fn acceptable_login(login: &str) -> bool {
+    !login.is_empty()
+        && login.len() <= MAX_SSH_LOGIN_BYTES
+        && login.bytes().all(|byte| (0x20..=0x7e).contains(&byte))
+}
+
 pub(crate) struct ProxySshSession {
     pub(crate) store: Arc<SnapshotStore>,
     pub(crate) control: Arc<ControlPlane>,
@@ -27,7 +40,6 @@ pub(crate) struct ProxySshSession {
     pub(crate) reject_paused: bool,
     pub(crate) authenticated_login: Option<String>,
     pub(crate) authenticated_public_key: Option<PublicKey>,
-    pub(crate) resolved_route: Option<OwnedResolvedRoute>,
 }
 
 #[derive(Clone, Debug)]
@@ -94,7 +106,6 @@ impl ProxySshSession {
             reject_paused,
             authenticated_login: None,
             authenticated_public_key: None,
-            resolved_route: None,
         }
     }
 
@@ -133,22 +144,22 @@ impl ProxySshSession {
         Ok(user.id.clone())
     }
 
-    pub(crate) fn authorized_route_for_target(
-        &self,
-        routed_ip: &str,
-    ) -> Result<OwnedResolvedRoute> {
+    /// `target` is the `direct-tcpip` host: a routed IP or a container name.
+    pub(crate) fn authorized_route_for_target(&self, target: &str) -> Result<OwnedResolvedRoute> {
         let user_id = self.authorized_user_id()?;
         let snapshot = self
             .held_snapshot()
             .context("no SSH proxy snapshot is installed")?;
         snapshot
-            .resolve_owned_route_for_user_ip(&user_id, routed_ip)
+            .resolve_owned_route_for_user_target(&user_id, target)
             .map_err(|reason| anyhow::anyhow!(reason.to_string()))
     }
 
+    /// `login` must already have passed [`acceptable_login`]; pass `None`
+    /// for a login that did not, so its content never leaves the proxy.
     pub(crate) fn emit_login_audit(
         &self,
-        login: &str,
+        login: Option<&str>,
         username: Option<&str>,
         route: Option<&OwnedResolvedRoute>,
         ok: bool,
@@ -160,12 +171,10 @@ impl ProxySshSession {
                 user_id: route
                     .map(|route| route.user_id.clone())
                     .or_else(|| lock(&self.connection.authenticated_user_id).clone()),
-                username: Some(
-                    route
-                        .map(|route| route.username.clone())
-                        .or_else(|| username.map(str::to_string))
-                        .unwrap_or_else(|| login.to_string()),
-                ),
+                username: route
+                    .map(|route| route.username.clone())
+                    .or_else(|| username.map(str::to_string))
+                    .or_else(|| login.map(str::to_string)),
                 container_id: route.map(|route| route.container_id.clone()),
                 server_id: route.map(|route| route.server_id.clone()),
                 action: "login".to_string(),
@@ -209,6 +218,9 @@ impl russh::server::Handler for ProxySshSession {
         user: &str,
         public_key: &PublicKey,
     ) -> Result<Auth, Self::Error> {
+        if !acceptable_login(user) {
+            return Ok(Auth::reject());
+        }
         if self.pause_rejecting() {
             return Ok(Auth::Accept);
         }
@@ -227,18 +239,27 @@ impl russh::server::Handler for ProxySshSession {
         user: &str,
         public_key: &PublicKey,
     ) -> Result<Auth, Self::Error> {
+        if !acceptable_login(user) {
+            warn!(
+                peer = %self.peer,
+                login_bytes = user.len(),
+                "SSH proxy login rejected: not 1..=256 printable ASCII bytes"
+            );
+            self.emit_login_audit(None, None, None, false, Some("invalid_login"));
+            return Ok(Auth::reject());
+        }
         if self.pause_rejecting() {
             return Ok(Auth::Accept);
         }
         let Some(snapshot) = self.latest_snapshot() else {
-            self.emit_login_audit(user, None, None, false, Some("snapshot_unavailable"));
+            self.emit_login_audit(Some(user), None, None, false, Some("snapshot_unavailable"));
             return Ok(Auth::reject());
         };
         let user_row = match snapshot.find_active_user_by_public_key(public_key) {
             Ok(user_row) => user_row,
             Err(reason) => {
                 warn!(peer = %self.peer, login = user, %reason, "SSH proxy public key rejected");
-                self.emit_login_audit(user, None, None, false, Some(reason.code()));
+                self.emit_login_audit(Some(user), None, None, false, Some(reason.code()));
                 return Ok(Auth::reject());
             }
         };
@@ -259,7 +280,7 @@ impl russh::server::Handler for ProxySshSession {
             "SSH proxy login authenticated"
         );
         self.emit_login_audit(
-            user,
+            Some(user),
             Some(&user_row.username),
             pinned_route.as_ref(),
             true,
@@ -289,7 +310,6 @@ impl russh::server::Handler for ProxySshSession {
         );
         self.authenticated_login = Some(user.to_string());
         self.authenticated_public_key = Some(public_key.clone());
-        self.resolved_route = pinned_route;
         Ok(Auth::Accept)
     }
 
@@ -473,30 +493,6 @@ impl russh::server::Handler for ProxySshSession {
                 return Ok(false);
             }
         };
-        self.connection.set_route(&route);
-        self.resolved_route = Some(route.clone());
-
-        if host_to_connect != route.routed_ip {
-            warn!(
-                %peer,
-                target = %format!("{host_to_connect}:{port_to_connect}"),
-                permitted = %format!("{}:22", route.routed_ip),
-                originator = %format!("{originator_address}:{originator_port}"),
-                "direct-tcpip target outside PermitOpen"
-            );
-            emit_metric(
-                &self.telemetry,
-                "ssh_proxy_channels_total",
-                vec![
-                    ("kind", "direct_tcpip".to_string()),
-                    ("result", "rejected_permit".to_string()),
-                ],
-                1.0,
-            );
-            let _ = channel.close().await;
-            return Ok(false);
-        }
-
         if self.connection.channels.load(Ordering::Relaxed) >= MAX_CHANNELS_PER_CONNECTION {
             warn!(%peer, "SSH direct-tcpip channel limit reached");
             emit_metric(
@@ -576,9 +572,14 @@ impl russh::server::Handler for ProxySshSession {
             }
         };
 
+        // Bind first, re-check second: a snapshot installed after this point
+        // revalidates the bound route and aborts this bridge on its own.
+        bridge_permit.bind_route(&route);
+        // A failed re-check (user or key revoked meanwhile) refuses this
+        // channel only; the connection's own revalidation handles the rest.
         if !self
-            .authorized_route_for_target(&route.routed_ip)?
-            .same_authority(&route)
+            .authorized_route_for_target(&route.routed_ip)
+            .is_ok_and(|current| current.same_authority(&route))
         {
             warn!(
                 %peer,
@@ -607,6 +608,7 @@ impl russh::server::Handler for ProxySshSession {
             ],
             1.0,
         );
+        self.connection.set_display_route(&route);
         debug!(
             %peer,
             target = %address,

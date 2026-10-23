@@ -171,6 +171,80 @@ describe('agent Incus policy', () => {
     expect((await check({ method: 'DELETE', path: '/1.0/storage-pools/default' })).allowed).toBe(false);
   });
 
+  it('refuses volume mounts over kernel pseudo-filesystems', async () => {
+    const withMount = (path: string) => instanceDocument({
+      devices: {
+        ...(instanceDocument().devices as Record<string, unknown>),
+        [ATTACHMENT]: { type: 'disk', pool: 'default', source: VOLUME, path },
+      },
+    });
+    for (const path of ['/proc', '/proc/sys', '/sys', '/sys/fs/cgroup', '/dev', '/dev/shm', '//proc', '/dev/', '/./sys', '/data/../proc']) {
+      const verdict = await check({ method: 'POST', path: '/1.0/instances', body: body(withMount(path)) });
+      expect(verdict.allowed, path).toBe(false);
+    }
+    for (const path of ['/data', '/procfs', '/srv/dev', '/system']) {
+      const verdict = await check({ method: 'POST', path: '/1.0/instances', body: body(withMount(path)) });
+      expect(verdict.allowed, path).toBe(true);
+    }
+  });
+
+  it('requires a volume PUT to keep security.shifted, like PATCH', async () => {
+    const path = `/1.0/storage-pools/default/volumes/custom/${VOLUME}`;
+    const current = { config: { size: '1073741824', 'security.shifted': 'true' } };
+    for (const config of [{ size: '2147483648' }, undefined]) {
+      expect((await check({ method: 'PUT', path, body: body(config ? { config } : { description: '' }) }, current)).allowed)
+        .toBe(false);
+    }
+    expect((await check({ method: 'PUT', path, body: body({ config: { size: '2147483648', 'security.shifted': 'true' } }) }, current)).allowed)
+      .toBe(true);
+    // A PATCH that leaves the key out leaves it as it is.
+    expect((await check({ method: 'PATCH', path, body: body({ config: { size: '2147483648' } }) }, current)).allowed)
+      .toBe(true);
+    expect((await check({ method: 'PATCH', path, body: body({ config: { 'security.shifted': null } }) }, current)).allowed)
+      .toBe(false);
+  });
+
+  it('pulls images only from public https simplestreams servers', async () => {
+    const pull = (server: unknown, protocol: string | null = 'simplestreams') => check({
+      method: 'POST',
+      path: '/1.0/images',
+      body: body({ source: { type: 'image', server, alias: 'ubuntu/24.04', ...(protocol ? { protocol } : {}) } }),
+    });
+    expect((await pull('https://images.linuxcontainers.org')).allowed).toBe(true);
+    expect((await pull('https://nyabase-images.example.workers.dev/')).allowed).toBe(true);
+    for (const server of [
+      'http://images.example.com',
+      'https://127.0.0.1',
+      'https://2130706433',
+      'https://0x7f.1',
+      'https://[::1]',
+      'https://169.254.169.254/latest',
+      'https://10.0.0.8:8443',
+      'https://[fd00::1]',
+      'https://localhost',
+      'https://localhost.',
+      'https://metadata.localhost',
+      'https://intranet',
+      'https://registry.internal',
+      'https://nas.local',
+      'https://user:pw@images.example.com',
+      'unix:///var/lib/incus/unix.socket',
+      'not a url',
+    ]) {
+      expect((await pull(server)).allowed, server).toBe(false);
+    }
+    expect((await pull('https://images.example.com', 'incus')).allowed).toBe(false);
+    expect((await pull('https://images.example.com', null)).allowed).toBe(false);
+    // Instance creation from a remote image is held to the same rule.
+    const create = (server: string) => check({
+      method: 'POST',
+      path: '/1.0/instances',
+      body: body(instanceDocument({ source: { type: 'image', alias: 'debian/12', server, protocol: 'simplestreams' } })),
+    });
+    expect((await create('https://images.example.com')).allowed).toBe(true);
+    expect((await create('https://192.168.1.10')).allowed).toBe(false);
+  });
+
   it('refuses server, trust, profile and network mutation', async () => {
     for (const request of [
       { method: 'PUT', path: '/1.0', body: body({ config: {} }) },

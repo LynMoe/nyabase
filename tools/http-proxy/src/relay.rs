@@ -6,6 +6,62 @@ use std::time::Duration;
 use tokio::io::{self, AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::time::{self, Instant};
 
+/// An error after the response to the client may have started. The listener
+/// resets (RST) the client connection instead of closing it, so a
+/// close-delimited response that was cut short cannot look complete.
+#[derive(Debug)]
+pub(crate) struct ClientAbort(pub(crate) String);
+
+impl std::fmt::Display for ClientAbort {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for ClientAbort {}
+
+pub(crate) fn client_abort(message: impl Into<String>) -> anyhow::Error {
+    ClientAbort(message.into()).into()
+}
+
+pub(crate) fn is_client_abort(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<ClientAbort>().is_some()
+}
+
+/// Copies `reader` to `writer` until EOF, failing once no byte has been read
+/// for `idle`. A stalled writer stops the reads too, so this bounds silence
+/// in both directions without capping the total duration.
+pub(crate) async fn copy_with_idle_timeout<R, W>(
+    reader: &mut R,
+    writer: &mut W,
+    idle: Duration,
+) -> Result<()>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    let activity = Activity::new();
+    let mut tracked = Tracked {
+        inner: &mut *reader,
+        activity: &activity,
+    };
+    let copy = io::copy(&mut tracked, writer);
+    tokio::pin!(copy);
+    loop {
+        tokio::select! {
+            result = &mut copy => {
+                result?;
+                return Ok(());
+            }
+            _ = time::sleep_until(activity.last() + idle) => {
+                if activity.last() + idle <= Instant::now() {
+                    return Err(anyhow!("request idle timeout exceeded"));
+                }
+            }
+        }
+    }
+}
+
 /// Relays an upgraded connection until either side closes, or until no byte
 /// has moved in either direction for `idle`. Without the idle bound a parked
 /// tunnel would hold its connection slot (and two sockets) forever.

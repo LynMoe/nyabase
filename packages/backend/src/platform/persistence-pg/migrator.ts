@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { readdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import type { Pool, PoolClient } from 'pg';
+import type { Pool, PoolClient, QueryConfig } from 'pg';
 
 const MIGRATION_NAME = /^(\d{6})_([a-z0-9][a-z0-9-]*)\.sql$/;
 const ADVISORY_LOCK_NAMESPACE = 1_856_214_885;
@@ -84,6 +84,10 @@ export async function discoverSqlMigrations(
   return migrations;
 }
 
+/** Client-side bound on one migration file; the server-side timeout is lifted. */
+const MIGRATION_QUERY_TIMEOUT_MS = 6 * 60 * 60 * 1_000;
+const MIGRATION_LOCK_TIMEOUT = '2min';
+
 export function assertFreshInitialMigrationManifest(
   migrations: SqlMigration[],
 ): void {
@@ -93,7 +97,7 @@ export function assertFreshInitialMigrationManifest(
     || migrations[0]?.name !== 'initial'
   ) {
     throw new Error(
-      'Nyabase requires exactly one fresh migration: 000001_initial.sql',
+      'Nyabase migrations must start with the fresh baseline 000001_initial.sql',
     );
   }
 }
@@ -315,7 +319,17 @@ export async function runSqlMigrations(
       const startedAt = performance.now();
       await client.query('BEGIN');
       try {
-        await client.query(migration.sql);
+        // Pool connections carry request-sized limits (15 s by default). A
+        // schema change on a large table must not roll back and crash-loop
+        // the Backend on that, but it should not wait forever on a lock either.
+        await client.query(`SET LOCAL statement_timeout = 0`);
+        await client.query(`SET LOCAL lock_timeout = '${MIGRATION_LOCK_TIMEOUT}'`);
+        // pg honours a per-query `query_timeout`; its typings do not declare it.
+        const statement: QueryConfig & { query_timeout: number } = {
+          text: migration.sql,
+          query_timeout: MIGRATION_QUERY_TIMEOUT_MS,
+        };
+        await client.query(statement);
         const executionMs = Math.max(0, Math.round(performance.now() - startedAt));
         await client.query(
           `INSERT INTO system.schema_migrations

@@ -89,8 +89,12 @@ openssl rand -hex 32   # ssh.proxyToken
 ```
 
 - `auth.jwtSecret`: at least 32 characters.
-- `ssh.keyEncryptionSecret`: dedicated secret; production must not fall back to
-  `auth.jwtSecret`.
+- `ssh.keyEncryptionSecret`: dedicated secret of at least 32 characters that
+  differs from `auth.jwtSecret` (production refuses to start otherwise). It
+  encrypts the SSH proxy host key and every HTTP domain pool's TLS private key
+  in the database, so it belongs to the database: back it up with every
+  database backup and never rotate it in place (there is no re-encryption).
+  See **Lost `ssh.keyEncryptionSecret`** under the backup contract.
 - `http.proxyToken` and `ssh.proxyToken`: 32–1024 character ASCII using only
   letters, digits, `_`, or `-`. `openssl rand -hex 32` is valid. The HTTP and
   SSH WebSocket handlers refuse to start with an empty token.
@@ -122,20 +126,27 @@ public entrypoint and forwards everything to the Backend:
 Keep the Backend on loopback:
 
 - Compose already publishes it only on `127.0.0.1:3001`; run the reverse proxy
-  on the same host.
-- A Backend outside Compose sets `server.listenAddress` (`LISTEN_ADDRESS`) to
-  `127.0.0.1`.
+  on the same host. Inside the container it listens on `0.0.0.0`.
+- Outside Compose `server.listenAddress` (`LISTEN_ADDRESS`) defaults to
+  `127.0.0.1`; listening anywhere else must be set explicitly (`0.0.0.0`).
 
 Set `server.trustedProxies` (`TRUSTED_PROXIES`) to the address the Backend sees
 the reverse proxy connect from. Without it every client appears to share the
 proxy's address, so one client exhausting the per-address login limit blocks
-sign-in for everyone. Use `loopback` for a non-Compose Backend on the same host.
-Under Compose, Docker forwards the loopback publish from the `edge` network, so
-the peer is the host's address on that bridge network, not `127.0.0.1`: trust
-the `edge` subnet
-(`docker network inspect nyabase_edge --format '{{(index .IPAM.Config 0).Subnet}}'`)
-and re-check it whenever the network is recreated. The proxy must overwrite,
-not append to, an inbound `X-Forwarded-For`.
+sign-in for everyone; the Backend logs a warning the first time it sees an
+`X-Forwarded-For` while no proxy is trusted. Use `loopback` for a non-Compose
+Backend on the same host. Under Compose, Docker forwards the loopback publish
+from the `edge` bridge's own address, not `127.0.0.1`. Compose pins that
+network to `EDGE_SUBNET` (default `172.30.250.0/24`) and trusts its first
+address (`172.30.250.1`) by default; if the range collides with a host network,
+change `EDGE_SUBNET` and `TRUSTED_PROXIES` together in `deploy/.env`. The proxy
+must overwrite, not append to, an inbound `X-Forwarded-For`.
+
+Do not put tenant HTTP domain pools under the panel's registrable domain
+(for example the panel at `panel.example.com` and tenant sites at
+`*.apps.example.com`). The refresh cookie is `__Host-` scoped so a tenant page
+cannot plant one for the panel, but same-site tenant pages still count as the
+panel's site for `SameSite` and share every other parent-domain cookie.
 
 Minimal nginx shape (certificate handling is the operator's):
 
@@ -190,11 +201,18 @@ They are not Compose services. Prefer installing them on a host or netns
 that can reach both the Backend WebSocket and the guest LAN; do not add them
 to the default Compose file.
 
+`deploy/install-proxy.sh ssh|http` does all of the steps below for one proxy
+from a checkout (as root): it builds with cargo (or installs `--binary FILE`),
+installs the binary and unit, creates `/etc/nyabase/<kind>-proxy.env` from the
+example only once (and then stops, so you can edit it), and on later runs
+replaces the binary and unit and restarts the service, failing loudly with the
+journal if it does not stay up. The manual equivalent:
+
 ```bash
 cargo build --release --locked --manifest-path tools/Cargo.toml
 sudo install -m 0755 tools/target/release/nyabase-ssh-proxy /usr/local/bin/
 sudo install -m 0755 tools/target/release/nyabase-http-proxy /usr/local/bin/
-sudo install -d -m 0700 /etc/nyabase
+sudo install -d -m 0755 /etc/nyabase   # the proxy user must read a CA file kept here
 sudo install -m 0600 deploy/ssh-proxy.env.example /etc/nyabase/ssh-proxy.env
 sudo install -m 0600 deploy/http-proxy.env.example /etc/nyabase/http-proxy.env
 # edit both files: NYABASE_BACKEND_WS and the proxy tokens
@@ -222,24 +240,121 @@ enforced at start-up):
 | `HTTP_PROXY_TOKEN` / `HTTP_PROXY_TOKEN_FILE` | HTTP | required, one of the two; same value as `http.proxyToken` |
 | `NYABASE_SSH_LISTEN` | SSH | `0.0.0.0:2222` |
 | `NYABASE_SSH_MAX_CONNECTIONS` | SSH | `512` (1–1024) |
-| `NYABASE_SSH_MAX_CONNECTIONS_PER_IP` | SSH | `16` (1–1024) |
+| `NYABASE_SSH_MAX_CONNECTIONS_PER_IP` | SSH | `16` (1–1024), per IPv4 address / IPv6 `/64` |
+| `NYABASE_SSH_MAX_CONNECTIONS_PER_IPV6_48` | SSH | `64` (1–1024), all `/64`s of one IPv6 `/48` together |
+| `NYABASE_SSH_MAX_PREAUTH_CONNECTIONS` | SSH | `128` (1–`NYABASE_SSH_MAX_CONNECTIONS`), not yet authenticated |
 | `NYABASE_SSH_AUTH_TIMEOUT_MS` | SSH | `30000` (1000–600000), accept to successful auth |
 | `NYABASE_SSH_CONTROL_HOLD_MS` | SSH | `300000` (180000–600000) |
 | `NYABASE_HTTP_LISTEN` | HTTP | `0.0.0.0:8080` (the example uses `:80`) |
 | `NYABASE_HTTPS_LISTEN` | HTTP | unset = HTTPS off (the example uses `:443`) |
 | `NYABASE_HTTP_MAX_CONNECTIONS` | HTTP | `4096` (1–65536) |
-| `NYABASE_HTTP_MAX_CONNECTIONS_PER_IP` | HTTP | `64` (1–65536) |
-| `NYABASE_HTTP_BODY_DEADLINE_MS` | HTTP | `30000` (1000–120000), whole request body |
+| `NYABASE_HTTP_MAX_CONNECTIONS_PER_IP` | HTTP | `64` (1–65536), per IPv4 address / IPv6 `/64` |
+| `NYABASE_HTTP_MAX_CONNECTIONS_PER_IPV6_48` | HTTP | `256` (1–65536), all `/64`s of one IPv6 `/48` together |
+| `NYABASE_HTTP_MAX_PENDING_CONNECTIONS` | HTTP | `1024` (1–`NYABASE_HTTP_MAX_CONNECTIONS`), in TLS handshake or before a full request head |
+| `NYABASE_HTTP_BODY_DEADLINE_MS` | HTTP | `30000` (1000–3600000), whole request body |
+| `NYABASE_HTTP_IDLE_TIMEOUT_MS` | HTTP | `120000` (1000–86400000), ordinary request with no bytes either way |
 | `NYABASE_HTTP_UPGRADED_IDLE_MS` | HTTP | `3600000` (1000–86400000), no bytes either way |
 | `NYABASE_HTTP_CONTROL_HOLD_MS` | HTTP | `300000` (0–600000; `0` clears routes immediately) |
 
+HTTPS domain pools take a wildcard certificate whose `subjectAltName` covers
+the pool's `*.domain` (the subject CN alone is not enough), as an X.509 v3
+certificate with an RSA 2048–4096, ECDSA P-256/P-384, or Ed25519 key, the key
+types the proxy can load. The Backend refuses anything else at upload and
+stores the key re-encoded as PKCS#8.
+
 A token file must be a regular file (not a symlink) readable only by the
 service user; with `DynamicUser` deliver it through a `LoadCredential=` drop-in
-rather than a root-owned path. Per-IP limits bucket IPv6 clients per `/64`;
-WebSocket and other upgraded connections count against both HTTP limits. A
-connection over a limit is closed immediately. The SSH authentication deadline
-is independent of the 600 s session inactivity timeout. These are environment
-settings only, not YAML or panel settings.
+rather than a root-owned path. Per-IP limits bucket IPv6 clients per `/64`
+and additionally cap each `/48`; IPv4-mapped addresses count as IPv4.
+WebSocket and other upgraded connections count against every HTTP limit. A
+connection over a limit is closed immediately. Every new connection also
+takes a pre-auth (SSH: until public-key authentication succeeds) or pending
+(HTTP: until the request head is read, including the TLS handshake) slot, a
+smaller pool than the total, so unauthenticated sockets cannot crowd out
+established sessions. The SSH authentication deadline is independent of the
+600 s session inactivity timeout. These are environment settings only, not
+YAML or panel settings. A transient `accept()` failure (descriptor
+exhaustion, `ECONNABORTED`, `ENOBUFS`) is logged and retried with a short
+backoff (5 ms doubling to 1 s); it does not restart the proxy.
+
+**Reaching containers by name.** The proxy authenticates by public key
+alone; the jump login only labels the session. A `direct-tcpip` target is
+either a container's routed IP or its name, bare (`work`) or with the host
+suffix `ssh.proxyHostSuffix` (default `nya`, so `work.nya`), and a name is
+looked up only among the key holder's own containers. Container names are
+therefore unique per owner, ignoring case (and still per server). Each user's
+profile page shows a one-time `~/.ssh/config` block (`Host *.<suffix>` with
+`ProxyJump <user>@<proxy host>:<port>`) and two `known_hosts` lines: the
+proxy's host key and `@cert-authority *.<suffix> <the user's host CA>`. After
+that `ssh root@work.nya` works for every current and future container with
+strict host key checking and no fingerprint prompt.
+
+**Container host certificates.** Every user has their own Ed25519 host CA
+(`interaction.ssh_host_authorities`, private key encrypted with
+`ssh.keyEncryptionSecret`); it signs only that user's containers, so one
+user's container named `work` can never present a certificate another user's
+known_hosts accepts. While a container's sshd is up, the reconciler writes
+`/etc/ssh/ssh_host_ed25519_key-cert.pub` (principals `<name>.<suffix>` and
+`<name>`, valid forever) and `/etc/ssh/sshd_config.d/50-nyabase-host-certificate.conf`,
+checks the result with `sshd -t` (removing its drop-in if sshd refuses it) and
+reloads sshd. This is best effort: an image without an Ed25519 host key or
+without `Include /etc/ssh/sshd_config.d/*.conf` gets no certificate and users
+fall back to trust-on-first-use; the reconciler logs why. Changing the host
+suffix re-signs every container and breaks the ssh_config and known_hosts
+lines users already copied; rotating the proxy host key breaks the proxy line.
+Choose a suffix that is not a real domain covering the proxy's own public
+host: `Host *.<suffix>` would then match the jump host itself.
+
+**Guest authorized_keys.** The platform owns only a marked block at the end of
+the login user's `authorized_keys` (`# >>> nyabase: platform SSH keys …` to
+`# <<< nyabase <<<`); lines the user adds outside it are kept. The block holds
+the owner's current keys and is removed when they have none.
+
+**Snapshot size.** The proxy snapshot carries only users, containers, servers
+and images behind at least one routable SSH route, and has a hard cap of
+4 MiB. A build over the cap fails and the proxies keep the previous snapshot
+(new containers and keys stop taking effect); the admin SSH proxy page shows
+the last build's size against the cap, warns from 75%, and shows the error of a
+failed build, a missing public address, and proxies behind the latest
+generation. Because users without a reachable container are left out, their
+login attempts are audited as `public_key_rejected`, the same as an unknown key.
+
+**SSH logins.** The SSH login must be 1–256 printable ASCII bytes; anything
+else is refused before any key lookup and audited as `invalid_login` without
+the login text. The once-per-second status report caps its per-connection
+details at 1024 entries / 512 KiB; connections beyond that are counted in
+`omittedConnections` (and in `activeConnections`) but not listed. Each
+`direct-tcpip` bridge is revalidated against every new snapshot on its own: a
+bridge whose container route is revoked is closed, the connection and its
+other bridges stay. A route bound by a jump-format login (`user.container`)
+still ends the whole connection when revoked.
+
+**HTTP request handling.** The HTTP proxy is the public edge, so it never
+trusts client forwarding headers: incoming `Forwarded`, `X-Real-IP` and every
+`X-Forwarded-*` header are removed, and the upstream receives
+`X-Forwarded-For` and `X-Real-IP` (the client socket address; IPv4-mapped
+IPv6 shown as IPv4), `X-Forwarded-Proto` (`http` or `https` by listener) and
+`X-Forwarded-Host` (the client's `Host`). Do not put another proxy in front of
+it unless that hop is changed to pass the client address some other way;
+behind one, every request would appear to come from it. Each connection
+carries exactly one request (`Connection: close` upstream, no upstream reuse).
+Request bodies are capped at 16 MiB. `Expect: 100-continue` is answered by the
+proxy itself (after the route resolves and the upstream connects) and is not
+forwarded; any other expectation is a 400. `Transfer-Encoding: chunked`
+request bodies are accepted only as exactly `chunked` on HTTP/1.1, without
+`Content-Length`, and are decoded strictly and re-chunked to the upstream
+(chunk extensions and trailers dropped); malformed framing or bytes after the
+final chunk get a 400 and the upstream never receives a complete body. Other
+transfer codings, a coding list, duplicate `Transfer-Encoding` or
+`Content-Length` headers and folded header lines are rejected. There is no
+total request lifetime: the request head must arrive within 10 s, the body
+within `NYABASE_HTTP_BODY_DEADLINE_MS`, and after that the exchange runs until
+it finishes, the route is revoked, or nothing moves for
+`NYABASE_HTTP_IDLE_TIMEOUT_MS` (waiting for the upstream's first byte counts as
+idle). Long downloads, SSE and long-polling therefore work as long as bytes
+flow at least that often. When a response is cut short (idle timeout, route
+revocation, upstream error) the proxy resets the client connection (TCP RST)
+instead of closing it, so a close-delimited body cannot look complete.
 
 **Backend restarts and agent outages.** After losing its control connection
 the HTTP proxy keeps serving its last snapshot for `NYABASE_HTTP_CONTROL_HOLD_MS`,
@@ -579,6 +694,23 @@ VictoriaMetrics backup must use `vmbackup` against an instant snapshot and copy
 it to object storage or another host. `vmrestore` is an offline operation:
 stop VictoriaMetrics, restore into its data path, then start it.
 
+### Lost `ssh.keyEncryptionSecret`
+
+Restore `config.yaml` from the same backup set as the database whenever
+possible. If the secret is gone (or a restore paired the database with a new
+one), nothing else breaks, but the encrypted keys are unrecoverable:
+
+- **SSH proxy**: rotate the proxy host key from the admin SSH proxy page
+  (rotation does not need the old key). Users see a new host key fingerprint.
+- **Container host certificates**: the reconciler logs that a user's host CA
+  cannot be decrypted and stops issuing certificates (existing ones keep
+  working). Use **重置容器证书 CA** on the admin SSH proxy page: every user gets a
+  new CA and every active container is queued for a new certificate. Users must
+  copy the new `@cert-authority` line from their profile.
+- **HTTP proxy**: snapshots skip every domain pool whose key no longer
+  decrypts and log `TLS key cannot be decrypted`; its sites keep serving plain
+  HTTP and fail HTTPS until the certificate and key are uploaded again.
+
 ## Upgrades
 
 - Pin PostgreSQL to the current PostgreSQL 18 minor after staging its release
@@ -658,8 +790,10 @@ from the product SLO and measured baseline, not from this example deployment.
   their password.
 - SSH public keys are globally unique: adding a key that any account already
   holds fails with `409 SSH_KEY_IN_USE` without revealing the owner.
-- Browser sessions keep the refresh secret in the `nyabase_refresh` cookie
-  (`HttpOnly`, `Secure`, `SameSite=Strict`, `Path=/api/auth`); the access token
+- Browser sessions keep the refresh secret in the `__Host-nyabase_refresh`
+  cookie (`HttpOnly`, `Secure`, `SameSite=Strict`, `Path=/`; the `__Host-`
+  prefix stops sibling subdomains from overwriting it). Plain-HTTP development
+  with `auth.cookieSecure=false` uses `nyabase_refresh` on `/api/auth`. The access token
   lives only in tab memory, and nothing credential-bearing is written to web
   storage. `/api/auth/login`, `/refresh`, and `/logout` require the
   `X-Nyabase-Auth: 1` header, which cross-site pages cannot send without a
@@ -681,7 +815,15 @@ from the product SLO and measured baseline, not from this example deployment.
   weakening those controls.
 - Never publish the PostgreSQL port.
 - Rotate `.env` and `config.yaml` credentials through the deployment secret
-  mechanism used by the target environment; do not commit either file.
+  mechanism used by the target environment; do not commit either file. The
+  exception is `ssh.keyEncryptionSecret`: it encrypts data at rest and has no
+  in-place rotation (see the backup contract).
+- Audit retention (`audit.retentionDays`, `audit.retentionMaxEntries`) is
+  admin-only in the system settings page and cannot be set below 30 days or
+  10,000 entries (0 disables that limit), so an operator cannot purge the trail.
+- Each user holds at most 32 HTTP bindings and 64 active-or-draining hostnames.
+  Operators can delete any user's binding from the HTTP proxy page
+  (`DELETE /api/http-proxy/bindings/:id?scope=all`).
 - Keep PostgreSQL TLS policy out of `DATABASE_URL`: URL-level `ssl`,
   `sslmode`, certificate and key parameters are rejected because
   `node-postgres` would otherwise let them override the fail-closed pool
@@ -760,7 +902,7 @@ sudo install -d /opt/nyabase/agent
 # Copy packages/agent/dist + package.json and production node_modules
 # (@nyabase/common, zod, ws must resolve).
 sudo install -D -m 0644 deploy/nyabase-agent.service /etc/systemd/system/nyabase-agent.service
-sudo install -d -m 0700 /etc/nyabase
+sudo install -d -m 0755 /etc/nyabase   # the proxy user must read a CA file kept here
 sudo tee /etc/nyabase/agent.env >/dev/null <<ENV
 NYABASE_BACKEND_URL=https://nyabase.example.com
 NYABASE_AGENT_ENROLLMENT_TOKEN=<控制台显示的一次性令牌>

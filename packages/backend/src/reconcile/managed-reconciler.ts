@@ -34,6 +34,11 @@ export function failedOutcome(
 }
 
 /** Who owns a resource (null: nobody, operator-only). */
+/**
+ * Who owns a resource (`null` for operator-managed types). `resourceAuthorities`
+ * omits owned resources that no longer exist, so intents can tell "deleted"
+ * from "someone else's".
+ */
 export interface ResourceAuthority {
   readonly ownerId: string | null;
 }

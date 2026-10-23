@@ -12,7 +12,7 @@ import {
 } from '@nyabase/common';
 import { AgentConnection } from './agent-connection.js';
 import { AgentCredentialVerifier } from './agent-credentials.js';
-import { AgentRegistry } from './agent-registry.service.js';
+import { AGENT_CLOSE_CREDENTIAL_REJECTED, AgentRegistry } from './agent-registry.service.js';
 
 const HELLO_TIMEOUT_MS = 10_000;
 const STREAM_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -92,7 +92,8 @@ export class AgentGateway implements OnModuleDestroy {
     // ws attaches its own socket error handling once the upgrade completes.
     socket.removeListener('error', onSocketError);
     if (path === AGENT_CONTROL_PATH) {
-      this.control!.handleUpgrade(request, socket, head, (ws) => this.acceptControl(ws, serverId));
+      const authorization = request.headers.authorization;
+      this.control!.handleUpgrade(request, socket, head, (ws) => this.acceptControl(ws, serverId, authorization));
       return;
     }
     this.streams!.handleUpgrade(request, socket, head, (ws) => {
@@ -110,10 +111,17 @@ export class AgentGateway implements OnModuleDestroy {
     ws.on('ping', () => this.alive.set(ws, true));
   }
 
-  private acceptControl(ws: WebSocket, serverId: string): void {
+  /**
+   * hello → re-verify the credential (it may have been rotated, or the server
+   * deleted, while this socket was upgrading) → welcome and register. Until
+   * registered the socket is tracked so AgentRegistry.disconnect reaches it.
+   */
+  private acceptControl(ws: WebSocket, serverId: string, authorization: string | undefined): void {
     this.watchLiveness(ws);
     ws.on('error', (error) => this.logger.warn(`Agent ${serverId} socket error: ${error.message}`));
     let connection: AgentConnection | undefined;
+    let verifying = false;
+    const untrack = this.registry.trackPending(serverId, ws);
     const helloTimer = setTimeout(() => ws.close(1008, 'hello timeout'), HELLO_TIMEOUT_MS);
     ws.on('message', (data, isBinary) => {
       if (isBinary) {
@@ -127,23 +135,36 @@ export class AgentGateway implements OnModuleDestroy {
         ws.close(1008, 'malformed control frame');
         return;
       }
-      if (!connection) {
-        const hello = zAgentHello.safeParse(frame);
-        if (!hello.success) {
-          ws.close(1008, 'expected hello');
+      if (connection) {
+        if (!connection.handleFrame(frame)) ws.close(1008, 'malformed control frame');
+        return;
+      }
+      const hello = verifying ? undefined : zAgentHello.safeParse(frame);
+      if (!hello?.success) {
+        ws.close(1008, verifying ? 'frame before welcome' : 'expected hello');
+        return;
+      }
+      verifying = true;
+      void this.credentials.confirmControl(serverId, authorization).then((valid) => {
+        if (ws.readyState !== WebSocket.OPEN) return;
+        if (!valid) {
+          ws.close(AGENT_CLOSE_CREDENTIAL_REJECTED, 'credential revoked');
           return;
         }
         clearTimeout(helloTimer);
+        untrack();
         connection = new AgentConnection(serverId, hello.data, ws, this.registry.streams);
         ws.send(JSON.stringify({ type: 'welcome', serverId }));
         this.registry.register(connection);
         this.logger.log(`Agent connected for server ${serverId} (${hello.data.hostname}, ${hello.data.agentVersion})`);
-        return;
-      }
-      if (!connection.handleFrame(frame)) ws.close(1008, 'malformed control frame');
+      }, (error: unknown) => {
+        this.logger.warn(`Agent ${serverId} credential check failed: ${error instanceof Error ? error.message : String(error)}`);
+        ws.close(1011, 'credential check failed');
+      });
     });
     ws.once('close', () => {
       clearTimeout(helloTimer);
+      untrack();
       if (connection) {
         this.registry.unregister(connection);
         this.logger.log(`Agent disconnected for server ${serverId}`);

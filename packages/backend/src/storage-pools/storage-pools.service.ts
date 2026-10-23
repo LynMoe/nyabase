@@ -1,5 +1,6 @@
 import { ConflictException, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import {
+  AuditAction,
   FailureCode,
   type ListScope,
   type PatchStoragePoolRequest,
@@ -14,6 +15,7 @@ import type { IncusClientPort } from '../incus/index.js';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
+import { AuditService } from '../iam/audit.service.js';
 import { isLocalPoolDto, isLocalPoolRow } from './storage-pool-capability.js';
 import { StoragePoolDiscoveryService } from './storage-pool-discovery.service.js';
 import { optionalByteCount } from './storage-pool-discovery.service.js';
@@ -28,6 +30,7 @@ export class StoragePoolsService {
     private readonly transactions: PgTransactionManager,
     @Inject(PG_DATABASE) private readonly database: Kysely<NyabaseDatabase>,
     private readonly discovery: StoragePoolDiscoveryService,
+    private readonly audit: AuditService,
   ) {}
 
   /** Records observed used/total bytes for every registered pool of one server. */
@@ -106,11 +109,21 @@ export class StoragePoolsService {
     return toUserPoolDto(row);
   }
 
-  discover(serverId: string): Promise<StoragePoolDiscoverResult> {
-    return this.discovery.discover(serverId);
+  async discover(actorId: string, serverId: string): Promise<StoragePoolDiscoverResult> {
+    const result = await this.discovery.discover(serverId);
+    await this.audit.log(actorId, AuditAction.DiscoverStoragePools, serverId, 'server', {
+      pools: result.pools.length,
+      identityConflicts: result.identityConflicts.length,
+    });
+    return result;
   }
 
-  async patch(id: string, input: PatchStoragePoolRequest, serverId?: string): Promise<StoragePoolDto> {
+  async patch(
+    actorId: string,
+    id: string,
+    input: PatchStoragePoolRequest,
+    serverId?: string,
+  ): Promise<StoragePoolDto> {
     const result = await this.transactions.run(
       async (transaction) => {
         const observed = await this.repository.findById(id, transaction);
@@ -145,6 +158,20 @@ export class StoragePoolsService {
             : { display_name: input.displayName?.trim() ? input.displayName.trim() : null }),
         }, transaction);
         if (!updated) throw new ConflictException({ code: FailureCode.RevisionConflict });
+        await this.audit.append(
+          transaction,
+          actorId,
+          input.registered === true && !current.registered
+            ? AuditAction.RegisterStoragePool
+            : AuditAction.UpdateStoragePool,
+          id,
+          'storage_pool',
+          {
+            serverId: current.server_id,
+            ...(input.registered === undefined ? {} : { registered: input.registered }),
+            ...(input.displayName === undefined ? {} : { displayName: input.displayName }),
+          },
+        );
         return updated;
       },
       { isolationLevel: 'serializable', maxAttempts: 5 },

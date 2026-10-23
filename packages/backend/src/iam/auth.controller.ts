@@ -8,6 +8,7 @@ import {
   Param,
   Req,
   Res,
+  ForbiddenException,
   UnauthorizedException,
 } from '@nestjs/common';
 import { AuthService } from './auth.service.js';
@@ -17,19 +18,92 @@ import type { UserRecord } from './auth-persistence.js';
 import { AccessResolverService } from './access-resolver.service.js';
 import { NyabaseConfigService } from '../platform/config/nyabase-config.service.js';
 import {
-  clearRefreshCookie,
-  readRefreshCookie,
-  requireAuthIntent,
-  setRefreshCookie,
-  type CookieRequest,
-  type CookieResponse,
-} from './refresh-cookie.js';
-import {
   zLoginRequest,
   zRotateRefreshTokenRequest,
   zCreateApiTokenRequest,
   UserDto,
 } from '@nyabase/common';
+
+export const REFRESH_COOKIE_NAME = 'nyabase_refresh';
+/**
+ * With Secure cookies the name carries the `__Host-` prefix: browsers then
+ * refuse it from any response that sets a Domain, so a tenant site under the
+ * same registrable domain cannot toss its own refresh cookie at the panel.
+ * The prefix requires Path=/; plain-HTTP development keeps the scoped path.
+ */
+export const SECURE_REFRESH_COOKIE_NAME = `__Host-${REFRESH_COOKIE_NAME}`;
+/** Scope the refresh secret to the endpoints that consume it. */
+export const REFRESH_COOKIE_PATH = '/api/auth';
+
+export function refreshCookieName(secure: boolean): string {
+  return secure ? SECURE_REFRESH_COOKIE_NAME : REFRESH_COOKIE_NAME;
+}
+/**
+ * Browsers cannot attach a custom header to a cross-site request without a
+ * CORS preflight, which the Backend denies for foreign origins. Requiring it
+ * on every cookie-reading or cookie-setting endpoint (including login, which
+ * would otherwise accept a cross-site urlencoded form) closes CSRF without
+ * relying on SameSite alone.
+ */
+export const AUTH_INTENT_HEADER = 'x-nyabase-auth';
+
+export interface CookieRequest {
+  headers: Record<string, string | string[] | undefined>;
+}
+
+export interface CookieResponse {
+  cookie(name: string, value: string, options: Record<string, unknown>): unknown;
+  clearCookie(name: string, options: Record<string, unknown>): unknown;
+}
+
+export function requireAuthIntent(request: CookieRequest): void {
+  if (request.headers[AUTH_INTENT_HEADER] !== '1') {
+    throw new ForbiddenException({
+      code: 'AUTH_INTENT_REQUIRED',
+      message: `${AUTH_INTENT_HEADER}: 1 header is required`,
+    });
+  }
+}
+
+export function readRefreshCookie(request: CookieRequest, secure: boolean): string | null {
+  const header = request.headers.cookie;
+  const raw = Array.isArray(header) ? header.join('; ') : header;
+  if (!raw) return null;
+  const name = refreshCookieName(secure);
+  for (const part of raw.split(';')) {
+    const separator = part.indexOf('=');
+    if (separator < 0 || part.slice(0, separator).trim() !== name) continue;
+    const value = part.slice(separator + 1).trim();
+    // Issued tokens are URL-safe; anything else was not set by this Backend,
+    // so keep looking instead of letting a planted value shadow the real one.
+    if (/^[A-Za-z0-9_-]{1,256}$/.test(value)) return value;
+  }
+  return null;
+}
+
+function cookieOptions(secure: boolean) {
+  return {
+    httpOnly: true,
+    secure,
+    sameSite: 'strict',
+    path: secure ? '/' : REFRESH_COOKIE_PATH,
+  } as const;
+}
+
+export function setRefreshCookie(
+  response: CookieResponse,
+  token: string,
+  options: { secure: boolean; maxAgeMs: number },
+): void {
+  response.cookie(refreshCookieName(options.secure), token, {
+    ...cookieOptions(options.secure),
+    maxAge: options.maxAgeMs,
+  });
+}
+
+export function clearRefreshCookie(response: CookieResponse, secure: boolean): void {
+  response.clearCookie(refreshCookieName(secure), cookieOptions(secure));
+}
 
 @Controller('auth')
 export class AuthController {
@@ -92,7 +166,7 @@ export class AuthController {
   ) {
     requireAuthIntent(request);
     const { requestId } = zRotateRefreshTokenRequest.parse(body);
-    const presented = readRefreshCookie(request);
+    const presented = readRefreshCookie(request, this.cookieSecure());
     if (!presented) throw new UnauthorizedException('Invalid refresh token');
     let rotated: Awaited<ReturnType<AuthService['refreshTokens']>>;
     try {
@@ -116,7 +190,7 @@ export class AuthController {
     @Res({ passthrough: true }) response: CookieResponse,
   ) {
     requireAuthIntent(request);
-    const presented = readRefreshCookie(request);
+    const presented = readRefreshCookie(request, this.cookieSecure());
     clearRefreshCookie(response, this.cookieSecure());
     if (presented) await this.authService.logout(presented);
   }

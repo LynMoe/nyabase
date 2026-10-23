@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { gpuInstanceSpec, gpuRequiresStop } from './instance-spec.js';
+import { gpuInstanceSpec, gpuRequiresStop, gpuStateOccupies } from './instance-spec.js';
 
 describe('gpuInstanceSpec', () => {
   it('returns empty config/devices when the key is missing or empty', () => {
@@ -29,6 +29,18 @@ describe('gpuInstanceSpec', () => {
         gpu1: { type: 'gpu', gputype: 'physical', pci: '0000:a1:00.0' },
       },
     });
+  });
+
+  it('projects nothing for runtime-off state without cards (the Incus default)', () => {
+    expect(gpuInstanceSpec({ nvidiaRuntime: false, pciAddresses: [] }))
+      .toEqual({ config: {}, devices: {} });
+  });
+
+  it('counts a container as occupying GPU exactly when it contributes to the spec', () => {
+    expect(gpuStateOccupies(null)).toBe(false);
+    expect(gpuStateOccupies({ nvidiaRuntime: false, pciAddresses: [] })).toBe(false);
+    expect(gpuStateOccupies({ nvidiaRuntime: true, pciAddresses: [] })).toBe(true);
+    expect(gpuStateOccupies({ nvidiaRuntime: true, pciAddresses: ['00000000:41:00.0'] })).toBe(true);
   });
 
   it('does not leak admitCreate defaults into an empty projection', () => {

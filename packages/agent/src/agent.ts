@@ -1,5 +1,6 @@
 import { hostname } from 'node:os';
 import {
+  AGENT_HEARTBEAT_INTERVAL_MS,
   AGENT_PROTOCOL_VERSION,
   AGENT_STREAM_CONNECT_TIMEOUT_MS,
   MAX_AGENT_METRICS_TEXT_BYTES,
@@ -37,7 +38,7 @@ export function createAgentHandlers(deps: AgentDependencies): AgentHandlers {
   return {
     hello: () => hello(deps),
     incusHttp: (params, signal) => incusHttp(deps, params, signal),
-    incusWebSocket: (params, signal) => incusWebSocket(deps, params, signal),
+    incusWebSocket: (params, signal, session) => incusWebSocket(deps, params, signal, session),
     collectMetrics: () => collectMetrics(deps),
   };
 }
@@ -93,6 +94,7 @@ async function incusWebSocket(
   deps: AgentDependencies,
   params: AgentIncusWebSocketParams,
   signal: AbortSignal,
+  session: AbortSignal,
 ): Promise<void> {
   const verdict = checkIncusWebSocket(params.path);
   if (!verdict.allowed) throw new AgentRequestError('policy_denied', verdict.reason);
@@ -102,7 +104,7 @@ async function incusWebSocket(
   } catch (error) {
     throw asRequestError(error);
   }
-  if (signal.aborted) {
+  if (signal.aborted || session.aborted) {
     incus.socket.terminate();
     throw new AgentRequestError('cancelled', 'stream request was cancelled');
   }
@@ -112,7 +114,12 @@ async function incusWebSocket(
       deps.credential(),
       deps.config.backendCa,
     );
-    bridgeSockets(incus.socket, backendSocket, incus.release());
+    // Bound to the control session and heartbeated: a partition that the
+    // Backend already noticed must not leave an exec session running here.
+    bridgeSockets(incus.socket, backendSocket, incus.release(), {
+      session,
+      heartbeatMs: AGENT_HEARTBEAT_INTERVAL_MS,
+    });
   } catch (error) {
     incus.socket.terminate();
     throw new AgentRequestError('internal', error instanceof Error ? error.message : String(error));

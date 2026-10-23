@@ -26,6 +26,7 @@ describe('SystemSettingsAuthorityService.committed', () => {
       {} as never,
       {
         revision: () => revision,
+        get: () => 'nya',
         applyAuthoritativeSnapshot: (snapshot: AuthoritativeSystemSettingsSnapshot) => {
           revision = snapshot.revision;
           return applyAuthoritativeSnapshot(snapshot);
@@ -33,6 +34,7 @@ describe('SystemSettingsAuthorityService.committed', () => {
       } as never,
       {} as never,
       { broadcastSnapshot } as never,
+      { startReconcileAllHostCertificates: vi.fn() } as never,
     );
 
     await authority.committed({ revision: 2, values: {} });
@@ -41,5 +43,32 @@ describe('SystemSettingsAuthorityService.committed', () => {
 
     await authority.committed({ revision: 2, values: {} });
     expect(broadcastSnapshot).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('SystemSettingsAuthorityService host suffix', () => {
+  it('re-signs every host certificate only when the suffix changes', async () => {
+    let revision = 1;
+    let suffix = 'nya';
+    const startReconcileAllHostCertificates = vi.fn();
+    const authority = new SystemSettingsAuthorityService(
+      {} as never,
+      {
+        revision: () => revision,
+        get: () => suffix,
+        applyAuthoritativeSnapshot: (snapshot: AuthoritativeSystemSettingsSnapshot) => {
+          revision = snapshot.revision;
+          suffix = String(snapshot.values['ssh.proxyHostSuffix'] ?? suffix);
+          return true;
+        },
+      } as never,
+      {} as never,
+      { broadcastSnapshot: vi.fn().mockResolvedValue(undefined) } as never,
+      { startReconcileAllHostCertificates } as never,
+    );
+    await authority.committed({ revision: 2, values: { 'ssh.proxyHostSuffix': 'nya' } });
+    expect(startReconcileAllHostCertificates).not.toHaveBeenCalled();
+    await authority.committed({ revision: 3, values: { 'ssh.proxyHostSuffix': 'lab' } });
+    expect(startReconcileAllHostCertificates).toHaveBeenCalledTimes(1);
   });
 });

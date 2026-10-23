@@ -54,6 +54,8 @@ export interface CreatePendingIntentInput {
 export type EnsurePendingIntentInput = CreatePendingIntentInput & {
   readonly reuseSettled?: boolean;
   readonly reuseFailed?: boolean;
+  /** With `reuseFailed`: only failed intents settled at or after this time are reused. */
+  readonly reuseFailedSettledAfter?: Date;
 };
 
 export interface IntentPage {

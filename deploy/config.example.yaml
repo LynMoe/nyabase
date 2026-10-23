@@ -74,4 +74,6 @@ ssh:
   proxyToken: ""
   proxyPublicHost: ""
   proxyPublicPort: 2222
+  # Containers are reached as <name>.<suffix> (e.g. `ssh root@work.nya`).
+  proxyHostSuffix: nya
   proxySnapshotStaleMs: 300000

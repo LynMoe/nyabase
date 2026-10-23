@@ -20,6 +20,7 @@ import {
   MAX_SSH_PROXY_SNAPSHOT_BYTES,
   MAX_SSH_PROXY_STATUS_CONNECTIONS,
   type SshProxyBackendMessage,
+  type SshProxySnapshotSummaryDto,
   type SshProxyStatusReport,
 } from '@nyabase/common';
 import { SshProxySnapshotService } from './ssh-proxy-snapshot.service.js';
@@ -231,6 +232,8 @@ export class SshProxyGateway implements OnModuleInit, OnModuleDestroy {
     bandwidthInBps: number;
     bandwidthOutBps: number;
     updatedAt: string | null;
+    publicEndpoint: { host: string; port: number } | null;
+    snapshot: SshProxySnapshotSummaryDto | null;
     proxies: SshProxyStatusReport[];
   } {
     const proxies = Array.from(this.latestStatus.values())
@@ -253,6 +256,8 @@ export class SshProxyGateway implements OnModuleInit, OnModuleDestroy {
       bandwidthInBps: boundedStatusSum(proxies, (proxy) => proxy.bandwidthInBps),
       bandwidthOutBps: boundedStatusSum(proxies, (proxy) => proxy.bandwidthOutBps),
       updatedAt: safeStatusTimestampIso(last),
+      publicEndpoint: this.snapshots.endpoint(),
+      snapshot: this.snapshots.lastSummary(),
       proxies,
     };
   }

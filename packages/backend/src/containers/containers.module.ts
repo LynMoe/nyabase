@@ -5,6 +5,7 @@ import { CpuModule } from '../cpu/cpu.module.js';
 import { IpPoolsModule } from '../ip-pools/ip-pools.module.js';
 import { ProxySnapshotNotifierModule } from '../proxy-snapshots/proxy-snapshot-notifier.module.js';
 import { ReconcileModule } from '../reconcile/reconcile.module.js';
+import { SshHostCaModule } from '../ssh-host-ca/ssh-host-ca.module.js';
 import { VolumesModule } from '../volumes/volumes.module.js';
 import { ConsoleBridgeGateway } from './console-bridge.gateway.js';
 import { ConsoleSessionService } from './console-session.service.js';
@@ -26,6 +27,7 @@ import { ContainersController } from './containers.controller.js';
     VolumesModule,
     GpuModule,
     ProxySnapshotNotifierModule,
+    SshHostCaModule,
   ],
   providers: [
     ContainerControlService,
