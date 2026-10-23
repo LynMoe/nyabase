@@ -19,13 +19,10 @@ import { AGENT_CLOSE_CREDENTIAL_REJECTED, AgentRegistry } from './agent-registry
 
 const HELLO_TIMEOUT_MS = 10_000;
 const STREAM_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
-const REFUSALS = {
-  429: 'HTTP/1.1 429 Too Many Requests\r\nRetry-After: 60\r\nConnection: close\r\nContent-Length: 0\r\n\r\n',
-  503: 'HTTP/1.1 503 Service Unavailable\r\nRetry-After: 5\r\nConnection: close\r\nContent-Length: 0\r\n\r\n',
-} as const;
+const BUSY = 'HTTP/1.1 503 Service Unavailable\r\nRetry-After: 5\r\nConnection: close\r\nContent-Length: 0\r\n\r\n';
 
 export interface AgentGatewayOptions {
-  /** Express' `trust proxy fn`, so a client behind the TLS edge is limited by its own address. */
+  /** Express' `trust proxy fn`, so a refused agent behind the TLS edge is reported by its own address. */
   readonly trustProxy?: TrustProxy;
 }
 
@@ -41,7 +38,7 @@ export class AgentGateway implements OnModuleDestroy {
   private streams?: WebSocketServer;
   private heartbeat?: NodeJS.Timeout;
   private readonly alive = new WeakMap<WebSocket, boolean>();
-  private admissions = new AgentUpgradeAdmissions();
+  private readonly admissions = new AgentUpgradeAdmissions();
   private trustProxy: TrustProxy = () => false;
 
   constructor(
@@ -51,7 +48,6 @@ export class AgentGateway implements OnModuleDestroy {
 
   attachToHttpServer(server: http.Server, options: AgentGatewayOptions = {}): void {
     this.trustProxy = options.trustProxy ?? this.trustProxy;
-    this.admissions = new AgentUpgradeAdmissions(this.trustProxy);
     this.control = new WebSocketServer({
       noServer: true,
       maxPayload: MAX_AGENT_CONTROL_FRAME_BYTES,
@@ -94,10 +90,10 @@ export class AgentGateway implements OnModuleDestroy {
       socket.destroy();
     };
     socket.on('error', onSocketError);
-    // Each credential check costs a database query: bound them before anyone is authenticated.
-    const admission = this.admissions.admit(request);
-    if (admission.refused) {
-      socket.end(REFUSALS[admission.refused]);
+    // Each credential check costs a database query: bound how many run at once.
+    const release = this.admissions.admit();
+    if (!release) {
+      socket.end(BUSY);
       return;
     }
     let serverId: string | undefined;
@@ -107,7 +103,7 @@ export class AgentGateway implements OnModuleDestroy {
         clientAddress(request, this.trustProxy),
       );
     } finally {
-      admission.settle(serverId !== undefined);
+      release();
     }
     if (socket.destroyed) return;
     if (!serverId) {

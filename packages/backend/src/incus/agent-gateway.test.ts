@@ -3,6 +3,7 @@ import type * as http from 'node:http';
 import { describe, expect, it, vi } from 'vitest';
 import WebSocket from 'ws';
 import { AGENT_PROTOCOL_VERSION } from '@nyabase/common';
+import { MAX_PENDING_AGENT_AUTHENTICATIONS } from './agent-credentials.js';
 import { AgentGateway } from './agent-gateway.js';
 import { AgentRegistry } from './agent-registry.service.js';
 
@@ -86,26 +87,45 @@ describe('agent gateway upgrade', () => {
     gateway.onModuleDestroy();
   });
 
-  it('stops looking up credentials for an address that keeps failing', async () => {
-    const authenticate = vi.fn().mockResolvedValue(undefined);
+  it('never locks out an address whose other agents keep failing', async () => {
+    const good = 'Bearer nyak.good';
+    const authenticate = vi.fn(async (authorization: string) =>
+      authorization === good ? '11111111-1111-4111-8111-111111111111' : undefined);
     const gateway = new AgentGateway(new AgentRegistry(), { authenticate } as never);
     const server = new EventEmitter();
     gateway.attachToHttpServer(server as unknown as http.Server, { trustProxy: () => false });
-    const attempt = async () => {
+    const attempt = async (authorization: string) => {
       const socket = new FakeUpgradeSocket();
       server.emit('upgrade', {
-        url: '/ws/agent',
-        headers: { authorization: 'Bearer nyak.x.y' },
+        url: '/ws/agent/stream?id=x',
+        headers: { authorization },
         socket: { remoteAddress: '198.51.100.7' },
       }, socket, Buffer.alloc(0));
       await new Promise((resolve) => setImmediate(resolve));
       return socket.ended;
     };
-    for (let index = 0; index < 30; index += 1) expect(await attempt()).toMatch(/^HTTP\/1\.1 401/);
-    expect(await attempt()).toMatch(/^HTTP\/1\.1 429/);
-    expect(authenticate).toHaveBeenCalledTimes(30);
+    // Stale agents behind the same NAT (or a database outage) fail as often as they like...
+    for (let index = 0; index < 100; index += 1) expect(await attempt('Bearer nyak.stale')).toMatch(/^HTTP\/1\.1 401/);
+    // ...and a healthy agent there still gets its credential checked (400: the stream id is malformed).
+    expect(await attempt(good)).toMatch(/^HTTP\/1\.1 400/);
+    expect(authenticate).toHaveBeenCalledTimes(101);
     // The client address goes along, so a refused credential can be traced to its host.
-    expect(authenticate).toHaveBeenLastCalledWith('Bearer nyak.x.y', '198.51.100.7');
+    expect(authenticate).toHaveBeenCalledWith('Bearer nyak.stale', '198.51.100.7');
+    gateway.onModuleDestroy();
+  });
+
+  it('answers 503 while too many credential lookups are in flight', async () => {
+    const authenticate = vi.fn(() => new Promise<string | undefined>(() => undefined));
+    const gateway = new AgentGateway(new AgentRegistry(), { authenticate } as never);
+    const server = new EventEmitter();
+    gateway.attachToHttpServer(server as unknown as http.Server);
+    const sockets = Array.from({ length: MAX_PENDING_AGENT_AUTHENTICATIONS + 1 }, () => new FakeUpgradeSocket());
+    for (const socket of sockets) {
+      server.emit('upgrade', { url: '/ws/agent', headers: { authorization: 'Bearer nyak.x.y' } }, socket, Buffer.alloc(0));
+    }
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(authenticate).toHaveBeenCalledTimes(MAX_PENDING_AGENT_AUTHENTICATIONS);
+    expect(sockets.at(-1)!.ended).toMatch(/^HTTP\/1\.1 503 .*\r\nRetry-After: 5\r\n/s);
     gateway.onModuleDestroy();
   });
 

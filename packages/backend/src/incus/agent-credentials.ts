@@ -3,7 +3,6 @@ import type * as http from 'node:http';
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import type { Kysely } from 'kysely';
 import { parseAgentSecret, type RejectedAgentCredentialDto } from '@nyabase/common';
-import { clientAddressBucket, LoginAttemptLimiter } from '../iam/login-throttling.js';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
 
@@ -168,58 +167,34 @@ export class AgentCredentialVerifier {
   }
 }
 
-/** Failed agent authentications one client address bucket may cause per window. */
-export const AGENT_AUTH_FAILURE_WINDOW_MS = 10 * 60_000;
-export const MAX_AGENT_AUTH_FAILURES_PER_WINDOW = 30;
-export const MAX_TRACKED_AGENT_AUTH_ADDRESSES = 4_096;
 /** Credential lookups in flight at once, across all clients. */
 export const MAX_PENDING_AGENT_AUTHENTICATIONS = 64;
 
 /** Express' compiled `trust proxy` function: is the hop at `index` (0 = socket peer) a trusted proxy? */
 export type TrustProxy = (address: string, index: number) => boolean;
 
-export type AgentUpgradeAdmission =
-  | { readonly refused: 429 | 503 }
-  | {
-    readonly refused?: undefined;
-    /** Report the credential check: a success gives the attempt back, a failure keeps it counted. */
-    settle(authenticated: boolean): void;
-  };
-
 /**
- * Bounds what unauthenticated agent WebSocket upgrades cost before their
- * credential is checked against the database: each client address bucket
- * (as `clientAddressBucket` forms it, behind trusted proxies only) may fail
- * a limited number of times per window, and only so many lookups run at
- * once. Successful checks are given back, so connected agents (and their
- * stream sockets) never use up the budget.
+ * Bounds how many agent upgrades may wait on their credential's database
+ * lookup at once, so a reconnect storm (every agent after a Backend restart)
+ * cannot pile up queries. There is deliberately no per-client failure budget:
+ * agents behind one NAT or an unconfigured proxy share an address, and a
+ * stale agent among them (or a database outage) must never lock the healthy
+ * ones out of their control and stream sockets.
  */
 export class AgentUpgradeAdmissions {
-  private readonly failures: LoginAttemptLimiter;
   private pending = 0;
 
-  constructor(
-    private readonly trustProxy: TrustProxy = () => false,
-    now: () => number = Date.now,
-    private readonly maxPending = MAX_PENDING_AGENT_AUTHENTICATIONS,
-  ) {
-    this.failures = new LoginAttemptLimiter(now, MAX_TRACKED_AGENT_AUTH_ADDRESSES, AGENT_AUTH_FAILURE_WINDOW_MS);
-  }
+  constructor(private readonly maxPending = MAX_PENDING_AGENT_AUTHENTICATIONS) {}
 
-  admit(request: http.IncomingMessage): AgentUpgradeAdmission {
-    if (this.pending >= this.maxPending) return { refused: 503 };
-    const key = `agent:${clientAddressBucket(clientAddress(request, this.trustProxy))}`;
-    const reservation = this.failures.reserve([{ key, limit: MAX_AGENT_AUTH_FAILURES_PER_WINDOW }]);
-    if (!reservation) return { refused: 429 };
+  /** A release function for one lookup slot, or undefined when all are taken. */
+  admit(): (() => void) | undefined {
+    if (this.pending >= this.maxPending) return undefined;
     this.pending += 1;
-    let settled = false;
-    return {
-      settle: (authenticated) => {
-        if (settled) return;
-        settled = true;
-        this.pending -= 1;
-        if (authenticated) this.failures.release(reservation);
-      },
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this.pending -= 1;
     };
   }
 }

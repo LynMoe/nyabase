@@ -1631,10 +1631,10 @@ Backend **不直连** Incus，也不主动连接任何主机。每台 Incus 主�
   status 帧每分钟最多 30 个——违反者连接被关闭，一台主机让 Backend 解析的量不超过 Backend 自己请求的量。
 - 每个 Incus WebSocket（事件、exec/控制台）由 agent 另开一条
   `wss://<backend>/ws/agent/stream?id=…` 回连，逐帧转发。
-- 认证前的 `/ws/agent*` 升级有限流（每次凭据检查都要查库）：同一客户端地址（IPv6 按 /64，
-  按 `TRUSTED_PROXIES` 解析，与登录限流相同）10 分钟内最多 30 次失败，超出回 429
-  （`Retry-After: 60`）；全局同时最多 64 个凭据查询在途，超出回 503。认证成功不计数，
-  已接入的 agent 及其 stream 连接不受影响。
+- 认证前的 `/ws/agent*` 升级只限制并发（每次凭据检查都要查库）：全局同时最多 64 个凭据查询
+  在途，超出回 503（`Retry-After: 5`，agent 稍后重连）。不按客户端地址计失败、不封禁：
+  同一 NAT 后（或 Backend 在未配置 `TRUSTED_PROXIES` 的代理后）的 agent 共用一个地址，
+  凭据过期的 agent 或数据库故障都不会让健康的 agent 连不上。
 - agent 经本机 `/var/lib/incus/unix.socket` 访问 Incus，不开监听端口，Incus 也
   不需要开 `core.https_address`、不需要任何 trust 条目。
 - agent 是安全边界：每个请求先过 `packages/agent/src/policy.ts`。只允许操作

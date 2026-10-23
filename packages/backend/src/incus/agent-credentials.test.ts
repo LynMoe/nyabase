@@ -4,9 +4,7 @@ import {
   AgentCredentialRejections,
   AgentUpgradeAdmissions,
   clientAddress,
-  MAX_AGENT_AUTH_FAILURES_PER_WINDOW,
   REJECTED_AGENT_CREDENTIAL_TTL_MS,
-  type AgentUpgradeAdmission,
 } from './agent-credentials.js';
 
 function request(peer: string, forwardedFor?: string): http.IncomingMessage {
@@ -14,11 +12,6 @@ function request(peer: string, forwardedFor?: string): http.IncomingMessage {
     socket: { remoteAddress: peer },
     headers: forwardedFor === undefined ? {} : { 'x-forwarded-for': forwardedFor },
   } as unknown as http.IncomingMessage;
-}
-
-function settle(admission: AgentUpgradeAdmission, authenticated: boolean): void {
-  if (admission.refused) throw new Error(`refused with ${admission.refused}`);
-  admission.settle(authenticated);
 }
 
 describe('agent upgrade admission', () => {
@@ -30,31 +23,15 @@ describe('agent upgrade admission', () => {
     expect(clientAddress(request('127.0.0.1', '203.0.113.7'), () => false)).toBe('127.0.0.1');
   });
 
-  it('turns an address away after repeated failures but never counts successes', () => {
-    let now = 0;
-    const admissions = new AgentUpgradeAdmissions(() => false, () => now);
-    for (let attempt = 0; attempt < MAX_AGENT_AUTH_FAILURES_PER_WINDOW * 2; attempt += 1) {
-      settle(admissions.admit(request('198.51.100.20')), true);
-    }
-    for (let attempt = 0; attempt < MAX_AGENT_AUTH_FAILURES_PER_WINDOW; attempt += 1) {
-      settle(admissions.admit(request('198.51.100.20')), false);
-    }
-    expect(admissions.admit(request('198.51.100.20'))).toEqual({ refused: 429 });
-    // Another host is not affected, and the window passes.
-    settle(admissions.admit(request('198.51.100.21')), true);
-    now += 10 * 60_000;
-    settle(admissions.admit(request('198.51.100.20')), false);
-  });
-
-  it('bounds credential lookups in flight', () => {
-    const admissions = new AgentUpgradeAdmissions(() => false, Date.now, 2);
-    const first = admissions.admit(request('198.51.100.1'));
-    admissions.admit(request('198.51.100.2'));
-    expect(admissions.admit(request('198.51.100.3'))).toEqual({ refused: 503 });
-    settle(first, true);
-    settle(first, true);
-    expect(admissions.admit(request('198.51.100.3')).refused).toBeUndefined();
-    expect(admissions.admit(request('198.51.100.4'))).toEqual({ refused: 503 });
+  it('bounds credential lookups in flight and nothing else', () => {
+    const admissions = new AgentUpgradeAdmissions(2);
+    const first = admissions.admit()!;
+    expect(admissions.admit()).toBeDefined();
+    expect(admissions.admit()).toBeUndefined();
+    first();
+    first();
+    expect(admissions.admit()).toBeDefined();
+    expect(admissions.admit()).toBeUndefined();
   });
 });
 

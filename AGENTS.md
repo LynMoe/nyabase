@@ -134,7 +134,9 @@ Vite 通过 alias 将 `@nyabase/common` 指向 `src/index.ts`，但 `index.ts` �
    一次性令牌 `nyae.…`（24h），agent 用 `POST /api/agent/enroll` 换凭据；`servers/agent-enrollment.service.ts`。
    控制帧按方向定上限（`MAX_AGENT_BACKEND_FRAME_BYTES` / `MAX_AGENT_CONTROL_FRAME_BYTES`）；`AgentConnection.admits`
    在解析前拒绝没有在等回复时的大帧，未请求过的 response id 与过量 status 帧都按协议违规断开。
-   认证前的 agent 升级经 `incus/agent-credentials.ts` 的 `AgentUpgradeAdmissions` 限流（按客户端地址桶计失败、成功归还，并限制在途查库数）。
+   认证前的 agent 升级只经 `incus/agent-credentials.ts` 的 `AgentUpgradeAdmissions` 限制在途查库数（满了回 503 + `Retry-After`）；
+   不要按客户端地址计失败或封禁：同一 NAT / 未配 `trustedProxies` 时所有 agent 共用一个地址，一台凭据过期的 agent 或一次 PG 故障
+   不能把健康 agent 的控制 / stream 连接挡在外面。被拒的凭据只记进给运维看的 `AgentCredentialRejections`，不限流。
    agent 端 `policy.ts` 是安全边界（只许 `nyc-*`/`nyv-*`、配置白名单、禁 raw/特权/宿主路径/profiles、
    必须 idmap.isolated、网卡 `nyh*` + IPv4/MAC 过滤 + `security.port_isolation`，volatile 改回当前值）；
    backend 生成的规格必须过得了它：`backend/src/agent-policy.contract.test.ts` 用真实的规格构建与 Incus 操作
