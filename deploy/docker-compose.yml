@@ -27,7 +27,7 @@ services:
       # PostgreSQL 18 stores its version-specific PGDATA below this mount.
       - postgres-data:/var/lib/postgresql
       - ./postgres-app-role.sh:/docker-entrypoint-initdb.d/10-nyabase-app-role.sh:ro
-    cpus: ${POSTGRES_CPUS:-4.0}
+    cpus: ${POSTGRES_CPUS:-2.0}
     mem_limit: ${POSTGRES_MEMORY_LIMIT:-4g}
     pids_limit: ${POSTGRES_PIDS_LIMIT:-512}
     shm_size: ${POSTGRES_SHM_SIZE:-256m}
@@ -55,7 +55,7 @@ services:
       - -storageDataPath=/victoria-metrics-data
       - -retentionPeriod=${VM_RETENTION_PERIOD:-30d}
       - -storage.minFreeDiskSpaceBytes=${VM_MIN_FREE_DISK_SPACE_BYTES:-5GiB}
-    cpus: ${VICTORIAMETRICS_CPUS:-4.0}
+    cpus: ${VICTORIAMETRICS_CPUS:-2.0}
     mem_limit: ${VICTORIAMETRICS_MEMORY_LIMIT:-4g}
     pids_limit: ${VICTORIAMETRICS_PIDS_LIMIT:-512}
     networks:
@@ -122,7 +122,7 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
-    cpus: ${BACKEND_CPUS:-4.0}
+    cpus: ${BACKEND_CPUS:-2.0}
     mem_limit: ${BACKEND_MEMORY_LIMIT:-2g}
     pids_limit: ${BACKEND_PIDS_LIMIT:-512}
     networks:

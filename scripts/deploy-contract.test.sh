@@ -82,6 +82,11 @@ for (const serviceName of ['postgres', 'victoriametrics', 'backend']) {
   if (!(service?.cpus > 0) || !(service?.mem_limit > 0) || !(service?.pids_limit > 0)) {
     throw new Error(`${serviceName} resource limits are incomplete`);
   }
+  // Docker rejects a CPU limit above the host's CPU count: the defaults must
+  // start on a two-CPU host.
+  if (service.cpus > 2) {
+    throw new Error(`${serviceName} default CPU limit ${service.cpus} exceeds a two-CPU host`);
+  }
   if (service.stop_signal !== 'SIGTERM') {
     throw new Error(`${serviceName} does not use SIGTERM for graceful shutdown`);
   }

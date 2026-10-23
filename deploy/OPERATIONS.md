@@ -740,7 +740,13 @@ migration and operations headroom below PostgreSQL `max_connections`.
 
 Compose sets CPU, memory and PID ceilings for every service. Treat the example
 values as safety bounds, not reservations or sizing claims. Override them from
-the measured workload and verify the rendered result before rollout:
+the measured workload and verify the rendered result before rollout. Each
+`*_CPUS` value must not exceed the host's CPU count (`nproc`): Docker refuses
+to create a container with a larger CPU limit, so `up` fails. The defaults
+(2.0 each) start on any host with two CPUs; on a one-CPU host set all three to
+`1.0`, and on a larger host raise PostgreSQL and the Backend first (the three
+ceilings may add up to more than the host has; they bound each service, they
+do not partition the CPUs):
 
 ```bash
 docker compose --env-file .env config --format json > rendered-compose.json
