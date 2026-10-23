@@ -134,7 +134,8 @@ describePg('user server resource purge over the real container service', () => {
       await database.updateTable('infra.servers').set({ status: 'unreachable' })
         .where('id', '=', serverId).execute();
 
-      const result = await purgeService(database).purgeSharedBackendVolumes(SYSTEM_ACTOR, userId, backendId);
+      const result = await new PgTransactionManager(database).run((transaction) =>
+        purgeService(database).purgeSharedBackendVolumes(transaction, SYSTEM_ACTOR, userId, backendId));
 
       expect(result.volumeIds).toEqual([volumeId]);
       expect(result.intentIds).toHaveLength(1);

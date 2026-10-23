@@ -22,6 +22,7 @@ function createService() {
   };
   const containers = {
     action: vi.fn(),
+    actionInTransaction: vi.fn(),
   };
   const volumes = {
     list: vi.fn(),
@@ -167,9 +168,6 @@ describe('UserServerResourcePurgeService grant expiry actions', () => {
         ),
       })),
     };
-    fixture.transactions.run.mockImplementation(async (
-      work: (transaction: unknown) => Promise<unknown>,
-    ) => work(transaction));
     fixture.volumes.list.mockResolvedValue([volume]);
     fixture.volumes.listAttachments.mockResolvedValue([
       { id: 'attachment-1', container_id: 'container-1', bind_state: 'attached' },
@@ -179,20 +177,23 @@ describe('UserServerResourcePurgeService grant expiry actions', () => {
       { volume_id: 'volume-1', server_id: 'server-1' },
     ]);
     fixture.intents.ensurePending.mockResolvedValue({ id: 'volume-delete-intent' });
-    fixture.attachments.forceDetach.mockResolvedValue({ id: 'detach-intent' });
 
     const result = await fixture.service.purgeStoragePoolVolumes(
+      transaction as never,
       SYSTEM,
       'user-1',
       'pool-1',
     );
 
     expect(result).toEqual({
-      intentIds: ['volume-delete-intent', 'detach-intent'],
+      intentIds: ['volume-delete-intent'],
       volumeIds: ['volume-1'],
     });
-    // Only the volume goes: the container it was attached to is kept.
-    expect(fixture.containers.action).not.toHaveBeenCalled();
+    // Only the volume goes: the container it was attached to is kept, and the
+    // destroy is queued in the caller's transaction (no transaction of its own).
+    expect(fixture.containers.actionInTransaction).not.toHaveBeenCalled();
+    expect(fixture.transactions.run).not.toHaveBeenCalled();
+    expect(fixture.attachments.forceDetach).not.toHaveBeenCalled();
     expect(fixture.intents.ensurePending).toHaveBeenCalledWith(
       expect.objectContaining({
         kind: IntentKind.VolumeDestroy,
@@ -214,11 +215,9 @@ describe('UserServerResourcePurgeService grant expiry actions', () => {
       expect.objectContaining({
         userId: 'user-1',
         volumeIds: ['volume-1'],
-        detachIntentIds: ['detach-intent'],
+        intentIds: ['volume-delete-intent'],
       }),
     );
-    expect(fixture.attachments.forceDetach.mock.invocationCallOrder[0])
-      .toBeLessThan(fixture.intents.ensurePending.mock.invocationCallOrder[0]);
   });
 
   it('does not deleteVolumeRow while attachments remain on empty tracking', async () => {
@@ -247,9 +246,6 @@ describe('UserServerResourcePurgeService grant expiry actions', () => {
         ),
       })),
     };
-    fixture.transactions.run.mockImplementation(async (
-      work: (transaction: unknown) => Promise<unknown>,
-    ) => work(transaction));
     fixture.volumes.list.mockResolvedValue([volume]);
     fixture.volumes.listAttachments.mockResolvedValue([
       { id: 'attachment-1', container_id: 'container-1', bind_state: 'attached' },
@@ -261,9 +257,9 @@ describe('UserServerResourcePurgeService grant expiry actions', () => {
       lifecycle_phase: 'deleting',
     });
     fixture.intents.ensurePending.mockResolvedValue({ id: 'destroy-1' });
-    fixture.attachments.forceDetach.mockResolvedValue({ id: 'detach-intent' });
 
     const result = await fixture.service.purgeSharedBackendVolumes(
+      transaction as never,
       SYSTEM,
       'user-1',
       'backend-1',
@@ -272,8 +268,7 @@ describe('UserServerResourcePurgeService grant expiry actions', () => {
     expect(result.volumeIds).toEqual(['volume-1']);
     expect(fixture.volumes.deleteVolumeRow).not.toHaveBeenCalled();
     expect(fixture.intents.ensurePending).toHaveBeenCalled();
-    expect(fixture.containers.action).not.toHaveBeenCalled();
-    expect(fixture.attachments.forceDetach).toHaveBeenCalledWith(SYSTEM, 'attachment-1');
+    expect(fixture.containers.actionInTransaction).not.toHaveBeenCalled();
   });
 
   it('audits administrator purges separately from expiry cleanup', async () => {
@@ -327,9 +322,6 @@ describe('UserServerResourcePurgeService grant expiry actions', () => {
           ),
         })),
       };
-      fixture.transactions.run.mockImplementation(async (
-        work: (transaction: unknown) => Promise<unknown>,
-      ) => work(transaction));
       fixture.volumes.list.mockResolvedValue([volume]);
       fixture.volumes.listAttachments.mockResolvedValue([]);
       fixture.volumes.listPlacements.mockResolvedValue([]);
@@ -340,6 +332,7 @@ describe('UserServerResourcePurgeService grant expiry actions', () => {
       });
       fixture.intents.ensurePending.mockResolvedValue({ id: 'destroy-1' });
       const result = await fixture.service.purgeSharedBackendVolumes(
+        transaction as never,
         SYSTEM,
         'user-1',
         'backend-1',

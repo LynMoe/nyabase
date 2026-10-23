@@ -1,9 +1,10 @@
 import { randomUUID } from 'node:crypto';
-import type { Kysely } from 'kysely';
+import { sql, type Kysely } from 'kysely';
 import { AuditAction, GRANT_EXPIRY_GRACE_DAYS, UserStatus } from '@nyabase/common';
 import { describe, expect, it, vi } from 'vitest';
 import { ContainerControlRepository } from '../containers/container-control.repository.js';
 import { AccessChangeNotifier } from '../iam/access-resolver.service.js';
+import { lockIamPolicy } from '../iam/administration.js';
 import {
   addMember,
   days,
@@ -36,7 +37,7 @@ import { UserServerResourcePurgeService } from './user-server-resource-purge.ser
 const describePg = process.env.NYABASE_TEST_DATABASE_URL ? describe : describe.skip;
 const DAY_MS = 24 * 60 * 60 * 1000;
 
-async function fixture(database: Kysely<NyabaseDatabase>) {
+async function fixture(database: Kysely<NyabaseDatabase>, onDelete?: () => Promise<void>) {
   const transactions = new PgTransactionManager(database);
   const claims = new ReconcileClaimRepository(database);
   const changes = new AccessChangeNotifier();
@@ -51,6 +52,17 @@ async function fixture(database: Kysely<NyabaseDatabase>) {
         await database.updateTable('control.containers').set({ power_intent: 'stopped' })
           .where('id', '=', id).execute();
       }
+      return { intentId: randomUUID() };
+    }),
+    // The purge queues its deletes in the transaction holding the IAM lock.
+    actionInTransaction: vi.fn(async (
+      _transaction: unknown,
+      actor: { authKind: string },
+      id: string,
+      action: string,
+    ) => {
+      await onDelete?.();
+      actions.push({ id, action, actorIsSystem: actor.authKind === 'system' });
       return { intentId: randomUUID() };
     }),
   };
@@ -624,7 +636,7 @@ describePg('access lapse processor', () => {
       const inspect = lapses.inspect.bind(lapses);
       vi.spyOn(lapses, 'inspect').mockImplementationOnce(async (key) => {
         const scanned = await inspect(key);
-        await grantServer(database, { user: userId }, serverId);
+        await renewServerGrant(database, userId, serverId);
         return scanned;
       });
       actions.length = 0;
@@ -633,6 +645,76 @@ describePg('access lapse processor', () => {
 
       expect(actions).toEqual([]);
       expect((await ledger(database, userId))[0]?.purged_at ?? null).toBeNull();
+    });
+  });
+
+  it('does not purge when a grant commits while the purge waits for the IAM lock', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const { processor, actions, transactions } = await fixture(database);
+      const { userId, serverId, poolId, imageId } = await overduePurge(database);
+      const container = await seedContainer(database, { ownerId: userId, serverId, poolId, imageId });
+      const volume = await seedVolume(database, { ownerId: userId, poolId, serverId });
+      // An IAM write holds the lock with its grant not yet committed.
+      let commitGrant!: () => void;
+      let locked!: () => void;
+      const lockHeld = new Promise<void>((resolve) => { locked = resolve; });
+      const granting = transactions.run(async (transaction) => {
+        await lockIamPolicy(transaction);
+        await renewServerGrant(transaction, userId, serverId);
+        locked();
+        await new Promise<void>((resolve) => { commitGrant = resolve; });
+      });
+      await lockHeld;
+
+      const processing = processor.process();
+      await waitForIamLockWaiter(database);
+      commitGrant();
+      await granting;
+      await processing;
+
+      expect(actions).toEqual([]);
+      expect((await ledger(database, userId))[0]?.purged_at ?? null).toBeNull();
+      const phase = await database.selectFrom('control.containers').select('lifecycle_phase')
+        .where('id', '=', container).executeTakeFirstOrThrow();
+      expect(phase.lifecycle_phase).not.toBe('deleting');
+      expect(await database.selectFrom('control.volumes').select('id')
+        .where('id', '=', volume).executeTakeFirst()).toBeDefined();
+    });
+  });
+
+  it('holds the IAM lock until every delete of the purge is queued', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      let granting: Promise<void> | null = null;
+      let grantWaited = false;
+      const { processor, actions, transactions } = await fixture(database, async () => {
+        if (granting) return;
+        // A grant arriving while the first delete is queued must wait for the
+        // purge to commit; it cannot slip in between the check and the deletes.
+        granting = transactions.run(async (transaction) => {
+          await lockIamPolicy(transaction);
+          await renewServerGrant(transaction, userId, serverId);
+        });
+        await waitForIamLockWaiter(database);
+        grantWaited = true;
+      });
+      const { userId, serverId, poolId, imageId } = await overduePurge(database);
+      const containers = [
+        await seedContainer(database, { ownerId: userId, serverId, poolId, imageId }),
+        await seedContainer(database, { ownerId: userId, serverId, poolId, imageId }),
+      ];
+
+      await expect(processor.process()).resolves.toBe(1);
+      await granting;
+
+      expect(grantWaited).toBe(true);
+      expect(actions.map((entry) => entry.id).sort()).toEqual([...containers].sort());
+      const row = (await ledger(database, userId))[0]!;
+      expect(row.purged_at).not.toBeNull();
+      // The grant committed after the purge: the next pass only clears the row.
+      actions.length = 0;
+      await processor.process();
+      expect(actions).toEqual([]);
+      expect(await ledger(database, userId)).toEqual([]);
     });
   });
 
@@ -764,4 +846,44 @@ async function powerOf(database: Kysely<NyabaseDatabase>, containerId: string): 
   const row = await database.selectFrom('control.containers').select('power_intent')
     .where('id', '=', containerId).executeTakeFirstOrThrow();
   return row.power_intent;
+}
+
+/** A user whose server grant expired and whose 14-day grace there is already over. */
+async function overduePurge(database: Kysely<NyabaseDatabase>) {
+  const ids = await world(database);
+  await grantServer(database, { user: ids.userId }, ids.serverId, { expiresAt: days(-20) });
+  await database.insertInto('control.access_lapses').values({
+    user_id: ids.userId,
+    resource_kind: 'server',
+    resource_id: ids.serverId,
+    lapsed_at: new Date(Date.now() - (GRACE_DAYS + 1) * DAY_MS),
+  }).execute();
+  return ids;
+}
+
+/** Makes the user's expired direct server grant current again (one grant per user and server). */
+async function renewServerGrant(
+  executor: Kysely<NyabaseDatabase>,
+  userId: string,
+  serverId: string,
+): Promise<void> {
+  const result = await executor.updateTable('iam.server_grants').set({ expires_at: null })
+    .where('user_id', '=', userId)
+    .where('server_id', '=', serverId)
+    .executeTakeFirst();
+  expect(Number(result.numUpdatedRows)).toBe(1);
+}
+
+/** Resolves once some session of this database waits for an advisory (IAM) lock. */
+async function waitForIamLockWaiter(database: Kysely<NyabaseDatabase>): Promise<void> {
+  for (let attempt = 0; attempt < 500; attempt += 1) {
+    const result = await sql<{ waiting: number }>`
+      SELECT count(*)::int AS waiting FROM pg_locks
+      WHERE locktype = 'advisory' AND NOT granted
+        AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
+    `.execute(database);
+    if ((result.rows[0]?.waiting ?? 0) > 0) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error('No session waited for the IAM lock');
 }

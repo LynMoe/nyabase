@@ -239,22 +239,31 @@ export class AccessLapseProcessor implements OnModuleInit, OnModuleDestroy {
     actor: Actor,
     assertOwned: () => void,
   ): Promise<boolean> {
-    // Deleting is irreversible: re-read coverage under the IAM lock right
-    // before it, so a grant committed since the scan still saves the data.
-    if (!await this.lapses.stillUncovered(candidate)) return false;
-    switch (candidate.kind) {
-      case 'server':
-        await this.purge.purge(actor, candidate.userId, candidate.resourceId);
-        break;
-      case 'storage_pool':
-        await this.purge.purgeStoragePoolVolumes(actor, candidate.userId, candidate.resourceId);
-        break;
-      case 'shared_backend':
-        await this.purge.purgeSharedBackendVolumes(actor, candidate.userId, candidate.resourceId);
-        break;
+    // Volumes re-attached during the grace are detached first; that is
+    // reversible and goes through its own transactions.
+    if (candidate.kind === 'storage_pool') {
+      await this.purge.detachVolumesForStoragePool(actor, candidate.userId, candidate.resourceId);
+    } else if (candidate.kind === 'shared_backend') {
+      await this.purge.detachVolumesForSharedBackend(actor, candidate.userId, candidate.resourceId);
     }
     assertOwned();
-    // The purge audit rows are written by the purge itself.
-    return this.lapses.markPurged(candidate, async () => undefined);
+    // Deleting is irreversible: every delete is queued in the transaction that
+    // re-read coverage under the IAM lock, so a grant committed since the scan
+    // still saves the data. The purge audit rows are written by the purge itself.
+    return this.lapses.purgeIfUncovered(candidate, async (transaction) => {
+      const { userId, resourceId } = candidate;
+      switch (candidate.kind) {
+        case 'server':
+          await this.purge.purgeServerInTransaction(transaction, actor, userId, resourceId);
+          break;
+        case 'storage_pool':
+          await this.purge.purgeStoragePoolVolumes(transaction, actor, userId, resourceId);
+          break;
+        case 'shared_backend':
+          await this.purge.purgeSharedBackendVolumes(transaction, actor, userId, resourceId);
+          break;
+      }
+      assertOwned();
+    });
   }
 }

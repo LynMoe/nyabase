@@ -221,12 +221,27 @@ export class AccessLapseRepository {
     });
   }
 
-  /** The pair is still uncovered, read under the IAM lock (the last check before a purge). */
-  async stillUncovered(key: LapseKey): Promise<boolean> {
+  /**
+   * Runs `purge` (which must only queue its deletes in the given transaction)
+   * and records `purged_at`, both in one transaction that first takes the IAM
+   * lock and re-reads coverage. A grant committed before the lock is seen and
+   * cancels the purge; one committed later waits until every delete is queued
+   * (queued deletes cannot be taken back, so the lock must span them). Read
+   * committed on purpose: under a snapshot isolation the snapshot would date
+   * from before the lock wait and miss a grant committed during it. Returns
+   * false when the pair is covered or already purged.
+   */
+  async purgeIfUncovered(
+    key: LapseKey,
+    purge: (transaction: Transaction<NyabaseDatabase>) => Promise<void>,
+  ): Promise<boolean> {
     return this.transactions.run(async (transaction) => {
       await lockIamPolicy(transaction);
-      return !await this.isCovered(transaction, key);
-    });
+      if (await this.isCovered(transaction, key)) return false;
+      if (!await this.markIn(transaction, key, 'purged_at')) return false;
+      await purge(transaction);
+      return true;
+    }, { isolationLevel: 'read committed' });
   }
 
   /** Coverage returned: cancel the grace. Containers stay as they are (not auto-started). */
@@ -248,33 +263,27 @@ export class AccessLapseRepository {
     key: LapseKey,
     after: (transaction: Transaction<NyabaseDatabase>) => Promise<void>,
   ): Promise<boolean> {
-    return this.mark(key, 'stopped_at', after);
-  }
-
-  markPurged(
-    key: LapseKey,
-    after: (transaction: Transaction<NyabaseDatabase>) => Promise<void>,
-  ): Promise<boolean> {
-    return this.mark(key, 'purged_at', after);
-  }
-
-  private mark(
-    key: LapseKey,
-    column: 'stopped_at' | 'purged_at',
-    after: (transaction: Transaction<NyabaseDatabase>) => Promise<void>,
-  ): Promise<boolean> {
     return this.transactions.run(async (transaction) => {
-      const result = await transaction.updateTable('control.access_lapses')
-        .set({ [column]: sql`clock_timestamp()` })
-        .where('user_id', '=', key.userId)
-        .where('resource_kind', '=', key.kind)
-        .where('resource_id', '=', key.resourceId)
-        .where(column, 'is', null)
-        .executeTakeFirst();
-      if (Number(result.numUpdatedRows) === 0) return false;
+      if (!await this.markIn(transaction, key, 'stopped_at')) return false;
       await after(transaction);
       return true;
     });
+  }
+
+  /** Sets the ledger timestamp once; false when the row is gone or already set. */
+  private async markIn(
+    transaction: Transaction<NyabaseDatabase>,
+    key: LapseKey,
+    column: 'stopped_at' | 'purged_at',
+  ): Promise<boolean> {
+    const result = await transaction.updateTable('control.access_lapses')
+      .set({ [column]: sql`clock_timestamp()` })
+      .where('user_id', '=', key.userId)
+      .where('resource_kind', '=', key.kind)
+      .where('resource_id', '=', key.resourceId)
+      .where(column, 'is', null)
+      .executeTakeFirst();
+    return Number(result.numUpdatedRows) > 0;
   }
 
   /** Current coverage of the pair (active user holding a current grant). */

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { AuditAction, IntentKind, IntentResourceType, IntentStatus } from '@nyabase/common';
+import { AuditAction, FailureCode, IntentKind, IntentResourceType, IntentStatus } from '@nyabase/common';
 import {
   buildDesiredInstanceSpec,
   deriveAttachmentDeviceName,
@@ -18,6 +18,7 @@ import {
 } from './container-instance-ops.js';
 import { decideRootShrink } from './container-rules.js';
 import type { IntentRecord } from '../reconcile/intent.repository.js';
+import { VOLUME_ADOPT_FAIL_AFTER_ATTEMPTS } from '../volumes/shared-volume-catalog.service.js';
 import type { ReconcileRunContext } from '../reconcile/managed-reconciler.js';
 import {
   IncusContainerSshStateAdapter,
@@ -1355,6 +1356,75 @@ describe('container reconciler: changes that need a stopped instance never block
     expect(outcome).toEqual({ outcome: 'succeeded', observedRevision: 3 });
     expect(actions).toEqual(['stop']);
     expect(setup.putBodies[0]!.devices.root!.size).toBe('5000000000');
+  });
+
+  it('stops the instance even while an attached volume is not ready on the server', async () => {
+    // A local volume whose create failed: it never appears in the Incus catalog.
+    const setup = await harness({
+      status: 'Running',
+      powerIntent: 'stopped',
+      attachments: [attachment(ATTACH_ADD, VOLUME_ADD, '/data/add', 'attaching')],
+    });
+    const actions = followPower(setup);
+    setup.client.getStorageVolume.mockRejectedValue(new IncusError('INCUS_NOT_FOUND', 'managed_failure'));
+    const stop = context(setup.client, {
+      kind: IntentKind.ContainerPower,
+      request: { action: 'stop', operation: 'stop' },
+    });
+
+    await expect(setup.reconciler.reconcile(stop)).rejects.toMatchObject({
+      code: 'VOLUME_PLACEMENT_PENDING',
+      disposition: 'retry',
+    });
+    expect(actions).toEqual(['stop']);
+    expect(setup.client.readModifyWriteInstance).not.toHaveBeenCalled();
+
+    // Retried, the stopped instance is left alone.
+    await expect(setup.reconciler.reconcile(stop)).rejects.toMatchObject({ code: 'VOLUME_PLACEMENT_PENDING' });
+    expect(actions).toEqual(['stop']);
+  });
+
+  it('stops the instance even while a shared volume has no placement on the server', async () => {
+    const setup = await harness({ status: 'Running', powerIntent: 'stopped' });
+    const actions = followPower(setup);
+    (storeOf(setup.reconciler) as unknown as { readAttachments: ReturnType<typeof vi.fn> })
+      .readAttachments.mockRejectedValue(new IncusError('VOLUME_PLACEMENT_PENDING', 'retry', {
+        volumeId: VOLUME_ADD,
+        serverId: SERVER_ID,
+      }));
+
+    await expect(setup.reconciler.reconcile(context(setup.client))).rejects.toMatchObject({
+      code: 'VOLUME_PLACEMENT_PENDING',
+    });
+    expect(actions).toEqual(['stop']);
+  });
+
+  it('fails visibly instead of retrying forever once a volume stays not ready', async () => {
+    const setup = await harness({
+      status: 'Stopped',
+      powerIntent: 'running',
+      attachments: [attachment(ATTACH_ADD, VOLUME_ADD, '/data/add', 'attaching')],
+    });
+    const actions = followPower(setup);
+    setup.client.getStorageVolume.mockRejectedValue(new IncusError('INCUS_NOT_FOUND', 'managed_failure'));
+
+    await expect(setup.reconciler.reconcile(context(setup.client, {
+      attemptCount: VOLUME_ADOPT_FAIL_AFTER_ATTEMPTS - 1,
+    }))).rejects.toMatchObject({ code: 'VOLUME_PLACEMENT_PENDING' });
+    const outcome = await setup.reconciler.reconcile(context(setup.client, {
+      attemptCount: VOLUME_ADOPT_FAIL_AFTER_ATTEMPTS,
+    }));
+
+    expect(outcome).toMatchObject({
+      outcome: 'failed',
+      failure: {
+        code: FailureCode.VolumePlacementFailed,
+        details: { volumeId: VOLUME_ADD, serverId: SERVER_ID },
+      },
+    });
+    // It never starts without the volume, and never writes the instance.
+    expect(actions).toEqual([]);
+    expect(setup.client.readModifyWriteInstance).not.toHaveBeenCalled();
   });
 });
 

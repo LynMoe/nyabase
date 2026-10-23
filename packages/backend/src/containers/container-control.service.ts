@@ -353,106 +353,120 @@ export class ContainerControlService {
     action: ContainerAction,
     scope: ListScope = 'mine',
   ): Promise<IntentAcceptedDto> {
-    const result = await this.transactions.run(async (transaction) => {
-      const current = await this.repository.lock(containerId, transaction);
-      if (!current) throw new NotFoundException('Container not found');
-      const access = assertCanAccess(actor, current, scope);
-      // Stopping or deleting only shrinks what the owner uses, so it needs no
-      // current coverage: an owner in the grace period can still do both.
-      const grant = await this.enforceInTransaction(
+    return this.transactions.run(
+      (transaction) => this.actionInTransaction(transaction, actor, containerId, action, scope),
+      {
+        // Expiry/system stops must not lose to concurrent reconcile observation writes.
+        isolationLevel: isSystemActor(actor) ? 'read committed' : 'serializable',
+        maxAttempts: 5,
+      },
+    );
+  }
+
+  /**
+   * `action` in the caller's transaction. The access-lapse purge queues its
+   * deletes in the transaction that re-checked coverage under the IAM lock.
+   */
+  async actionInTransaction(
+    transaction: Transaction<NyabaseDatabase>,
+    actor: Actor,
+    containerId: string,
+    action: ContainerAction,
+    scope: ListScope = 'mine',
+  ): Promise<IntentAcceptedDto> {
+    const current = await this.repository.lock(containerId, transaction);
+    if (!current) throw new NotFoundException('Container not found');
+    const access = assertCanAccess(actor, current, scope);
+    // Stopping or deleting only shrinks what the owner uses, so it needs no
+    // current coverage: an owner in the grace period can still do both.
+    const grant = await this.enforceInTransaction(
+      transaction,
+      actor,
+      current,
+      access,
+      action === 'stop' || action === 'delete' ? 'optional' : 'required',
+    );
+    // A restart of a container whose stop is not yet observed also flips the
+    // intent back to running, so it is admitted exactly like a start.
+    if (grant && (action === 'start' || action === 'restart')
+      && current.power_intent !== ContainerPowerIntent.Running) {
+      await this.admitStart(transaction, current, grant);
+    }
+    if (access === 'owner' && (action === 'start' || action === 'restart')) {
+      await this.access.assertAttachedStorageCoveredInTransaction(
         transaction,
-        actor,
-        current,
-        access,
-        action === 'stop' || action === 'delete' ? 'optional' : 'required',
-      );
-      // A restart of a container whose stop is not yet observed also flips the
-      // intent back to running, so it is admitted exactly like a start.
-      if (grant && (action === 'start' || action === 'restart')
-        && current.power_intent !== ContainerPowerIntent.Running) {
-        await this.admitStart(transaction, current, grant);
-      }
-      if (access === 'owner' && (action === 'start' || action === 'restart')) {
-        await this.access.assertAttachedStorageCoveredInTransaction(
-          transaction,
-          current.owner_id,
-          containerId,
-        );
-      }
-      if (action !== 'delete' && current.lifecycle_phase === ContainerPhase.Deleting) {
-        throw new ConflictException({
-          code: FailureCode.InstanceBusy,
-          message: 'A deleting container cannot receive power actions',
-        });
-      }
-      const route = action === 'restart'
-        ? await this.repository.currentRoute(containerId, transaction)
-        : undefined;
-      if (action === 'restart'
-        && containerStatus(route?.instance_status, current.power_intent as ContainerPowerIntent)
-          !== ContainerStatus.Running) {
-        throw new ConflictException({
-          code: FailureCode.InstanceBusy,
-          message: 'Restart requires a running container',
-        });
-      }
-      if (action === 'start' || action === 'restart') {
-        const detaching = await this.repository.findDetachingAttachment(containerId, transaction);
-        if (detaching) {
-          throw new ConflictException({
-            code: FailureCode.InstanceBusy,
-            message: '等待卸载完成后再启动',
-            details: { containerId, attachmentId: detaching.id },
-          });
-        }
-      }
-      const nextPhase = action === 'delete' ? ContainerPhase.Deleting : current.lifecycle_phase;
-      const nextPower = action === 'stop'
-        ? ContainerPowerIntent.Stopped
-        : action === 'start' || action === 'restart'
-          ? ContainerPowerIntent.Running
-          : ContainerPowerIntent.Stopped;
-      const updated = await this.repository.updateDesired(
+        current.owner_id,
         containerId,
-        Number(current.revision),
-        { lifecycle_phase: nextPhase, power_intent: nextPower, failure_code: null, failure_reason: null },
-        transaction,
       );
-      if (!updated) throw new ConflictException({ code: FailureCode.RevisionConflict });
-      // A deleting container keeps its GPU claims until its row (and so its
-      // instance) is gone: a slow or parked delete must not hand the card on.
-      if (nextPhase === ContainerPhase.Failed) {
-        await this.gpuClaims.releaseContainerClaims(containerId, transaction);
+    }
+    if (action !== 'delete' && current.lifecycle_phase === ContainerPhase.Deleting) {
+      throw new ConflictException({
+        code: FailureCode.InstanceBusy,
+        message: 'A deleting container cannot receive power actions',
+      });
+    }
+    const route = action === 'restart'
+      ? await this.repository.currentRoute(containerId, transaction)
+      : undefined;
+    if (action === 'restart'
+      && containerStatus(route?.instance_status, current.power_intent as ContainerPowerIntent)
+        !== ContainerStatus.Running) {
+      throw new ConflictException({
+        code: FailureCode.InstanceBusy,
+        message: 'Restart requires a running container',
+      });
+    }
+    if (action === 'start' || action === 'restart') {
+      const detaching = await this.repository.findDetachingAttachment(containerId, transaction);
+      if (detaching) {
+        throw new ConflictException({
+          code: FailureCode.InstanceBusy,
+          message: '等待卸载完成后再启动',
+          details: { containerId, attachmentId: detaching.id },
+        });
       }
-      const kind = action === 'delete'
-        ? IntentKind.ContainerDelete
-        : action === 'restart' || action === 'start' || action === 'stop'
-          ? IntentKind.ContainerPower
-          : IntentKind.ContainerUpdate;
-      const intent = await createContainerIntent(this.intents, {
-        kind,
-        resourceType: IntentResourceType.Container,
-        resourceId: containerId,
-        serverId: current.server_id,
-        requestedBy: actor.userId,
-        targetRevision: updated.revision,
-        baseline: action === 'restart'
-          ? {
-            startedAt: route?.instance_started_at
-              ? new Date(route.instance_started_at).toISOString()
-              : null,
-          }
-          : undefined,
-        request: { action, operation: action },
-      }, transaction);
-      await this.audit.append(transaction, actor.userId, auditActionFor(action), containerId, 'container');
-      return { intent, serverId: current.server_id };
-    }, {
-      // Expiry/system stops must not lose to concurrent reconcile observation writes.
-      isolationLevel: isSystemActor(actor) ? 'read committed' : 'serializable',
-      maxAttempts: 5,
-    });
-    return acceptedIntent(result.intent);
+    }
+    const nextPhase = action === 'delete' ? ContainerPhase.Deleting : current.lifecycle_phase;
+    const nextPower = action === 'stop'
+      ? ContainerPowerIntent.Stopped
+      : action === 'start' || action === 'restart'
+        ? ContainerPowerIntent.Running
+        : ContainerPowerIntent.Stopped;
+    const updated = await this.repository.updateDesired(
+      containerId,
+      Number(current.revision),
+      { lifecycle_phase: nextPhase, power_intent: nextPower, failure_code: null, failure_reason: null },
+      transaction,
+    );
+    if (!updated) throw new ConflictException({ code: FailureCode.RevisionConflict });
+    // A deleting container keeps its GPU claims until its row (and so its
+    // instance) is gone: a slow or parked delete must not hand the card on.
+    if (nextPhase === ContainerPhase.Failed) {
+      await this.gpuClaims.releaseContainerClaims(containerId, transaction);
+    }
+    const kind = action === 'delete'
+      ? IntentKind.ContainerDelete
+      : action === 'restart' || action === 'start' || action === 'stop'
+        ? IntentKind.ContainerPower
+        : IntentKind.ContainerUpdate;
+    const intent = await createContainerIntent(this.intents, {
+      kind,
+      resourceType: IntentResourceType.Container,
+      resourceId: containerId,
+      serverId: current.server_id,
+      requestedBy: actor.userId,
+      targetRevision: updated.revision,
+      baseline: action === 'restart'
+        ? {
+          startedAt: route?.instance_started_at
+            ? new Date(route.instance_started_at).toISOString()
+            : null,
+        }
+        : undefined,
+      request: { action, operation: action },
+    }, transaction);
+    await this.audit.append(transaction, actor.userId, auditActionFor(action), containerId, 'container');
+    return acceptedIntent(intent);
   }
 
   private async updateDesired(

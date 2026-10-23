@@ -1,18 +1,30 @@
 import type { Logger } from '@nestjs/common';
+import { FailureCode } from '@nyabase/common';
 import {
   compareManagedFields,
   deriveInstanceName,
   IncusError,
+  isMissingCustomVolumeError,
   type DesiredInstanceSpec,
   type IncusClientPort,
 } from '../incus/index.js';
 import type { CpuSetService } from '../cpu/cpu-sets.service.js';
 import type { NyabaseConfigService } from '../platform/config/nyabase-config.service.js';
 import type { IntentRecord } from '../reconcile/intent.repository.js';
+import {
+  failedOutcome,
+  type ReconcileOutcome,
+  type ReconcileRunContext,
+} from '../reconcile/managed-reconciler.js';
+import {
+  VOLUME_ADOPT_FAIL_AFTER_ATTEMPTS,
+  ensureSharedCatalogOnServer,
+} from '../volumes/shared-volume-catalog.service.js';
 import { resolveContainerRuntime } from './container-runtime.js';
 import {
   buildContainerSpec,
   deletePhysicalInstance,
+  isNotFound,
   managedContainerIdentity,
   MANAGED_FIELD_OWNERSHIP,
   normalized,
@@ -26,13 +38,17 @@ import {
   type InstanceFull,
   type InstanceState,
 } from './container-instance-ops.js';
-import type { ContainerReconcileStore, ContainerRow } from './container-reconcile.store.js';
-import { decideRootShrink, type RootShrinkBlock } from './container-rules.js';
+import type {
+  ContainerAttachment,
+  ContainerReconcileStore,
+  ContainerRow,
+} from './container-reconcile.store.js';
+import { decideRootShrink, isRestartIntent, type RootShrinkBlock } from './container-rules.js';
 
 /*
  * Step functions of the container reconciler that need no Incus mutation
- * audit: the root-shrink decision, the SSH readiness wait policy and the
- * full scan. SQL stays in the store.
+ * audit: the root-shrink decision, the SSH readiness wait policy, the full
+ * scan and the attachment preparation. SQL stays in the store.
  */
 
 // --- root disk shrink --------------------------------------------------------------
@@ -244,4 +260,143 @@ async function scanNeedsUpdate(
     await resolveContainerRuntime(deps.cpuSets, deps.config, full, 'preview'),
   );
   return compareManagedFields(actual.document, desired, MANAGED_FIELD_OWNERSHIP).kind !== 'empty';
+}
+
+// --- attachments ------------------------------------------------------------------
+
+export interface AttachmentDeps {
+  readonly store: Pick<ContainerReconcileStore, 'rereadDesired' | 'markCatalogPresent'>;
+  readonly logger: Pick<Logger, 'log'>;
+}
+
+/**
+ * The attachments the instance must carry, with their catalogs present on the
+ * server. An outcome means the intent became stale or must end here: a
+ * volume still not ready after as many attempts as a catalog adopt gets
+ * fails the intent visibly instead of retrying it forever.
+ */
+export async function prepareAttachments(
+  deps: AttachmentDeps,
+  context: ReconcileRunContext,
+  client: IncusClientPort,
+  row: ContainerRow,
+): Promise<{ outcome: ReconcileOutcome } | { attachments: ContainerAttachment[] }> {
+  try {
+    return await readyAttachments(deps, context, client, row);
+  } catch (error) {
+    if (
+      error instanceof IncusError
+      && error.code === 'VOLUME_PLACEMENT_PENDING'
+      && context.intent.attemptCount >= VOLUME_ADOPT_FAIL_AFTER_ATTEMPTS
+    ) {
+      return {
+        outcome: failedOutcome(
+            FailureCode.VolumePlacementFailed,
+            'An attached volume is still not present on the container\'s server',
+            { ...error.details, serverId: row.server_id },
+          ),
+      };
+    }
+    throw error;
+  }
+}
+
+async function readyAttachments(
+  deps: AttachmentDeps,
+  context: ReconcileRunContext,
+  client: IncusClientPort,
+  row: ContainerRow,
+): Promise<{ outcome: ReconcileOutcome } | { attachments: ContainerAttachment[] }> {
+  const beforeMkdir = await deps.store.rereadDesired(
+    row.id,
+    row.server_id,
+    context.intent.targetRevision,
+  );
+  if (beforeMkdir.stale && !isRestartIntent(context.intent.kind, context.intent.request)) {
+    return {
+      outcome: { outcome: 'succeeded', observedRevision: context.intent.targetRevision, stale: true },
+    };
+  }
+  const catalogOutcome = await ensureDesiredCatalogs(
+    deps,
+    context,
+    client,
+    beforeMkdir.desired,
+    row.server_id,
+  );
+  if (catalogOutcome) return { outcome: catalogOutcome };
+  const beforePut = await deps.store.rereadDesired(
+    row.id,
+    row.server_id,
+    context.intent.targetRevision,
+  );
+  return { attachments: beforePut.desired };
+}
+
+/**
+ * Every volume the instance mounts must already exist in this daemon's Incus
+ * catalog before the instance PUT, or Incus rejects the device.
+ */
+async function ensureDesiredCatalogs(
+  deps: AttachmentDeps,
+  context: ReconcileRunContext,
+  client: IncusClientPort,
+  attachments: readonly ContainerAttachment[],
+  serverId: string,
+): Promise<ReconcileOutcome | undefined> {
+  for (const attachment of attachments) {
+    if (!attachment.pool_name) {
+      throw new IncusError(
+        attachment.shared ? 'VOLUME_PLACEMENT_PENDING' : 'MISSING_STORAGE_POOL',
+        attachment.shared ? 'retry' : 'managed_failure',
+        { volumeId: attachment.volume_id, serverId },
+      );
+    }
+    if (attachment.shared) {
+      const result = await ensureSharedCatalogOnServer(client, {
+        poolName: attachment.pool_name,
+        incusName: attachment.incus_name,
+        sizeBytes: attachment.size_bytes,
+        ownerScope: attachment.shared_backend_id ?? null,
+      });
+      if (result === 'missing') {
+        if (context.intent.attemptCount >= VOLUME_ADOPT_FAIL_AFTER_ATTEMPTS) {
+          return failedOutcome(
+              'VOLUME_CATALOG_ADOPT_FAILED',
+              'Incus did not adopt the existing CephFS directory into this daemon catalog',
+              { volumeId: attachment.volume_id, serverId },
+            );
+        }
+        throw new IncusError('VOLUME_CATALOG_ADOPT_PENDING', 'retry', {
+          volumeId: attachment.volume_id,
+          serverId,
+        });
+      }
+      await deps.store.markCatalogPresent(attachment.volume_id, serverId);
+      deps.logger.log(
+        `container=${context.intent.resourceId} ensure shared catalog volume=${attachment.volume_id} `
+        + `server=${serverId} result=${result}`,
+      );
+      continue;
+    }
+    try {
+      await client.getStorageVolume(attachment.pool_name, 'custom', attachment.incus_name);
+      await deps.store.markCatalogPresent(attachment.volume_id, serverId);
+    } catch (error) {
+      if (error instanceof IncusError && error.code === 'MISSING_STORAGE_POOL') {
+        throw error;
+      }
+      if (isNotFound(error) || isMissingCustomVolumeError(error)) {
+        deps.logger.log(
+          `Custom volume ${attachment.incus_name} is not present on ${serverId}`,
+        );
+        throw new IncusError('VOLUME_PLACEMENT_PENDING', 'retry', {
+          volumeId: attachment.volume_id,
+          reason: 'preflight',
+        });
+      }
+      throw error;
+    }
+  }
+  return undefined;
 }

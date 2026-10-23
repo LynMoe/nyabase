@@ -7,7 +7,6 @@ import {
   compareManagedFields,
   deriveInstanceName,
   IncusError,
-  isMissingCustomVolumeError,
   observeRootQuotaPending,
   type DesiredInstanceSpec,
   type IncusClientPort,
@@ -32,17 +31,12 @@ import { failedOutcome } from '../reconcile/managed-reconciler.js';
 import { ReconcilerRegistry } from '../reconcile/reconciler-registry.service.js';
 import { ProxySnapshotNotifierService } from '../proxy-snapshots/proxy-snapshot-notifier.service.js';
 import { gpuRequiresStop } from '../gpu/instance-spec.js';
-import {
-  VOLUME_ADOPT_FAIL_AFTER_ATTEMPTS,
-  ensureSharedCatalogOnServer,
-} from '../volumes/shared-volume-catalog.service.js';
 import { applyGuestNetwork, parseCidrPrefix } from './guest-network.adapter.js';
 import {
   buildContainerSpec,
   createInstance,
   deletePhysicalInstance,
   findExpectedOrIdentity,
-  isNotFound,
   MANAGED_FIELD_OWNERSHIP,
   managedContainerIdentity,
   normalized,
@@ -64,7 +58,6 @@ import {
 } from './container-instance-ops.js';
 import {
   ContainerReconcileStore,
-  type ContainerAttachment,
   type ContainerRow,
   type SshFileObservation,
 } from './container-reconcile.store.js';
@@ -72,6 +65,7 @@ import { isRestartIntent } from './container-rules.js';
 import {
   awaitsSshDaemon,
   guardRootShrink,
+  prepareAttachments,
   rootShrinkDecision,
   scanServerContainers,
 } from './container-reconcile-steps.js';
@@ -164,7 +158,13 @@ export class ContainerReconciler implements ManagedReconciler, OnModuleInit {
     if (row.lifecycle_phase === 'deleting' || context.intent.kind === 'container.delete') {
       return this.reconcileDelete(context, client, row, expectedName);
     }
-    const prepared = await this.prepareAttachments(context, client, row);
+    await this.stopBeforeAttachments(client, row, expectedName);
+    const prepared = await prepareAttachments(
+      { store: this.store, logger: this.logger },
+      context,
+      client,
+      row,
+    );
     if ('outcome' in prepared) return prepared.outcome;
     const desiredAttachments = prepared.attachments;
     const runtime = await resolveContainerRuntime(this.cpuSets, this.config, row);
@@ -332,104 +332,21 @@ export class ContainerReconciler implements ManagedReconciler, OnModuleInit {
   }
 
   /**
-   * The attachments the instance must carry, with their catalogs present on the
-   * server. An outcome means the intent became stale or must end here.
+   * Powering off never waits for the attachments: a volume that is not ready
+   * on this server (its create failed, a placement is pending) would hold the
+   * stop, the access-lapse one included, in retries while the instance runs.
    */
-  private async prepareAttachments(
-    context: ReconcileRunContext,
+  private async stopBeforeAttachments(
     client: IncusClientPort,
     row: ContainerRow,
-  ): Promise<{ outcome: ReconcileOutcome } | { attachments: ContainerAttachment[] }> {
-    const beforeMkdir = await this.store.rereadDesired(
-      row.id,
-      row.server_id,
-      context.intent.targetRevision,
-    );
-    if (beforeMkdir.stale && !isRestartIntent(context.intent.kind, context.intent.request)) {
-      return {
-        outcome: { outcome: 'succeeded', observedRevision: context.intent.targetRevision, stale: true },
-      };
-    }
-    const catalogOutcome = await this.ensureDesiredCatalogs(
-      context,
-      client,
-      beforeMkdir.desired,
-      row.server_id,
-    );
-    if (catalogOutcome) return { outcome: catalogOutcome };
-    const beforePut = await this.store.rereadDesired(
-      row.id,
-      row.server_id,
-      context.intent.targetRevision,
-    );
-    return { attachments: beforePut.desired };
-  }
-
-  /**
-   * Every volume the instance mounts must already exist in this daemon's Incus
-   * catalog before the instance PUT, or Incus rejects the device.
-   */
-  private async ensureDesiredCatalogs(
-    context: ReconcileRunContext,
-    client: IncusClientPort,
-    attachments: readonly ContainerAttachment[],
-    serverId: string,
-  ): Promise<ReconcileOutcome | undefined> {
-    for (const attachment of attachments) {
-      if (!attachment.pool_name) {
-        throw new IncusError(
-          attachment.shared ? 'VOLUME_PLACEMENT_PENDING' : 'MISSING_STORAGE_POOL',
-          attachment.shared ? 'retry' : 'managed_failure',
-          { volumeId: attachment.volume_id, serverId },
-        );
-      }
-      if (attachment.shared) {
-        const result = await ensureSharedCatalogOnServer(client, {
-          poolName: attachment.pool_name,
-          incusName: attachment.incus_name,
-          sizeBytes: attachment.size_bytes,
-          ownerScope: attachment.shared_backend_id ?? null,
-        });
-        if (result === 'missing') {
-          if (context.intent.attemptCount >= VOLUME_ADOPT_FAIL_AFTER_ATTEMPTS) {
-            return failedOutcome(
-                'VOLUME_CATALOG_ADOPT_FAILED',
-                'Incus did not adopt the existing CephFS directory into this daemon catalog',
-                { volumeId: attachment.volume_id, serverId },
-              );
-          }
-          throw new IncusError('VOLUME_CATALOG_ADOPT_PENDING', 'retry', {
-            volumeId: attachment.volume_id,
-            serverId,
-          });
-        }
-        await this.store.markCatalogPresent(attachment.volume_id, serverId);
-        this.logger.log(
-          `container=${context.intent.resourceId} ensure shared catalog volume=${attachment.volume_id} `
-          + `server=${serverId} result=${result}`,
-        );
-        continue;
-      }
-      try {
-        await client.getStorageVolume(attachment.pool_name, 'custom', attachment.incus_name);
-        await this.store.markCatalogPresent(attachment.volume_id, serverId);
-      } catch (error) {
-        if (error instanceof IncusError && error.code === 'MISSING_STORAGE_POOL') {
-          throw error;
-        }
-        if (isNotFound(error) || isMissingCustomVolumeError(error)) {
-          this.logger.log(
-            `Custom volume ${attachment.incus_name} is not present on ${serverId}`,
-          );
-          throw new IncusError('VOLUME_PLACEMENT_PENDING', 'retry', {
-            volumeId: attachment.volume_id,
-            reason: 'preflight',
-          });
-        }
-        throw error;
-      }
-    }
-    return undefined;
+    expectedName: string,
+  ): Promise<void> {
+    if (row.power_intent !== 'stopped') return;
+    const actual = await this.findInstance(client, expectedName, row);
+    if (!actual || this.checkIdentity(actual, row, expectedName)) return;
+    const status = actual.document.state?.status ?? actual.document.status;
+    if (powerTransition(status, 'stopped') !== 'stop') return;
+    await setPowerState(client, actual.name, 'stop');
   }
 
   // --- instance lifecycle --------------------------------------------------------
