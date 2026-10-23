@@ -33,6 +33,11 @@ import type { OperationLookup } from './operation-ledger.js';
  * even a compromised Backend can only manage nyabase instances and volumes as
  * unprivileged, uid-isolated, profile-free containers without host paths,
  * raw LXC config or IPv6. Anything not listed here is refused.
+ *
+ * The policy restricts what the Backend may change: on an update, a config
+ * key echoed with the value Incus holds right now passes as it is (Incus and
+ * the host's pool defaults put keys there the Backend never sets, and a
+ * read-modify-write sends them back). New or changed keys must be allowed.
  */
 
 export type PolicyVerdict =
@@ -255,9 +260,10 @@ async function checkInstances(
     if (problem) return deny(problem);
     const current = await readCurrent(instancePath);
     if (!current) return deny('instance to update does not exist');
-    const verdict = checkInstanceDocument(body, { full: method === 'PUT' });
+    const currentConfig = stringMap(current.config);
+    const verdict = checkInstanceDocument(body, { full: method === 'PUT', current: currentConfig });
     if (!verdict.allowed) return verdict;
-    return withCurrentVolatile(body, stringMap(current.config), bringsNicUp(body, current));
+    return withCurrentVolatile(body, currentConfig, bringsNicUp(body, current));
   }
   switch (leaf) {
     case 'state':
@@ -333,6 +339,13 @@ function checkJson(
 interface DocumentCheckOptions {
   /** POST / PUT carry the whole document; PATCH carries a fragment. */
   readonly full: boolean;
+  /** The config Incus holds now (updates only): a key echoed with its current value is not a change. */
+  readonly current?: Readonly<Record<string, string>>;
+}
+
+/** The key is echoed with exactly the value Incus holds now. */
+function unchanged(current: Readonly<Record<string, string>> | undefined, key: string, value: string): boolean {
+  return current !== undefined && Object.hasOwn(current, key) && current[key] === value;
 }
 
 /**
@@ -387,9 +400,11 @@ function checkInstanceConfig(
 ): PolicyVerdict {
   for (const [key, value] of Object.entries(config)) {
     if (typeof value !== 'string') return deny(`config ${key} must be a string`);
+    if (unchanged(options.current, key, value)) continue;
     const verdict = checkConfigEntry(key, value);
     if (!verdict.allowed) return verdict;
   }
+  // Whole documents must state these whatever the instance holds now.
   if (options.full) {
     if (config['security.idmap.isolated'] !== 'true') return deny('security.idmap.isolated must be true');
     if (config['security.privileged'] !== undefined && config['security.privileged'] !== 'false') {
@@ -535,12 +550,18 @@ async function checkStoragePools(
   if (method === 'PUT' && (!isRecord(body.config) || body.config['security.shifted'] !== 'true')) {
     return deny('volumes must stay shifted');
   }
-  const verdict = checkVolumeConfig(body.config ?? {});
+  const currentConfig = stringMap(current.config);
+  const verdict = checkVolumeConfig(body.config ?? {}, currentConfig);
   if (!verdict.allowed) return verdict;
-  return withCurrentVolatile(body, stringMap(current.config));
+  return withCurrentVolatile(body, currentConfig);
 }
 
-function checkVolumeConfig(config: unknown): PolicyVerdict {
+/**
+ * `current` is the volume's config on an update: driver and snapshot keys the
+ * pool's `volume.*` defaults put there (zfs.*, snapshots.*, ...) are echoed
+ * back unchanged, and only new or changed keys must be on this list.
+ */
+function checkVolumeConfig(config: unknown, current?: Readonly<Record<string, string>>): PolicyVerdict {
   if (!isRecord(config)) return deny('volume config must be an object');
   for (const [key, value] of Object.entries(config)) {
     if (typeof value !== 'string') return deny(`volume config ${key} must be a string`);
@@ -549,6 +570,7 @@ function checkVolumeConfig(config: unknown): PolicyVerdict {
       if (value !== 'true') return deny('volumes must stay shifted');
       continue;
     }
+    if (unchanged(current, key, value)) continue;
     if (key === 'size' || key.startsWith('block.') || key.startsWith('initial.')) continue;
     // Ownership labels: inert to Incus, they let the Backend tell its volumes apart.
     if (key.startsWith('user.nyabase.')) continue;

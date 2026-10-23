@@ -165,9 +165,28 @@ function etagOf(document: Document): string {
 const PUT_INSTANCE_FIELDS = ['architecture', 'config', 'description', 'devices', 'ephemeral', 'profiles', 'stateful'];
 
 /**
+ * Pool-level `volume.*` defaults as a host operator may set them. Incus copies
+ * each into every new custom volume without the prefix, so they come back in
+ * the volume document the Backend reads and echoes on update.
+ */
+const POOL_CONFIG: Document = {
+  'volume.zfs.use_refquota': 'true',
+  'volume.zfs.remove_snapshots': 'true',
+  'volume.snapshots.schedule': '@daily',
+  'volume.snapshots.expiry': '7d',
+};
+
+function poolVolumeDefaults(): Document {
+  return Object.fromEntries(Object.entries(POOL_CONFIG)
+    .filter(([key]) => key.startsWith('volume.'))
+    .map(([key, value]) => [key.slice('volume.'.length), value]));
+}
+
+/**
  * Just enough of an Incus daemon for the Backend's flows to complete: it keeps
  * instances, custom volumes and images, adds the volatile.* / image.* keys
- * Incus adds, and finishes every operation successfully.
+ * Incus adds (and the pool's volume.* defaults to new volumes), and finishes
+ * every operation successfully.
  */
 export class FakeIncusHost {
   readonly instances = new Map<string, Document>();
@@ -326,7 +345,7 @@ export class FakeIncusHost {
 
   private storage(method: IncusHttpMethod, [pool, volumes, , name, leaf]: readonly string[], json: () => Document): IncusTunnelResponse {
     if (volumes === undefined || method === 'GET' && name === undefined) {
-      return sync(volumes === undefined ? { name: pool, driver: 'zfs', config: {} } : [...this.volumes.values()]);
+      return sync(volumes === undefined ? { name: pool, driver: 'zfs', config: POOL_CONFIG } : [...this.volumes.values()]);
     }
     if (name === undefined) {
       const created = json();
@@ -336,7 +355,7 @@ export class FakeIncusHost {
         name: created.name,
         type: 'custom',
         content_type: 'filesystem',
-        config: { ...(created.config as Document), 'volatile.uuid': randomUUID() },
+        config: { ...poolVolumeDefaults(), ...(created.config as Document), 'volatile.uuid': randomUUID() },
         description: '',
       });
       return this.operation({});

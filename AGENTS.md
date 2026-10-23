@@ -141,7 +141,7 @@ Vite 通过 alias 将 `@nyabase/common` 指向 `src/index.ts`，但 `index.ts` �
    不要按客户端地址计失败或封禁：同一 NAT / 未配 `trustedProxies` 时所有 agent 共用一个地址，一台凭据过期的 agent 或一次 PG 故障
    不能把健康 agent 的控制 / stream 连接挡在外面。被拒的凭据只记进给运维看的 `AgentCredentialRejections`，不限流。
    agent 端 `policy.ts` 是安全边界（只许 `nyc-*`/`nyv-*`、配置白名单、禁 raw/特权/宿主路径/profiles、
-   必须 idmap.isolated、网卡 `nyh*` + IPv4/MAC 过滤 + `security.port_isolation`，volatile 改回当前值）；
+   必须 idmap.isolated、网卡 `nyh*` + IPv4/MAC 过滤 + `security.port_isolation`，volatile 改回当前值；更新时与 Incus 当前值相同的配置键原样放行，白名单只管新增 / 改值的键，例如池 `volume.*` 默认值复制进卷的 `zfs.*`）；
    backend 生成的规格必须过得了它：`backend/src/agent-policy.contract.test.ts` 用真实的规格构建与 Incus 操作
    （容器、卷、镜像、预检 probe、控制台）经真实 `IncusClient` 送进 agent 的 `policy.ts`（按路径加载 agent 源码，
    backend 不依赖 agent 包）；新增发往 Incus 的请求时把它的流程加进去。客户网卡统一用 `buildGuestNicDevice`。

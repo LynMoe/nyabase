@@ -289,6 +289,44 @@ describe('agent Incus policy', () => {
       .toBe(false);
   });
 
+  it('lets an update echo config Incus already holds, but not change or add it', async () => {
+    const path = `/1.0/storage-pools/default/volumes/custom/${VOLUME}`;
+    // What a pool with volume.zfs.* / volume.snapshots.* defaults gives every new volume.
+    const poolDefaults = { 'zfs.use_refquota': 'true', 'snapshots.schedule': '@daily' };
+    const current = { config: { size: '1073741824', 'security.shifted': 'true', ...poolDefaults } };
+    const put = (config: Record<string, string>) => check({ method: 'PUT', path, body: body({ config }) }, current);
+    expect((await put({ size: '2147483648', 'security.shifted': 'true', ...poolDefaults })).allowed).toBe(true);
+    expect((await put({ size: '2147483648', 'security.shifted': 'true', 'zfs.use_refquota': 'false' })).allowed)
+      .toBe(false);
+    expect((await put({ size: '2147483648', 'security.shifted': 'true', 'zfs.blocksize': '16KiB' })).allowed)
+      .toBe(false);
+    // Nothing is "unchanged" on create.
+    expect((await check({
+      method: 'POST',
+      path: '/1.0/storage-pools/default/volumes',
+      body: body({ name: VOLUME, type: 'custom', config: { size: '1073741824', 'security.shifted': 'true', ...poolDefaults } }),
+    }, current)).allowed).toBe(false);
+
+    const instancePath = `/1.0/instances/${INSTANCE}`;
+    const { config } = instanceDocument() as { config: Record<string, string> };
+    const held = { status: 'Stopped', config: { ...config, 'boot.autostart': 'false' } };
+    const update = (extra: Record<string, string>) => check({
+      method: 'PATCH',
+      path: instancePath,
+      body: body({ config: { ...config, ...extra } }),
+    }, held);
+    expect((await update({ 'boot.autostart': 'false' })).allowed).toBe(true);
+    expect((await update({ 'boot.autostart': 'true' })).allowed).toBe(false);
+    expect((await update({ 'raw.lxc': 'lxc.apparmor.profile=unconfined' })).allowed).toBe(false);
+    // A whole document must still keep the uid shift, whatever the instance holds now.
+    const shiftless = { ...config, 'security.idmap.isolated': 'false' };
+    expect((await check({
+      method: 'PUT',
+      path: instancePath,
+      body: body({ ...instanceDocument({ config: shiftless }), name: undefined, type: undefined, source: undefined }),
+    }, { status: 'Stopped', config: shiftless })).allowed).toBe(false);
+  });
+
   it('pulls images only from public https simplestreams servers', async () => {
     const pull = (server: unknown, protocol: string | null = 'simplestreams') => check({
       method: 'POST',

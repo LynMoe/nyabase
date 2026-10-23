@@ -1685,7 +1685,10 @@ Backend **不直连** Incus，也不主动连接任何主机。每台 Incus 主�
   `nyc-*` 实例与 `nyv-*` 卷；配置白名单；禁止 `raw.*`、特权容器、宿主路径设备、
   profiles、证书/服务器配置/网络/存储池写入；`security.idmap.isolated` 必须为
   true；网卡必须开 IPv4/MAC 过滤与 `security.port_isolation`、`host_name` 为 `nyh*`；
-  `volatile.*` 一律改回 Incus 当前值。即使 Backend 被攻破，也拿不到宿主机 root。
+  `volatile.*` 一律改回 Incus 当前值。白名单约束的是 Backend 能**改**什么：更新实例 / 卷时，
+  与 Incus 当前值相同的配置键原样放行（例如存储池 `volume.zfs.*` / `volume.snapshots.*`
+  默认值被 Incus 复制进每个新卷的 `zfs.*` / `snapshots.*`，Backend 读改写时会带回），
+  新增或改值的键仍须在白名单内。即使 Backend 被攻破，也拿不到宿主机 root。
   Incus 操作（operation）只能读取 / 等待由经过 policy 的请求创建的那些（agent 记在内存里，
   24 小时或 4096 条后遗忘），其余一律按 Incus 的 404 回答；exec / 控制台的 operation
   WebSocket 同理，所以宿主机运维自己的 `incus exec` 既看不到也接不上。operation 不可列出、不可取消。
