@@ -1610,6 +1610,10 @@ from the product SLO and measured baseline, not from this example deployment.
 
 ## 主机 Agent（每台 Incus 主机一个）
 
+**Incus 主机必须专供 nyabase 使用**，不要在上面跑其他 Incus 负载。agent 的 policy（见下）
+把 nyabase 限制在 `nyc-*` 实例与 `nyv-*` 卷上，保护的是宿主机，而不是 `default` project 里
+非 nyabase 的实例、卷和镜像：Backend 仍能列出并读取它们，也能删除任意镜像与镜像别名。
+
 Backend **不直连** Incus，也不主动连接任何主机。每台 Incus 主机运行
 `nyabase-agent`（`packages/agent`），由它主动连到 Backend：
 
