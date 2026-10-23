@@ -38,8 +38,8 @@ export default function ServerDetailPage() {
   const navigate = useNavigate({ from: '/servers/$id' });
   const queryClient = useQueryClient();
   const [deleteOpen, setDeleteOpen] = useState(false);
-  /** Set once the server refused because it still holds containers or local volumes. */
-  const [heldResources, setHeldResources] = useState<{ containers: number; localVolumes: number } | null>(null);
+  /** Set once the server refused because it still holds resources or is a shared backend's last executor. */
+  const [heldResources, setHeldResources] = useState<HeldResources | null>(null);
   const canManageServers = useHasRole(Role.Operator);
 
   const serverQuery = useQuery({
@@ -71,6 +71,7 @@ export default function ServerDetailPage() {
         setHeldResources({
           containers: Number(details?.containers ?? 0),
           localVolumes: Number(details?.localVolumes ?? 0),
+          strandedSharedVolumes: Number(details?.strandedSharedVolumes ?? 0),
         });
         return;
       }
@@ -117,8 +118,8 @@ export default function ServerDetailPage() {
         open={deleteOpen}
         title={heldResources ? '强制从控制面删除这台服务器？' : '从控制面删除这台服务器？'}
         description={heldResources
-          ? `这台服务器上还有 ${heldResources.containers} 个容器、${heldResources.localVolumes} 个本机卷。请先删除它们（会同时清理主机上的实例和卷）。只有主机已永久下线或已重装时才强制删除：否则主机上的实例会继续运行，而它们的 IP 会被重新分配给新容器，造成地址冲突。`
-          : '只会清除控制面上这台服务器的对象（本机 catalog、授权等），不会对这台 Incus 做任何删除；服务器上仍有容器或本机卷时会被拒绝。共享卷若还登记在其他服务器上会保留；若只登记在这台上，控制面卷行会消失，Ceph 目录可能残留。重新加入按全新空白服务器处理。'}
+          ? heldResourcesDescription(heldResources)
+          : '只会清除控制面上这台服务器的对象（本机 catalog、授权等），不会对这台 Incus 做任何删除；服务器上仍有容器或本机卷、或它是某个共享存储最后一台执行器且该存储上还有卷时会被拒绝。共享卷始终保留在控制面上。重新加入按全新空白服务器处理。'}
         confirmLabel={heldResources ? '主机已永久下线，强制删除' : '确认删除'}
         pendingLabel="删除中..."
         pending={deleteServer.isPending}
@@ -130,4 +131,21 @@ export default function ServerDetailPage() {
       />
     </Page>
   );
+}
+
+interface HeldResources {
+  readonly containers: number;
+  readonly localVolumes: number;
+  readonly strandedSharedVolumes: number;
+}
+
+function heldResourcesDescription(held: HeldResources): string {
+  const parts: string[] = [];
+  if (held.containers > 0 || held.localVolumes > 0) {
+    parts.push(`这台服务器上还有 ${held.containers} 个容器、${held.localVolumes} 个本机卷。请先删除它们（会同时清理主机上的实例和卷）。只有主机已永久下线或已重装时才强制删除：否则主机上的实例会继续运行，而它们的 IP 会被重新分配给新容器，造成地址冲突。`);
+  }
+  if (held.strandedSharedVolumes > 0) {
+    parts.push(`它是某个共享存储最后一台执行器，该存储上还有 ${held.strandedSharedVolumes} 个共享卷。请先登记另一台执行器；强制删除后这些卷仍保留在控制面上，但在新执行器登记前无法挂载或删除。`);
+  }
+  return parts.join(' ');
 }

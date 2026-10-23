@@ -110,9 +110,10 @@ deployment.
 
 With `auth.adminInitPassword` empty, the first production boot creates the
 `admin` account with a random password and prints it **once**, at that first
-boot only and whatever `server.logLevel` is, as a
-`Generated one-time admin password: …` line in the Backend log
-(`docker compose --env-file .env logs backend | grep -i 'admin password'`).
+boot only and whatever `server.logLevel` is, written straight to the Backend's
+stderr after a `[nyabase] Created the administrator account "admin" with a
+generated password:` line
+(`docker compose --env-file .env logs backend | grep -A1 'generated password'`).
 Later boots never print it again, so capture it before the log rotates. Sign in
 and change it immediately, then treat the log line as a leaked secret (rotate
 the log or restrict who can read it).
@@ -275,8 +276,10 @@ enforced at start-up):
 | `NYABASE_HTTP_MAX_CONNECTIONS_PER_IP` | HTTP | `64` (1–65536), per IPv4 address / IPv6 `/64` |
 | `NYABASE_HTTP_MAX_CONNECTIONS_PER_IPV6_48` | HTTP | `256` (1–65536), all `/64`s of one IPv6 `/48` together |
 | `NYABASE_HTTP_MAX_PENDING_CONNECTIONS` | HTTP | `1024` (1–`NYABASE_HTTP_MAX_CONNECTIONS`), in TLS handshake or before a full request head |
+| `NYABASE_HTTP_MAX_CONNECTIONS_PER_CONTAINER` | HTTP | `512` (1–`NYABASE_HTTP_MAX_CONNECTIONS`), per upstream container, all its hostnames together, WebSockets included; over it the client gets a 503 |
 | `NYABASE_HTTP_BODY_DEADLINE_MS` | HTTP | `30000` (1000–3600000), whole request body |
 | `NYABASE_HTTP_IDLE_TIMEOUT_MS` | HTTP | `120000` (1000–86400000), ordinary request with no bytes either way |
+| `NYABASE_HTTP_RESPONSE_LIFETIME_MS` | HTTP | `1800000` (1000–86400000), whole ordinary response, counted from the end of the request body |
 | `NYABASE_HTTP_UPGRADED_IDLE_MS` | HTTP | `3600000` (1000–86400000), no bytes either way |
 | `NYABASE_HTTP_CONTROL_HOLD_MS` | HTTP | `300000` (0–600000; `0` clears routes immediately) |
 
@@ -355,7 +358,10 @@ still ends the whole connection when revoked.
 
 **HTTP request handling.** The HTTP proxy is the public edge, so it never
 trusts client forwarding headers: incoming `Forwarded`, `X-Real-IP` and every
-`X-Forwarded-*` header are removed, and the upstream receives
+`X-Forwarded-*` header are removed, with `_` treated as `-` (so
+`X_Forwarded_For` and `X-Real_IP` are removed too, as are underscore spellings
+of `Content-Length`, `Transfer-Encoding`, `Keep-Alive`, `Proxy-Connection` and
+`Sec-WebSocket-*`; other underscore headers pass unchanged), and the upstream receives
 `X-Forwarded-For` and `X-Real-IP` (the client socket address; IPv4-mapped
 IPv6 shown as IPv4), `X-Forwarded-Proto` (`http` or `https` by listener) and
 `X-Forwarded-Host` (the client's `Host`). Do not put another proxy in front of
@@ -370,13 +376,20 @@ request bodies are accepted only as exactly `chunked` on HTTP/1.1, without
 (chunk extensions and trailers dropped); malformed framing or bytes after the
 final chunk get a 400 and the upstream never receives a complete body. Other
 transfer codings, a coding list, duplicate `Transfer-Encoding` or
-`Content-Length` headers and folded header lines are rejected. There is no
-total request lifetime: the request head must arrive within 10 s, the body
-within `NYABASE_HTTP_BODY_DEADLINE_MS`, and after that the exchange runs until
-it finishes, the route is revoked, or nothing moves for
-`NYABASE_HTTP_IDLE_TIMEOUT_MS` (waiting for the upstream's first byte counts as
-idle). Long downloads, SSE and long-polling therefore work as long as bytes
-flow at least that often. When a response is cut short (idle timeout, route
+`Content-Length` headers and folded header lines are rejected. The request
+head must arrive within 10 s, the body within `NYABASE_HTTP_BODY_DEADLINE_MS`,
+and after that the exchange runs until it finishes, the route is revoked,
+nothing moves for `NYABASE_HTTP_IDLE_TIMEOUT_MS` (waiting for the upstream's
+first byte counts as idle), or the response has run for
+`NYABASE_HTTP_RESPONSE_LIFETIME_MS` (default 30 min) since the end of the
+request body. Long downloads, SSE and long-polling therefore work as long as
+bytes flow at least that often and finish within that ceiling (EventSource
+reconnects on its own). Upgraded tunnels (WebSocket) have no total lifetime,
+only `NYABASE_HTTP_UPGRADED_IDLE_MS`. Each upstream container may hold at most
+`NYABASE_HTTP_MAX_CONNECTIONS_PER_CONTAINER` connections at once across all its
+hostnames, so one tenant cannot take the whole connection pool; unlike the
+listener limits, which close silently, going over it is answered with a 503.
+When a response is cut short (idle timeout, response lifetime, route
 revocation, upstream error) the proxy resets the client connection (TCP RST)
 instead of closing it, so a close-delimited body cannot look complete.
 
@@ -558,14 +571,38 @@ rebuilding vmbr.
 - Volume destroy and purge wait while the executing server is offline (normal
   failure backoff and retry) instead of dropping the volume rows; only when the
   server or pool no longer exists is the destroy treated as having no executor.
-  Deleting a server keeps a shared volume that is being destroyed as long as
-  another executor server for its backend exists, online or not.
+  Deleting a server never drops a live shared volume: one placed only on that
+  server stays tracked and is placed again when attached elsewhere.
 - Deleting a server removes it from the control plane only and never touches
   its Incus. It is refused (`SERVER_NOT_EMPTY`) while the server still holds
-  containers or local volumes: delete those first, so the reconciler removes
-  them from the host. `DELETE /api/servers/:id?force=true` skips the check and
-  is only for a host that is gone for good or wiped; on a live host its
-  instances would keep running while their addresses are handed out again.
+  containers or local volumes, or while it is the last executor (online or
+  not) of a CephFS shared backend that still has volumes
+  (`details.strandedSharedVolumes`): delete those first, so the reconciler
+  removes them from the host, and register another executor before removing
+  the last one. `DELETE /api/servers/:id?force=true` skips the check and is
+  only for a host that is gone for good or wiped; on a live host its instances
+  would keep running while their addresses are handed out again. A forced
+  delete of a backend's last executor keeps its live shared volumes listed
+  (they cannot be attached or deleted until a new executor is registered) and
+  only finishes destroys already in progress (`destroy_executor_gone`).
+- Agent streams (event stream, console, exec): the Backend waits up to 30 s
+  for the agent's `incus.ws` reply and up to 35 s for the stream socket; a
+  stream connecting later is closed with 1008. A stream that buffers more than
+  16 MiB or 4096 frames before the Backend reads it is closed with 1009 and
+  shows up as an event-stream reconnect or a failed exec.
+- `POST /api/agent/enroll` allows 30 attempts per 10 minutes per client (one
+  IPv4 address or one IPv6 `/64`, from `server.trustedProxies`); past 4096
+  tracked clients the least recently seen are forgotten instead of refusing
+  everyone.
+- Browser sessions: each refresh extends a session by
+  `auth.refreshTokenExpiresDays` (idle timeout) but never past login +
+  `auth.sessionMaxLifetimeDays` (default 30); both are admin-only online
+  settings, and a lower cap applies to existing sessions on their next refresh.
+  Presenting an already-rotated refresh token revokes that session (audit
+  `user.refresh_token_reuse`, warn log `Refresh token reuse: revoked session …`),
+  except a lost-response retry with the same request id or a concurrent refresh
+  with the immediately previous token within 15 s (401 `REFRESH_SUPERSEDED`,
+  cookie kept).
 - Incus instances and custom volumes that carry this installation's labels but
   have no row (an instance `user.nyabase.server_id` of this server; a volume
   `user.nyabase.scope` of this server or of the pool's shared backend) are

@@ -64,10 +64,16 @@ Vite 通过 alias 将 `@nyabase/common` 指向 `src/index.ts`，但 `index.ts` �
   （含仍在 provisioning 的），期满删容器 + 本地卷；数据盘池 / 共享后端 = 立即把该用户在其上的卷从容器强制卸载
   （`VolumeAttachmentsService.forceDetach`，运行中热拔，容器不停也不删），期满只删这些卷。`lapsed_at` 恒为检测时间（处理器开台账行的那一刻），
   不从原始授权行推断（否则会把撤销倒推到不相干的旧到期时间并立刻清除）。宽限内只要处置被绕过（服务器上又有 `power_intent='running'` 的容器，
-  或池 / 后端上的卷又被挂上，例如管理员用 `scope=all`），每轮都会再次处置；`stopped_at` 保留第一次处置时间。清除前在 IAM 锁下复核覆盖。
+  或池 / 后端上的卷又被挂上，例如管理员用 `scope=all`），每轮都会再次处置；`stopped_at` 保留第一次处置时间。
+  清除时复核覆盖、标记 `purged_at` 与全部删除 / 销毁 intent 的入队在同一个持有 `lockIamPolicy` 的 **read committed** 事务里
+  （`AccessLapseRepository.purgeIfUncovered`）：serializable / repeatable read 的快照取自加锁语句、早于锁等待，会漏掉等锁期间提交的授权。
+  池 / 后端清除前的强制卸载是可逆的，在锁外进行。
 - 禁用用户 = 失去覆盖，与撤销同一条流程：覆盖只认 `iam.effective_*_access`（active 用户 + 当前授权），禁用后其名下资源按检测时间开宽限、立即停机，
   14 天后清除；宽限内重新启用则删台账行（容器不自动启动）。用户状态变更在 `afterCommit` 里通知 `AccessChangeNotifier`。
-- 宽限中（无当前覆盖）的用户不能新建、启动、挂载；已停机的容器在覆盖恢复后不会自动启动。
+- 宽限中（无当前覆盖）的用户不能新建、启动、挂载、扩容；已停机的容器在覆盖恢复后不会自动启动。所有者扩容本地卷要同时有服务器和存储池的当前授权。
+- intent 重试归属重试者（`requested_by`，system 为 NULL）并记审计 `intent.retry`；重试 `volume.resize` 只能把 `size_bytes` 调小，不会绕过配额重新扩容。
+- 会话：refresh token 每次轮换顺延 `auth.refreshTokenExpiresDays`（空闲超时），但不超过登录时间 + `auth.sessionMaxLifetimeDays`（绝对上限）；两者都是 admin-only 在线设置。
+  已轮换掉的旧 token 再出现即判为重放，删除整个会话并记审计 `user.refresh_token_reuse`（同一 `requestId` 的丢响应重试、以及 15 s 内紧邻上一枚 token 的并发刷新除外）；退役哈希在 `iam.refresh_token_ancestors`。
 
 ## 后端结构规则（`packages/backend/src`）
 
@@ -92,7 +98,9 @@ Vite 通过 alias 将 `@nyabase/common` 指向 `src/index.ts`，但 `index.ts` �
    `executeWithPostCommit`）开启，提交后才触发，回滚/重试丢弃。worker 的周期全量扫描是兜底。
    worker 按资源排队（`reconcile/resource-chains.ts`）：同一资源的 intent 严格按序、绝不并发（claim 按 worker 记，
    同 worker 重入会续租，所以这道进程内互斥不能去掉），不同资源并发（全局 12、每服务器 4），一个慢操作不再拖住整个队列。
-   全量扫描先列 Incus 再读库；库里不认识的带本安装标签的实例 / 卷进 `control.orphan_sightings`，实例立即停机，7 天后才删。系统设置只用 revision CAS
+   全量扫描先列 Incus 再读库；库里不认识的带本安装标签的实例 / 卷进 `control.orphan_sightings`，实例立即停机，7 天后才删。
+   删除服务器：仍有容器 / 本机卷，或它是某个仍有卷的共享后端的最后一台执行器（不论在线与否）时，非 `force` 删除返回 `SERVER_NOT_EMPTY`；
+   共享卷绝不因失去 placement 而被丢弃，`force` 只结束最后执行器上已在 `deleting` 的卷（`destroy_executor_gone`），活卷保留到有新执行器。系统设置只用 revision CAS
    （冲突返回 409 + 当前值），没有内容 token 和定时轮询。
 9. Backend 不直连 Incus，也不主动连任何主机。每台服务器的 `nyabase-agent`（`packages/agent`）主动 wss 连
    `/ws/agent`（凭据 `nyak.<serverId>.<secret>`，库里只存 sha256），Incus 请求走 `incus.http` RPC、
@@ -129,11 +137,13 @@ SSH 代理按公钥认证、按名路由：direct-tcpip 目标是容器 IP 或 `
 
 GPU 是平台内置功能（`gpu/` 模块、`common/src/gpu/`、agent 的 `gpu-collector`），不存在扩展框架。
 
-## Schema 规则（上线前）
+## Schema 规则（上线冻结）
 
-只有一个迁移 `packages/backend/src/platform/persistence-pg/migrations/000001_initial.sql`。
-产品尚未上线，改 schema 时**直接编辑它**，不要新增增量迁移，也不要写兼容旧数据的代码；
-启动时会精确校验迁移清单。上线之后才改为只追加迁移。
+迁移在 `packages/backend/src/platform/persistence-pg/migrations/`，启动时按 sha256 精确校验已应用的迁移：
+已发布的迁移文件改一个字节，线上库就拒绝启动。已发布迁移的校验和固定在
+`platform/persistence-pg/migration-freeze.test.ts` 的 `RELEASED_MIGRATION_CHECKSUMS`，**不要改已发布的迁移，也不要改这个常量去迁就**；
+schema 变更一律新增 `NNNNNN_name.sql`（只追加），随版本发布时把它的 sha256 加进常量。
+`000001_initial.sql` 随上线版本冻结；上线前用旧版 000001 建的库（试运行 / staging）必须重建。
 
 ## 本地开发后端
 
@@ -174,4 +184,6 @@ lab 场景 API 测试，不在 CI 里跑；CI 只跑 `pnpm e2e:check`（e2e 包 
 - 进程数 / 网卡带宽 / 磁盘读写是可在线编辑的系统设置 `containers.*`，统一作用于所有容器（CephFS 卷不限 IO）。
 - 漂移：平台拥有整份实例文档，只放过 `volatile.*`、`image.*`；未知配置键、多出的设备、设备内多出的键、
   非空 profiles 都算漂移，写回时整份覆盖并记审计 `container.drift_corrected`。
+- `power_intent='stopped'` 时 reconciler 先停机再准备挂载，停机绝不等卷就绪；挂载卷超过 `VOLUME_ADOPT_FAIL_AFTER_ATTEMPTS` 次仍未就绪，
+  intent 以 `VOLUME_PLACEMENT_FAILED` 失败，不再无限重试。
 
