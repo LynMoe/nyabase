@@ -823,7 +823,12 @@ owner of every object). The old database stays as the rollback point.
 1. In `deploy/.env`: remove `POSTGRES_DB` and `POSTGRES_USER`, add
    `NYABASE_DB_PASSWORD` (`openssl rand -hex 32`) and put it into
    `DATABASE_URL` in place of the old password. `POSTGRES_PASSWORD` stays: it
-   remains the superuser's password.
+   remains the superuser's password. Set `NYABASE_VERSION` to the release
+   being installed (the checkout with this layout, for example
+   `git describe --tags --always`): every `docker compose` command below
+   refuses to run without it. Build that release's image now, while the old
+   Backend keeps serving: `docker compose --env-file .env build backend`.
+   Step 5 starts it.
 2. Stop the Backend (`docker compose --env-file .env stop backend`), then take
    and verify a logical backup with the current `pg_ops` setup (see **Logical
    backups**).
