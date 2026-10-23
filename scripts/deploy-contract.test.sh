@@ -15,6 +15,7 @@ require_command() {
 
 require_command docker
 require_command node
+require_command rg
 
 for obsolete_path in \
   deploy/install-agent.sh \

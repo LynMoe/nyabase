@@ -6,6 +6,17 @@ if [[ "$#" -ne 0 ]]; then
   exit 2
 fi
 
+# The architecture assertions read `if rg ...; then fail`: a missing rg (exit 127)
+# would look like "no match" and let every one of them pass.
+require_command() {
+  command -v "$1" >/dev/null 2>&1 || {
+    echo "required command not found: $1" >&2
+    exit 1
+  }
+}
+
+require_command rg
+
 assert_no_common_src_artifacts() {
   local artifact
   artifact="$(find packages/common/src -type f \( -name '*.js' -o -name '*.js.map' -o -name '*.d.ts' -o -name '*.d.ts.map' \) -print -quit)"

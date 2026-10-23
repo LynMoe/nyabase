@@ -39,6 +39,8 @@ jobs:
           cache: pnpm
       - name: Enable pinned pnpm
         run: corepack enable
+      - name: Install ripgrep for the source assertions
+        run: sudo apt-get update && sudo apt-get install -y ripgrep
       - name: Install locked dependencies
         run: pnpm install --frozen-lockfile
       - name: Dependency security gate
