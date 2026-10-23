@@ -3,16 +3,10 @@
 # control plane and both proxies, register the servers, start their agents,
 # then register the rest of the lab (lib/bootstrap.ts).
 
-# A self-contained agent tree: its dist plus @nyabase/common, zod and ws.
+# The same self-contained agent tree an operator installs ($RUN_DIR/agent), built
+# from what the build step above produced.
 bundle_agent() {
-  local out="$RUN_DIR/agent" agent="$REPO_ROOT/packages/agent" common="$REPO_ROOT/packages/common" zod ws
-  zod="$(cd "$common" && node -p 'require("path").dirname(require.resolve("zod/package.json"))')"
-  ws="$(cd "$agent" && node -p 'require("path").dirname(require.resolve("ws/package.json"))')"
-  mkdir -p "$out/node_modules/@nyabase/common"
-  cp -R "$agent/dist" "$agent/package.json" "$out/"
-  cp -R "$common/dist" "$common/package.json" "$out/node_modules/@nyabase/common/"
-  cp -RL "$zod" "$out/node_modules/zod"
-  cp -RL "$ws" "$out/node_modules/ws"
+  bash "$REPO_ROOT/scripts/build-agent-bundle.sh" --skip-build "$RUN_DIR" >/dev/null
 }
 
 # Every lab host gets a run-scoped agent: a transient systemd unit named

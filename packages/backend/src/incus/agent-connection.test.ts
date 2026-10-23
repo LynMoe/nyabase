@@ -1,7 +1,7 @@
 import { EventEmitter, getEventListeners } from 'node:events';
 import { describe, expect, it, vi } from 'vitest';
 import WebSocket from 'ws';
-import type { AgentHello } from '@nyabase/common';
+import { AGENT_PROTOCOL_VERSION, type AgentHello } from '@nyabase/common';
 import {
   AGENT_STREAM_REPLY_TIMEOUT_MS,
   AGENT_STREAM_WAIT_TIMEOUT_MS,
@@ -14,7 +14,7 @@ import { BufferedStreamSocket } from './agent-stream-socket.js';
 const SERVER_ID = '11111111-1111-4111-8111-111111111111';
 const HELLO: AgentHello = {
   type: 'hello',
-  protocol: 1,
+  protocol: AGENT_PROTOCOL_VERSION,
   agentVersion: '0.1.0',
   hostname: 'worker-1',
   incus: { serverVersion: '7.4', apiExtensions: [] },

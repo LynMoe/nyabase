@@ -7,6 +7,8 @@ import type { IncusTunnel } from './incus-client-types.js';
 export interface AgentPresenceListener {
   connected(serverId: string, hello: AgentHello): void | Promise<void>;
   disconnected(serverId: string): void | Promise<void>;
+  /** An authenticated agent was turned away (e.g. its protocol is not this Backend's). */
+  refused?(serverId: string, reason: string): void | Promise<void>;
 }
 
 /** An authenticated control socket whose agent has not finished hello yet. */
@@ -45,6 +47,11 @@ export class AgentRegistry {
     if (this.connections.get(connection.serverId) !== connection) return;
     this.connections.delete(connection.serverId);
     this.notify((listener) => listener.disconnected(connection.serverId));
+  }
+
+  /** Report an authenticated agent that was turned away, so the server can say why. */
+  refuse(serverId: string, reason: string): void {
+    this.notify((listener) => listener.refused?.(serverId, reason));
   }
 
   /**

@@ -1,6 +1,8 @@
 import WebSocket from 'ws';
 import {
+  AGENT_CLOSE_PROTOCOL_UNSUPPORTED,
   AGENT_HEARTBEAT_INTERVAL_MS,
+  AGENT_PROTOCOL_VERSION,
   MAX_AGENT_CONTROL_FRAME_BYTES,
   zAgentBackendFrame,
   type AgentErrorCode,
@@ -45,6 +47,11 @@ export interface BackendConnectionOptions {
 export const AGENT_CLOSE_CREDENTIAL_REJECTED = 4401;
 export const AGENT_CLOSE_REPLACED = 4409;
 
+interface SessionEnd {
+  readonly code: number;
+  readonly reason: string;
+}
+
 const WELCOME_TIMEOUT_MS = 10_000;
 const MIN_BACKOFF_MS = 1_000;
 const MAX_BACKOFF_MS = 30_000;
@@ -62,10 +69,10 @@ export class BackendConnection {
   async run(signal: AbortSignal): Promise<void> {
     let attempt = 0;
     while (!signal.aborted) {
-      let closeCode = 0;
+      let closed: SessionEnd = { code: 0, reason: '' };
       const started = Date.now();
       try {
-        closeCode = await this.session(signal);
+        closed = await this.session(signal);
       } catch (error) {
         this.options.log(`control connection failed: ${error instanceof Error ? error.message : String(error)}`);
       }
@@ -73,17 +80,23 @@ export class BackendConnection {
       if (Date.now() - started > MAX_BACKOFF_MS) attempt = 0;
       let delay = Math.min(MAX_BACKOFF_MS, MIN_BACKOFF_MS * 2 ** attempt);
       attempt += 1;
-      if (closeCode === AGENT_CLOSE_CREDENTIAL_REJECTED) {
+      if (closed.code === AGENT_CLOSE_CREDENTIAL_REJECTED) {
         this.options.log('Backend rejected the agent credential');
         await this.options.onCredentialRejected?.();
         delay = REJECTED_BACKOFF_MS;
+      } else if (closed.code === AGENT_CLOSE_PROTOCOL_UNSUPPORTED) {
+        // Retrying cannot help until one side is upgraded; stay visible but quiet.
+        this.options.log(`Backend refused agent protocol ${AGENT_PROTOCOL_VERSION}: ${closed.reason || 'no reason given'}`);
+        delay = REJECTED_BACKOFF_MS;
+      } else if (closed.code !== 0 && closed.code !== 1000 && closed.code !== 1001) {
+        this.options.log(`control connection closed (${closed.code}${closed.reason ? ` ${closed.reason}` : ''})`);
       }
       await sleep(delay / 2 + Math.random() * (delay / 2), signal);
     }
   }
 
-  /** One connected session; resolves with the close code. */
-  private session(signal: AbortSignal): Promise<number> {
+  /** One connected session; resolves with how it was closed. */
+  private session(signal: AbortSignal): Promise<SessionEnd> {
     return new Promise((resolve, reject) => {
       const socket = new WebSocket(this.options.url, {
         headers: { authorization: `Bearer ${this.options.credential()}` },
@@ -154,7 +167,7 @@ export class BackendConnection {
           : 0;
         socket.terminate();
         cleanup();
-        resolve(code);
+        resolve({ code, reason: '' });
       });
       const cleanup = (): void => {
         clearTimeout(welcomeTimer);
@@ -164,9 +177,9 @@ export class BackendConnection {
         for (const controller of this.inFlight.values()) controller.abort();
         this.inFlight.clear();
       };
-      socket.once('close', (code) => {
+      socket.once('close', (code, reason) => {
         cleanup();
-        resolve(code);
+        resolve({ code, reason: reason.toString('utf8').slice(0, 200) });
       });
       socket.once('error', (error) => {
         cleanup();

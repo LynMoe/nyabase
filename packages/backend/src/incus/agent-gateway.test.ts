@@ -2,13 +2,14 @@ import { EventEmitter } from 'node:events';
 import type * as http from 'node:http';
 import { describe, expect, it, vi } from 'vitest';
 import WebSocket from 'ws';
+import { AGENT_PROTOCOL_VERSION } from '@nyabase/common';
 import { AgentGateway } from './agent-gateway.js';
 import { AgentRegistry } from './agent-registry.service.js';
 
 const SERVER_ID = '11111111-1111-4111-8111-111111111111';
 const HELLO = {
   type: 'hello',
-  protocol: 1,
+  protocol: AGENT_PROTOCOL_VERSION,
   agentVersion: '0.1.0',
   hostname: 'worker-1',
   incus: { serverVersion: '7.4', apiExtensions: [] },
@@ -133,5 +134,16 @@ describe('agent gateway hello', () => {
     ws.emit('message', Buffer.from(JSON.stringify(HELLO)), false);
     ws.emit('message', Buffer.from(JSON.stringify(HELLO)), false);
     expect(ws.closed?.code).toBe(1008);
+  });
+
+  it('turns away a hello of another protocol and reports why', async () => {
+    const { registry, ws, confirmControl } = acceptControl(async () => true);
+    const refused = vi.fn();
+    registry.onPresence({ connected: vi.fn(), disconnected: vi.fn(), refused });
+    ws.emit('message', Buffer.from(JSON.stringify({ ...HELLO, protocol: 1, agentVersion: '0.1.0+gold' })), false);
+    expect(ws.closed?.code).toBe(4426);
+    expect(confirmControl).not.toHaveBeenCalled();
+    expect(refused).toHaveBeenCalledWith(SERVER_ID, expect.stringContaining('0.1.0+gold speaks protocol 1'));
+    expect(registry.isConnected(SERVER_ID)).toBe(false);
   });
 });

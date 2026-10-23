@@ -134,6 +134,11 @@ Vite 通过 alias 将 `@nyabase/common` 指向 `src/index.ts`，但 `index.ts` �
    agent 端 `policy.ts` 是安全边界（只许 `nyc-*`/`nyv-*`、配置白名单、禁 raw/特权/宿主路径/profiles、
    必须 idmap.isolated、网卡 `nyh*` + 过滤，volatile 改回当前值）；backend 生成的规格必须过得了它。
    不要再加 mTLS、trust token 或 Incus 端点字段。
+   `AGENT_PROTOCOL_VERSION` 同时约定控制帧格式和 policy 接受什么：两边构建只在协议号相同时通信，
+   不同的 hello 被 close 4426 拒绝并写进服务器 `last_error`。改 `policy.ts` / `policy-body.ts` /
+   `common/src/protocol/agent.ts` 时 `protocol-freeze.test.ts` 会失败：若另一版本可能因此拒绝对方的请求就递增协议号，
+   并在 OPERATIONS.md 写升级顺序，然后重新固定摘要。agent 安装包只用 `pnpm build:agent-bundle`
+   （`scripts/build-agent-bundle.sh`，lab e2e 同用）构建，版本 `<package>+g<commit>` 随 hello 上报。
 
 8. 体量上限（`scripts/check-source-size.mjs`，已接入 `scripts/check.sh`）：手写的 backend / frontend / common / agent
    源文件 ≤ 800 行，单个函数 / 方法 ≤ 150 行（`api-types.ts`、`routeTree.gen.ts`、测试文件除外）。确有理由超出时，

@@ -1,7 +1,7 @@
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { AGENT_PROTOCOL_VERSION } from '@nyabase/common';
 import { createAgentHandlers } from './agent.js';
 import { BackendConnection } from './backend-connection.js';
+import { readAgentBuild } from './build-info.js';
 import { LinuxNodeMetricsCollector } from './collector.js';
 import { controlUrl, loadAgentConfig } from './config.js';
 import { collectContainerCgroupMetrics } from './container-cgroup.js';
@@ -17,17 +17,10 @@ function log(message: string): void {
   console.log(`[nyabase-agent] ${message}`);
 }
 
-function agentVersion(): string {
-  try {
-    const manifest = JSON.parse(readFileSync(join(__dirname, '..', 'package.json'), 'utf8')) as { version?: string };
-    return manifest.version ?? 'unknown';
-  } catch {
-    return 'unknown';
-  }
-}
-
 async function main(): Promise<void> {
   const config = await loadAgentConfig();
+  const build = readAgentBuild();
+  log(`nyabase-agent ${build.version} (protocol ${AGENT_PROTOCOL_VERSION}${build.commit ? `, commit ${build.commit}` : ''})`);
   const controller = new AbortController();
   const shutdown = (): void => controller.abort();
   process.once('SIGINT', shutdown);
@@ -65,7 +58,7 @@ async function main(): Promise<void> {
       guard,
       metrics,
       credential: () => credential,
-      version: agentVersion(),
+      version: build.version,
       log,
     }),
     // A rotated enrollment re-issues the credential; re-enroll when a fresh token was provided.

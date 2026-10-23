@@ -1,5 +1,7 @@
 node_modules/
 dist/
+# scripts/build-agent-bundle.sh output
+dist-agent/
 target/
 .env
 .env.local

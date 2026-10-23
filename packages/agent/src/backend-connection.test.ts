@@ -2,6 +2,7 @@ import type { AddressInfo } from 'node:net';
 import { randomUUID } from 'node:crypto';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { WebSocketServer } from 'ws';
+import { AGENT_PROTOCOL_VERSION } from '@nyabase/common';
 import { BackendConnection, type AgentHandlers } from './backend-connection.js';
 
 const SERVER_ID = '11111111-1111-4111-8111-111111111111';
@@ -35,7 +36,7 @@ describe('backend control connection', () => {
     const handlers: AgentHandlers = {
       hello: async () => ({
         type: 'hello',
-        protocol: 1,
+        protocol: AGENT_PROTOCOL_VERSION,
         agentVersion: 'test',
         hostname: 'worker-1',
         incus: { serverVersion: '7.4', apiExtensions: [] },

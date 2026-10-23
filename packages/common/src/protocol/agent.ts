@@ -7,10 +7,21 @@ import { z } from 'zod';
  * WebSocket the agent opens back to the Backend on request.
  */
 
-export const AGENT_PROTOCOL_VERSION = 1;
+/**
+ * The contract between a Backend build and an agent build: the frame shapes
+ * here AND what the agent's policy (packages/agent/src/policy.ts) accepts.
+ * Bump it whenever either changes so that one side's output could be refused
+ * by the other; the Backend closes a control socket that says hello with any
+ * other version (AGENT_CLOSE_PROTOCOL_UNSUPPORTED) and records why on the
+ * server. packages/agent/src/protocol-freeze.test.ts pins the sources.
+ */
+export const AGENT_PROTOCOL_VERSION = 2;
 export const AGENT_CONTROL_PATH = '/ws/agent';
 export const AGENT_STREAM_PATH = '/ws/agent/stream';
 export const AGENT_ENROLL_PATH = '/api/agent/enroll';
+
+/** Close code for a hello whose protocol the Backend does not speak. */
+export const AGENT_CLOSE_PROTOCOL_UNSUPPORTED = 4426;
 
 export const AGENT_ENROLLMENT_TTL_MS = 24 * 60 * 60 * 1000;
 export const AGENT_HEARTBEAT_INTERVAL_MS = 15_000;

@@ -1630,14 +1630,24 @@ Backend **不直连** Incus，也不主动连接任何主机。每台 Incus 主�
 
 ### 构建与安装
 
+在仓库里构建一个自包含的 agent 包（`dist`、`package.json`、`build-info.json` 和运行时依赖
+`@nyabase/common` / `zod` / `ws`），不要手工拼 `node_modules`，也不要用 `pnpm deploy`（它按
+`.gitignore` 丢掉 `dist/`）：
+
 ```bash
-pnpm --filter @nyabase/common build
-pnpm --filter @nyabase/agent build
+pnpm build:agent-bundle            # = bash scripts/build-agent-bundle.sh [--skip-build] [<out>]
+# -> dist-agent/nyabase-agent-<版本>.tar.gz（顶层目录 agent/），版本形如 0.1.0+g<commit12>[.dirty]
+```
+
+同一提交、干净工作区构建出的 tarball 字节相同（排序、提交时间作 mtime、无属主）；
+lab e2e（`tests/e2e/lib/up.sh`）用的也是这个脚本。agent 在 hello 里上报这个版本，服务器详情
+「主机 Agent」卡片显示它，启动日志第一行也会打印版本、协议号与提交。
+
+```bash
 sudo useradd --system --no-create-home --home-dir /nonexistent \
   --shell /usr/sbin/nologin nyabase-agent
-sudo install -d /opt/nyabase/agent
-# Copy packages/agent/dist + package.json and production node_modules
-# (@nyabase/common, zod, ws must resolve).
+sudo install -d /opt/nyabase
+sudo tar -xzf nyabase-agent-<版本>.tar.gz -C /opt/nyabase     # -> /opt/nyabase/agent
 sudo install -D -m 0644 deploy/nyabase-agent.service /etc/systemd/system/nyabase-agent.service
 sudo install -d -m 0755 /etc/nyabase   # the proxy user must read a CA file kept here
 sudo tee /etc/nyabase/agent.env >/dev/null <<ENV
@@ -1657,6 +1667,27 @@ sudo systemctl enable --now nyabase-agent
 unit 以 `nyabase-agent` 用户运行，附加 `incus-admin` 组（访问 Incus socket），
 只保留 `CAP_NET_ADMIN`（维护 `nyabase_guard`、读取 `bridge incus`）。需要 Node.js 20+。
 `nvidia-smi` 需要 `video`/`render` 组时自行追加 `SupplementaryGroups`。
+
+### 升级与版本匹配
+
+Backend 与 agent 只在 **agent 协议号**（`AGENT_PROTOCOL_VERSION`，`@nyabase/common`）相同时
+通信。协议号同时约定控制帧格式和 agent 策略（`policy.ts`）接受什么：任何一边的改动可能让另一
+版本拒绝对方的请求时就会递增（`packages/agent/src/protocol-freeze.test.ts` 固定了这些源文件）。
+协议号不同的 agent 发来 hello 时，Backend 以 close 4426 拒绝，服务器保持 `unreachable`，
+`lastError` 写明双方的协议号与 agent 版本；agent 日志打印同样的原因，每分钟重试一次。
+
+- **协议号不变的升级**：Backend 与 agent 可以按任意顺序、逐台升级。
+- **协议号变化的升级**（发布说明会写明）：在同一个维护窗口里升级 Backend 和全部 agent。
+  先升级 Backend 时，未升级的服务器显示上面的协议错误；先升级 agent 时，旧 Backend 只会以
+  1008 关闭新 agent 的连接（agent 日志 `control connection closed (1008 expected hello)`）。
+  两种情况下都只是该服务器暂停 reconcile：容器照常运行，intent 等连上后重试，不丢东西。
+  建议先升级 Backend，这样每台还没升级的服务器都能在控制台看到原因。
+
+**重启 / 升级 agent 会发生什么**：控制连接断开，服务器标为 `unreachable`，进行中的 Incus
+请求以 `SERVER_UNREACHABLE` 失败并稍后重试；经这台 agent 转发的 exec / 控制台会话随之关闭；
+容器、卷与 nft 表 `nyabase_guard` 都不受影响（agent 退出时不删除该表，启动时会重新校验）。
+agent 重连后服务器恢复 `online`，刷新清点并触发全量扫描。替换 `/opt/nyabase/agent` 时先解压到
+新目录再整体替换，然后 `systemctl restart nyabase-agent`；凭据在 `/var/lib/nyabase-agent`，不受影响。
 
 ### 指标
 

@@ -42,6 +42,7 @@ export class AgentPresenceService implements OnModuleInit, OnApplicationBootstra
     this.unsubscribe = this.agents.onPresence({
       connected: (serverId, hello) => this.serialize(serverId, () => this.connected(serverId, hello)),
       disconnected: (serverId) => this.serialize(serverId, () => this.disconnected(serverId)),
+      refused: (serverId, reason) => this.serialize(serverId, () => this.refused(serverId, reason)),
     });
   }
 
@@ -102,6 +103,16 @@ export class AgentPresenceService implements OnModuleInit, OnApplicationBootstra
     }
     this.wake.wake({ serverId, reason: 'reconnect' });
     this.wake.wake({ reason: 'scan' });
+  }
+
+  /** An agent that cannot be served (other protocol) leaves the server unreachable, saying why. */
+  private async refused(serverId: string, reason: string): Promise<void> {
+    if (this.agents.isConnected(serverId)) return;
+    await this.database
+      .updateTable('infra.servers')
+      .set({ status: 'unreachable', last_error: reason.slice(0, 4096) })
+      .where('id', '=', serverId)
+      .execute();
   }
 
   private async disconnected(serverId: string): Promise<void> {

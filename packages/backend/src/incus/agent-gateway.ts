@@ -3,8 +3,10 @@ import type * as http from 'node:http';
 import type { Duplex } from 'node:stream';
 import WebSocket, { WebSocketServer } from 'ws';
 import {
+  AGENT_CLOSE_PROTOCOL_UNSUPPORTED,
   AGENT_CONTROL_PATH,
   AGENT_HEARTBEAT_INTERVAL_MS,
+  AGENT_PROTOCOL_VERSION,
   AGENT_STREAM_PATH,
   MAX_AGENT_CONTROL_FRAME_BYTES,
   MAX_AGENT_STREAM_FRAME_BYTES,
@@ -139,6 +141,13 @@ export class AgentGateway implements OnModuleDestroy {
         if (!connection.handleFrame(frame)) ws.close(1008, 'malformed control frame');
         return;
       }
+      const refusal = verifying ? undefined : unsupportedProtocol(frame);
+      if (refusal) {
+        ws.close(AGENT_CLOSE_PROTOCOL_UNSUPPORTED, refusal.slice(0, 120));
+        this.logger.warn(`Agent for server ${serverId} refused: ${refusal}`);
+        this.registry.refuse(serverId, refusal);
+        return;
+      }
       const hello = verifying ? undefined : zAgentHello.safeParse(frame);
       if (!hello?.success) {
         ws.close(1008, verifying ? 'frame before welcome' : 'expected hello');
@@ -183,4 +192,17 @@ export class AgentGateway implements OnModuleDestroy {
       ws.ping();
     }
   }
+}
+
+/**
+ * Why a hello from another agent build is refused, or undefined when the
+ * frame claims this Backend's protocol (or is no hello at all).
+ */
+export function unsupportedProtocol(frame: unknown): string | undefined {
+  if (typeof frame !== 'object' || frame === null) return undefined;
+  const { type, protocol, agentVersion } = frame as Record<string, unknown>;
+  if (type !== 'hello' || protocol === AGENT_PROTOCOL_VERSION) return undefined;
+  const build = typeof agentVersion === 'string' ? ` ${agentVersion.slice(0, 64)}` : '';
+  return `nyabase-agent${build} speaks protocol ${String(protocol).slice(0, 16)}; `
+    + `this Backend requires protocol ${AGENT_PROTOCOL_VERSION}. Upgrade the agent on this host`;
 }
