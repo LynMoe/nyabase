@@ -247,6 +247,12 @@ describe('the agent policy accepts what the Backend sends', () => {
       sourceServer: IMAGE_SERVER,
       imageType: 'container',
     }, SERVER_ID, intent);
+    // An in-house mirror by IP, as the image source settings accept it.
+    await ensurePulled(audit, pulls, client, {
+      alias: 'debian/13',
+      fingerprint: null,
+      sourceServer: 'https://10.0.0.8:8443/images/',
+    }, SERVER_ID, intent);
     const images = (await client.listImages(1)).metadata;
     await ensureAliasOnFingerprint(audit, client, images, 'nyabase/debian-12', FINGERPRINT, intent);
     const other = images.find((image) => image.fingerprint !== FINGERPRINT)!.fingerprint!;

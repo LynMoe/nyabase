@@ -1,6 +1,6 @@
-import { isIP } from 'node:net';
 import {
   GUEST_IPV6_DISABLE_SYSCTLS,
+  imageSourceServerProblem,
   isForbiddenContainerMountPath,
   MANAGED_ATTACHMENT_DEVICE_PATTERN,
   MANAGED_INSTANCE_NAME_PATTERN,
@@ -607,37 +607,18 @@ function checkImages(request: PolicyRequest, rest: readonly string[]): PolicyVer
 }
 
 /**
- * Incus fetches from a remote image server itself, from the host's network:
- * without this a compromised Backend could point it at anything the host can
- * reach. Only simplestreams over https to a public DNS name is allowed; IP
- * literals (in any spelling the URL parser accepts) and local-only names are
- * refused. A name that resolves to a private address is not caught here.
+ * Incus fetches from a remote image server itself, from the host's network.
+ * Only simplestreams over https is allowed, by the same rule the image source
+ * settings are saved with (imageSourceServerProblem in @nyabase/common), so a
+ * source an operator could save is never refused here. In-house mirrors by IP
+ * or internal name are allowed: the host is dedicated to nyabase.
  */
 export function imageServerProblem(source: Record<string, unknown>): string | undefined {
   if (source.server === undefined) return undefined;
   if (typeof source.server !== 'string') return 'image source server must be a string';
   if (source.protocol !== 'simplestreams') return 'remote images must use the simplestreams protocol';
-  let url: URL;
-  try {
-    url = new URL(source.server);
-  } catch {
-    return 'image source server must be a URL';
-  }
-  if (url.protocol !== 'https:') return 'image source server must use https';
-  if (url.username || url.password) return 'image source server must not carry credentials';
-  const host = url.hostname.replace(/^\[|\]$/g, '').replace(/\.$/, '').toLowerCase();
-  if (isIP(host) !== 0) return 'image source server must be a DNS name, not an IP address';
-  if (
-    !host.includes('.')
-    || host === 'localhost'
-    || LOCAL_ONLY_SUFFIXES.some((suffix) => host.endsWith(suffix))
-  ) {
-    return 'image source server must be a public host';
-  }
-  return undefined;
+  return imageSourceServerProblem(source.server);
 }
-
-const LOCAL_ONLY_SUFFIXES = ['.localhost', '.local', '.internal', '.home.arpa', '.lan'];
 
 /**
  * Only operations this agent started are reachable, and only to read and wait

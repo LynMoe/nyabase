@@ -3,6 +3,7 @@ import {
   SSH_PROXY_SNAPSHOT_STALE_MAX_MS,
   SSH_PROXY_SNAPSHOT_STALE_MIN_MS,
 } from '../constants.js';
+import { imageSourceServerProblem } from '../protocol/agent.js';
 import { controlPlaneConfigDefinitions, jwtLifetimeMs } from './definition.js';
 
 describe('SSH proxy snapshot lease configuration', () => {
@@ -114,6 +115,21 @@ describe('Incus transport and preflight configuration', () => {
       .toBe(true);
     expect(definition('incus.imageSourceServer')?.schema.safeParse('http://insecure.example.test').success)
       .toBe(false);
+  });
+
+  it('accepts exactly the image sources the agent policy pulls from', () => {
+    for (const key of ['incus.preflightSourceServer', 'incus.imageSourceServer']) {
+      const schema = definition(key)!.schema;
+      for (const value of ['https://images.example.test', 'https://10.0.0.8:8443', 'https://mirror.internal/images/', 'https://mirror']) {
+        expect(schema.safeParse(value).success, `${key} ${value}`).toBe(true);
+        expect(imageSourceServerProblem(value)).toBeUndefined();
+      }
+      for (const value of ['http://mirror.lan', 'https://u:p@images.example.test', 'https://images.example.test/?x=1', 'mirror']) {
+        expect(schema.safeParse(value).success, `${key} ${value}`).toBe(false);
+        expect(imageSourceServerProblem(value)).toBeDefined();
+      }
+    }
+    expect(definition('incus.preflightSourceServer')!.schema.safeParse('').success).toBe(false);
   });
 
   it('has no Incus TLS inputs: the Backend reaches Incus only through host agents', () => {

@@ -327,34 +327,35 @@ describe('agent Incus policy', () => {
     }, { status: 'Stopped', config: shiftless })).allowed).toBe(false);
   });
 
-  it('pulls images only from public https simplestreams servers', async () => {
+  it('pulls images only from https simplestreams servers, internal mirrors included', async () => {
     const pull = (server: unknown, protocol: string | null = 'simplestreams') => check({
       method: 'POST',
       path: '/1.0/images',
       body: body({ source: { type: 'image', server, alias: 'ubuntu/24.04', ...(protocol ? { protocol } : {}) } }),
     });
-    expect((await pull('https://images.linuxcontainers.org')).allowed).toBe(true);
-    expect((await pull('https://nyabase-images.example.workers.dev/')).allowed).toBe(true);
     for (const server of [
-      'http://images.example.com',
-      'https://127.0.0.1',
-      'https://2130706433',
-      'https://0x7f.1',
-      'https://[::1]',
-      'https://169.254.169.254/latest',
+      'https://images.linuxcontainers.org',
+      'https://nyabase-images.example.workers.dev/',
+      // In-house mirrors: the host is dedicated to nyabase, and the settings accept these too.
       'https://10.0.0.8:8443',
-      'https://[fd00::1]',
-      'https://localhost',
-      'https://localhost.',
-      'https://metadata.localhost',
-      'https://intranet',
+      'https://[fd00::1]/images/',
+      'https://mirror',
       'https://registry.internal',
       'https://nas.local',
+      'https://mirror.lan',
+    ]) {
+      expect((await pull(server)).allowed, server).toBe(true);
+    }
+    for (const server of [
+      'http://images.example.com',
       'https://user:pw@images.example.com',
+      'https://images.example.com/?stream=x',
+      'https://images.example.com/#x',
       'unix:///var/lib/incus/unix.socket',
       'not a url',
+      42,
     ]) {
-      expect((await pull(server)).allowed, server).toBe(false);
+      expect((await pull(server)).allowed, String(server)).toBe(false);
     }
     expect((await pull('https://images.example.com', 'incus')).allowed).toBe(false);
     expect((await pull('https://images.example.com', null)).allowed).toBe(false);
@@ -365,7 +366,8 @@ describe('agent Incus policy', () => {
       body: body(instanceDocument({ source: { type: 'image', alias: 'debian/12', server, protocol: 'simplestreams' } })),
     });
     expect((await create('https://images.example.com')).allowed).toBe(true);
-    expect((await create('https://192.168.1.10')).allowed).toBe(false);
+    expect((await create('https://192.168.1.10')).allowed).toBe(true);
+    expect((await create('http://192.168.1.10')).allowed).toBe(false);
   });
 
   it('refuses server, trust, profile and network mutation', async () => {

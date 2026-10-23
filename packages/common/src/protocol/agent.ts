@@ -60,6 +60,30 @@ export const GUEST_IPV6_DISABLE_SYSCTLS = [
   'linux.sysctl.net.ipv6.conf.default.disable_ipv6',
 ] as const;
 
+/**
+ * Why `value` cannot be a simplestreams image server Incus pulls from, or
+ * undefined. One rule for the image source settings (config/definition.ts)
+ * and the agent policy, so a saved source is never refused at pull time.
+ * Incus fetches `<server>/streams/v1/...` itself from the host's network:
+ * https without credentials, query or fragment. IP literals and internal
+ * names are allowed, since an in-house mirror is a normal setup on hosts
+ * dedicated to nyabase.
+ */
+export function imageSourceServerProblem(value: string): string | undefined {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return 'image source server must be a URL';
+  }
+  if (url.protocol !== 'https:') return 'image source server must use https';
+  if (url.username || url.password) return 'image source server must not carry credentials';
+  if (url.search || url.hash || value.includes('?') || value.includes('#')) {
+    return 'image source server must not carry a query or fragment';
+  }
+  return undefined;
+}
+
 export type AgentSecretKind = 'credential' | 'enrollment';
 const AGENT_SECRET_PREFIX: Readonly<Record<AgentSecretKind, string>> = {
   credential: 'nyak',

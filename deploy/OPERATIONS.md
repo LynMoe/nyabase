@@ -1835,6 +1835,12 @@ GPU 是平台内置功能，不是插件。管理员在服务器详情的 GPU �
 linuxcontainers 原样盘）。添加镜像只提交 `{ alias }`；控制面写入
 `loginUser=root` 与 `networkManagedExternally=true`。
 
+`incus.imageSourceServer` / `incus.preflightSourceServer` 必须是 https 的
+simplestreams 地址（不带账号密码、query、fragment）；内网镜像站用 IP 或内网域名
+（`https://10.0.0.8:8443`、`https://mirror.internal/images/`）都可以。设置校验与
+agent policy 用同一条规则（`@nyabase/common` 的 `imageSourceServerProblem`），
+能保存的地址 agent 就不会拒绝拉取。
+
 开放 create 之前：
 
 1. 控制面已部署「assignment 只留当前指纹」的 ensure 逻辑。

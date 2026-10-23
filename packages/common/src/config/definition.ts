@@ -4,6 +4,7 @@ import {
   SSH_PROXY_SNAPSHOT_STALE_MAX_MS,
   SSH_PROXY_SNAPSHOT_STALE_MIN_MS,
 } from '../constants.js';
+import { imageSourceServerProblem } from '../protocol/agent.js';
 
 export const DEFAULT_NYABASE_CONFIG_FILE = '/etc/nyabase/config.yaml';
 
@@ -30,6 +31,12 @@ export interface ConfigFieldDefinition<T = unknown> {
 }
 
 const sourceOrder = ['default', 'yaml', 'env'] as const;
+
+/** The agent pulls only from what this accepts (protocol/agent.ts), so a saved source never fails at pull time. */
+function imageSourceServerIssue(value: string, context: z.RefinementCtx): void {
+  const problem = imageSourceServerProblem(value);
+  if (problem) context.addIssue({ code: z.ZodIssueCode.custom, message: `Expected an HTTPS simplestreams source URL: ${problem}` });
+}
 const nonEmptyString = z.string().trim().min(1);
 const optionalString = z.string().trim();
 const developmentJwtSecret = 'change-me-in-production';
@@ -361,44 +368,30 @@ export const controlPlaneConfigDefinitions = [
     yamlPath: 'incus.preflightSourceServer',
     env: 'INCUS_PREFLIGHT_SOURCE_SERVER',
     defaultValue: DEFAULT_IMAGE_SOURCE_SERVER,
-    schema: z.string().trim().url().refine((value) => {
-      try {
-        return new URL(value).protocol === 'https:';
-      } catch {
-        return false;
-      }
-    }, 'Expected an HTTPS simplestreams source URL'),
+    schema: z.string().trim().max(2_048).superRefine(imageSourceServerIssue),
     valueKind: 'string',
     secret: false,
     editable: true,
     restartRequired: false,
     public: false,
     label: 'Incus preflight image source',
-    description: 'HTTPS simplestreams source used for preflight probe images.',
+    description: 'HTTPS simplestreams source used for preflight probe images (an internal mirror by IP or internal name is fine).',
   }),
   field({
     key: 'incus.imageSourceServer',
     yamlPath: 'incus.imageSourceServer',
     env: 'INCUS_IMAGE_SOURCE_URL',
     defaultValue: DEFAULT_IMAGE_SOURCE_SERVER,
-    schema: optionalString.max(2_048).refine(
-      (value) => {
-        if (value === '') return true;
-        try {
-          return new URL(value).protocol === 'https:';
-        } catch {
-          return false;
-        }
-      },
-      'Expected an empty value or an HTTPS simplestreams source URL',
-    ),
+    schema: optionalString.max(2_048).superRefine((value, context) => {
+      if (value !== '') imageSourceServerIssue(value, context);
+    }),
     valueKind: 'string',
     secret: false,
     editable: true,
     restartRequired: false,
     public: false,
     label: 'Incus image assignment source',
-    description: 'HTTPS simplestreams source used for managed image pulls. Empty falls back to the preflight source.',
+    description: 'HTTPS simplestreams source used for managed image pulls (an internal mirror by IP or internal name is fine). Empty falls back to the preflight source.',
   }),
   field({
     key: 'containers.processLimit',
