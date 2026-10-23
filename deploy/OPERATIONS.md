@@ -1042,27 +1042,140 @@ shipped Compose database has none.
 
 ### Restoring production
 
-To put a backup back into service (disaster recovery, or rolling back an
-upgrade), restore into a new database and swap names while the Backend is
-stopped. The replaced database stays in place until you drop it:
+A restored database rewinds the control plane, not the hosts: every Incus host
+keeps running what it ran a moment ago. Putting a backup back into service
+(disaster recovery, or rolling back an upgrade) therefore has to handle:
 
-```bash
-docker compose --env-file .env stop backend
-docker compose --env-file .env exec -T postgres \
-  psql -U postgres -d postgres -v ON_ERROR_STOP=1 \
-  -c 'CREATE DATABASE nyabase_restored OWNER nyabase TEMPLATE template0'
-NYABASE_PG_TARGET_URL=postgresql://nyabase@postgres:5432/nyabase_restored \
-  pg_ops restore-logical \
-    --input "/backups/$backup_name" \
-    --confirm-database nyabase_restored
-docker compose --env-file .env exec -T postgres \
-  psql -U postgres -d postgres -v ON_ERROR_STOP=1 \
-  -c 'ALTER DATABASE nyabase RENAME TO nyabase_replaced' \
-  -c 'ALTER DATABASE nyabase_restored RENAME TO nyabase'
-# Set NYABASE_VERSION to the release the backup was taken with (its image is
-# still on the host; otherwise check that release out and build it), then:
-docker compose --env-file .env up -d backend
-```
+- **Newer containers.** Containers created after the backup keep running with
+  addresses that the restored database considers free and hands out again;
+  IP pools are shared across servers, so the duplicate can appear on any
+  server of the LAN.
+- **Servers added after the backup.** The restored database has no row for
+  them: their agents are refused, so nothing on those hosts is ever scanned
+  or stopped.
+- **Servers re-enrolled after the backup.** The restored row holds the
+  previous credential digest, so those agents are refused as well.
+- **The reconciler does not wait.** As soon as an agent reconnects it runs the
+  pending intents and starts the containers the restored database wants
+  running, before a full scan has stopped the newer instances.
+- **Identity rewinds too.** Users, roles, passwords, grants, SSH keys and
+  sessions are as they were at the backup, including sessions revoked since.
+
+The Backend has no maintenance mode, so the TLS edge keeps everyone but the
+host agents and the operator out, and every newer instance is stopped before
+the restored Backend starts. Tenants are down from step 3 until step 5 starts
+their containers again; that is the price of never running two containers on
+one address.
+
+1. **Close the edge.** Serve the panel's host from a maintenance server block
+   that forwards only the host agents (`/ws/agent`, `/ws/agent/stream`, and
+   `/api/agent/enroll` for re-enrollment) and the operator's own address, and
+   refuses everything else, including `/ws/ssh-proxy`, `/ws/http-proxy` and
+   `/ws/console` (certificate lines as in **TLS edge**):
+
+   ```nginx
+   server {
+       listen 443 ssl;
+       server_name nyabase.example.com;
+       ssl_certificate     /etc/nginx/tls/nyabase.crt;
+       ssl_certificate_key /etc/nginx/tls/nyabase.key;
+
+       location ~ ^/ws/agent(/stream)?$ {
+           proxy_pass http://127.0.0.1:3001;
+           proxy_http_version 1.1;
+           proxy_set_header Host $host;
+           proxy_set_header X-Forwarded-For $remote_addr;
+           proxy_set_header Upgrade $http_upgrade;
+           proxy_set_header Connection $connection_upgrade;
+           proxy_buffering off;
+           proxy_read_timeout 1h;
+           proxy_send_timeout 1h;
+       }
+       location = /api/agent/enroll {
+           proxy_pass http://127.0.0.1:3001;
+           proxy_set_header Host $host;
+           proxy_set_header X-Forwarded-For $remote_addr;
+       }
+       # The operator doing the restore: sign-in, enrollment tokens, checks.
+       location / {
+           allow 198.51.100.7;
+           deny all;
+           proxy_pass http://127.0.0.1:3001;
+           proxy_http_version 1.1;
+           proxy_set_header Host $host;
+           proxy_set_header X-Forwarded-For $remote_addr;
+           proxy_set_header X-Forwarded-Proto https;
+       }
+   }
+   ```
+
+   The proxies lose their control links: the HTTP proxy stops routing within
+   about five minutes and the SSH proxy refuses new Jump connections.
+2. **Stop the Backend** (`docker compose --env-file .env stop backend`), before
+   touching the hosts: a running Backend would start their containers again.
+3. **Stop every Nyabase instance on every host** that has run `nyabase-agent`
+   since the backup was taken. Take the hosts from your inventory, not from
+   the restored database, which lacks servers added later. On each host, with
+   the agent left running:
+
+   ```bash
+   incus list --format csv --columns n | grep '^nyc-' | xargs -r incus stop --force
+   ```
+
+   A host you cannot reach must not come back on the LAN until this is done
+   on it.
+4. **Restore the database** into a new one and swap the names, then, still
+   with the Backend stopped, end every session (sessions revoked after the
+   backup are valid again in the restored rows) and list the servers the
+   restored database knows:
+
+   ```bash
+   docker compose --env-file .env exec -T postgres \
+     psql -U postgres -d postgres -v ON_ERROR_STOP=1 \
+     -c 'CREATE DATABASE nyabase_restored OWNER nyabase TEMPLATE template0'
+   NYABASE_PG_TARGET_URL=postgresql://nyabase@postgres:5432/nyabase_restored \
+     pg_ops restore-logical \
+       --input "/backups/$backup_name" \
+       --confirm-database nyabase_restored
+   docker compose --env-file .env exec -T postgres \
+     psql -U postgres -d postgres -v ON_ERROR_STOP=1 \
+     -c 'ALTER DATABASE nyabase RENAME TO nyabase_replaced' \
+     -c 'ALTER DATABASE nyabase_restored RENAME TO nyabase'
+   docker compose --env-file .env exec -T postgres \
+     psql -U postgres -d nyabase -v ON_ERROR_STOP=1 \
+     -c 'DELETE FROM iam.refresh_tokens' \
+     -c 'SELECT id, name, agent_hostname FROM infra.servers ORDER BY name'
+   ```
+
+5. **Start the restored Backend.** Set `NYABASE_VERSION` to the release the
+   backup was taken with (its image is still on the host; otherwise check that
+   release out and build it), then
+   `docker compose --env-file .env up -d backend`. Agents of the servers it
+   knows reconnect; the reconciler starts the containers the restored
+   database wants running, with its addresses, and every full scan (at each
+   agent connect, then every minute) records the instances it does not know
+   in `control.orphan_sightings` and keeps them stopped.
+6. **Fix the servers that are refused.** Their agents log `Backend rejected
+   the agent credential` and the servers do not come `online`.
+   - A server in the list from step 4 was re-enrolled after the backup: sign
+     in, issue a new enrollment token for it, and re-enroll its agent with
+     that token (**接入（enrollment）**, step 3).
+   - A host missing from that list was added after the backup. Stop its agent
+     (`systemctl disable --now nyabase-agent`). Its instances and `nyv-*`
+     volumes are labelled with a server id the restored database does not
+     know, so no scan will ever stop or delete them: export what the tenants
+     need (see **After a restore**) and delete the rest by hand
+     (`incus delete`, `incus storage volume delete`). Only then register the
+     host again as a new server, if it should stay.
+7. **Check before reopening.** Every server in the restored database is
+   `online` (`SELECT name, status FROM infra.servers`), and a few minutes have
+   passed since the last one connected. Re-apply, from your own records (the
+   audit trail rewound as well), what the backup undid and still matters:
+   users disabled or demoted, grants revoked and passwords reset after the
+   backup are back in force, and containers deleted after the backup are
+   recreated, empty, from their images; delete those again.
+8. **Reopen the edge** with the normal server block. The proxies reconnect and
+   route from the restored database.
 
 Start the Backend release whose migrations match the backup (see **Upgrading
 the Backend**); a newer one migrates the restored database forward on boot, an
@@ -1159,15 +1272,20 @@ major, verify the base backup, copy it into that stopped cluster's `PGDATA`
 configure `restore_command` for the off-host WAL archive and set the required
 `recovery_target_time`, then start it isolated from application traffic.
 Promote only after schema compatibility, row-count/application invariants, and
-the desired recovery timestamp are verified.
+the desired recovery timestamp are verified, and put it into service with the
+steps of **Restoring production** (closed edge, stopped instances, refused
+servers) around the switch.
 
 ### After a restore
 
-After restoring a database that is older than the hosts' state, every
-container and volume created after the backup is an orphan: its instances are
-stopped by the next full scan and everything is deleted 7 days later. Within
-those 7 days, decide per orphan (recreate the row, or copy data out and let it
-go); `control.orphan_sightings` lists them with `first_seen_at`.
+On the servers the restored database knows, every container and volume
+created after the backup is an orphan: full scans keep its instance stopped
+and delete it, with its volumes, 7 days after it was first seen.
+`control.orphan_sightings` lists them with `first_seen_at`. Within those 7
+days, copy out what tenants need (`incus export nyc-<id> <file>` on the host,
+or `incus storage volume export`) and hand it to them; do not start an orphan
+on the bridged network, its address may belong to another container by now.
+There is no way to adopt an orphan back into the database.
 
 Record drill evidence instead of claiming an unmeasured RPO/RTO:
 
@@ -1237,9 +1355,9 @@ There is no down-migration. A Backend from before a migration does not start
 on a database that has it applied (`Applied migration … is missing from the
 application`), so rolling back across a new migration means restoring the
 pre-upgrade backup (see **Restoring production**) and starting the previous
-release on it. Changes made between the upgrade and the restore are lost, and
-hosts may hold containers or volumes created in that window (they become
-orphans; see **After a restore**). A rollback within the same migration set
+release on it, following every step there. Changes made between the upgrade
+and the restore are lost, and containers or volumes created in that window
+become orphans (see **After a restore**). A rollback within the same migration set
 is setting `NYABASE_VERSION` back to the previous release and
 `docker compose --env-file .env up -d backend`: its image is still on the
 host, nothing is rebuilt.
