@@ -78,7 +78,8 @@ Vite 通过 alias 将 `@nyabase/common` 指向 `src/index.ts`，但 `index.ts` �
   但 `deleting` 卷上到期的 `detaching` 挂载（`destroyBlocked`，不依赖台账和覆盖）仍由 `detach` 按退避重新下发，且只卸这些卷，不碰用户重新使用的卷。
   服务器的停机是同一模型（`ContainerControlService.enforceStop`）：停机 intent 带 `despiteAttention: true` 与 `reason: 'access_lapse'`；
   `power_intent='stopped'` 但实例最后观测仍在运行（`container_ssh_routes.instance_status='running'`，例如停机 intent 撞上 busy strikes 把容器搁置、全量扫描又跳过它）
-  也算暴露，按同样的退避重新下停机（`containers/container-control.repository.ts` 的 `lapseStopRedriveDue`，按该容器已有的 lapse 停机 intent 数翻倍；
+  也算暴露，按同样的退避重新下停机（`containers/container-control.repository.ts` 的 `lapseStopRedriveDue`，按本次 lapse（该服务器台账行 `lapsed_at` 之后）的停机 intent 数翻倍，
+  早先 lapse 的停机不计；卸载按该挂载的 detach intent 计，挂载只会进入一次 `detaching`，所以天然只算当前这次卸载；
   与 `detachRedriveDue` 共用 `volumes/detach-redrive.ts` 的 `containerRedriveDue`，扫描与 `enforceStop` 共用）；第一次停机清 attention，重新下发保留。
 - 禁用用户 = 失去覆盖，与撤销同一条流程：覆盖只认 `iam.effective_*_access`（active 用户 + 当前授权），禁用后其名下资源按检测时间开宽限、立即停机，
   14 天后清除；宽限内重新启用则删台账行（容器不自动启动）。用户状态变更在 `afterCommit` 里通知 `AccessChangeNotifier`。

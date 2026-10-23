@@ -1043,6 +1043,55 @@ describePg('access lapse processor', () => {
     });
   });
 
+  it('backs off a lapse stop re-drive by the stops of the current lapse only', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const { processor } = await fixture(database);
+      const { userId, serverId, poolId, imageId } = await world(database);
+      await grantServer(database, { user: userId }, serverId, { expiresAt: days(-1) });
+      const container = await seedContainer(database, {
+        ownerId: userId, serverId, poolId, imageId, running: true,
+      });
+      await observeInstance(database, container, serverId, 'running');
+      // Earlier lapses stopped it six times; the owner started it again each
+      // time coverage came back.
+      const longAgo = new Date(Date.now() - 30 * DAY_MS);
+      await database.insertInto('control.intents').values(Array.from({ length: 6 }, () => ({
+        id: randomUUID(),
+        kind: 'container.power' as const,
+        resource_type: 'container' as const,
+        resource_id: container,
+        server_id: serverId,
+        requested_by: null,
+        request_json: JSON.stringify({ operation: 'stop', reason: 'access_lapse', despiteAttention: true }),
+        target_revision: 1,
+        baseline_json: null,
+        status: 'succeeded' as const,
+        failure_code: null,
+        failure_json: null,
+        attempt_count: 1,
+        next_attempt_at: null,
+        created_at: longAgo,
+        settled_at: longAgo,
+      }))).execute();
+      const worker = reconcileWorker(database);
+      try {
+        await processor.process();
+        await worker.strikeBusy(container);
+        expect(await attentionOf(database, container)).toBe(true);
+
+        // The first re-drive of this lapse follows the first backoff, not one
+        // doubled by the stops of earlier lapses (which would be at the cap).
+        await ageContainerIntents(database, container, DETACH_REDRIVE_BACKOFF_MS + 60_000);
+        await processor.process();
+        expect(await pendingRequests(database, container)).toEqual([
+          expect.objectContaining({ operation: 'stop', reason: 'access_lapse', redrive: true }),
+        ]);
+      } finally {
+        await worker.stop();
+      }
+    });
+  });
+
   it('does not stop a container again that its owner stopped and that was observed stopped', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const { processor, actions } = await fixture(database);
@@ -1461,18 +1510,31 @@ async function failPendingIntents(database: Kysely<NyabaseDatabase>, containerId
     .where('id', '=', containerId).execute();
 }
 
-/** Moves the container's intents into the past, as if `ms` had passed. */
+/**
+ * Moves the container's intents into the past, as if `ms` had passed, and the
+ * lapse of its owner on its server with them (the stops of the current lapse
+ * are those queued since `lapsed_at`).
+ */
 async function ageContainerIntents(
   database: Kysely<NyabaseDatabase>,
   containerId: string,
   ms: number,
 ): Promise<void> {
+  const shift = sql`make_interval(secs => ${ms / 1000}::double precision)`;
   await database.updateTable('control.intents')
     .set({
-      created_at: sql`created_at - make_interval(secs => ${ms / 1000}::double precision)`,
-      settled_at: sql`settled_at - make_interval(secs => ${ms / 1000}::double precision)`,
+      created_at: sql`created_at - ${shift}`,
+      settled_at: sql`settled_at - ${shift}`,
     })
     .where('resource_id', '=', containerId)
+    .execute();
+  const { owner_id: ownerId, server_id: serverId } = await database.selectFrom('control.containers')
+    .select(['owner_id', 'server_id']).where('id', '=', containerId).executeTakeFirstOrThrow();
+  await database.updateTable('control.access_lapses')
+    .set({ lapsed_at: sql`lapsed_at - ${shift}`, stopped_at: sql`stopped_at - ${shift}` })
+    .where('user_id', '=', ownerId)
+    .where('resource_kind', '=', 'server')
+    .where('resource_id', '=', serverId)
     .execute();
 }
 

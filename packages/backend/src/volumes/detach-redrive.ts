@@ -58,8 +58,12 @@ export function containerRedriveDue(
 
 /**
  * Whether a `detaching` attachment is due to be detached again
- * (`containerRedriveDue`, counting the attachment's detach intents). Shared by
- * the access-lapse scan (`exposed`) and `forceDetach`, so both agree on when a
+ * (`containerRedriveDue`, counting the attachment's detach intents). An
+ * attachment becomes detaching once and never goes back (its row is deleted
+ * when the device is gone; a new attach is a new row), so these are exactly
+ * the intents of its current detach, however many lapses it outlived: a detach
+ * still stuck from an earlier lapse keeps its backoff. Shared by the
+ * access-lapse scan (`exposed`) and `forceDetach`, so both agree on when a
  * re-drive is due.
  */
 export function detachRedriveDue(

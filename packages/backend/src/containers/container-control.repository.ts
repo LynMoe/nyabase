@@ -21,8 +21,12 @@ export const ACCESS_LAPSE_STOP_REASON = 'access_lapse';
  * again: the container is desired stopped, its instance was last observed
  * running (the stop failed, or hit the busy-strike limit and parked the
  * container, and nothing else stops it), and `containerRedriveDue` holds,
- * counting the lapse stops for the backoff. Shared by the access-lapse scan
- * (`exposed`) and `enforceStop`, so both agree on when a re-drive is due.
+ * counting for the backoff the lapse stops of the current lapse only: those
+ * queued since the ledger row of the owner's lapse on the container's server
+ * was opened (`lapsed_at`). Stops of an earlier lapse (the container was
+ * started again once coverage came back) say nothing about this one. Shared
+ * by the access-lapse scan (`exposed`) and `enforceStop`, so both agree on
+ * when a re-drive is due.
  */
 export function lapseStopRedriveDue(containerId: RawBuilder<unknown>): RawBuilder<boolean> {
   return sql<boolean>`(
@@ -37,6 +41,15 @@ export function lapseStopRedriveDue(containerId: RawBuilder<unknown>): RawBuilde
     AND ${containerRedriveDue(containerId, sql<boolean>`(
       enforcement_intent.request_json ->> 'operation' = 'stop'
       AND enforcement_intent.request_json ->> 'reason' = ${ACCESS_LAPSE_STOP_REASON}
+      AND enforcement_intent.created_at >= coalesce((
+        SELECT lapse.lapsed_at
+        FROM control.containers AS lapsed_container
+        JOIN control.access_lapses AS lapse
+          ON lapse.user_id = lapsed_container.owner_id
+         AND lapse.resource_kind = 'server'
+         AND lapse.resource_id = lapsed_container.server_id
+        WHERE lapsed_container.id = ${containerId}
+      ), '-infinity'::timestamptz)
     )`)}
   )`;
 }
