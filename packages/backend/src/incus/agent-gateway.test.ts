@@ -87,6 +87,27 @@ describe('agent gateway upgrade', () => {
     gateway.onModuleDestroy();
   });
 
+  it('stops looking up credentials for an address that keeps failing', async () => {
+    const authenticate = vi.fn().mockResolvedValue(undefined);
+    const gateway = new AgentGateway(new AgentRegistry(), { authenticate } as never);
+    const server = new EventEmitter();
+    gateway.attachToHttpServer(server as unknown as http.Server, { trustProxy: () => false });
+    const attempt = async () => {
+      const socket = new FakeUpgradeSocket();
+      server.emit('upgrade', {
+        url: '/ws/agent',
+        headers: { authorization: 'Bearer nyak.x.y' },
+        socket: { remoteAddress: '198.51.100.7' },
+      }, socket, Buffer.alloc(0));
+      await new Promise((resolve) => setImmediate(resolve));
+      return socket.ended;
+    };
+    for (let index = 0; index < 30; index += 1) expect(await attempt()).toMatch(/^HTTP\/1\.1 401/);
+    expect(await attempt()).toMatch(/^HTTP\/1\.1 429/);
+    expect(authenticate).toHaveBeenCalledTimes(30);
+    gateway.onModuleDestroy();
+  });
+
   it('answers 401 to a credential that does not resolve to a server', async () => {
     const gateway = new AgentGateway(new AgentRegistry(), { authenticate: vi.fn().mockResolvedValue(undefined) } as never);
     const server = new EventEmitter();

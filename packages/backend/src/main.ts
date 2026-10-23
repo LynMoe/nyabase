@@ -18,6 +18,7 @@ import { RuntimeLifecycleService } from './health/runtime-lifecycle.service.js';
 import { ConsoleBridgeGateway } from './containers/console-bridge.gateway.js';
 import { SshProxyGateway } from './ssh/ssh-proxy-gateway.js';
 import { HttpProxyGateway } from './http-proxy/http-proxy-gateway.js';
+import type { TrustProxy } from './incus/agent-credentials.js';
 import { AgentGateway } from './incus/agent-gateway.js';
 
 const LOG_LEVELS_BY_VERBOSITY: readonly LogLevel[] = ['fatal', 'error', 'warn', 'log', 'debug', 'verbose'];
@@ -91,7 +92,9 @@ async function bootstrap() {
   app.get(ConsoleBridgeGateway).attachToHttpServer(httpServer);
   app.get(SshProxyGateway).attachToHttpServer(httpServer);
   app.get(HttpProxyGateway).attachToHttpServer(httpServer);
-  app.get(AgentGateway).attachToHttpServer(httpServer);
+  app.get(AgentGateway).attachToHttpServer(httpServer, {
+    trustProxy: app.getHttpAdapter().getInstance().get('trust proxy fn') as TrustProxy,
+  });
   const websocketPaths = new Set([
     '/ws/console',
     '/ws/ssh-proxy',

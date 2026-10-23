@@ -1601,6 +1601,10 @@ Backend **不直连** Incus，也不主动连接任何主机。每台 Incus 主�
   Backend 只存凭据的 sha256。backend 发来的 Incus 请求、指标采集都走这条连接。
 - 每个 Incus WebSocket（事件、exec/控制台）由 agent 另开一条
   `wss://<backend>/ws/agent/stream?id=…` 回连，逐帧转发。
+- 认证前的 `/ws/agent*` 升级有限流（每次凭据检查都要查库）：同一客户端地址（IPv6 按 /64，
+  按 `TRUSTED_PROXIES` 解析，与登录限流相同）10 分钟内最多 30 次失败，超出回 429
+  （`Retry-After: 60`）；全局同时最多 64 个凭据查询在途，超出回 503。认证成功不计数，
+  已接入的 agent 及其 stream 连接不受影响。
 - agent 经本机 `/var/lib/incus/unix.socket` 访问 Incus，不开监听端口，Incus 也
   不需要开 `core.https_address`、不需要任何 trust 条目。
 - agent 是安全边界：每个请求先过 `packages/agent/src/policy.ts`。只允许操作

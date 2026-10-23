@@ -13,11 +13,20 @@ import {
   zAgentHello,
 } from '@nyabase/common';
 import { AgentConnection } from './agent-connection.js';
-import { AgentCredentialVerifier } from './agent-credentials.js';
+import { AgentCredentialVerifier, AgentUpgradeAdmissions, type TrustProxy } from './agent-credentials.js';
 import { AGENT_CLOSE_CREDENTIAL_REJECTED, AgentRegistry } from './agent-registry.service.js';
 
 const HELLO_TIMEOUT_MS = 10_000;
 const STREAM_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const REFUSALS = {
+  429: 'HTTP/1.1 429 Too Many Requests\r\nRetry-After: 60\r\nConnection: close\r\nContent-Length: 0\r\n\r\n',
+  503: 'HTTP/1.1 503 Service Unavailable\r\nRetry-After: 5\r\nConnection: close\r\nContent-Length: 0\r\n\r\n',
+} as const;
+
+export interface AgentGatewayOptions {
+  /** Express' `trust proxy fn`, so a client behind the TLS edge is limited by its own address. */
+  readonly trustProxy?: TrustProxy;
+}
 
 /**
  * Accepts the WebSockets host agents dial: one control socket per server and
@@ -31,13 +40,15 @@ export class AgentGateway implements OnModuleDestroy {
   private streams?: WebSocketServer;
   private heartbeat?: NodeJS.Timeout;
   private readonly alive = new WeakMap<WebSocket, boolean>();
+  private admissions = new AgentUpgradeAdmissions();
 
   constructor(
     private readonly registry: AgentRegistry,
     private readonly credentials: AgentCredentialVerifier,
   ) {}
 
-  attachToHttpServer(server: http.Server): void {
+  attachToHttpServer(server: http.Server, options: AgentGatewayOptions = {}): void {
+    this.admissions = new AgentUpgradeAdmissions(options.trustProxy);
     this.control = new WebSocketServer({
       noServer: true,
       maxPayload: MAX_AGENT_CONTROL_FRAME_BYTES,
@@ -80,7 +91,18 @@ export class AgentGateway implements OnModuleDestroy {
       socket.destroy();
     };
     socket.on('error', onSocketError);
-    const serverId = await this.credentials.authenticate(request.headers.authorization);
+    // Each credential check costs a database query: bound them before anyone is authenticated.
+    const admission = this.admissions.admit(request);
+    if (admission.refused) {
+      socket.end(REFUSALS[admission.refused]);
+      return;
+    }
+    let serverId: string | undefined;
+    try {
+      serverId = await this.credentials.authenticate(request.headers.authorization);
+    } finally {
+      admission.settle(serverId !== undefined);
+    }
     if (socket.destroyed) return;
     if (!serverId) {
       socket.end('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\nContent-Length: 0\r\n\r\n');

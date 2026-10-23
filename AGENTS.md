@@ -131,6 +131,7 @@ Vite 通过 alias 将 `@nyabase/common` 指向 `src/index.ts`，但 `index.ts` �
    WebSocket 由 agent 另开 `/ws/agent/stream` 回连；`IncusClient` 的传输是 `IncusTunnel`
    （`incus/agent-registry.service.ts` 按服务器解析当前连接，重连后 client 照常可用）。接入：建服务器时签发
    一次性令牌 `nyae.…`（24h），agent 用 `POST /api/agent/enroll` 换凭据；`servers/agent-enrollment.service.ts`。
+   认证前的 agent 升级经 `incus/agent-credentials.ts` 的 `AgentUpgradeAdmissions` 限流（按客户端地址桶计失败、成功归还，并限制在途查库数）。
    agent 端 `policy.ts` 是安全边界（只许 `nyc-*`/`nyv-*`、配置白名单、禁 raw/特权/宿主路径/profiles、
    必须 idmap.isolated、网卡 `nyh*` + IPv4/MAC 过滤 + `security.port_isolation`、`parent` 必须在 agent 本机的
    `NYABASE_AGENT_GUEST_BRIDGES` 里（agent 侧白名单，随 hello 上报给服务器详情，未设置则拒绝一切网卡），
