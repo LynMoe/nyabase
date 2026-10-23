@@ -67,6 +67,12 @@ async function check(request: PolicyRequest, current: Record<string, unknown> | 
   return checkIncusHttp(request, context(async () => current));
 }
 
+/*
+ * What the Backend actually sends is checked from its side:
+ * packages/backend/src/agent-policy.contract.test.ts runs the Backend's real
+ * builders and Incus operations through this policy. These tests pin what the
+ * policy refuses.
+ */
 describe('agent Incus policy', () => {
   it('accepts the instance the platform builds', async () => {
     await expect(check({ method: 'POST', path: '/1.0/instances', body: body(instanceDocument({ start: false })) }))
@@ -493,44 +499,6 @@ describe('agent Incus policy body forwarding', () => {
     ] as const) {
       const verdict = await checkIncusHttp(request, context(async () => current));
       expect(verdict.allowed, `${request.method} ${request.path} ${request.body.toString()}`).toBe(false);
-    }
-  });
-
-  it('accepts the bodies the Backend sends and forwards them re-serialized', async () => {
-    const current = { config: { 'volatile.idmap.next': '[]' } };
-    const putDocument = {
-      architecture: 'x86_64',
-      config: { ...instanceDocument().config as object, 'volatile.idmap.next': '[]' },
-      description: '',
-      devices: instanceDocument().devices,
-      ephemeral: false,
-      profiles: [],
-      stateful: false,
-    };
-    const probe = {
-      name: 'nyabase-preflight-' + 'b'.repeat(32),
-      type: 'container',
-      profiles: [],
-      source: { type: 'image', alias: 'debian/12', server: 'https://images.example', protocol: 'simplestreams' },
-      config: { 'user.nyabase.preflight': 'true', 'limits.memory': '512MiB', 'security.privileged': 'false', 'security.idmap.isolated': 'true' },
-      devices: { root: { type: 'disk', path: '/', pool: 'default', size: '1073741824' } },
-      start: false,
-    };
-    for (const request of [
-      { method: 'POST', path: '/1.0/instances', body: probe },
-      { method: 'POST', path: `/1.0/instances/${INSTANCE}`, body: { name: 'nyc-' + 'f'.repeat(32) } },
-      { method: 'PUT', path: `/1.0/instances/${INSTANCE}`, body: putDocument },
-      { method: 'PUT', path: `/1.0/instances/${INSTANCE}/state`, body: { action: 'restart', force: true } },
-      { method: 'POST', path: `/1.0/instances/${INSTANCE}/exec`, body: { command: ['bash', '-c', 'true'], 'record-output': false } },
-      { method: 'POST', path: `/1.0/instances/${INSTANCE}/exec`, body: { command: ['/bin/bash'], interactive: true, 'wait-for-websocket': true, width: 80, height: 24, user: 1000, group: 1000 } },
-      { method: 'POST', path: '/1.0/storage-pools/default/volumes', body: { name: VOLUME, type: 'custom', content_type: 'filesystem', config: { size: '1073741824', 'security.shifted': 'true' } } },
-      { method: 'PUT', path: `/1.0/storage-pools/default/volumes/custom/${VOLUME}`, body: { config: { size: '2147483648', 'security.shifted': 'true' }, description: '' } },
-      { method: 'POST', path: '/1.0/images', body: { aliases: [], source: { type: 'image', alias: 'ubuntu/24.04', protocol: 'simplestreams', server: 'https://images.example', image_type: 'container' } } },
-      { method: 'POST', path: '/1.0/images/aliases', body: { name: 'ubuntu/24.04', target: 'a'.repeat(64), type: 'container' } },
-    ] as const) {
-      const raw = body(request.body);
-      const verdict = await checkIncusHttp({ ...request, body: raw }, context(async () => current));
-      expect(JSON.parse(sent(verdict)), `${request.method} ${request.path}`).toEqual(request.body);
     }
   });
 

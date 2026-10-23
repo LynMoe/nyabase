@@ -459,6 +459,7 @@ describe('ServerPreflightReconciler', () => {
             'ipv4.address': '169.254.255.254',
             'security.ipv4_filtering': 'true',
             'security.mac_filtering': 'true',
+            'security.port_isolation': 'true',
           },
         },
         start: false,

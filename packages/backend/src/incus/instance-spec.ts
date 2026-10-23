@@ -213,6 +213,32 @@ export function deriveInstanceHwaddr(containerId: string): string {
   return bytes.map((byte) => byte.toString(16).padStart(2, '0')).join(':');
 }
 
+/**
+ * The one guest NIC of every nyabase instance (containers and the preflight
+ * probe): bridged onto the server's LAN bridge, IPv4 / MAC filtered to its
+ * address, port-isolated from the other guests and named for the IPv6 guard.
+ * The agent policy refuses any eth0 without these.
+ */
+export function buildGuestNicDevice(input: {
+  readonly parentInterface: string;
+  /** The id the MAC address and host-side veth name derive from. */
+  readonly hardwareId: string;
+  readonly ipv4Address: string;
+}): Record<string, string> {
+  return {
+    type: 'nic',
+    nictype: 'bridged',
+    parent: input.parentInterface,
+    name: 'eth0',
+    hwaddr: deriveInstanceHwaddr(input.hardwareId),
+    host_name: deriveNicHostName(input.hardwareId),
+    'ipv4.address': input.ipv4Address,
+    'security.ipv4_filtering': 'true',
+    'security.mac_filtering': 'true',
+    'security.port_isolation': 'true',
+  };
+}
+
 export interface InstanceSpecContribution {
   readonly config: Readonly<Record<string, string>>;
   readonly devices: Readonly<Record<string, Readonly<Record<string, string>>>>;
@@ -288,16 +314,7 @@ export function buildDesiredInstanceSpec(input: InstanceSpecInput): DesiredInsta
       ...diskLimits(input.limits),
     },
     eth0: {
-      type: 'nic',
-      nictype: 'bridged',
-      parent: parentInterface,
-      name: 'eth0',
-      hwaddr: deriveInstanceHwaddr(containerId),
-      host_name: deriveNicHostName(containerId),
-      'ipv4.address': routedIp,
-      'security.ipv4_filtering': 'true',
-      'security.mac_filtering': 'true',
-      'security.port_isolation': 'true',
+      ...buildGuestNicDevice({ parentInterface, hardwareId: containerId, ipv4Address: routedIp }),
       'limits.ingress': `${nonNegativeInteger(input.limits.networkIngressMbit, 'network_ingress')}Mbit`,
       'limits.egress': `${nonNegativeInteger(input.limits.networkEgressMbit, 'network_egress')}Mbit`,
     },
