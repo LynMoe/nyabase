@@ -1606,8 +1606,9 @@ Backend **不直连** Incus，也不主动连接任何主机。每台 Incus 主�
 - agent 是安全边界：每个请求先过 `packages/agent/src/policy.ts`。只允许操作
   `nyc-*` 实例与 `nyv-*` 卷；配置白名单；禁止 `raw.*`、特权容器、宿主路径设备、
   profiles、证书/服务器配置/网络/存储池写入；`security.idmap.isolated` 必须为
-  true；网卡必须开 IPv4/MAC 过滤且 `host_name` 为 `nyh*`；`volatile.*` 一律改回
-  Incus 当前值。即使 Backend 被攻破，也拿不到宿主机 root。
+  true；网卡必须开 IPv4/MAC 过滤与 `security.port_isolation`、`host_name` 为 `nyh*`，
+  且 `parent` 必须是本机 `NYABASE_AGENT_GUEST_BRIDGES` 列出的网桥（未设置则拒绝一切网卡，
+  管理网等其他网桥接不上）；`volatile.*` 一律改回 Incus 当前值。即使 Backend 被攻破，也拿不到宿主机 root。
   Incus 操作（operation）只能读取 / 等待由经过 policy 的请求创建的那些（agent 记在内存里，
   24 小时或 4096 条后遗忘），其余一律按 Incus 的 404 回答；exec / 控制台的 operation
   WebSocket 同理，所以宿主机运维自己的 `incus exec` 既看不到也接不上。operation 不可列出、不可取消。
@@ -1669,12 +1670,20 @@ sudo install -d -m 0755 /etc/nyabase   # the proxy user must read a CA file kept
 sudo tee /etc/nyabase/agent.env >/dev/null <<ENV
 NYABASE_BACKEND_URL=https://nyabase.example.com
 NYABASE_AGENT_ENROLLMENT_TOKEN=<控制台显示的一次性令牌>
+# 客户网卡只能接到这些网桥（逗号分隔）；填这台服务器的 LAN 网桥（服务器的 parentInterface）
+NYABASE_AGENT_GUEST_BRIDGES=vmbr0
 # NYABASE_BACKEND_CA_FILE=/etc/nyabase/backend-ca.pem   # 私有 CA 时
 ENV
 sudo chmod 0600 /etc/nyabase/agent.env
 sudo systemctl daemon-reload
 sudo systemctl enable --now nyabase-agent
 ```
+
+`NYABASE_AGENT_GUEST_BRIDGES` 是 agent 侧的白名单，Backend 无法改它：即使 Backend 被攻破，
+容器也只能接到这里列出的网桥。没设置时 agent 照常连接（停止、删除、指标都正常），但拒绝一切
+带网卡的创建 / 写回，启动日志会提示；服务器详情「主机 Agent」卡片显示 agent 上报的白名单，
+服务器的 LAN 网桥不在其中时给出警告。改 LAN 网桥（`parentInterface`）时先在主机上改这个变量并
+重启 agent。
 
 `NYABASE_BACKEND_URL` 必须是 `https://`（经 TLS 边缘）；只有 Backend 主机为 loopback
 （`localhost`、`127.0.0.0/8`、`::1`）时才接受 `http://`，否则 agent 拒绝启动。设置
@@ -1693,6 +1702,10 @@ Backend 与 agent 只在 **agent 协议号**（`AGENT_PROTOCOL_VERSION`，`@nyab
 `lastError` 写明双方的协议号与 agent 版本；agent 日志打印同样的原因，每分钟重试一次。
 
 - **协议号不变的升级**：Backend 与 agent 可以按任意顺序、逐台升级。
+- **协议 2（本版本）**：升级 agent 前在每台主机的 `/etc/nyabase/agent.env` 加上
+  `NYABASE_AGENT_GUEST_BRIDGES=<该服务器的 LAN 网桥>`，否则新 agent 拒绝一切容器网卡；
+  并重新安装 unit 文件（`ExecStartPre … ipv6-guard`，排在 `incus.service` 之前）后
+  `systemctl daemon-reload`。
 - **协议号变化的升级**（发布说明会写明）：在同一个维护窗口里升级 Backend 和全部 agent。
   先升级 Backend 时，未升级的服务器显示上面的协议错误；先升级 agent 时，旧 Backend 只会以
   1008 关闭新 agent 的连接（agent 日志 `control connection closed (1008 expected hello)`）。

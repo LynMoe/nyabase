@@ -529,6 +529,7 @@ describe('canonical DTO shapes', () => {
         connectedAt: null,
         enrollmentExpiresAt: null,
         ipv6Guard: null,
+        guestBridges: null,
       },
       metricsHealth: {
         status: NodeMetricsStatus.Unknown,

@@ -19,6 +19,7 @@ const HELLO: AgentHello = {
   hostname: 'worker-1',
   incus: { serverVersion: '7.4', apiExtensions: [] },
   status: { ipv6Guard: { present: true, error: null } },
+  guestBridges: ['vmbr0'],
 };
 
 class FakeSocket extends EventEmitter {

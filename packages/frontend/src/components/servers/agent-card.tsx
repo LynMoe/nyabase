@@ -76,6 +76,12 @@ export function AgentCard({ server }: { server: ServerDto }) {
             </Badge>
           )}
         </div>
+        {agent.guestBridges && !agent.guestBridges.includes(server.parentInterface) && (
+          <p className="break-all text-xs text-destructive" data-testid="server-agent-bridge-mismatch">
+            LAN 网桥 {server.parentInterface || '（未设置）'} 不在这台主机的 NYABASE_AGENT_GUEST_BRIDGES 里：
+            Agent 会拒绝创建或修改容器网卡。在 /etc/nyabase/agent.env 中设置后重启 nyabase-agent。
+          </p>
+        )}
         {agent.ipv6Guard && !agent.ipv6Guard.present && (
           <p className="break-all text-xs text-destructive">
             主机上的 nft 表 nyabase_guard 不在位{agent.ipv6Guard.error ? `（${agent.ipv6Guard.error}）` : ''}：
@@ -94,6 +100,10 @@ export function AgentCard({ server }: { server: ServerDto }) {
             title={agent.connectedAt ? relativeTime(agent.connectedAt) : undefined}
           />
           <Field label="Incus 版本" value={server.incusVersion ?? '尚未上报'} />
+          <Field
+            label="允许的客户网桥"
+            value={agent.guestBridges ? (agent.guestBridges.join(', ') || '未设置') : '—'}
+          />
           <Field
             label="待使用的接入令牌"
             value={pendingExpiry
@@ -126,7 +136,7 @@ export function AgentCard({ server }: { server: ServerDto }) {
               <DialogTitle>新的接入令牌</DialogTitle>
               <DialogDescription>请立即复制；关闭此窗口后无法再次查看。</DialogDescription>
             </DialogHeader>
-            <EnrollmentInstructions enrollment={issued} />
+            <EnrollmentInstructions enrollment={issued} parentInterface={server.parentInterface} />
             <DialogFooter>
               <Button onClick={() => setIssued(null)}>我已保存，关闭</Button>
             </DialogFooter>

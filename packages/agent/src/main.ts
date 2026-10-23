@@ -38,6 +38,9 @@ async function main(): Promise<void> {
   const config = await loadAgentConfig();
   const build = readAgentBuild();
   log(`nyabase-agent ${build.version} (protocol ${AGENT_PROTOCOL_VERSION}${build.commit ? `, commit ${build.commit}` : ''})`);
+  if (config.guestBridges.length === 0) {
+    log('NYABASE_AGENT_GUEST_BRIDGES is not set: no container can get a network interface on this host');
+  }
   const controller = new AbortController();
   const shutdown = (): void => controller.abort();
   process.once('SIGINT', shutdown);
@@ -88,6 +91,7 @@ async function serve(config: AgentConfig, version: string, guard: Ipv6Guard, sig
       incus,
       guard,
       operations: new OperationLedger(),
+      guestBridges: new Set(config.guestBridges),
       metrics,
       credential: () => credential,
       version,

@@ -10,6 +10,11 @@ export interface AgentConfig {
   /** One-time enrollment token; only read when no credential is stored yet. */
   readonly enrollmentToken?: string;
   readonly incusSocket: string;
+  /**
+   * Host bridges guest NICs may attach to (`NYABASE_AGENT_GUEST_BRIDGES`,
+   * comma separated): the server's parent interface. Empty refuses every NIC.
+   */
+  readonly guestBridges: readonly string[];
 }
 
 export async function loadAgentConfig(
@@ -27,7 +32,22 @@ export async function loadAgentConfig(
     stateDir: environment.NYABASE_AGENT_STATE_DIR?.trim() || '/var/lib/nyabase-agent',
     enrollmentToken,
     incusSocket: environment.INCUS_SOCKET?.trim() || '/var/lib/incus/unix.socket',
+    guestBridges: parseGuestBridges(environment.NYABASE_AGENT_GUEST_BRIDGES ?? ''),
   };
+}
+
+/** A Linux interface name: 1-15 characters, no slash, whitespace or colon. */
+const INTERFACE_NAME_PATTERN = /^[A-Za-z0-9_.-]{1,15}$/;
+
+export function parseGuestBridges(value: string): string[] {
+  const names = [...new Set(value.split(',').map((name) => name.trim()).filter(Boolean))];
+  for (const name of names) {
+    if (!INTERFACE_NAME_PATTERN.test(name) || name === '.' || name === '..') {
+      throw new Error(`NYABASE_AGENT_GUEST_BRIDGES: ${JSON.stringify(name)} is not an interface name`);
+    }
+  }
+  if (names.length > 64) throw new Error('NYABASE_AGENT_GUEST_BRIDGES lists more than 64 bridges');
+  return names;
 }
 
 export function parseBackendUrl(value: string): URL {

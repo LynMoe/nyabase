@@ -132,7 +132,9 @@ Vite 通过 alias 将 `@nyabase/common` 指向 `src/index.ts`，但 `index.ts` �
    （`incus/agent-registry.service.ts` 按服务器解析当前连接，重连后 client 照常可用）。接入：建服务器时签发
    一次性令牌 `nyae.…`（24h），agent 用 `POST /api/agent/enroll` 换凭据；`servers/agent-enrollment.service.ts`。
    agent 端 `policy.ts` 是安全边界（只许 `nyc-*`/`nyv-*`、配置白名单、禁 raw/特权/宿主路径/profiles、
-   必须 idmap.isolated、网卡 `nyh*` + 过滤，volatile 改回当前值）；backend 生成的规格必须过得了它。
+   必须 idmap.isolated、网卡 `nyh*` + IPv4/MAC 过滤 + `security.port_isolation`、`parent` 必须在 agent 本机的
+   `NYABASE_AGENT_GUEST_BRIDGES` 里（agent 侧白名单，随 hello 上报给服务器详情，未设置则拒绝一切网卡），
+   volatile 改回当前值）；backend 生成的规格必须过得了它。
    IPv6 拦截表 `bridge nyabase_guard` 是 agent 自己执行的不变量：policy 把会接通客户网卡的请求（start / restart /
    unfreeze、`start: true` 创建、给未停止实例新增或改网卡）标为 `needsIpv6Guard`，agent 转发前现场校验（必要时补回），
    不在位返回可重试的 `ipv6_guard_missing`（`AGENT_IPV6_GUARD_MISSING`）；状态经 hello / status 帧上报，

@@ -107,6 +107,8 @@ export const zAgentHello = z.object({
     apiExtensions: z.array(zText(128)).max(2048),
   }).strict(),
   status: zAgentHostStatus,
+  /** NYABASE_AGENT_GUEST_BRIDGES: the only bridges the agent lets a guest NIC attach to. */
+  guestBridges: z.array(zText(15)).max(64),
 }).strict();
 
 /** Agent -> Backend, unsolicited and only after welcome: the host status changed. */

@@ -70,6 +70,8 @@ export type CurrentDocumentReader = (path: string) => Promise<Record<string, unk
 /** What the policy needs besides the request itself. */
 export interface PolicyContext {
   readonly readCurrent: CurrentDocumentReader;
+  /** Bridges guest NICs may attach to (NYABASE_AGENT_GUEST_BRIDGES); empty refuses every NIC. */
+  readonly guestBridges: ReadonlySet<string>;
   /** Operations started through this policy (operation-ledger.ts); no other operation is reachable. */
   readonly operations: OperationLookup;
 }
@@ -149,7 +151,7 @@ export async function checkIncusHttp(request: PolicyRequest, context: PolicyCont
         ? ALLOW
         : deny('networks are read-only');
     case 'instances':
-      return checkInstances(request, rest, readCurrent);
+      return checkInstances(request, rest, context);
     case 'storage-pools':
       return checkStoragePools(request, rest, readCurrent);
     case 'images':
@@ -229,13 +231,13 @@ function isManagedSource(source: string): boolean {
 async function checkInstances(
   request: PolicyRequest,
   rest: readonly string[],
-  readCurrent: CurrentDocumentReader,
+  { readCurrent, guestBridges }: PolicyContext,
 ): Promise<PolicyVerdict> {
   const { method } = request;
   if (rest.length === 0) {
     if (method === 'GET') return ALLOW;
     if (method !== 'POST') return deny('instance collection only supports list and create');
-    return checkInstanceCreate(request.body);
+    return checkInstanceCreate(request.body, guestBridges);
   }
   const [name, leaf, ...tail] = rest;
   if (!isManagedInstance(name)) return deny('only nyabase instances are reachable');
@@ -255,7 +257,7 @@ async function checkInstances(
     if (problem) return deny(problem);
     const current = await readCurrent(instancePath);
     if (!current) return deny('instance to update does not exist');
-    const verdict = checkInstanceDocument(body, { full: method === 'PUT' });
+    const verdict = checkInstanceDocument(body, { full: method === 'PUT', guestBridges });
     if (!verdict.allowed) return verdict;
     return withCurrentVolatile(body, stringMap(current.config), bringsNicUp(body, current));
   }
@@ -282,7 +284,7 @@ async function checkInstances(
   }
 }
 
-function checkInstanceCreate(raw: Buffer | undefined): PolicyVerdict {
+function checkInstanceCreate(raw: Buffer | undefined, guestBridges: ReadonlySet<string>): PolicyVerdict {
   const body = jsonBody(raw);
   if (!body) return deny('instance create needs a JSON body');
   const problem = fieldsProblem(body, INSTANCE_CREATE_FIELDS, 'instance');
@@ -296,7 +298,7 @@ function checkInstanceCreate(raw: Buffer | undefined): PolicyVerdict {
   if (isRecord(body.config) && Object.keys(body.config).some((key) => key.startsWith('volatile.'))) {
     return deny('volatile keys may not be set on create');
   }
-  const verdict = checkInstanceDocument(body, { full: true });
+  const verdict = checkInstanceDocument(body, { full: true, guestBridges });
   return verdict.allowed ? forward(body, body.start === true) : verdict;
 }
 
@@ -333,6 +335,7 @@ function checkJson(
 interface DocumentCheckOptions {
   /** POST / PUT carry the whole document; PATCH carries a fragment. */
   readonly full: boolean;
+  readonly guestBridges: ReadonlySet<string>;
 }
 
 /**
@@ -374,7 +377,7 @@ export function checkInstanceDocument(
   if (body.devices !== undefined || options.full) {
     if (!isRecord(body.devices)) return deny('instance devices must be an object');
     for (const [name, device] of Object.entries(body.devices)) {
-      const verdict = checkDevice(name, device);
+      const verdict = checkDevice(name, device, options.guestBridges);
       if (!verdict.allowed) return verdict;
     }
   }
@@ -433,7 +436,7 @@ const NIC_KEYS = new Set([
 ]);
 const GPU_KEYS = new Set(['type', 'gputype', 'pci']);
 
-export function checkDevice(name: string, device: unknown): PolicyVerdict {
+export function checkDevice(name: string, device: unknown, guestBridges: ReadonlySet<string>): PolicyVerdict {
   if (!isRecord(device)) return deny(`device ${name} must be an object`);
   const entries = stringMap(device);
   if (Object.keys(entries).length !== Object.keys(device).length) {
@@ -443,7 +446,7 @@ export function checkDevice(name: string, device: unknown): PolicyVerdict {
     case 'disk':
       return checkDisk(name, entries);
     case 'nic':
-      return checkNic(name, entries);
+      return checkNic(name, entries, guestBridges);
     case 'gpu':
       if (!/^gpu[0-9]+$/.test(name)) return deny(`gpu device ${name} is misnamed`);
       if (!onlyKeys(entries, GPU_KEYS)) return deny(`gpu device ${name} has refused keys`);
@@ -477,10 +480,21 @@ function checkDisk(name: string, device: Readonly<Record<string, string>>): Poli
   return ALLOW;
 }
 
-function checkNic(name: string, device: Readonly<Record<string, string>>): PolicyVerdict {
+function checkNic(
+  name: string,
+  device: Readonly<Record<string, string>>,
+  guestBridges: ReadonlySet<string>,
+): PolicyVerdict {
   if (name !== 'eth0') return deny('the only NIC is eth0');
   if (!onlyKeys(device, NIC_KEYS)) return deny('eth0 has refused keys');
   if (device.nictype !== 'bridged' || !device.parent) return deny('eth0 must be a bridged NIC');
+  // Any other host bridge (management, storage) would put the guest on that network.
+  if (!guestBridges.has(device.parent)) {
+    return deny(guestBridges.size === 0
+      ? 'NYABASE_AGENT_GUEST_BRIDGES is not set on this host, so no guest NIC is allowed'
+      : `eth0 parent ${device.parent} is not in NYABASE_AGENT_GUEST_BRIDGES on this host`);
+  }
+  if (device['security.port_isolation'] !== 'true') return deny('eth0 must be port-isolated from other guests');
   if (!MANAGED_NIC_HOST_NAME_PATTERN.test(device.host_name ?? '')) {
     return deny('eth0 host_name must carry the IPv6 guard prefix');
   }

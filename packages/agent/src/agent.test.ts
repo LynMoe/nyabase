@@ -23,6 +23,7 @@ function harness(guardInPlace: boolean) {
     incus: { request, requestJson: vi.fn(async () => ({})) } as unknown as AgentDependencies['incus'],
     guard: new Ipv6Guard(nft),
     operations: new OperationLedger(),
+    guestBridges: new Set(['vmbr0']),
     metrics: { collect: async () => [] },
     credential: () => 'nyak.x.y',
     version: 'test',

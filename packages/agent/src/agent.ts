@@ -30,6 +30,8 @@ export interface AgentDependencies {
   readonly guard: Ipv6Guard;
   /** Operations started through the policy; the only ones the Backend can reach. */
   readonly operations: OperationLedger;
+  /** config.guestBridges, as the policy reads it. */
+  readonly guestBridges: ReadonlySet<string>;
   readonly metrics: MetricsSource;
   readonly credential: () => string;
   readonly version: string;
@@ -61,6 +63,7 @@ async function hello(deps: AgentDependencies): Promise<AgentHello> {
       apiExtensions: (server.api_extensions ?? []).slice(0, 2048),
     },
     status: deps.guard.status(),
+    guestBridges: [...deps.guestBridges],
   };
 }
 
@@ -72,6 +75,7 @@ async function incusHttp(
   const body = params.body === undefined ? undefined : Buffer.from(params.body, 'base64');
   const verdict = await checkIncusHttp({ method: params.method, path: params.path, body }, {
     readCurrent: (path) => deps.incus.requestJson<Record<string, unknown>>('GET', path).catch(() => undefined),
+    guestBridges: deps.guestBridges,
     operations: deps.operations,
   });
   if (!verdict.allowed && verdict.notFound) return notFound();

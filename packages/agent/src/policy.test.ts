@@ -60,7 +60,7 @@ const noCurrent = async (): Promise<undefined> => undefined;
 const noOperations = new OperationLedger();
 
 function context(readCurrent: CurrentDocumentReader, operations = noOperations) {
-  return { readCurrent, operations };
+  return { readCurrent, operations, guestBridges: new Set(['vmbr0']) };
 }
 
 async function check(request: PolicyRequest, current: Record<string, unknown> | undefined = undefined) {
@@ -164,6 +164,29 @@ describe('agent Incus policy', () => {
       .toBe(true);
     expect((await check({ method: 'POST', path: `/1.0/instances/${INSTANCE}/backups`, body: body({}) })).allowed)
       .toBe(false);
+  });
+
+  it('attaches guests only to the host bridges this agent allows, port-isolated', async () => {
+    const devices = instanceDocument().devices as Record<string, Record<string, string>>;
+    const withNic = (eth0: Record<string, string>) =>
+      body(instanceDocument({ devices: { ...devices, eth0: { ...devices.eth0, ...eth0 } } }));
+    const create = (raw: Buffer, guestBridges: ReadonlySet<string> = new Set(['vmbr0'])) =>
+      checkIncusHttp({ method: 'POST', path: '/1.0/instances', body: raw }, { ...context(noCurrent), guestBridges });
+    expect((await create(withNic({}))).allowed).toBe(true);
+    expect(await create(withNic({ parent: 'mgmt0' })))
+      .toEqual({ allowed: false, reason: 'eth0 parent mgmt0 is not in NYABASE_AGENT_GUEST_BRIDGES on this host' });
+    expect(await create(withNic({}), new Set()))
+      .toEqual({ allowed: false, reason: 'NYABASE_AGENT_GUEST_BRIDGES is not set on this host, so no guest NIC is allowed' });
+    expect((await create(withNic({ 'security.port_isolation': 'false' }))).allowed).toBe(false);
+    const unisolated = { ...devices.eth0 };
+    delete unisolated['security.port_isolation'];
+    expect((await create(body(instanceDocument({ devices: { ...devices, eth0: unisolated } })))).allowed).toBe(false);
+    // A PATCH cannot move a NIC to another bridge either.
+    expect((await checkIncusHttp({
+      method: 'PATCH',
+      path: `/1.0/instances/${INSTANCE}`,
+      body: body({ devices: { eth0: { ...devices.eth0, parent: 'mgmt0' } } }),
+    }, context(async () => ({ config: {}, devices })))).allowed).toBe(false);
   });
 
   it('marks every request that brings a guest NIC up as needing the IPv6 guard', async () => {
