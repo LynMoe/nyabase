@@ -926,6 +926,12 @@ mkdir -p "$ops_dir"
 chmod 0700 "$ops_dir"
 # Owned by you, mode 0700 (skip if it exists and `ls -ld` shows you as owner).
 sudo install -d -m 0700 -o "$(id -un)" -g "$(id -gn)" "$backup_root"
+# Re-owning an existing directory leaves the archives in it as they were:
+# installs that followed an earlier Scheduled backups step have root-owned
+# 0600 archives there. Hand those to you as well, or pg_ops cannot verify or
+# restore them.
+sudo find "$backup_root" -maxdepth 1 -type f -name 'nyabase-*' \
+  -exec chown "$(id -un):$(id -gn)" {} +
 
 # libpq password file: host:port:database:user:password. The password is read
 # from the terminal, so it is neither in shell history nor on a command line.
@@ -1031,6 +1037,10 @@ install -m 0600 deploy/backup.env.example /etc/nyabase/backup.env
 # Owned by the operator who runs pg_ops by hand (see Backup and restore
 # contract); skip if that setup already created it.
 install -d -m 0700 -o <operator> -g <operator-group> /srv/nyabase-backups
+# Archives an earlier version of this step left there are root-owned 0600;
+# re-own them with the directory (`chown <operator>: .../nyabase-*`).
+find /srv/nyabase-backups -maxdepth 1 -type f -name 'nyabase-*' \
+  -exec chown <operator>:<operator-group> {} +
 # edit /etc/nyabase/backup.env: NYABASE_DEPLOY_DIR, the upload command
 systemctl daemon-reload
 systemctl enable --now nyabase-backup.timer
