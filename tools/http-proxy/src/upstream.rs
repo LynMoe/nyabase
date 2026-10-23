@@ -4,7 +4,9 @@ use crate::config::{
     MAX_UPSTREAM_UPGRADE_HEADER_BYTES, UPSTREAM_CONNECT_DEADLINE, UPSTREAM_UPGRADE_HEADER_DEADLINE,
 };
 use crate::listener::reject;
-use crate::relay::{client_abort, copy_with_idle_timeout, relay_with_idle_timeout};
+use crate::relay::{
+    client_abort, copy_with_idle_timeout, relay_with_idle_timeout, write_client_with_deadline,
+};
 use crate::request::{
     find_header_end, header_has_token, initial_body_bytes_allowed, invalid_header_value,
     is_http_token, RequestMode, RequestPlan,
@@ -98,8 +100,11 @@ pub(crate) async fn proxy_single_request<S: AsyncRead + AsyncWrite + Unpin>(
     if expect_continue {
         // The upstream never sees `Expect`, so the proxy grants it here,
         // once the route is authorized and the upstream is reachable.
-        inbound.write_all(b"HTTP/1.1 100 Continue\r\n\r\n").await?;
-        inbound.flush().await?;
+        write_client_with_deadline(runtime.limits.client_write, "100 Continue", async {
+            inbound.write_all(b"HTTP/1.1 100 Continue\r\n\r\n").await?;
+            inbound.flush().await
+        })
+        .await?;
     }
     // The body is streamed, not buffered, so a connection costs bounded
     // memory; the whole-body budget stops a slow drip from holding the
@@ -141,11 +146,15 @@ pub(crate) async fn proxy_single_request<S: AsyncRead + AsyncWrite + Unpin>(
         }
         Err(_) => return Err(client_abort("response lifetime exceeded")),
     }
-    inbound
-        .shutdown()
-        .await
-        .map_err(|error| client_abort(format!("response shutdown failed: {error}")))?;
-    Ok(())
+    // The shutdown flushes what TLS still buffers and writes close_notify;
+    // its own deadline keeps a client that stopped reading right at the end
+    // from holding the slots past the lifetime.
+    write_client_with_deadline(
+        runtime.limits.client_write,
+        "response shutdown",
+        inbound.shutdown(),
+    )
+    .await
 }
 
 async fn forward_request<S, U>(
@@ -236,7 +245,15 @@ pub(crate) async fn proxy_websocket_upgrade<S: AsyncRead + AsyncWrite + Unpin>(
         reject(inbound, runtime, "502 Bad Gateway").await?;
         return Err(error);
     }
-    inbound.write_all(&response).await?;
+    write_client_with_deadline(
+        runtime.limits.client_write,
+        "WebSocket handshake response",
+        async {
+            inbound.write_all(&response).await?;
+            inbound.flush().await
+        },
+    )
+    .await?;
     relay_with_idle_timeout(inbound, &mut upstream, runtime.limits.upgraded_idle).await
 }
 

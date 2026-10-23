@@ -28,6 +28,11 @@ pub(crate) const CONTROL_WRITE_DEADLINE: Duration = Duration::from_secs(5);
 
 pub(crate) const TLS_HANDSHAKE_DEADLINE: Duration = Duration::from_secs(10);
 
+/// One proxy-generated write to the client that no idle or lifetime timer
+/// covers (an error response, `100 Continue`, the WebSocket handshake, the
+/// final shutdown with its TLS close_notify).
+pub(crate) const CLIENT_WRITE_DEADLINE: Duration = Duration::from_secs(10);
+
 pub(crate) const MAX_SNAPSHOT_STALE_AFTER_MS: u64 = 300_000;
 
 // Request bodies are streamed to the upstream rather than buffered, so a
@@ -94,6 +99,8 @@ pub(crate) struct ConnectionLimits {
     pub(crate) response_lifetime: Duration,
     /// An upgraded tunnel with no bytes in either direction for this long is closed.
     pub(crate) upgraded_idle: Duration,
+    /// `CLIENT_WRITE_DEADLINE`; a field only so tests can shorten it.
+    pub(crate) client_write: Duration,
 }
 
 impl Default for ConnectionLimits {
@@ -103,6 +110,7 @@ impl Default for ConnectionLimits {
             idle: Duration::from_millis(DEFAULT_IDLE_TIMEOUT_MS),
             response_lifetime: Duration::from_millis(DEFAULT_RESPONSE_LIFETIME_MS),
             upgraded_idle: Duration::from_millis(DEFAULT_UPGRADED_IDLE_MS),
+            client_write: CLIENT_WRITE_DEADLINE,
         }
     }
 }
@@ -207,6 +215,7 @@ impl Config {
                 MIN_UPGRADED_IDLE_MS,
                 MAX_UPGRADED_IDLE_MS,
             )?),
+            client_write: CLIENT_WRITE_DEADLINE,
         };
         let control_hold = Duration::from_millis(validate_ms(
             "NYABASE_HTTP_CONTROL_HOLD_MS",

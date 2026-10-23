@@ -1,4 +1,5 @@
 use anyhow::{anyhow, Result};
+use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::task::{Context, Poll};
@@ -26,6 +27,25 @@ pub(crate) fn client_abort(message: impl Into<String>) -> anyhow::Error {
 
 pub(crate) fn is_client_abort(error: &anyhow::Error) -> bool {
     error.downcast_ref::<ClientAbort>().is_some()
+}
+
+/// Runs a proxy-generated write to the client (an error response, `100
+/// Continue`, the WebSocket handshake, the final shutdown) under `deadline`.
+/// No idle or lifetime timer covers these, and a client that stops reading
+/// (zero window) would otherwise park the write, and with it the
+/// connection's global and per-container slots, forever; on TLS even a
+/// shutdown waits until its close_notify is written. Any failure is a client
+/// abort, so the listener resets the connection rather than leaving the
+/// unsent bytes for the kernel to keep probing.
+pub(crate) async fn write_client_with_deadline<T>(
+    deadline: Duration,
+    what: &str,
+    write: impl Future<Output = io::Result<T>>,
+) -> Result<T> {
+    match time::timeout(deadline, write).await {
+        Ok(result) => result.map_err(|error| client_abort(format!("{what} failed: {error}"))),
+        Err(_) => Err(client_abort(format!("{what} deadline exceeded"))),
+    }
 }
 
 /// Copies `reader` to `writer` until EOF, failing once no byte has been read

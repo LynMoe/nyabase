@@ -1,5 +1,5 @@
 use crate::config::{REQUEST_HEADER_DEADLINE, TLS_HANDSHAKE_DEADLINE};
-use crate::relay::{client_abort, is_client_abort};
+use crate::relay::{client_abort, is_client_abort, write_client_with_deadline};
 use crate::request::{
     find_header_end, read_request_head, request_plan, ClientContext, RequestMode,
 };
@@ -12,7 +12,7 @@ use proxy_common::conn_limit::{ConnectionLimiter, PendingPermit};
 use std::net::SocketAddr;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::watch;
@@ -204,11 +204,28 @@ where
         .container_slots
         .try_acquire(&authorization.route.container_id)
     else {
-        debug!(
-            container_id = %authorization.route.container_id,
-            hostname = %host,
-            "HTTP proxy per-container connection limit reached"
-        );
+        let route = &authorization.route;
+        // Operators need to see which container is saturated, but a flood of
+        // refusals must not flood the log: one warning per container per
+        // interval, carrying the count it stands for.
+        match runtime
+            .container_slots
+            .note_refusal(&route.container_id, Instant::now())
+        {
+            Some(refused) => warn!(
+                container_id = %route.container_id,
+                binding_id = %route.binding_id,
+                hostname = %host,
+                limit = runtime.container_slots.per_container(),
+                refused,
+                "HTTP proxy per-container connection limit reached; refusing with 503"
+            ),
+            None => debug!(
+                container_id = %route.container_id,
+                hostname = %host,
+                "HTTP proxy per-container connection limit reached"
+            ),
+        }
         reject(inbound, &runtime, "503 Service Unavailable").await?;
         return Ok(());
     };
@@ -276,14 +293,12 @@ pub(crate) async fn reject<S: AsyncWrite + Unpin>(
     runtime
         .total_rejected_requests
         .fetch_add(1, Ordering::Relaxed);
-    inbound
-        .write_all(
-            format!("HTTP/1.1 {status}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n")
-                .as_bytes(),
-        )
-        .await?;
-    inbound.shutdown().await?;
-    Ok(())
+    let response = format!("HTTP/1.1 {status}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n");
+    write_client_with_deadline(runtime.limits.client_write, "rejection", async {
+        inbound.write_all(response.as_bytes()).await?;
+        inbound.shutdown().await
+    })
+    .await
 }
 
 #[cfg(test)]

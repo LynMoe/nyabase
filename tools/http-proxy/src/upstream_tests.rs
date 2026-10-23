@@ -101,6 +101,48 @@ async fn valid_websocket_upgrade_relays_bidirectional_bytes() {
 }
 
 #[tokio::test]
+async fn a_websocket_handshake_to_a_client_that_never_reads_is_bounded() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream_port = listener.local_addr().unwrap().port();
+    let (header, expected_accept) = websocket_test_plan();
+    let response = websocket_accept_response(&expected_accept);
+    let upstream = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let _ = read_request_head(&mut socket).await.unwrap();
+        socket.write_all(&response).await.unwrap();
+        std::future::pending::<()>().await;
+    });
+    let route = test_route(upstream_port);
+    let mut runtime = Arc::try_unwrap(test_runtime()).ok().unwrap();
+    runtime.limits.client_write = Duration::from_millis(100);
+    // Smaller than the 101 response, and the client never reads it.
+    let (_client, mut proxy_side) = tokio::io::duplex(32);
+
+    let error = time::timeout(
+        Duration::from_secs(2),
+        proxy_websocket_upgrade(
+            &mut proxy_side,
+            &runtime,
+            &route,
+            header,
+            &expected_accept,
+            Duration::from_secs(1),
+        ),
+    )
+    .await
+    .expect("WebSocket handshake write was not bounded")
+    .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("WebSocket handshake response deadline exceeded"),
+        "{error}"
+    );
+    assert!(crate::relay::is_client_abort(&error));
+    upstream.abort();
+}
+
+#[tokio::test]
 async fn websocket_non_101_timeout_and_oversize_fail_closed() {
     async fn run_failure(response: Option<Vec<u8>>, deadline: Duration) -> (String, String) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

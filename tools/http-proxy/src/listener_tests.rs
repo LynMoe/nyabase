@@ -512,3 +512,109 @@ async fn a_drip_fed_response_is_cut_at_the_response_lifetime() {
     assert_eq!(runtime.container_slots.active_for("container-a"), 0);
     upstream.await.unwrap();
 }
+
+#[tokio::test]
+async fn a_rejection_to_a_client_that_never_reads_hits_the_write_deadline() {
+    let runtime = runtime_with(|runtime| runtime.limits.client_write = Duration::from_millis(100));
+    // Smaller than the rejection, and the client never reads it.
+    let (_client, mut proxy_side) = tokio::io::duplex(16);
+
+    let error = time::timeout(
+        Duration::from_secs(2),
+        reject(&mut proxy_side, &runtime, "503 Service Unavailable"),
+    )
+    .await
+    .expect("rejection write was not bounded")
+    .unwrap_err();
+    assert!(
+        error.to_string().contains("rejection deadline exceeded"),
+        "{error}"
+    );
+    assert!(crate::relay::is_client_abort(&error));
+}
+
+/// A client stream whose shutdown never completes, as a TLS shutdown does
+/// when the client stops reading before close_notify fits its window.
+struct StalledShutdown(tokio::io::DuplexStream);
+
+impl tokio::io::AsyncRead for StalledShutdown {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.0).poll_read(cx, buf)
+    }
+}
+
+impl tokio::io::AsyncWrite for StalledShutdown {
+    fn poll_write(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        std::pin::Pin::new(&mut self.0).poll_write(cx, buf)
+    }
+
+    fn poll_flush(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.0).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::task::Poll::Pending
+    }
+}
+
+#[tokio::test]
+async fn a_stalled_response_shutdown_is_bounded_and_releases_the_slots() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream_port = listener.local_addr().unwrap().port();
+    let upstream = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let _ = read_request_head(&mut socket).await.unwrap();
+        socket
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+            .await
+            .unwrap();
+        socket.shutdown().await.unwrap();
+    });
+    let store = Arc::new(SnapshotStore::default());
+    store
+        .store(test_snapshot(1, 30_000, vec![test_route(upstream_port)]))
+        .unwrap();
+    // Lifetime and idle are far longer than the test: only the write
+    // deadline can end the exchange.
+    let runtime = runtime_with(|runtime| runtime.limits.client_write = Duration::from_millis(100));
+    let (mut client, proxy_side) = tokio::io::duplex(4096);
+    let handler = tokio::spawn(handle_connection(
+        StalledShutdown(proxy_side),
+        "127.0.0.1:12345".parse().unwrap(),
+        store,
+        runtime.clone(),
+    ));
+    client
+        .write_all(b"GET / HTTP/1.1\r\nHost: app.example.test\r\n\r\n")
+        .await
+        .unwrap();
+
+    let error = time::timeout(Duration::from_secs(2), handler)
+        .await
+        .expect("stalled shutdown held the connection")
+        .unwrap()
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("response shutdown deadline exceeded"),
+        "{error}"
+    );
+    assert!(crate::relay::is_client_abort(&error));
+    assert_eq!(runtime.container_slots.active_for("container-a"), 0);
+    upstream.await.unwrap();
+}

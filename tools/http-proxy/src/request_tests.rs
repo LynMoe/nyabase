@@ -133,6 +133,28 @@ fn underscore_spellings_of_proxy_headers_are_dropped() {
 }
 
 #[test]
+fn dot_spellings_of_proxy_headers_are_dropped() {
+    // PHP turns `.` into `_` in `$_SERVER` keys, so `X.Forwarded.For` lands
+    // in HTTP_X_FORWARDED_FOR too.
+    let head = b"POST / HTTP/1.1\r\nHost: app.example.test\r\nX.Forwarded.For: 6.6.6.6\r\nX-Real.IP: 6.6.6.6\r\nX_Forwarded.Host: evil.test\r\nContent-Length: 0\r\nContent.Length: 4\r\nTransfer.Encoding: chunked\r\nSec.WebSocket_Key: x\r\nX.Api.Key: kept\r\n\r\n";
+    let plan = request_plan(head, &test_client()).unwrap();
+    assert!(matches!(plan.mode, RequestMode::FixedBody { body_len: 0 }));
+    let header = String::from_utf8(plan.header).unwrap();
+    assert!(!header.contains("6.6.6.6"), "{header}");
+    assert!(!header.contains("evil.test"), "{header}");
+    for dropped in ["content.length", "transfer.encoding", "sec.websocket"] {
+        assert!(!header.to_ascii_lowercase().contains(dropped), "{header}");
+    }
+    assert!(
+        header.contains("X-Forwarded-For: 192.0.2.10\r\n"),
+        "{header}"
+    );
+    assert!(header.contains("Content-Length: 0\r\n"));
+    // Dotted names that collide with nothing the proxy owns are kept.
+    assert!(header.contains("X.Api.Key: kept\r\n"));
+}
+
+#[test]
 fn only_plain_chunked_transfer_coding_is_accepted() {
     let plan = request_plan(
         b"POST /git-receive-pack HTTP/1.1\r\nHost: app.example.test\r\nTransfer-Encoding: Chunked\r\n\r\n",
