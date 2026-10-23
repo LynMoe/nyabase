@@ -1653,7 +1653,8 @@ Backend **不直连** Incus，也不主动连接任何主机。每台 Incus 主�
   这是安全不变量，由 agent 自己执行：
   - 校验（缺失或不完整就补回）发生在：unit 的 `ExecStartPre=… ipv6-guard`（unit 排在
     `incus.service` 之前，开机时 Incus 恢复运行的容器之前表已在位）、agent 启动、每 10 秒、
-    以及 `nft monitor` 报告任何规则集变化（防火墙重载、`nft flush ruleset`）之后约 200 ms。
+    以及 `nft monitor` 报告任何规则集变化（防火墙重载、`nft flush ruleset`）之后约 200 ms
+    （补回本身也是一次变化；若补回后仍校验不过，监视触发的校验逐次加倍间隔、最长 60 秒，不会空转）。
   - 会让客户网卡接通的请求——`start` / `restart` / `unfreeze`、`start: true` 的创建、
     给未停止的实例新增或修改网卡——转发前再校验一次；不在位就拒绝
     （`AGENT_IPV6_GUARD_MISSING`，可重试，intent 按退避重试，不会失败）。停止、删除、卸载照常。

@@ -136,6 +136,13 @@ export function guardTableIsComplete(listing: string): boolean {
 
 /** Coalesce a burst of ruleset events (a firewall reload is many) into one check. */
 const MONITOR_DEBOUNCE_MS = 200;
+/**
+ * Ceiling of the back-off between monitor-driven checks while they keep
+ * failing. A failed check re-applies the table, which is itself a ruleset
+ * change the monitor reports: without the back-off a table that applies but
+ * never verifies would be re-applied every 200 ms forever.
+ */
+const MONITOR_MAX_BACKOFF_MS = 60_000;
 const MONITOR_RESTART_MS = 5_000;
 
 /**
@@ -173,7 +180,12 @@ export class Ipv6Guard {
     return this.queued;
   }
 
-  /** Re-check after every ruleset change until the returned function is called. */
+  /**
+   * Re-check after every ruleset change until the returned function is called.
+   * Changes reported while a monitor-driven check runs (its own apply among
+   * them) lead to one more check after it; while those checks keep failing,
+   * each waits twice as long as the last, up to MONITOR_MAX_BACKOFF_MS.
+   */
   watch(): () => void {
     const monitor = this.nft.monitor?.bind(this.nft);
     if (!monitor) return () => undefined;
@@ -181,12 +193,28 @@ export class Ipv6Guard {
     let active: NftMonitor | undefined;
     let debounce: NodeJS.Timeout | undefined;
     let restart: NodeJS.Timeout | undefined;
+    let checking = false;
+    let changedDuringCheck = false;
+    let failures = 0;
     const changed = (): void => {
       if (stopped || debounce) return;
+      if (checking) {
+        changedDuringCheck = true;
+        return;
+      }
+      const delay = Math.min(MONITOR_DEBOUNCE_MS * 2 ** failures, MONITOR_MAX_BACKOFF_MS);
       debounce = setTimeout(() => {
         debounce = undefined;
-        void this.ensure();
-      }, MONITOR_DEBOUNCE_MS);
+        checking = true;
+        void this.ensure().then((present) => {
+          checking = false;
+          failures = present ? 0 : Math.min(failures + 1, 16);
+          if (changedDuringCheck) {
+            changedDuringCheck = false;
+            changed();
+          }
+        });
+      }, delay);
     };
     const start = (): void => {
       monitor(changed, () => {

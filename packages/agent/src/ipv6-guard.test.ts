@@ -141,4 +141,42 @@ describe('IPv6 guard', () => {
       vi.useRealTimers();
     }
   });
+
+  it('backs off instead of re-applying forever when the applied table never verifies', async () => {
+    vi.useFakeTimers();
+    try {
+      // nft prints the table in a shape guardTableIsComplete does not recognise,
+      // and every apply is a ruleset change the monitor reports back.
+      const nft = new FakeNft();
+      nft.apply = async (ruleset) => {
+        nft.applied.push(ruleset);
+        nft.table = 'table bridge nyabase_guard { }';
+        for (const monitor of nft.monitors) monitor.changed();
+      };
+      const guard = new Ipv6Guard(nft);
+      const stop = guard.watch();
+      await vi.advanceTimersByTimeAsync(0);
+      nft.monitors[0]!.changed();
+      await vi.advanceTimersByTimeAsync(60_000);
+      // 200 ms, 400 ms, 800 ms, ... apart: about eight attempts in a minute, not three hundred.
+      expect(nft.applied.length).toBeGreaterThan(3);
+      expect(nft.applied.length).toBeLessThan(12);
+      expect(guard.status().ipv6Guard).toEqual({ present: false, error: 'guard table did not verify after apply' });
+      // Once it verifies again, the next change is checked promptly.
+      nft.apply = async (ruleset) => {
+        nft.applied.push(ruleset);
+        nft.table = LISTING;
+      };
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(guard.status().ipv6Guard.present).toBe(true);
+      const applied = nft.applied.length;
+      nft.table = undefined;
+      nft.monitors[0]!.changed();
+      await vi.advanceTimersByTimeAsync(250);
+      expect(nft.applied).toHaveLength(applied + 1);
+      stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
