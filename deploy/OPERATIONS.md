@@ -42,10 +42,15 @@ file is owned by the process uid and is not group/other-readable (mode
 `0400` or `0600` with no `0o077` bits). Compose cannot chmod the host
 bind-mount; set the mode on the host before `docker compose up`.
 
-Validate before starting:
+Set `NYABASE_VERSION` in `.env` to the release being installed (for example
+`git describe --tags --always` of the checkout): the Backend image is built as
+`nyabase-backend:<NYABASE_VERSION>`, and every release keeps its own tag so a
+rollback starts the previous image instead of rebuilding it (see
+**Upgrades**). Validate, build, and start:
 
 ```bash
 docker compose --env-file .env config --quiet
+docker compose --env-file .env build backend
 docker compose --env-file .env up -d
 docker compose --env-file .env ps
 ```
@@ -965,8 +970,9 @@ docker compose --env-file .env exec -T postgres \
   psql -U postgres -d postgres -v ON_ERROR_STOP=1 \
   -c 'ALTER DATABASE nyabase RENAME TO nyabase_replaced' \
   -c 'ALTER DATABASE nyabase_restored RENAME TO nyabase'
-# Check out / build the Backend release the backup was taken with, then:
-docker compose --env-file .env up -d --build backend
+# Set NYABASE_VERSION to the release the backup was taken with (its image is
+# still on the host; otherwise check that release out and build it), then:
+docker compose --env-file .env up -d backend
 ```
 
 Start the Backend release whose migrations match the backup (see **Upgrading
@@ -1101,8 +1107,11 @@ edited, and a CI test pins each released file's checksum.
 
 1. Take and verify a logical backup (see **Logical backups**) immediately
    before the upgrade, and keep it with the release record.
-2. Check out the new release, then rebuild and restart only the Backend:
-   `docker compose --env-file .env up -d --build backend`.
+2. Check out the new release, set `NYABASE_VERSION` in `.env` to it, then
+   build its image and restart only the Backend:
+   `docker compose --env-file .env build backend` and
+   `docker compose --env-file .env up -d backend`. Never build two releases
+   under one tag: the build replaces the image a rollback would start.
 3. Watch `docker compose --env-file .env logs -f backend` for
    `Applied N PostgreSQL migration(s)` and confirm
    `curl --fail http://127.0.0.1:3001/api/health/ready`.
@@ -1114,7 +1123,14 @@ pre-upgrade backup (see **Restoring production**) and starting the previous
 release on it. Changes made between the upgrade and the restore are lost, and
 hosts may hold containers or volumes created in that window (they become
 orphans; see **After a restore**). A rollback within the same migration set
-is just checking out and rebuilding the previous release.
+is setting `NYABASE_VERSION` back to the previous release and
+`docker compose --env-file .env up -d backend`: its image is still on the
+host, nothing is rebuilt.
+
+Keep the images of the last few releases (`docker image ls nyabase-backend`)
+and remove older ones by tag (`docker image rm nyabase-backend:<tag>`). Do not
+run `docker image prune -a` on this host: it deletes every image no container
+uses, including the previous release.
 
 A database created by a pre-launch build is not upgradable to the launch
 build: before launch the single baseline migration was edited in place, so its

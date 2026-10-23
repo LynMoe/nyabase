@@ -49,6 +49,7 @@ cleanup_smoke() {
 trap cleanup_smoke EXIT
 
 {
+  echo 'NYABASE_VERSION=smoke'
   echo 'POSTGRES_PASSWORD=smoke-postgres-superuser-password'
   echo 'NYABASE_DB_PASSWORD=smoke-postgres-password'
   echo 'DATABASE_URL=postgresql://nyabase:smoke-postgres-password@postgres:5432/nyabase'

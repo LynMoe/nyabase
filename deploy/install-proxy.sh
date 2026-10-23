@@ -25,6 +25,35 @@ die() {
   exit 1
 }
 
+# Runs as the building user (via `declare -f`). rustup applies a
+# rust-toolchain file found from the current directory upwards, not from
+# --manifest-path, and only through its own cargo: build from tools/ and refuse
+# a cargo that would ignore the pinned toolchain.
+build_proxy() {
+  local tools_dir=$1 package=$2 pinned="" candidate cargo_path rustup_path
+  cd "$tools_dir" || return 1
+  for candidate in rust-toolchain.toml rust-toolchain ../rust-toolchain.toml ../rust-toolchain; do
+    if [[ -f "$candidate" ]]; then
+      pinned=$candidate
+      break
+    fi
+  done
+  cargo_path=$(command -v cargo) || {
+    echo "install-proxy: cargo not found; install Rust (rustup) or pass --binary" >&2
+    return 1
+  }
+  if [[ -n "$pinned" ]]; then
+    rustup_path=$(command -v rustup) || rustup_path=""
+    if [[ -z "$rustup_path" || ! "$cargo_path" -ef "$rustup_path" ]]; then
+      echo "install-proxy: $tools_dir/$pinned pins the Rust toolchain, which only rustup's cargo applies;" \
+        "$cargo_path is not rustup's. Install rustup, put it first in PATH, or pass --binary" >&2
+      return 1
+    fi
+  fi
+  cargo --version >&2
+  cargo build --release --locked -p "$package"
+}
+
 [[ $# -ge 1 ]] || usage
 kind=$1
 shift
@@ -53,11 +82,10 @@ unit="/etc/systemd/system/${name}.service"
 if [[ -z "$binary" ]]; then
   if [[ -n "${SUDO_USER:-}" && "$SUDO_USER" != root ]]; then
     # Build as the invoking user: no root-owned target/ and no build scripts as root.
-    sudo -H -u "$SUDO_USER" bash -lc 'cargo build --release --locked --manifest-path "$1" -p "$2"' \
-      _ "$repo/tools/Cargo.toml" "$name" || die "cargo build failed (as $SUDO_USER)"
+    sudo -H -u "$SUDO_USER" bash -lc "$(declare -f build_proxy); build_proxy \"\$@\"" \
+      _ "$repo/tools" "$name" || die "cargo build failed (as $SUDO_USER)"
   else
-    command -v cargo >/dev/null 2>&1 || die "cargo not found; install Rust or pass --binary"
-    cargo build --release --locked --manifest-path "$repo/tools/Cargo.toml" -p "$name"
+    (build_proxy "$repo/tools" "$name") || die "cargo build failed"
   fi
   binary="$repo/tools/target/release/$name"
 fi

@@ -32,6 +32,7 @@ done
 contract_root="$(mktemp -d)"
 trap 'rm -rf "$contract_root"' EXIT
 rendered="$contract_root/compose.json"
+NYABASE_VERSION=contract-test \
 POSTGRES_PASSWORD=contract-test-superuser \
 NYABASE_DB_PASSWORD=contract-test \
 DATABASE_URL=postgresql://nyabase:contract-test@postgres:5432/nyabase \
@@ -109,6 +110,11 @@ for (const envName of [
 ]) {
   if (!(envName in backend.environment)) throw new Error(`backend is missing ${envName}`);
 }
+// Each release keeps its own image tag; rollback starts the previous one.
+if (backend.image !== 'nyabase-backend:contract-test'
+  || backend.build?.args?.NYABASE_VERSION !== 'contract-test') {
+  throw new Error(`backend image must be tagged with NYABASE_VERSION, got ${backend.image}`);
+}
 // The Backend connects as the database owner `nyabase`, never as the cluster
 // superuser, whose password stays with the postgres service.
 const postgres = config.services.postgres;
@@ -177,6 +183,12 @@ if rg -n '^POSTGRES_(USER|DB)=' deploy/.env.example; then
   exit 1
 fi
 rg -q '^FROM node:22-slim@sha256:[0-9a-f]{64} AS builder$' deploy/Dockerfile.backend
+# A proxy build honours a pinned toolchain only through rustup, from tools/.
+rg -q 'cargo build --release --locked -p "\$package"' deploy/install-proxy.sh
+if rg -n -- 'cargo build.*--manifest-path' deploy/install-proxy.sh; then
+  echo "install-proxy.sh must build from tools/ so rustup sees a rust-toolchain file" >&2
+  exit 1
+fi
 rg -q '^FROM node:22-slim@sha256:[0-9a-f]{64} AS runner$' deploy/Dockerfile.backend
 rg -q '^USER 10001:10001$' deploy/Dockerfile.backend
 if rg -n 'packages/agent|dockerd|dockerRoot|nyabase-agent' deploy/Dockerfile.backend; then

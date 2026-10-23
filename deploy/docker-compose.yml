@@ -84,9 +84,15 @@ services:
 
   backend:
     <<: *service-defaults
+    # Every release is built under its own tag and kept, so rolling back is
+    # `docker compose up -d backend` with the previous NYABASE_VERSION, not a
+    # rebuild (see OPERATIONS.md, Upgrades).
+    image: nyabase-backend:${NYABASE_VERSION:?set NYABASE_VERSION in deploy/.env}
     build:
       context: ..
       dockerfile: deploy/Dockerfile.backend
+      args:
+        NYABASE_VERSION: ${NYABASE_VERSION}
     ports:
       # Loopback only: a TLS-terminating reverse proxy on this host is the
       # public entrypoint for the panel, /api and /ws/* (see OPERATIONS.md).
