@@ -70,7 +70,10 @@ Vite 通过 alias 将 `@nyabase/common` 指向 `src/index.ts`，但 `index.ts` �
   池 / 后端清除前的强制卸载是可逆的，在锁外进行。处置（停机 / 卸载）前先无锁重读覆盖，扫描后新提交的授权直接结束宽限。
   没有待处理 intent 的 `detaching` 挂载也算暴露，`forceDetach` 会重新下发卸载，但仅当容器最后一个 intent 结清已超过退避
   （15 分钟起，按该挂载已有的 detach intent 数翻倍，封顶 4 小时；`volumes/detach-redrive.ts` 的 `detachRedriveDue`，扫描与 `forceDetach` 共用）；
-  重新下发不清 `needs_attention`，持续失败的容器对运维可见。
+  重新下发不清 `needs_attention`，持续失败的容器对运维可见；`forceDetach` 下发的 intent 都带 `despiteAttention: true`
+  （`reconcile/intent-model.ts` 的 `runsDespiteAttention`，与用户重试 `retryOf` 同理），worker 对被搁置（busy strikes）的容器也照常处理：
+  成功清 attention，失败保留 / 重新搁置，下一次按退避再下发。清除后（`purged_at` 已设）池 / 后端上仍暴露的挂载（清除时退避未到而跳过的卸载）
+  由 `lapseWork` 的 `detach` 继续按退避重新下发，直到挂载消失、卷销毁得以进行；清除本身不重复。
 - 禁用用户 = 失去覆盖，与撤销同一条流程：覆盖只认 `iam.effective_*_access`（active 用户 + 当前授权），禁用后其名下资源按检测时间开宽限、立即停机，
   14 天后清除；宽限内重新启用则删台账行（容器不自动启动）。用户状态变更在 `afterCommit` 里通知 `AccessChangeNotifier`。
 - 宽限中（无当前覆盖）的用户不能新建、启动、挂载、扩容；已停机的容器在覆盖恢复后不会自动启动。所有者扩容本地卷要同时有服务器和存储池的当前授权。
@@ -79,9 +82,10 @@ Vite 通过 alias 将 `@nyabase/common` 指向 `src/index.ts`，但 `index.ts` �
 - intent 重试归属重试者（`requested_by`，system 为 NULL）并记审计 `intent.retry`；重试 `volume.resize` 只能把 `size_bytes` 调小，不会绕过配额重新扩容。
 - 会话：refresh token 每次轮换顺延 `auth.refreshTokenExpiresDays`（空闲超时），但不超过登录时间 + `auth.sessionMaxLifetimeDays`（绝对上限）；两者都是 admin-only 在线设置。
   已轮换掉的旧 token 再出现即判为重放，删除整个会话并记审计 `user.refresh_token_reuse`（同一 `requestId` 的丢响应重试、以及 15 s 内紧邻上一枚 token 的并发刷新除外，后者返回 `REFRESH_SUPERSEDED`，前端换新 requestId 重试一次、不登出）；
-  退役哈希在 `iam.refresh_token_ancestors`，每会话只留最新 256 条；不得遗忘 `auth.jwtExpiresIn` + 2 分钟内退役的哈希，即每个这样的窗口最多轮换 256 次
+  退役哈希在 `iam.refresh_token_ancestors`，每会话只留最新 256 条；不得遗忘 min(`auth.jwtExpiresIn`, 60 分钟) + 2 分钟内退役的哈希，即每个这样的窗口最多轮换 256 次
   （超出 429 `AUTH_RATE_LIMITED` + `Retry-After`，保留 cookie；前端在锁外按 Retry-After 退避、最多 3 次，之后只让该请求失败 / 冷加载显示「会话刷新繁忙」，
-  不登出、不进入「无法验证会话」），所以一个访问令牌有效期（+2 分钟）内退役的 token 必然能被识别为重放；更老的只是无效。登出接受当前或任一保留的退役 token。
+  不自动登出、不进入「无法验证会话」，但该页与「无法验证会话」一样提供「退出登录」按钮），所以访问令牌有效期 ≤ 60 分钟时，一个有效期（+2 分钟）内退役的 token 必然能被识别为重放；
+  更长的有效期窗口仍封顶 62 分钟（否则 24h 有效期下日常使用就会被限流数小时），超出部分的重放识别只是尽力而为；更老的只是无效。登出接受当前或任一保留的退役 token。
 
 ## 后端结构规则（`packages/backend/src`）
 

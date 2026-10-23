@@ -42,13 +42,20 @@ export function purgeDeadline(lapsedAt: Date): Date {
 }
 
 /** What the processor still has to do for a candidate, in order of urgency. */
-export type LapseWork = 'clear' | 'lapse' | 'stop' | 'purge' | 'none';
+export type LapseWork = 'clear' | 'lapse' | 'stop' | 'purge' | 'detach' | 'none';
 
 export function lapseWork(candidate: LapseCandidate): LapseWork {
   if (candidate.covered) return candidate.lapse ? 'clear' : 'none';
   if (!candidate.lapse) return 'lapse';
   const due = candidate.now.getTime() >= purgeDeadline(candidate.lapse.lapsedAt).getTime();
-  if (due) return candidate.lapse.purgedAt === null ? 'purge' : 'none';
+  if (due) {
+    if (candidate.lapse.purgedAt === null) return 'purge';
+    // Purged pool or backend: its volumes are deleting and each destroy waits
+    // for the volume's attachments. One still attached, or detaching with its
+    // re-drive due (the purge's own detach may have been backed off), is
+    // detached again until it is gone.
+    return candidate.kind !== 'server' && candidate.exposed ? 'detach' : 'none';
+  }
   // Enforce again whenever it is exposed: a container started, or a volume
   // re-attached, during the grace (an administrator override) must not
   // survive until the purge.

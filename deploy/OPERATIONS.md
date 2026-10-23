@@ -613,13 +613,18 @@ rebuilding vmbr.
   except a lost-response retry with the same request id or a concurrent refresh
   with the immediately previous token within 15 s (401 `REFRESH_SUPERSEDED`,
   cookie kept; the browser retries once). A session remembers its newest 256
-  retired tokens and may not forget one retired less than `auth.jwtExpiresIn`
-  + 2 minutes ago, so it rotates at most 256 times per that window (beyond that
-  429 `AUTH_RATE_LIMITED` with `Retry-After`, cookie kept; the browser waits and
-  retries up to 3 times, then shows a transient error without signing out). A
-  token retired within one access-token lifetime (+2 min) is therefore always
-  recognised as reuse while the victim has a tab making requests; older ones
-  are merely invalid.
+  retired tokens and may not forget one retired less than
+  min(`auth.jwtExpiresIn`, 60 min) + 2 minutes ago, so it rotates at most 256
+  times per that window (beyond that 429 `AUTH_RATE_LIMITED` with
+  `Retry-After`, cookie kept; the browser waits and retries up to 3 times, then
+  shows a transient error without signing out automatically; a cold load shows
+  a wait-and-retry screen that also offers 退出登录). The window is capped at
+  62 minutes so that a long lifetime (e.g. 24h, where every page load or new
+  tab rotates) never throttles a session for hours. With a lifetime of up to
+  60 minutes a token retired within one lifetime (+2 min) is therefore always
+  recognised as reuse while the victim has a tab making requests; with a longer
+  lifetime that is best effort beyond the window; older ones are merely
+  invalid.
 - Incus instances and custom volumes that carry this installation's labels but
   have no row (an instance `user.nyabase.server_id` of this server; a volume
   `user.nyabase.scope` of this server or of the pool's shared backend) are

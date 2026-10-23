@@ -54,7 +54,7 @@ export const REFRESH_REUSE_GRACE_MS = 15_000;
  * Retired refresh hashes remembered per session, and the most rotations a
  * session may make per protection window (below). A tab rotates once per
  * access-token lifetime while it makes requests, plus once per page load or
- * new tab, so a window of one lifetime plus slack sees roughly
+ * new tab, so a window of one lifetime (at most an hour) plus slack sees roughly
  * tabs + page loads + (tabs x 2 min / lifetime) rotations: 60 tabs opened at
  * once, or 60 tabs polling at the 1-minute minimum lifetime (~180), stay
  * well below 256. Storage stays bounded at 256 rows per session (x16
@@ -69,6 +69,13 @@ export const REFRESH_RETAINED_ANCESTORS = 256;
 export const REFRESH_ANCESTOR_WINDOW_SLACK_MS = 2 * 60_000;
 
 /**
+ * Longest access-token lifetime the protection window follows. Every page
+ * load or new tab rotates, so with a long lifetime 256 rotations per window
+ * is ordinary use and a throttled session would be locked out for hours.
+ */
+export const REFRESH_ANCESTOR_WINDOW_LIFETIME_CAP_MS = 60 * 60_000;
+
+/**
  * A session may not forget a hash retired less than this long ago; a rotation
  * that would is refused with 429 (at most REFRESH_RETAINED_ANCESTORS per
  * window). The guarantee: a tab that is making requests refreshes within one
@@ -76,10 +83,20 @@ export const REFRESH_ANCESTOR_WINDOW_SLACK_MS = 2 * 60_000;
  * holds, so if a thief rotates that cookie first, the victim's next refresh
  * presents a hash retired less than a window ago, which is still remembered
  * and revokes the session. Longer windows only add throttling, so the window
- * follows `auth.jwtExpiresIn` (1m..24h) rather than a fixed constant.
+ * is min(`auth.jwtExpiresIn`, REFRESH_ANCESTOR_WINDOW_LIFETIME_CAP_MS) + slack
+ * (at most 62 minutes). Reuse detection is therefore guaranteed for
+ * lifetimes up to the 60-minute cap. With a longer lifetime it is best
+ * effort: a hash is still only forgotten once REFRESH_RETAINED_ANCESTORS newer
+ * ones exist, so a victim tab whose next refresh comes after the thief
+ * rotated 256 more times over more than a window is merely signed out
+ * (invalid token) instead of revoking the session.
  */
 export function refreshAncestorMinimumAgeMs(accessTokenLifetimeMs: number): number {
-  return Math.max(accessTokenLifetimeMs, MIN_JWT_LIFETIME_MS) + REFRESH_ANCESTOR_WINDOW_SLACK_MS;
+  const lifetimeMs = Math.min(
+    Math.max(accessTokenLifetimeMs, MIN_JWT_LIFETIME_MS),
+    REFRESH_ANCESTOR_WINDOW_LIFETIME_CAP_MS,
+  );
+  return lifetimeMs + REFRESH_ANCESTOR_WINDOW_SLACK_MS;
 }
 /** Failed logins per (client address bucket, username) per window. */
 export const MAX_LOGIN_FAILURES_PER_IP_USERNAME = 10;

@@ -3,6 +3,7 @@ import { sql, type Kysely } from 'kysely';
 import { AuditAction, GRANT_EXPIRY_GRACE_DAYS, UserStatus } from '@nyabase/common';
 import { describe, expect, it, vi } from 'vitest';
 import { ContainerControlRepository } from '../containers/container-control.repository.js';
+import { ContainerReconcileStore } from '../containers/container-reconcile.store.js';
 import { AccessChangeNotifier } from '../iam/access-resolver.service.js';
 import { lockIamPolicy } from '../iam/administration.js';
 import {
@@ -25,14 +26,16 @@ import {
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 import { withPostgresTestDatabase } from '../platform/persistence-pg/postgres-test-harness.js';
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
-import { IntentRepository } from '../reconcile/intent.repository.js';
+import { IncusError } from '../incus/index.js';
+import { IntentRepository, type IntentRecord } from '../reconcile/intent.repository.js';
 import { ReconcileClaimRepository } from '../reconcile/reconcile-claim.repository.js';
+import { ReconcileWorkerService } from '../reconcile/reconcile-worker.service.js';
 import { noopWake } from '../reconcile/reconcile-wake.test-helper.js';
-import { DETACH_REDRIVE_BACKOFF_MS } from '../volumes/detach-redrive.js';
+import { DETACH_REDRIVE_BACKOFF_MS, DETACH_REDRIVE_MAX_BACKOFF_MS } from '../volumes/detach-redrive.js';
 import { VolumeAttachmentsService } from '../volumes/volume-attachments.service.js';
 import { VolumesRepository } from '../volumes/volumes.repository.js';
 import { AccessLapseProcessor } from './access-lapse.processor.js';
-import { AccessLapseRepository } from './access-lapse.repository.js';
+import { AccessLapseRepository, lapseWork, type LapseCandidate } from './access-lapse.repository.js';
 import { UserServerResourcePurgeService } from './user-server-resource-purge.service.js';
 
 const describePg = process.env.NYABASE_TEST_DATABASE_URL ? describe : describe.skip;
@@ -634,6 +637,115 @@ describePg('access lapse processor', () => {
     });
   });
 
+  it('unplugs a lapsed volume from a parked container: the re-drive runs despite needs_attention', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const { processor } = await fixture(database);
+      const { userId, serverId, poolId, imageId } = await world(database);
+      const lapsedPool = await seedPool(database, serverId);
+      await grantServer(database, { user: userId }, serverId);
+      await grantPool(database, { user: userId }, poolId);
+      await grantPool(database, { user: userId }, lapsedPool, days(-1));
+      const container = await seedContainer(database, {
+        ownerId: userId, serverId, poolId, imageId, running: true,
+      });
+      const volume = await seedVolume(database, { ownerId: userId, poolId: lapsedPool, serverId });
+      const attachmentId = await seedAttachment(database, container, volume);
+      const worker = reconcileWorker(database);
+      try {
+        await processor.process();
+        expect(await pendingDetaches(database, container)).toEqual([attachmentId]);
+
+        // The instance stays busy: five strikes park the container.
+        await worker.strikeBusy(container);
+        expect(await attentionOf(database, container)).toBe(true);
+        expect(await containerIntents(database, container))
+          .toEqual([expect.objectContaining({ status: 'failed' })]);
+
+        // The re-drive keeps the attention and is still processed; it fails
+        // the same way, which parks the container again.
+        await ageContainerIntents(database, container, DETACH_REDRIVE_BACKOFF_MS + 60_000);
+        await processor.process();
+        expect(await pendingDetaches(database, container)).toEqual([attachmentId]);
+        expect(await attentionOf(database, container)).toBe(true);
+        await worker.strikeBusy(container);
+        expect(worker.reconcile).toHaveBeenCalledTimes(10);
+        expect(await attentionOf(database, container)).toBe(true);
+        expect((await bindStates(database)).get(attachmentId)).toBe('detaching');
+
+        // The next re-drive (after the doubled backoff) unplugs the device:
+        // success clears the attention.
+        await ageContainerIntents(database, container, 2 * DETACH_REDRIVE_BACKOFF_MS + 60_000);
+        await processor.process();
+        expect(await pendingDetaches(database, container)).toEqual([attachmentId]);
+        await worker.succeed();
+        expect(await bindStates(database)).toEqual(new Map());
+        expect(await attentionOf(database, container)).toBe(false);
+        expect(await containerIntents(database, container)).toEqual([
+          expect.objectContaining({ status: 'failed' }),
+          expect.objectContaining({ status: 'failed' }),
+          expect.objectContaining({ status: 'succeeded' }),
+        ]);
+      } finally {
+        await worker.stop();
+      }
+    });
+  });
+
+  it('keeps re-driving a lapsed pool volume\'s detach after the purge until the attachment is gone', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const { processor } = await fixture(database);
+      const { userId, serverId, poolId, imageId } = await world(database);
+      const lapsedPool = await seedPool(database, serverId);
+      await grantServer(database, { user: userId }, serverId);
+      await grantPool(database, { user: userId }, poolId);
+      await grantPool(database, { user: userId }, lapsedPool, days(-1));
+      const container = await seedContainer(database, {
+        ownerId: userId, serverId, poolId, imageId, running: true,
+      });
+      const volume = await seedVolume(database, { ownerId: userId, poolId: lapsedPool, serverId });
+      const attachmentId = await seedAttachment(database, container, volume);
+      await processor.process();
+      await failPendingIntents(database, container);
+
+      // The grace ends while the re-drive is backed off: the purge's own
+      // detach is skipped, the volume is marked deleting all the same.
+      await database.updateTable('control.access_lapses')
+        .set({ lapsed_at: new Date(Date.now() - (GRANT_EXPIRY_GRACE_DAYS + 1) * DAY_MS) })
+        .execute();
+      await processor.process();
+      const [purged] = await ledger(database, userId);
+      expect(purged!.purged_at).not.toBeNull();
+      expect(await volumePhase(database, volume)).toBe('deleting');
+      expect(await containerIntents(database, container)).toHaveLength(1);
+      await processor.process();
+      expect(await containerIntents(database, container)).toHaveLength(1);
+
+      // Once due, the purged pair still re-drives the detach.
+      await ageContainerIntents(database, container, DETACH_REDRIVE_BACKOFF_MS + 60_000);
+      await processor.process();
+      expect(await pendingDetaches(database, container)).toEqual([attachmentId]);
+      expect(await containerIntents(database, container)).toHaveLength(2);
+
+      // It fails again: the next one waits for the doubled backoff.
+      await failPendingIntents(database, container);
+      await ageContainerIntents(database, container, DETACH_REDRIVE_BACKOFF_MS + 60_000);
+      await processor.process();
+      expect(await containerIntents(database, container)).toHaveLength(2);
+      await ageContainerIntents(database, container, DETACH_REDRIVE_BACKOFF_MS);
+      await processor.process();
+      expect(await pendingDetaches(database, container)).toEqual([attachmentId]);
+
+      // The device is gone: nothing more is queued, the purge is not repeated.
+      await database.deleteFrom('control.volume_attachments').where('id', '=', attachmentId).execute();
+      await database.updateTable('control.intents').set({ status: 'succeeded', settled_at: sql`clock_timestamp()` })
+        .where('resource_id', '=', container).where('status', '=', 'pending').execute();
+      await ageContainerIntents(database, container, DETACH_REDRIVE_MAX_BACKOFF_MS);
+      expect(await processor.process()).toBe(0);
+      expect(await containerIntents(database, container)).toHaveLength(3);
+      expect((await ledger(database, userId))[0]!.purged_at).toEqual(purged!.purged_at);
+    });
+  });
+
   it('does not detach when a pool grant commits between the scan and the detach', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const { processor } = await fixture(database);
@@ -935,7 +1047,92 @@ describePg('access lapse processor', () => {
   });
 });
 
+describe('lapseWork after the purge', () => {
+  const now = new Date();
+  const purgedLapse = {
+    lapsedAt: new Date(now.getTime() - (GRANT_EXPIRY_GRACE_DAYS + 1) * DAY_MS),
+    stoppedAt: now,
+    purgedAt: now,
+  };
+  const candidate = (kind: LapseCandidate['kind'], exposed: boolean): LapseCandidate => ({
+    userId: randomUUID(), kind, resourceId: randomUUID(), covered: false, exposed, lapse: purgedLapse, now,
+  });
+
+  it('detaches again on a purged pool or backend while a volume is exposed, and does nothing else', () => {
+    expect(lapseWork(candidate('storage_pool', true))).toBe('detach');
+    expect(lapseWork(candidate('shared_backend', true))).toBe('detach');
+    expect(lapseWork(candidate('storage_pool', false))).toBe('none');
+    expect(lapseWork(candidate('server', true))).toBe('none');
+    expect(lapseWork({ ...candidate('storage_pool', true), covered: true })).toBe('clear');
+  });
+});
+
 const GRACE_DAYS = GRANT_EXPIRY_GRACE_DAYS;
+
+/**
+ * The real reconcile worker over the database, with the real container store
+ * for `needs_attention`; only the Incus-facing reconcile is scripted.
+ */
+function reconcileWorker(database: Kysely<NyabaseDatabase>) {
+  const intents = new IntentRepository(database, noopWake());
+  const store = new ContainerReconcileStore(database, intents);
+  let mode: 'busy' | 'succeed' = 'busy';
+  const reconcile = vi.fn(async ({ intent }: { intent: IntentRecord }) => {
+    if (mode === 'busy') throw new IncusError('INSTANCE_BUSY', 'retry', { action: 'update' });
+    // The reconciler deletes the row once the device is gone.
+    const attachmentId = intent.request?.attachmentId;
+    if (typeof attachmentId === 'string') {
+      await database.deleteFrom('control.volume_attachments').where('id', '=', attachmentId).execute();
+    }
+    return { outcome: 'succeeded' as const, observedRevision: intent.targetRevision };
+  });
+  const reconciler = {
+    resourceType: 'container',
+    supports: () => true,
+    reconcile,
+    needsAttention: (id: string) => store.needsAttention(id),
+    markSucceeded: (id: string, revision: number) => store.markSucceeded(id, revision),
+    markFailure: (id: string, failure: never, attention: boolean) => store.markFailure(id, failure, attention),
+  };
+  const worker = new ReconcileWorkerService(
+    intents,
+    new ReconcileClaimRepository(database),
+    {
+      all: () => [reconciler],
+      forIntent: () => reconciler,
+      forResource: () => reconciler,
+      serverHealth: () => ({
+        isCurrentServerIntent: async () => true,
+        markServer: async () => undefined,
+      }),
+    } as never,
+    { get: async () => ({}), listServerIds: async () => [] } as never,
+    { onWake: () => () => undefined, wake: () => undefined } as never,
+  );
+  return {
+    reconcile,
+    /** Five busy passes in a row (each retry made due at once) park the container. */
+    async strikeBusy(containerId: string): Promise<void> {
+      mode = 'busy';
+      for (let attempt = 0; attempt < 5; attempt += 1) {
+        await database.updateTable('control.intents').set({ next_attempt_at: sql`clock_timestamp() - interval '1 second'` })
+          .where('resource_id', '=', containerId).where('status', '=', 'pending').execute();
+        await worker.runOnce();
+      }
+    },
+    async succeed(): Promise<void> {
+      mode = 'succeed';
+      await worker.runOnce();
+    },
+    stop: () => worker.onModuleDestroy(),
+  };
+}
+
+async function volumePhase(database: Kysely<NyabaseDatabase>, volumeId: string): Promise<string> {
+  const row = await database.selectFrom('control.volumes').select('lifecycle_phase')
+    .where('id', '=', volumeId).executeTakeFirstOrThrow();
+  return row.lifecycle_phase;
+}
 
 async function groupOf(database: Kysely<NyabaseDatabase>, userId: string): Promise<string> {
   const group = await seedGroup(database);
@@ -962,6 +1159,7 @@ async function pendingDetaches(database: Kysely<NyabaseDatabase>, containerId: s
 async function containerIntents(database: Kysely<NyabaseDatabase>, containerId: string): Promise<unknown[]> {
   return database.selectFrom('control.intents').select(['id', 'status'])
     .where('resource_id', '=', containerId)
+    .orderBy('created_at')
     .execute();
 }
 

@@ -124,6 +124,22 @@ export function isUserRetryIntent(
   return typeof request?.retryOf === 'string' && request.retryOf.length > 0;
 }
 
+/**
+ * Request field (`true`) that has the worker process an intent although its
+ * resource needs attention, as it does an explicit retry: an enforcement that
+ * must not wait for an operator, such as an access-lapse detach. It does not
+ * clear the attention itself: success does (`markSucceeded`), as for any
+ * intent, and a failure leaves it set (busy strikes park the resource again).
+ */
+export const DESPITE_ATTENTION_FIELD = 'despiteAttention';
+
+/** Whether the worker processes the intent while its resource needs attention. */
+export function runsDespiteAttention(
+  request: Record<string, unknown> | null | undefined,
+): boolean {
+  return isUserRetryIntent(request) || request?.[DESPITE_ATTENTION_FIELD] === true;
+}
+
 export function assertKindResource(kind: TypedIntentKind, resourceType: IntentResource): void {
   if (!Object.prototype.hasOwnProperty.call(KIND_RESOURCES, kind)) {
     throw new Error(`Unsupported intent kind: ${kind}`);

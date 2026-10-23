@@ -321,6 +321,25 @@ describe('ReconcileWorkerService', () => {
     expect(setup.reconciler.reconcile).toHaveBeenCalled();
   });
 
+  it('still processes an intent marked despiteAttention when the resource needs attention', async () => {
+    const setup = makeWorker({ needsAttention: true });
+    setup.listPending.mockResolvedValue({
+      items: [{
+        ...intent(),
+        request: {
+          operation: 'detach_volume',
+          attachmentId: '00000000-0000-4000-8000-000000000009',
+          despiteAttention: true,
+        },
+      }],
+      nextCursor: null,
+    });
+    await setup.worker.runOnce();
+    expect(setup.claims.claim).toHaveBeenCalled();
+    expect(setup.reconciler.reconcile).toHaveBeenCalled();
+    expect(setup.reconciler.markSucceeded).toHaveBeenCalledWith(resourceId, 1);
+  });
+
   it.each(['SSH_DAEMON_PENDING', 'GUEST_NOT_READY'] as const)(
     'does not count %s as Incus lock busy strikes',
     async (code) => {

@@ -13,7 +13,7 @@ import {
 import { INCUS_CLIENT_FACTORY, type IncusClientFactory } from '../incus/incus-client.factory.js';
 import {
   IntentRepository,
-  isUserRetryIntent,
+  runsDespiteAttention,
   type IntentRecord,
   type IntentFailure,
   type PhysicalSettlement,
@@ -313,8 +313,10 @@ export class ReconcileWorkerService implements OnApplicationBootstrap, OnModuleD
 
   private async processIntent(intent: IntentRecord): Promise<void> {
     if (this.controller.signal.aborted) return;
+    // A parked resource waits for an operator, except for an explicit retry
+    // or an enforcement that must not wait (`runsDespiteAttention`).
     if (
-      !isUserRetryIntent(intent.request)
+      !runsDespiteAttention(intent.request)
       && await this.registry.forResource(intent.resourceType)?.needsAttention(intent.resourceId)
     ) {
       return;

@@ -39,6 +39,9 @@ const MAX_PAIRS_PER_PASS = 128;
  *    first enforcement time);
  *  - grace over and not purged: on a server, purge the user's containers and
  *    local volumes there; on a pool or backend, destroy the user's volumes there;
+ *  - purged pool or backend whose volumes are still attached (a detach whose
+ *    re-drive was not due at the purge): detach them again, with the re-drive
+ *    backoff, until the attachments are gone and the destroys can run;
  *  - coverage back: delete the row (nothing is restarted or re-attached).
  *
  * Runs every minute and right after IAM writes commit (`AccessChangeNotifier`).
@@ -159,6 +162,8 @@ export class AccessLapseProcessor implements OnModuleInit, OnModuleDestroy {
           return await this.enforce(current, actor, lease.assertOwned.bind(lease));
         case 'purge':
           return await this.purgeResources(current, actor, lease.assertOwned.bind(lease));
+        case 'detach':
+          return await this.detachAfterPurge(current, actor);
         case 'none':
           return false;
       }
@@ -195,6 +200,7 @@ export class AccessLapseProcessor implements OnModuleInit, OnModuleDestroy {
     const work = lapseWork(opened);
     if (work === 'stop') return this.enforce(opened, actor, assertOwned);
     if (work === 'purge') return this.purgeResources(opened, actor, assertOwned);
+    if (work === 'detach') return this.detachAfterPurge(opened, actor);
     return true;
   }
 
@@ -217,10 +223,8 @@ export class AccessLapseProcessor implements OnModuleInit, OnModuleDestroy {
         );
         break;
       case 'storage_pool':
-        await this.purge.detachVolumesForStoragePool(actor, candidate.userId, candidate.resourceId);
-        break;
       case 'shared_backend':
-        await this.purge.detachVolumesForSharedBackend(actor, candidate.userId, candidate.resourceId);
+        await this.detachVolumes(candidate, actor);
         break;
     }
     assertOwned();
@@ -249,11 +253,7 @@ export class AccessLapseProcessor implements OnModuleInit, OnModuleDestroy {
     if (candidate.kind !== 'server' && await this.lapses.isCoveredNow(candidate)) {
       return this.lapses.clear(candidate);
     }
-    if (candidate.kind === 'storage_pool') {
-      await this.purge.detachVolumesForStoragePool(actor, candidate.userId, candidate.resourceId);
-    } else if (candidate.kind === 'shared_backend') {
-      await this.purge.detachVolumesForSharedBackend(actor, candidate.userId, candidate.resourceId);
-    }
+    if (candidate.kind !== 'server') await this.detachVolumes(candidate, actor);
     assertOwned();
     // Deleting is irreversible: every delete is queued in the transaction that
     // re-read coverage under the IAM lock, so a grant committed since the scan
@@ -273,5 +273,24 @@ export class AccessLapseProcessor implements OnModuleInit, OnModuleDestroy {
       }
       assertOwned();
     });
+  }
+
+  /**
+   * After the purge of a pool or backend: the deleting volumes still attached
+   * are detached again (`forceDetach` follows the re-drive backoff), so their
+   * destroys are not left waiting on an attachment no intent will remove.
+   * Reversible, so only the lock-free look at coverage guards it.
+   */
+  private async detachAfterPurge(candidate: LapseCandidate, actor: Actor): Promise<boolean> {
+    if (await this.lapses.isCoveredNow(candidate)) return this.lapses.clear(candidate);
+    const { intentIds } = await this.detachVolumes(candidate, actor);
+    return intentIds.length > 0;
+  }
+
+  /** Pool or backend: detach the user's volumes there from their containers. */
+  private detachVolumes(candidate: LapseCandidate, actor: Actor): Promise<{ intentIds: string[] }> {
+    return candidate.kind === 'shared_backend'
+      ? this.purge.detachVolumesForSharedBackend(actor, candidate.userId, candidate.resourceId)
+      : this.purge.detachVolumesForStoragePool(actor, candidate.userId, candidate.resourceId);
   }
 }

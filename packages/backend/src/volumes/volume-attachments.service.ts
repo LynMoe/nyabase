@@ -24,7 +24,11 @@ import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
 import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
 import { acceptedIntent } from '../reconcile/accepted-intent.js';
-import { IntentRepository, type IntentRecord } from '../reconcile/intent.repository.js';
+import {
+  DESPITE_ATTENTION_FIELD,
+  IntentRepository,
+  type IntentRecord,
+} from '../reconcile/intent.repository.js';
 import { StoragePoolsRepository } from '../storage-pools/storage-pools.repository.js';
 import { detachRedriveDue } from './detach-redrive.js';
 import { VolumeDtoAssembler, type VolumeRow } from './volume-dtos.js';
@@ -318,6 +322,10 @@ export class VolumeAttachmentsService {
    * intent ended without removing the device (the reconciler deletes the row
    * once the device is gone). A re-drive keeps the container's
    * `needs_attention`, so one whose intents keep failing stays visible.
+   * Every intent queued here is marked to run despite the attention
+   * (`runsDespiteAttention`), so a parked container (busy strikes) is still
+   * unplugged: success clears the attention, a failure leaves it set and the
+   * next re-drive follows the backoff.
    */
   async forceDetach(actor: Actor, attachmentId: string): Promise<IntentRecord | null> {
     return this.transactions.run(async (transaction) => {
@@ -339,14 +347,15 @@ export class VolumeAttachmentsService {
         attachment,
         container,
         redrive ? { reason: 'access_lapse', redrive: true } : { reason: 'access_lapse' },
-        { clearAttention: !redrive },
+        { clearAttention: !redrive, despiteAttention: true },
       );
     }, VOLUME_TX);
   }
 
   /**
    * Marks the attachment detaching, bumps the container revision and queues
-   * its update. A re-drive (`clearAttention: false`) keeps `needs_attention`.
+   * its update. A re-drive (`clearAttention: false`) keeps `needs_attention`;
+   * `despiteAttention` marks the intent so the worker runs it all the same.
    */
   private async beginDetach(
     transaction: Tx,
@@ -354,7 +363,9 @@ export class VolumeAttachmentsService {
     attachment: { id: string; volume_id: string },
     container: { id: string; server_id: string; revision: number },
     auditDetails: Record<string, unknown>,
-    options: { readonly clearAttention: boolean } = { clearAttention: true },
+    options: { readonly clearAttention: boolean; readonly despiteAttention?: boolean } = {
+      clearAttention: true,
+    },
   ): Promise<IntentRecord> {
     await this.repository.setAttachmentBindState(attachment.id, 'detaching', transaction);
     const revision = Number(container.revision) + 1;
@@ -376,7 +387,11 @@ export class VolumeAttachmentsService {
       serverId: container.server_id,
       requestedBy: actorId,
       targetRevision: revision,
-      request: { operation: 'detach_volume', attachmentId: attachment.id },
+      request: {
+        operation: 'detach_volume',
+        attachmentId: attachment.id,
+        ...(options.despiteAttention ? { [DESPITE_ATTENTION_FIELD]: true } : {}),
+      },
     }, transaction);
     await this.audit.append(
       transaction,

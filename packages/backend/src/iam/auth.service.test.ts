@@ -7,6 +7,7 @@ import {
   MAX_LOGIN_FAILURES_PER_IP,
   MAX_LOGIN_FAILURES_PER_IP_USERNAME,
   MAX_REAUTH_FAILURES_PER_USER,
+  REFRESH_ANCESTOR_WINDOW_LIFETIME_CAP_MS,
   REFRESH_ANCESTOR_WINDOW_SLACK_MS,
   REFRESH_RETAINED_ANCESTORS,
   REFRESH_REUSE_GRACE_MS,
@@ -29,11 +30,15 @@ const rateLimited = expect.objectContaining({
 });
 
 describe('refresh ancestor protection window', () => {
-  it('covers one access-token lifetime plus the refresh lag', () => {
+  it('covers one access-token lifetime (at most an hour) plus the refresh lag', () => {
     expect(REFRESH_ANCESTOR_WINDOW_SLACK_MS).toBe(2 * 60_000);
     expect(refreshAncestorMinimumAgeMs(60_000)).toBe(3 * 60_000);
     expect(refreshAncestorMinimumAgeMs(15 * 60_000)).toBe(17 * 60_000);
-    expect(refreshAncestorMinimumAgeMs(24 * 3_600_000)).toBe(24 * 3_600_000 + 2 * 60_000);
+    expect(refreshAncestorMinimumAgeMs(60 * 60_000)).toBe(62 * 60_000);
+    // Capped at one hour: a 24 h lifetime must not throttle a session for a day.
+    expect(REFRESH_ANCESTOR_WINDOW_LIFETIME_CAP_MS).toBe(60 * 60_000);
+    expect(refreshAncestorMinimumAgeMs(2 * 3_600_000)).toBe(62 * 60_000);
+    expect(refreshAncestorMinimumAgeMs(24 * 3_600_000)).toBe(62 * 60_000);
     // Never below the 1-minute minimum lifetime, even if misconfigured.
     expect(refreshAncestorMinimumAgeMs(1_000)).toBe(3 * 60_000);
   });
@@ -338,6 +343,24 @@ describe('AuthService refresh sessions', () => {
     });
     // A 1-minute lifetime frees the slot after 3 minutes, not a fixed 15.
     advance(windowMs - (REFRESH_RETAINED_ANCESTORS - 1) * 500);
+    await expect(service.refreshTokens(token, requestId('e')))
+      .resolves.toMatchObject({ refreshToken: expect.any(String) });
+  });
+
+  it('caps the throttle window at one hour (+ slack) for a long access-token lifetime', async () => {
+    const { service, first, advance } = await signedIn('24h');
+    const windowMs = 60 * 60_000 + REFRESH_ANCESTOR_WINDOW_SLACK_MS;
+    let token = first;
+    for (let index = 0; index < REFRESH_RETAINED_ANCESTORS; index += 1) {
+      advance(1_000);
+      token = (await service.refreshTokens(token, index.toString(16).padStart(64, '0'))).refreshToken;
+    }
+    const throttled = service.refreshTokens(token, requestId('e'));
+    await expect(throttled).rejects.toMatchObject({
+      retryAfterSeconds: Math.ceil((windowMs - (REFRESH_RETAINED_ANCESTORS - 1) * 1_000) / 1_000),
+    });
+    // The slot frees within the hour, not a day later.
+    advance(windowMs - (REFRESH_RETAINED_ANCESTORS - 1) * 1_000);
     await expect(service.refreshTokens(token, requestId('e')))
       .resolves.toMatchObject({ refreshToken: expect.any(String) });
   });
