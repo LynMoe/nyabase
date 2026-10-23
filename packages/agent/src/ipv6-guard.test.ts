@@ -179,4 +179,40 @@ describe('IPv6 guard', () => {
       vi.useRealTimers();
     }
   });
+
+  it('ends the back-off when any check verifies the table, not only a monitor-driven one', async () => {
+    vi.useFakeTimers();
+    try {
+      const nft = new FakeNft();
+      nft.apply = async (ruleset) => {
+        nft.applied.push(ruleset);
+        nft.table = 'table bridge nyabase_guard { }';
+        for (const monitor of nft.monitors) monitor.changed();
+      };
+      const guard = new Ipv6Guard(nft);
+      const stop = guard.watch();
+      await vi.advanceTimersByTimeAsync(0);
+      nft.monitors[0]!.changed();
+      // A failure streak: the next monitor-driven check is now tens of seconds away.
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(guard.status().ipv6Guard.present).toBe(false);
+      // The operator fixes nft; the backstop timer's check verifies the table.
+      nft.apply = async (ruleset) => {
+        nft.applied.push(ruleset);
+        nft.table = LISTING;
+      };
+      await expect(guard.ensure()).resolves.toBe(true);
+      // A firewall reload right after is checked promptly, not after the backed-off delay.
+      await vi.advanceTimersByTimeAsync(250);
+      const applied = nft.applied.length;
+      nft.table = undefined;
+      nft.monitors[0]!.changed();
+      await vi.advanceTimersByTimeAsync(250);
+      expect(nft.applied).toHaveLength(applied + 1);
+      expect(guard.status().ipv6Guard.present).toBe(true);
+      stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

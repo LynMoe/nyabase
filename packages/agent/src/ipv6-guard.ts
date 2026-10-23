@@ -184,7 +184,9 @@ export class Ipv6Guard {
    * Re-check after every ruleset change until the returned function is called.
    * Changes reported while a monitor-driven check runs (its own apply among
    * them) lead to one more check after it; while those checks keep failing,
-   * each waits twice as long as the last, up to MONITOR_MAX_BACKOFF_MS.
+   * each waits twice as long as the last, up to MONITOR_MAX_BACKOFF_MS. Any
+   * check that verifies the table (the timer's, a NIC's) ends the back-off,
+   * and a backed-off check still waiting is rescheduled at the normal delay.
    */
   watch(): () => void {
     const monitor = this.nft.monitor?.bind(this.nft);
@@ -230,9 +232,20 @@ export class Ipv6Guard {
         if (!stopped) restart = setTimeout(start, MONITOR_RESTART_MS);
       });
     };
+    const stopListening = this.onChange(({ ipv6Guard }) => {
+      // Failures only ever leave the guard absent, so verifying again is always this transition.
+      if (!ipv6Guard.present || failures === 0) return;
+      failures = 0;
+      if (debounce) {
+        clearTimeout(debounce);
+        debounce = undefined;
+        changed();
+      }
+    });
     start();
     return () => {
       stopped = true;
+      stopListening();
       if (debounce) clearTimeout(debounce);
       if (restart) clearTimeout(restart);
       active?.stop();
