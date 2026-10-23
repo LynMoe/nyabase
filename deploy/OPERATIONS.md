@@ -1258,6 +1258,52 @@ matches its SQL file`). Recreate it: stop the stack, remove the
 servers. Incus instances and volumes created by the old database are orphans
 to the new one; clean them up on the hosts.
 
+### Upgrading the proxies
+
+`deploy/install-proxy.sh` restarts the proxy on every upgrade. Restarting the
+HTTP proxy drops every tenant HTTP connection and WebSocket at once (clients
+see a reset and must reconnect); restarting the SSH proxy drops every Jump
+session. Upgrade them in a maintenance window that tenants know about, one
+proxy kind at a time.
+
+### Rotating secrets
+
+Every value below is read at start-up, so a rotation is: change the value in
+the secret store and in `config.yaml` / `.env`, then restart what reads it.
+Restart the Backend with `docker compose --env-file .env up -d --force-recreate backend`
+(a short API outage; agents and proxies reconnect on their own).
+
+- **`auth.jwtSecret`** signs the short-lived access tokens. After a restart
+  with a new value every outstanding access token is rejected, but sessions
+  survive: refresh tokens are stored as hashes and do not depend on the secret,
+  so each tab refreshes once and carries on (a refresh whose response was lost
+  across the restart can sign that one tab out). To end every session as well,
+  for example after a leak, stop the Backend, delete them, then start it with
+  the new secret:
+  `docker compose --env-file .env exec -T postgres psql -U postgres -d nyabase -c 'DELETE FROM iam.refresh_tokens'`.
+- **`http.proxyToken` / `ssh.proxyToken`**: the Backend accepts exactly one
+  token per proxy kind, so both sides change together with a short gap. Write
+  the new token into each proxy's `/etc/nyabase/<kind>-proxy.env` (or its
+  token file) without restarting it, restart the Backend with the new
+  `config.yaml`, then immediately `systemctl restart nyabase-http-proxy` (or
+  `nyabase-ssh-proxy`) on every proxy host. Until a proxy restarts, its
+  reconnects are refused: the HTTP proxy serves its last snapshot for at most
+  about five minutes (`NYABASE_HTTP_CONTROL_HOLD_MS`) and the SSH proxy keeps
+  established sessions but refuses new Jump connections. The restart itself
+  drops every tenant HTTP connection and WebSocket (HTTP) or every Jump session
+  (SSH), as in an upgrade.
+- **`NYABASE_DB_PASSWORD`**: set the new password with
+  `docker compose --env-file .env exec postgres psql -U postgres -d postgres -c '\password nyabase'`
+  (prompted, so it is not on a command line), put it into `NYABASE_DB_PASSWORD`,
+  `DATABASE_URL` and the `pg_ops` password file, and recreate the Backend.
+  **`POSTGRES_PASSWORD`** likewise with `\password postgres`; nothing but
+  operators uses it.
+- **`ssh.keyEncryptionSecret`** has no in-place rotation (there is no
+  re-encryption); see **Lost `ssh.keyEncryptionSecret`** for replacing it.
+
+After any rotation update the copy in the secret store (**Secrets are not in
+the backup**).
+
 ### Data services
 
 - Pin PostgreSQL to the current PostgreSQL 18 minor after staging its release
@@ -1380,9 +1426,9 @@ from the product SLO and measured baseline, not from this example deployment.
   superuser password (`POSTGRES_PASSWORD`) out of the Backend's configuration
   (see **Database roles**).
 - Rotate `.env` and `config.yaml` credentials through the deployment secret
-  mechanism used by the target environment; do not commit either file. The
-  exception is `ssh.keyEncryptionSecret`: it encrypts data at rest and has no
-  in-place rotation (see the backup contract).
+  mechanism used by the target environment (see **Rotating secrets**); do not
+  commit either file. The exception is `ssh.keyEncryptionSecret`: it encrypts
+  data at rest and has no in-place rotation (see the backup contract).
 - Audit retention (`audit.retentionDays`, `audit.retentionMaxEntries`) is
   admin-only in the system settings page and cannot be set below 30 days or
   10,000 entries (0 disables that limit), so an operator cannot purge the trail.
