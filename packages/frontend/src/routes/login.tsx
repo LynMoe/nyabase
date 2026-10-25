@@ -11,6 +11,7 @@ import { Input } from '../components/ui/input.js';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/card.js';
 import { FormField } from '../components/layout/form-field.js';
 import { usePublicSettings } from '../hooks/use-public-settings.js';
+import { useDocumentTitle } from '../hooks/use-document-title.js';
 
 function loginReasonBanner(reason: string | undefined): string | null {
   switch (reason) {
@@ -36,6 +37,7 @@ function LoginPage() {
   const safeRedirect = sanitizeInternalRedirect(redirect);
   const { settings } = usePublicSettings();
   const reasonBanner = loginReasonBanner(reason);
+  useDocumentTitle('登录');
 
   useEffect(() => {
     if (user && status === 'authenticated') window.location.replace(safeRedirect);

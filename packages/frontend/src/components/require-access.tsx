@@ -5,8 +5,10 @@ import { useAuthStore } from '../store/auth.js';
 import { roleLabel } from '../lib/display-labels.js';
 import { canAccess, type AccessRule } from '../lib/route-access.js';
 import { Button } from './ui/button.js';
+import { useDocumentTitle } from '../hooks/use-document-title.js';
 
 export function AccessDenied({ requiredLabel }: { requiredLabel?: string }) {
+  useDocumentTitle('无权访问');
   return (
     <div className="flex min-h-full items-center justify-center p-6">
       <div className="w-full max-w-md space-y-4 p-6 text-center">

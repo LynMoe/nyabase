@@ -2,6 +2,7 @@ import { Component, type ErrorInfo, type ReactNode } from 'react';
 import { AlertTriangle, RefreshCw } from 'lucide-react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './ui/card.js';
 import { Button } from './ui/button.js';
+import { DocumentTitle } from '../hooks/use-document-title.js';
 
 interface ErrorBoundaryProps {
   children: ReactNode;
@@ -40,6 +41,7 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
 
     return (
       <div className="min-h-[60vh] w-full flex items-center justify-center p-6">
+        <DocumentTitle title="页面出错了" />
         <Card className="w-full max-w-md">
           <CardHeader className="space-y-2">
             <div className="flex items-center gap-2">

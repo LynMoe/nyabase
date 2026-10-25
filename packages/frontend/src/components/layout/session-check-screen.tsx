@@ -1,5 +1,6 @@
 import { Button } from '../ui/button.js';
 import { terminateBrowserSession } from '../../lib/auth-session.js';
+import { useDocumentTitle } from '../../hooks/use-document-title.js';
 
 /**
  * Full-page screen for a cold load whose session check did not finish (error
@@ -13,6 +14,7 @@ export function SessionCheckScreen({ title, message, retrying, onRetry }: {
   retrying: boolean;
   onRetry: () => void;
 }) {
+  useDocumentTitle(title);
   return (
     <div className="min-h-screen flex items-center justify-center p-6">
       <div className="max-w-sm text-center space-y-3">

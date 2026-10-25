@@ -11,6 +11,7 @@ import {
   BreadcrumbSeparator,
 } from '../ui/breadcrumb.js';
 import { cn } from '../../lib/utils.js';
+import { pageHeaderTitleParts, useDocumentTitle, type DocumentTitleParts } from '../../hooks/use-document-title.js';
 
 type Crumb = {
   label: string;
@@ -39,13 +40,20 @@ export function PageHeader({
   crumbs,
   actions,
   backTo,
+  documentTitle,
 }: {
   title: React.ReactNode;
   description?: React.ReactNode;
   crumbs?: Crumb[];
   actions?: React.ReactNode;
   backTo?: BackTo;
+  /**
+   * Tab title (before the brand) when the crumbs or a plain-string `title`
+   * do not give one, e.g. a ReactNode title without crumbs.
+   */
+  documentTitle?: DocumentTitleParts;
 }) {
+  useDocumentTitle(pageHeaderTitleParts({ documentTitle, crumbs, title }));
   if (crumbs && backTo) {
     throw new Error('PageHeader: pass crumbs or backTo, not both');
   }

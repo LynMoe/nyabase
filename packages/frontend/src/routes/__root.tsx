@@ -7,6 +7,8 @@ import { ErrorBoundary } from '../components/error-boundary.js';
 import { bootstrapAuthSession } from '../lib/api.js';
 import { SessionCheckScreen } from '../components/layout/session-check-screen.js';
 import { sanitizeInternalRedirect, takePendingLoginReason } from '../lib/auth-session.js';
+import { DocumentTitle } from '../hooks/use-document-title.js';
+import { NotFound } from '../components/not-found.js';
 
 interface RouterContext {
   queryClient: QueryClient;
@@ -43,7 +45,12 @@ function Root() {
   };
 
   if (status === 'checking') {
-    return <div className="min-h-screen flex items-center justify-center text-sm text-muted-foreground">正在验证会话...</div>;
+    return (
+      <div className="min-h-screen flex items-center justify-center text-sm text-muted-foreground">
+        <DocumentTitle title="正在验证会话" />
+        正在验证会话...
+      </div>
+    );
   }
 
   if (status === 'throttled') {
@@ -90,4 +97,7 @@ function Root() {
   );
 }
 
-export const Route = createRootRouteWithContext<RouterContext>()({ component: Root });
+export const Route = createRootRouteWithContext<RouterContext>()({
+  component: Root,
+  notFoundComponent: NotFound,
+});

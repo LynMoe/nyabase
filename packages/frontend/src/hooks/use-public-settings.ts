@@ -1,11 +1,13 @@
+import { useEffect } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import type { PublicSettingsDto } from '@nyabase/common';
 import { api } from '../lib/api.js';
 import { queryKeys } from '../lib/query-keys.js';
+import { DEFAULT_BRAND_TITLE, setDocumentBrand } from './use-document-title.js';
 
 export const DEFAULT_PUBLIC_SETTINGS: PublicSettingsDto = {
   branding: {
-    title: 'nyabase',
+    title: DEFAULT_BRAND_TITLE,
     description: '开发容器管理平台',
   },
   sshProxy: null,
@@ -25,8 +27,12 @@ export function usePublicSettings() {
     retry: 1,
   });
 
+  const settings = query.data ?? DEFAULT_PUBLIC_SETTINGS;
+  // Tab titles end with the brand the sidebar and login show.
+  useEffect(() => setDocumentBrand(settings.branding.title), [settings.branding.title]);
+
   return {
     ...query,
-    settings: query.data ?? DEFAULT_PUBLIC_SETTINGS,
+    settings,
   };
 }

@@ -69,6 +69,7 @@ export default function ContainerUsagePage({
     <Page>
       <PageHeader
         title={selfQuery.data?.container.name ?? '使用情况'}
+        documentTitle={['使用情况', selfQuery.data?.container.name, admin ? '全平台容器' : '容器']}
         actions={(
           <Button asChild variant="ghost" size="sm">
             <Link
