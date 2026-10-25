@@ -70,8 +70,24 @@ export const zHttpProxySnapshot = z.object({
   domainPools: z.array(zHttpProxyDomainPoolSnapshot).max(MAX_HTTP_PROXY_DOMAIN_POOLS),
 }).strict();
 
+/** Cumulative counters of one binding since the proxy process started. */
+export const zHttpProxyBindingCounters = z.object({
+  bindingId: zId,
+  requests: zSafeCounter,
+  activeConnections: z.number().int().min(0).max(MAX_HTTP_PROXY_ACTIVE_CONNECTIONS),
+  rxBytes: zSafeCounter,
+  txBytes: zSafeCounter,
+}).strict();
+
 export const zHttpProxyStatusReport = z.object({
   proxyId: zAscii(128),
+  /**
+   * Random per proxy process. Optional together with `bindings` so a Backend
+   * accepts a proxy built before per-binding counters (upgrade the Backend
+   * first, then the proxies); such a report adds nothing to the counters.
+   */
+  instanceId: z.string().regex(/^[A-Za-z0-9_-]{8,64}$/).optional(),
+  bindings: z.array(zHttpProxyBindingCounters).max(MAX_HTTP_PROXY_ROUTES).optional(),
   hostname: zAscii(253).nullable(),
   httpListen: zAscii(128),
   httpsListen: zAscii(128).nullable(),
@@ -131,6 +147,7 @@ export type HttpProxyWarningReason = z.infer<typeof zHttpProxyWarningReason>;
 export type HttpProxyBindingStatus = z.infer<typeof zHttpProxyBindingStatus>;
 export type HttpProxySnapshot = z.infer<typeof zHttpProxySnapshot>;
 export type HttpProxyStatusReport = z.infer<typeof zHttpProxyStatusReport>;
+export type HttpProxyBindingCounters = z.infer<typeof zHttpProxyBindingCounters>;
 export type CreateHttpDomainPoolRequest = z.infer<typeof zCreateHttpDomainPoolRequest>;
 export type PatchHttpDomainPoolRequest = z.infer<typeof zPatchHttpDomainPoolRequest>;
 
@@ -151,8 +168,26 @@ export interface HttpProxyBindingDto {
   status: HttpProxyBindingStatus;
   warningReasons: HttpProxyWarningReason[];
   warningMessage: string;
+  stats: HttpProxyBindingStatsDto;
   createdAt: string;
   updatedAt: string;
+}
+
+/**
+ * Traffic of one binding. Totals are cumulative over every proxy process
+ * that has served it; the live values come from the connected proxies'
+ * latest reports, and the rates are `null` while no connected proxy has two
+ * reports to compare.
+ */
+export interface HttpProxyBindingStatsDto {
+  totalRequests: number;
+  activeConnections: number;
+  /** Visitor to container, bytes per second. */
+  rxBytesPerSec: number | null;
+  /** Container to visitor, bytes per second. */
+  txBytesPerSec: number | null;
+  totalRxBytes: number;
+  totalTxBytes: number;
 }
 
 export interface HttpDomainPoolDto {

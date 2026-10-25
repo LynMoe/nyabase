@@ -21,6 +21,7 @@ import {
   MAX_HTTP_PROXY_ROUTES,
   normalizeHttpProxyHostname,
   type HttpProxyBindingDto,
+  type HttpProxyBindingStatsDto,
   type HttpProxyBindingStatus,
   type HttpProxyWarningReason,
   type ListScope,
@@ -32,6 +33,7 @@ import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
 import { poolHasSafeTlsLease } from './http-proxy-certificates.js';
 import { hostnameCoversWildcardDomain } from './http-domain-overlap.js';
+import { HttpProxyTrafficService } from './http-proxy-traffic.service.js';
 import {
   BINDING_CAPACITY_LOCK,
   HOSTNAME_RESERVATION_LOCK,
@@ -169,6 +171,17 @@ async function releaseHostname(
   }
 }
 
+function emptyBindingStats(): HttpProxyBindingStatsDto {
+  return {
+    totalRequests: 0,
+    activeConnections: 0,
+    rxBytesPerSec: null,
+    txBytesPerSec: null,
+    totalRxBytes: 0,
+    totalTxBytes: 0,
+  };
+}
+
 function parseHttpProxyHostname(value: string): string {
   try {
     return normalizeHttpProxyHostname(value);
@@ -188,6 +201,7 @@ export class HttpProxyBindingsService {
     private readonly database: Kysely<NyabaseDatabase>,
     private readonly transactions: PgTransactionManager,
     private readonly audit: AuditService,
+    private readonly traffic: HttpProxyTrafficService,
   ) {}
 
   /** `scope=mine`: the caller's bindings; `scope=all`: every binding (operator). */
@@ -420,7 +434,7 @@ export class HttpProxyBindingsService {
     const poolIds = [...new Set(bindings.map((row) => row.domain_pool_id))];
     const containerIds = [...new Set(bindings.map((row) => row.container_id))];
     const ownerIds = [...new Set(bindings.map((row) => row.owner_id))];
-    const [pools, containers, routes, users] = await Promise.all([
+    const [pools, containers, routes, users, stats] = await Promise.all([
       executor.selectFrom('interaction.http_domain_pools')
         .selectAll()
         .where('id', 'in', poolIds)
@@ -437,6 +451,7 @@ export class HttpProxyBindingsService {
         .select(['id', 'username', 'status'])
         .where('id', 'in', ownerIds)
         .execute(),
+      this.traffic.statsFor(bindings.map((row) => row.id)),
     ]);
     const poolsById = new Map(pools.map((row) => [row.id, row]));
     const containersById = new Map(containers.map((row) => [row.id, row]));
@@ -482,6 +497,7 @@ export class HttpProxyBindingsService {
           status,
           warningReasons: reasons,
           warningMessage: httpProxyWarningMessage(reasons),
+          stats: stats.get(binding.id) ?? emptyBindingStats(),
           createdAt: binding.created_at.toISOString(),
           updatedAt: binding.updated_at.toISOString(),
         };

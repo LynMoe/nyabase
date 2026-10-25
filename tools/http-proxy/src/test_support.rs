@@ -41,6 +41,7 @@ pub(crate) fn test_route(target_port: u16) -> Route {
 pub(crate) fn test_runtime() -> Arc<Runtime> {
     Arc::new(Runtime {
         proxy_id: "proxy-test".into(),
+        instance_id: "instance-test".into(),
         hostname: Some("proxy.test".into()),
         http_listen: "127.0.0.1:0".into(),
         https_listen: None,
@@ -55,6 +56,7 @@ pub(crate) fn test_runtime() -> Arc<Runtime> {
         active_connections: AtomicU64::new(0),
         total_requests: AtomicU64::new(0),
         total_rejected_requests: AtomicU64::new(0),
+        binding_stats: Default::default(),
     })
 }
 

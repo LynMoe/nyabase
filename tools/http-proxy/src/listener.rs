@@ -222,6 +222,8 @@ where
     // Held until this function returns, whichever way, so the slots cover
     // the whole exchange or upgraded tunnel.
     let route = &authorization.route;
+    let counters = runtime.binding_stats.counters(&route.binding_id);
+    counters.count_request();
     let _container_slot = match runtime.container_slots.try_acquire(
         accepted.peer.ip(),
         &route.container_id,
@@ -236,6 +238,7 @@ where
     };
 
     let is_websocket = matches!(&plan.mode, RequestMode::WebSocket { .. });
+    let _active_relay = counters.open_relay();
     // An upgraded tunnel has no total lifetime, only its own idle timeout
     // (and the per-container cap); an ordinary request is bounded by the body
     // deadline, the request idle timeout and the response lifetime (all

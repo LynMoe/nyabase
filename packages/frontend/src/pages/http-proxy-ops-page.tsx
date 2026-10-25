@@ -14,6 +14,7 @@ import { queryPollInterval } from '../lib/query-lifecycle.js';
 import { ACCESS } from '../lib/route-access.js';
 import { useHasRole } from '../lib/use-role.js';
 import { emptyIfNotFound, httpProxyErrorMessage } from '../lib/http-proxy.js';
+import { HTTP_PROXY_BINDINGS_POLL_MS } from '../components/http-proxy/binding-traffic.js';
 import {
   AllBindingsCard,
   DomainPoolFormDialog,
@@ -54,6 +55,11 @@ export default function HttpProxyOpsPage() {
     queryFn: () => api.get<HttpProxyBindingDto[]>('/http-proxy/bindings?scope=all')
       .catch(emptyIfNotFound<HttpProxyBindingDto[] | null>(null)),
     enabled: canManagePools,
+    refetchInterval: (query) => queryPollInterval(query.state, {
+      activeIntervalMs: HTTP_PROXY_BINDINGS_POLL_MS,
+      // A Backend without the endpoint (404 → null) is not polled.
+      isTerminal: (data) => data === null,
+    }),
     retry: (count, error) => (error instanceof ApiError && error.status === 404 ? false : count < 2),
   });
 

@@ -18,6 +18,11 @@ import { Page, PageHeader } from '../components/layout/page-header.js';
 import { QueryView } from '../components/layout/query-view.js';
 import { SectionCard } from '../components/layout/section-card.js';
 import { queryKeys } from '../lib/query-keys.js';
+import { queryPollInterval } from '../lib/query-lifecycle.js';
+import {
+  BindingTrafficHeads,
+  HTTP_PROXY_BINDINGS_POLL_MS,
+} from '../components/http-proxy/binding-traffic.js';
 import { toast } from '../hooks/use-toast.js';
 import { emptyIfNotFound, httpProxyErrorMessage } from '../lib/http-proxy.js';
 import { BindingFormDialog, BindingRow } from './http-proxy-page/binding-parts.js';
@@ -30,6 +35,9 @@ export default function HttpProxyPage() {
   const bindingsQuery = useQuery({
     queryKey: queryKeys.httpProxy.bindings,
     queryFn: () => api.get<HttpProxyBindingDto[]>('/http-proxy/bindings'),
+    refetchInterval: (query) => queryPollInterval(query.state, {
+      activeIntervalMs: HTTP_PROXY_BINDINGS_POLL_MS,
+    }),
   });
   const poolsQuery = useQuery({
     queryKey: queryKeys.httpProxy.domainPools,
@@ -88,14 +96,14 @@ export default function HttpProxyPage() {
       >
         {(items) => (
           <SectionCard flush>
-          <Table className="min-w-[720px]">
+          <Table className="min-w-[960px]">
             <TableHeader>
               <TableRow>
                 <TableHead>主机名</TableHead>
                 <TableHead>状态</TableHead>
                 <TableHead>容器</TableHead>
                 <TableHead>端口</TableHead>
-                <TableHead>HTTPS</TableHead>
+                <BindingTrafficHeads />
                 <TableHead>域名池</TableHead>
                 <TableHead className="text-right">操作</TableHead>
               </TableRow>

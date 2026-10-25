@@ -1455,6 +1455,16 @@ see a reset and must reconnect); restarting the SSH proxy drops every Jump
 session. Upgrade them in a maintenance window that tenants know about, one
 proxy kind at a time.
 
+Upgrade the Backend before the proxies. A Backend accepts status reports from
+an older HTTP proxy (without per-binding counters; its traffic just is not
+counted), but an older Backend drops a newer proxy's status reports, so that
+proxy is missing from the status page until the Backend catches up. Each HTTP
+proxy process reports its own cumulative per-binding counters under a random
+instance id; the Backend stores them per instance
+(`interaction.http_proxy_binding_counters`), so restarting either side never
+double counts, and folds instances silent for a day into one `archived` row
+per binding.
+
 ### Rotating secrets
 
 Every value below is read at start-up, so a rotation is: change the value in

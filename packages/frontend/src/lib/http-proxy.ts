@@ -3,6 +3,7 @@ import {
   httpProxyWildcardSuffix,
   normalizeHttpProxyHostname,
   type HttpDomainPoolPublicDto,
+  type HttpProxyBindingDto,
   type HttpProxyBindingStatus,
   type HttpProxyWarningReason,
 } from '@nyabase/common';
@@ -35,6 +36,32 @@ export function httpProxyBindingStatusLabel(status: HttpProxyBindingStatus): str
 
 export function httpProxyWarningLabel(reasons: readonly HttpProxyWarningReason[]): string {
   return reasons.map((reason) => WARNING_LABELS[reason] ?? reason).join('；');
+}
+
+/**
+ * What the owner sees of a binding's state. HTTPS on the entry is the
+ * operators' business (domain-pool certificates), so its warning is not shown
+ * to users and alone does not make a binding look unhealthy.
+ */
+export function userVisibleBindingState(
+  binding: Pick<HttpProxyBindingDto, 'status' | 'warningReasons'>,
+): { status: HttpProxyBindingStatus; warning: string } {
+  const reasons = binding.warningReasons.filter((reason) => reason !== 'https_not_configured');
+  const status = binding.status === 'warning' && reasons.length === 0 ? 'ready' : binding.status;
+  return { status, warning: httpProxyWarningLabel(reasons) };
+}
+
+/** Request counts: grouped digits below 10 000, then 万 / 亿 with one decimal. */
+export function formatRequestCount(count: number): string {
+  if (!Number.isFinite(count) || count < 0) return '—';
+  const compact = (value: number, unit: string) => {
+    const text = value < 100 ? value.toFixed(1).replace(/\.0$/, '') : String(Math.round(value));
+    return `${text}${unit}`;
+  };
+  // 9999.95万 would print as 10000万.
+  if (count >= 99_995_000) return compact(count / 1e8, '亿');
+  if (count >= 1e4) return compact(count / 1e4, '万');
+  return Math.round(count).toLocaleString('zh-CN');
 }
 
 /** Treat a missing public domain-pools endpoint as an empty list. */

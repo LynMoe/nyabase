@@ -7,10 +7,11 @@ use futures_util::{SinkExt, StreamExt};
 use proxy_common::backend_tls::validate_backend_ws_url;
 use proxy_common::clock::now_ms;
 use proxy_common::control_link::connect_control as connect_control_link;
+use std::collections::HashSet;
 use std::future::Future;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio::time;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -163,37 +164,49 @@ where
 pub(crate) async fn status_loop(
     config: Config,
     runtime: Arc<Runtime>,
+    store: Arc<SnapshotStore>,
     status_tx: mpsc::Sender<String>,
 ) -> Result<()> {
     let mut interval = time::interval(config.status_interval);
     loop {
         interval.tick().await;
-        let last_generation = runtime.last_snapshot_generation.load(Ordering::Relaxed);
-        let last_at = runtime.last_snapshot_at.load(Ordering::Relaxed);
-        let report = StatusReport {
-            ts: now_ms(),
-            kind: "status",
-            payload: StatusPayload {
-                proxy_id: &runtime.proxy_id,
-                hostname: runtime.hostname.as_deref(),
-                http_listen: &runtime.http_listen,
-                https_listen: runtime.https_listen.as_deref(),
-                uptime_ms: runtime.started_at.elapsed().as_millis() as u64,
-                connected_at: runtime.connected_at.load(Ordering::Relaxed),
-                last_snapshot_generation: (last_generation > 0).then_some(last_generation),
-                last_snapshot_at: (last_at > 0).then_some(last_at),
-                active_connections: runtime.active_connections.load(Ordering::Relaxed),
-                total_requests: runtime.total_requests.load(Ordering::Relaxed),
-                total_rejected_requests: runtime.total_rejected_requests.load(Ordering::Relaxed),
-            },
-        };
-        let encoded =
-            serde_json::to_string(&report).context("failed to encode HTTP proxy status")?;
+        let encoded = encode_status_report(&runtime, &store)?;
         status_tx
             .send(encoded)
             .await
             .context("HTTP proxy control loop stopped receiving status")?;
     }
+}
+
+pub(crate) fn encode_status_report(runtime: &Runtime, store: &SnapshotStore) -> Result<String> {
+    let last_generation = runtime.last_snapshot_generation.load(Ordering::Relaxed);
+    let last_at = runtime.last_snapshot_at.load(Ordering::Relaxed);
+    let snapshot = store.load();
+    let routed: HashSet<&str> = snapshot
+        .iter()
+        .flat_map(|snapshot| snapshot.routes.values())
+        .map(|route| route.route.binding_id.as_str())
+        .collect();
+    let report = StatusReport {
+        ts: now_ms(),
+        kind: "status",
+        payload: StatusPayload {
+            proxy_id: &runtime.proxy_id,
+            instance_id: &runtime.instance_id,
+            hostname: runtime.hostname.as_deref(),
+            http_listen: &runtime.http_listen,
+            https_listen: runtime.https_listen.as_deref(),
+            uptime_ms: runtime.started_at.elapsed().as_millis() as u64,
+            connected_at: runtime.connected_at.load(Ordering::Relaxed),
+            last_snapshot_generation: (last_generation > 0).then_some(last_generation),
+            last_snapshot_at: (last_at > 0).then_some(last_at),
+            active_connections: runtime.active_connections.load(Ordering::Relaxed),
+            total_requests: runtime.total_requests.load(Ordering::Relaxed),
+            total_rejected_requests: runtime.total_rejected_requests.load(Ordering::Relaxed),
+            bindings: runtime.binding_stats.report(&routed, Instant::now()),
+        },
+    };
+    serde_json::to_string(&report).context("failed to encode HTTP proxy status")
 }
 
 #[cfg(test)]

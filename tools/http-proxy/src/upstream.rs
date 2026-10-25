@@ -13,6 +13,7 @@ use crate::request::{
 };
 use crate::runtime::Runtime;
 use crate::snapshot::Route;
+use crate::stats::Metered;
 use anyhow::{anyhow, Context, Result};
 use std::time::Duration;
 use tokio::io::{self, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -194,7 +195,7 @@ pub(crate) async fn connect_upstream<S: AsyncWrite + Unpin>(
     inbound: &mut S,
     runtime: &Runtime,
     route: &Route,
-) -> Result<TcpStream> {
+) -> Result<Metered<TcpStream>> {
     let upstream_addr = format!("{}:{}", route.routed_ip, route.target_port);
     match time::timeout(
         UPSTREAM_CONNECT_DEADLINE,
@@ -202,7 +203,10 @@ pub(crate) async fn connect_upstream<S: AsyncWrite + Unpin>(
     )
     .await
     {
-        Ok(Ok(stream)) => Ok(stream),
+        Ok(Ok(stream)) => Ok(Metered::new(
+            stream,
+            runtime.binding_stats.counters(&route.binding_id),
+        )),
         Ok(Err(error)) => {
             reject(inbound, runtime, "503 Service Unavailable").await?;
             Err(error.into())

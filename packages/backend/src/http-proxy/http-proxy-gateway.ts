@@ -12,6 +12,7 @@ import {
   type HttpProxyStatusReport,
 } from '@nyabase/common';
 import { HttpProxySnapshotService } from './http-proxy-snapshot.service.js';
+import { HttpProxyTrafficService } from './http-proxy-traffic.service.js';
 import { ProxySnapshotNotifierService } from '../proxy-snapshots/proxy-snapshot-notifier.service.js';
 import { snapshotBuildFailureMessage } from '../proxy-snapshots/snapshot-build-failure.js';
 import { ProxyControlHeartbeat } from '../proxy-snapshots/proxy-control-heartbeat.js';
@@ -65,6 +66,7 @@ export class HttpProxyGateway implements OnModuleInit, OnModuleDestroy {
     private service: HttpProxySnapshotService,
     config: NyabaseConfigService,
     private snapshotNotifier: ProxySnapshotNotifierService,
+    private traffic: HttpProxyTrafficService,
   ) {
     this.expectedTokenDigest = configuredProxyTokenDigest(
       config.get<string>('http.proxyToken'),
@@ -328,7 +330,11 @@ export class HttpProxyGateway implements OnModuleInit, OnModuleDestroy {
     }
     if (parsed.kind === 'status') {
       const status = zHttpProxyStatusReport.safeParse(parsed.payload);
-      if (status.success) this.latestStatus.set(ws, status.data);
+      if (status.success && this.clients.has(ws)) {
+        // Per-binding counters go to the traffic statistics, not the status page.
+        this.latestStatus.set(ws, { ...status.data, bindings: undefined });
+        this.traffic.record(ws, status.data);
+      }
     }
   }
 
@@ -349,10 +355,7 @@ export class HttpProxyGateway implements OnModuleInit, OnModuleDestroy {
         'HTTP proxy client terminated because the next snapshot exceeds the outbound buffer limit; '
         + `bufferedAmount=${client.bufferedAmount} snapshotBytes=${encodedBytes}`,
       );
-      this.clients.delete(client);
-      this.latestStatus.delete(client);
-      this.latestSentSnapshot.delete(client);
-      this.latestAck.delete(client);
+      this.removeAdmittedClient(client);
       client.terminate();
       return false;
     }
@@ -373,6 +376,7 @@ export class HttpProxyGateway implements OnModuleInit, OnModuleDestroy {
   }
 
   private removeAdmittedClient(client: WebSocket): void {
+    this.traffic.forget(client);
     this.clients.delete(client);
     this.latestStatus.delete(client);
     this.latestSentSnapshot.delete(client);

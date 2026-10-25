@@ -1,4 +1,5 @@
 use crate::snapshot::{DomainPool, Route};
+use crate::stats::BindingStatus;
 use proxy_common::clock::now_ms;
 use serde::{Deserialize, Serialize};
 
@@ -31,6 +32,8 @@ pub(crate) struct StatusReport<'a> {
 pub(crate) struct StatusPayload<'a> {
     #[serde(rename = "proxyId")]
     pub(crate) proxy_id: &'a str,
+    #[serde(rename = "instanceId")]
+    pub(crate) instance_id: &'a str,
     pub(crate) hostname: Option<&'a str>,
     #[serde(rename = "httpListen")]
     pub(crate) http_listen: &'a str,
@@ -50,6 +53,9 @@ pub(crate) struct StatusPayload<'a> {
     pub(crate) total_requests: u64,
     #[serde(rename = "totalRejectedRequests")]
     pub(crate) total_rejected_requests: u64,
+    /// Cumulative per-binding counters since process start; the Backend
+    /// keys them by `instanceId`.
+    pub(crate) bindings: Vec<BindingStatus>,
 }
 
 pub(crate) fn control_ack_message(generation: u64) -> String {

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   MAX_HTTP_PROXY_ACTIVE_CONNECTIONS,
+  MAX_HTTP_PROXY_ROUTES,
   MAX_SSH_PROXY_STATUS_CONNECTIONS,
   zHttpProxyStatusReport,
   zSshProxyStatusReport,
@@ -95,5 +96,66 @@ describe('HTTP proxy status report', () => {
       ...status,
       activeConnections: MAX_HTTP_PROXY_ACTIVE_CONNECTIONS + 1,
     }).success).toBe(false);
+  });
+
+  const httpStatus = {
+    proxyId: 'http-proxy-1',
+    hostname: null,
+    httpListen: '0.0.0.0:80',
+    httpsListen: null,
+    uptimeMs: 1,
+    connectedAt: 1,
+    lastSnapshotGeneration: null,
+    lastSnapshotAt: null,
+    activeConnections: 0,
+    totalRequests: 0,
+    totalRejectedRequests: 0,
+  };
+  const counters = {
+    bindingId: '00000000-0000-4000-8000-000000000001',
+    requests: 3,
+    activeConnections: 1,
+    rxBytes: 100,
+    txBytes: 2_000,
+  };
+
+  it('accepts a report from a proxy without per-binding counters', () => {
+    const parsed = zHttpProxyStatusReport.safeParse(httpStatus);
+    expect(parsed.success && parsed.data.bindings).toBeUndefined();
+  });
+
+  it('accepts per-binding counters up to the route bound', () => {
+    expect(zHttpProxyStatusReport.safeParse({
+      ...httpStatus,
+      instanceId: '0123456789abcdef0123456789abcdef',
+      bindings: [counters],
+    }).success).toBe(true);
+    expect(zHttpProxyStatusReport.safeParse({
+      ...httpStatus,
+      instanceId: '0123456789abcdef0123456789abcdef',
+      bindings: Array.from({ length: MAX_HTTP_PROXY_ROUTES }, () => counters),
+    }).success).toBe(true);
+    expect(zHttpProxyStatusReport.safeParse({
+      ...httpStatus,
+      instanceId: '0123456789abcdef0123456789abcdef',
+      bindings: Array.from({ length: MAX_HTTP_PROXY_ROUTES + 1 }, () => counters),
+    }).success).toBe(false);
+  });
+
+  it('rejects malformed counters and instance ids', () => {
+    for (const bad of [
+      { ...counters, requests: -1 },
+      { ...counters, rxBytes: 1.5 },
+      { ...counters, extra: true },
+      { ...counters, activeConnections: MAX_HTTP_PROXY_ACTIVE_CONNECTIONS + 1 },
+    ]) {
+      expect(zHttpProxyStatusReport.safeParse({
+        ...httpStatus,
+        instanceId: 'abcdef0123456789',
+        bindings: [bad],
+      }).success).toBe(false);
+    }
+    expect(zHttpProxyStatusReport.safeParse({ ...httpStatus, instanceId: 'a:b' }).success)
+      .toBe(false);
   });
 });

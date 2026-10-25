@@ -30,10 +30,11 @@ import {
   httpProxyBindingStatusLabel,
   httpProxyDomainRootLabel,
   httpProxyErrorMessage,
-  httpProxyWarningLabel,
   isHttpProxyPrefixLabel,
   splitHttpProxyHostname,
+  userVisibleBindingState,
 } from '../../lib/http-proxy.js';
+import { BindingTrafficCells } from '../../components/http-proxy/binding-traffic.js';
 import { Badge } from '../../components/ui/badge.js';
 import { TableCell, TableRow } from '../../components/ui/table.js';
 
@@ -133,9 +134,17 @@ function BindingFormBody({ binding, pools, open, onOpenChange }: BindingFormDial
         </DialogHeader>
         <div className="space-y-3">
           {pools.length === 0 ? (
-            <p className="text-sm text-muted-foreground">
-              当前没有已启用的通配域名，请联系管理员在「HTTP 代理」中创建。
-            </p>
+            <FormField
+              id="http-proxy-domain-root"
+              label="域名根"
+              hint="管理员尚未配置可用的通配域名，配置后才能发布。"
+            >
+              <Select disabled>
+                <SelectTrigger id="http-proxy-domain-root">
+                  <SelectValue placeholder="没有可用的域名" />
+                </SelectTrigger>
+              </Select>
+            </FormField>
           ) : (
             <>
               <FormField id="http-proxy-domain-root" label="域名根">
@@ -171,25 +180,12 @@ function BindingFormBody({ binding, pools, open, onOpenChange }: BindingFormDial
               </FormField>
             </>
           )}
-          <FormField id="http-proxy-container" label="容器">
-            <Select value={containerId || undefined} onValueChange={edit(setContainerId)}>
-              <SelectTrigger id="http-proxy-container">
-                <SelectValue placeholder={containersQuery.isLoading ? '加载容器…' : '选择容器'} />
-              </SelectTrigger>
-              <SelectContent>
-                {containers.map((container) => (
-                  <SelectItem key={container.id} value={container.id}>
-                    {container.name} · {container.serverName}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            {!containersQuery.isLoading && containers.length === 0 && (
-              <p className="text-xs text-muted-foreground">
-                还没有容器。<Link to="/containers" className="underline">去创建容器</Link>
-              </p>
-            )}
-          </FormField>
+          <ContainerSelect
+            containerId={containerId}
+            containers={containers}
+            loading={containersQuery.isLoading}
+            onChange={edit(setContainerId)}
+          />
           <FormField id="http-proxy-port" label="目标端口">
             <Input
               id="http-proxy-port"
@@ -213,6 +209,45 @@ function BindingFormBody({ binding, pools, open, onOpenChange }: BindingFormDial
   );
 }
 
+/** The container picker; with nothing to pick it is disabled and says why. */
+function ContainerSelect({
+  containerId,
+  containers,
+  loading,
+  onChange,
+}: {
+  containerId: string;
+  containers: ContainerDto[];
+  loading: boolean;
+  onChange: (value: string) => void;
+}) {
+  const empty = !loading && containers.length === 0;
+  return (
+    <FormField
+      id="http-proxy-container"
+      label="容器"
+      hint={empty ? (
+        <>还没有容器，创建后才能发布。<Link to="/containers" className="underline">去创建容器</Link></>
+      ) : undefined}
+    >
+      <Select value={containerId || undefined} onValueChange={onChange} disabled={loading || empty}>
+        <SelectTrigger id="http-proxy-container">
+          <SelectValue placeholder={loading ? '加载容器…' : empty ? '没有可用的容器' : '选择容器'} />
+        </SelectTrigger>
+        {!empty && (
+          <SelectContent>
+            {containers.map((container) => (
+              <SelectItem key={container.id} value={container.id}>
+                {container.name} · {container.serverName}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        )}
+      </Select>
+    </FormField>
+  );
+}
+
 export function BindingRow({
   binding,
   onEdit,
@@ -222,21 +257,19 @@ export function BindingRow({
   onEdit: () => void;
   onDelete: () => void;
 }) {
-  const warning = httpProxyWarningLabel(binding.warningReasons);
+  const { status, warning } = userVisibleBindingState(binding);
   return (
     <TableRow className="cursor-pointer" onClick={onEdit}>
       <TableCell className="font-mono">{binding.hostname}</TableCell>
       <TableCell className="whitespace-normal">
-        <Badge variant={binding.status === 'ready' ? 'success' : binding.status === 'warning' ? 'warning' : 'secondary'}>
-          {httpProxyBindingStatusLabel(binding.status)}
+        <Badge variant={status === 'ready' ? 'success' : status === 'warning' ? 'warning' : 'secondary'}>
+          {httpProxyBindingStatusLabel(status)}
         </Badge>
-        {(warning || binding.warningMessage) ? (
-          <p className="mt-1 text-xs text-destructive">{warning || binding.warningMessage}</p>
-        ) : null}
+        {warning ? <p className="mt-1 text-xs text-destructive">{warning}</p> : null}
       </TableCell>
       <TableCell>{binding.containerName ?? binding.containerId}</TableCell>
       <TableCell>{binding.targetPort}</TableCell>
-      <TableCell>{binding.entryHttpsEnabled ? '已启用' : '未启用'}</TableCell>
+      <BindingTrafficCells stats={binding.stats} />
       <TableCell className="font-mono">{binding.domainPool}</TableCell>
       <TableCell className="text-right" onClick={(event) => event.stopPropagation()}>
         <div className="flex justify-end gap-2">

@@ -1,5 +1,6 @@
 use crate::config::ConnectionLimits;
 use crate::container_limit::ContainerLimiter;
+use crate::stats::BindingStats;
 use proxy_common::conn_limit::ConnectionPermit;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -7,6 +8,8 @@ use std::time::Instant;
 
 pub(crate) struct Runtime {
     pub(crate) proxy_id: String,
+    /// Random per process; see `stats::new_instance_id`.
+    pub(crate) instance_id: String,
     pub(crate) hostname: Option<String>,
     pub(crate) http_listen: String,
     pub(crate) https_listen: Option<String>,
@@ -19,6 +22,7 @@ pub(crate) struct Runtime {
     pub(crate) active_connections: AtomicU64,
     pub(crate) total_requests: AtomicU64,
     pub(crate) total_rejected_requests: AtomicU64,
+    pub(crate) binding_stats: BindingStats,
 }
 
 pub(crate) struct ActiveConnectionGuard {

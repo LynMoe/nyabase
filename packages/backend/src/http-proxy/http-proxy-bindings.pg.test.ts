@@ -13,6 +13,7 @@ import { testActor } from '../iam/actor.test-helper.js';
 import { withPostgresTestDatabase } from '../platform/persistence-pg/postgres-test-harness.js';
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
 import { HttpProxyBindingsService } from './http-proxy-bindings.service.js';
+import { HttpProxyTrafficService } from './http-proxy-traffic.service.js';
 
 const describePg = process.env.NYABASE_TEST_DATABASE_URL ? describe : describe.skip;
 
@@ -23,6 +24,7 @@ describePg('HttpProxyBindingsService ownership (PostgreSQL)', () => {
         database,
         new PgTransactionManager(database),
         { append: async () => undefined } as never,
+        new HttpProxyTrafficService(database),
       );
       const ownerId = await seedUser(database, 'binding-owner');
       const otherId = await seedUser(database, 'binding-other');
@@ -68,6 +70,7 @@ describePg('HttpProxyBindingsService ownership (PostgreSQL)', () => {
         database,
         new PgTransactionManager(database),
         { append: async () => undefined } as never,
+        new HttpProxyTrafficService(database),
       );
       const ownerId = await seedUser(database, 'binding-editor');
       const otherId = await seedUser(database, 'binding-bystander');

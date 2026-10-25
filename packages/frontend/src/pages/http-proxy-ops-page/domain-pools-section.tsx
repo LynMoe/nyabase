@@ -14,6 +14,7 @@ import { Button } from '../../components/ui/button.js';
 import { SectionCard } from '../../components/layout/section-card.js';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../../components/ui/table.js';
 import { TechnicalId } from '../../components/refs/technical-id.js';
+import { BindingTrafficCells, BindingTrafficHeads } from '../../components/http-proxy/binding-traffic.js';
 import {
   httpProxyBindingStatusLabel,
   httpProxyErrorMessage,
@@ -119,7 +120,7 @@ export function AllBindingsCard({ bindings, onDelete }: {
       {bindings.length === 0 ? (
         <p className="text-sm text-muted-foreground">暂无用户发布绑定。</p>
       ) : (
-        <Table className="min-w-[720px]">
+        <Table className="min-w-[1040px]">
           <TableHeader>
             <TableRow>
               <TableHead>所有者</TableHead>
@@ -128,6 +129,7 @@ export function AllBindingsCard({ bindings, onDelete }: {
               <TableHead>端口</TableHead>
               <TableHead>HTTPS</TableHead>
               <TableHead>状态</TableHead>
+              <BindingTrafficHeads />
               <TableHead className="w-12" />
             </TableRow>
           </TableHeader>
@@ -147,6 +149,7 @@ export function AllBindingsCard({ bindings, onDelete }: {
                     <p className="mt-1 text-xs text-destructive">{httpProxyWarningLabel(binding.warningReasons)}</p>
                   )}
                 </TableCell>
+                <BindingTrafficCells stats={binding.stats} />
                 <TableCell>
                   <Button variant="ghost" size="icon" className="h-8 w-8 text-muted-foreground" aria-label="删除发布绑定" onClick={() => onDelete(binding)}>
                     <Trash2 className="h-4 w-4" />

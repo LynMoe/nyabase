@@ -18,6 +18,7 @@ mod relay;
 mod request;
 mod runtime;
 mod snapshot;
+mod stats;
 #[cfg(test)]
 mod test_support;
 mod upstream;
@@ -28,6 +29,7 @@ use crate::control::{control_loop, snapshot_lease_loop, status_loop};
 use crate::listener::http_listener;
 use crate::runtime::Runtime;
 use crate::snapshot::SnapshotStore;
+use crate::stats::new_instance_id;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -42,6 +44,7 @@ async fn main() -> Result<()> {
     let store = Arc::new(SnapshotStore::default());
     let runtime = Arc::new(Runtime {
         proxy_id: format!("http-proxy-{}", now_ms()),
+        instance_id: new_instance_id(),
         hostname: std::env::var("HOSTNAME").ok(),
         http_listen: config.http_listen.clone(),
         https_listen: config.https_listen.clone(),
@@ -54,6 +57,7 @@ async fn main() -> Result<()> {
         active_connections: AtomicU64::new(0),
         total_requests: AtomicU64::new(0),
         total_rejected_requests: AtomicU64::new(0),
+        binding_stats: Default::default(),
     });
     let (status_tx, status_rx) = mpsc::channel(32);
     // HTTP and HTTPS listeners share one pool so the caps are per process.
@@ -68,7 +72,7 @@ async fn main() -> Result<()> {
     spawn_supervised(
         &mut tasks,
         "HTTP proxy status loop",
-        status_loop(config.clone(), runtime.clone(), status_tx),
+        status_loop(config.clone(), runtime.clone(), store.clone(), status_tx),
     );
     spawn_supervised(
         &mut tasks,

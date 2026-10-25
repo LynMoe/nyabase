@@ -9,6 +9,7 @@ import { HttpProxyGateway } from './http-proxy-gateway.js';
 import { HttpDomainPoolsService } from './http-domain-pools.service.js';
 import { HttpProxyBindingsService } from './http-proxy-bindings.service.js';
 import { HttpProxySnapshotService } from './http-proxy-snapshot.service.js';
+import { HttpProxyTrafficService } from './http-proxy-traffic.service.js';
 
 @Module({
   imports: [
@@ -18,6 +19,7 @@ import { HttpProxySnapshotService } from './http-proxy-snapshot.service.js';
     HttpProxyBindingsService,
     HttpDomainPoolsService,
     HttpProxySnapshotService,
+    HttpProxyTrafficService,
     HttpProxyGateway,
   ],
   controllers: [HttpProxyController, HttpProxyDomainPoolsController, HttpProxyStatusController],

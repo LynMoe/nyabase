@@ -59,9 +59,26 @@ export interface HttpProxySnapshotStateTable {
   updated_at: GeneratedTimestamp;
 }
 
+export interface HttpProxyCounterInstanceTable {
+  proxy_instance: string;
+  last_seen_at: Timestamp;
+  archived_at: Timestamp | null;
+}
+
+export interface HttpProxyBindingCountersTable {
+  proxy_instance: string;
+  binding_id: string;
+  requests: GeneratedBigIntColumn;
+  rx_bytes: GeneratedBigIntColumn;
+  tx_bytes: GeneratedBigIntColumn;
+  updated_at: GeneratedTimestamp;
+}
+
 export interface HttpProxyDatabase {
   'interaction.http_domain_pools': HttpDomainPoolTable;
   'interaction.http_proxy_bindings': HttpProxyBindingTable;
   'interaction.http_hostname_reservations': HttpHostnameReservationTable;
   'interaction.http_proxy_snapshot_state': HttpProxySnapshotStateTable;
+  'interaction.http_proxy_counter_instances': HttpProxyCounterInstanceTable;
+  'interaction.http_proxy_binding_counters': HttpProxyBindingCountersTable;
 }

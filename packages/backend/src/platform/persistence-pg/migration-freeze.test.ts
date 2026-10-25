@@ -11,6 +11,7 @@ import { discoverSqlMigrations } from './migrator.js';
  */
 const RELEASED_MIGRATION_CHECKSUMS: Readonly<Record<string, string>> = {
   '000001_initial': 'c6a62ecdfd510dfddd2471228a15a4feaa175b18ba1c59d20901454d9a0c8b2b',
+  '000002_http-proxy-binding-counters': 'a795b512b553392498b6fd5b2a946f3f9ebc518bacc3e711f99c28276eb73af9',
 };
 
 describe('released SQL migrations', () => {

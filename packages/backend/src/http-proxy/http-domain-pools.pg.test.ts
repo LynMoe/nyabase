@@ -14,6 +14,7 @@ import { withPostgresTestDatabase } from '../platform/persistence-pg/postgres-te
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
 import { HttpDomainPoolsService } from './http-domain-pools.service.js';
 import { HttpProxyBindingsService } from './http-proxy-bindings.service.js';
+import { HttpProxyTrafficService } from './http-proxy-traffic.service.js';
 
 const describePg = process.env.NYABASE_TEST_DATABASE_URL ? describe : describe.skip;
 
@@ -35,7 +36,12 @@ describePg('HTTP domain pools stay disjoint (PostgreSQL)', () => {
         { keyEncryptionSecret: () => 'k'.repeat(32) } as never,
         audit,
       );
-      const bindings = new HttpProxyBindingsService(database, transactions, audit);
+      const bindings = new HttpProxyBindingsService(
+        database,
+        transactions,
+        audit,
+        new HttpProxyTrafficService(database),
+      );
       const operatorId = await seedUser(database, 'pool-operator', undefined, Role.Operator);
       const ownerId = await seedUser(database, 'pool-tenant');
       const serverId = await seedServer(database);
