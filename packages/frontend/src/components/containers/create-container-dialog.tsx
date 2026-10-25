@@ -56,7 +56,7 @@ function CreateContainerBody({ open, onOpenChange, defaultServerId }: CreateCont
       <DialogContent data-testid="container-create-canonical">
         <DialogHeader>
           <DialogTitle>新建容器</DialogTitle>
-          <DialogDescription>创建后可通过 SSH 跳板机登录，规格之后也能调整。</DialogDescription>
+          <DialogDescription>创建后可通过 SSH 登录，规格之后也能调整。</DialogDescription>
         </DialogHeader>
         <form
           className="space-y-4"

@@ -61,7 +61,7 @@ export function SshStatusSections({ status }: { status: SshProxyAdminStatus }) {
               <TableRow>
                 <TableHead>代理</TableHead>
                 <TableHead>监听</TableHead>
-                <TableHead>连接</TableHead>
+                <TableHead>连接（当前 / 累计）</TableHead>
                 <TableHead>带宽</TableHead>
                 <TableHead>流量</TableHead>
                 <TableHead>快照</TableHead>

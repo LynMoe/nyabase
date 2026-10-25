@@ -215,7 +215,35 @@ export function formatSshClientConfig(input: {
 }): string {
   return [
     `Host *.${input.hostSuffix}`,
+    '  User root',
     `  ProxyJump ${formatSshProxyJump(input)}`,
+  ].join('\n');
+}
+
+/**
+ * The one-time client setup as a request to an AI agent on the user's
+ * machine: a short instruction, then the ssh_config block and the
+ * known_hosts lines verbatim, and a non-interactive login to check it.
+ */
+export function formatSshAgentSetupPrompt(input: {
+  sshConfig: string;
+  knownHosts: string;
+  hostSuffix: string;
+  /** `[user@]host` to try once the setup is in place. */
+  verifyTarget: string;
+}): string {
+  return [
+    '帮我把下面的 SSH 配置配置到本机，不要改动其他已有条目：',
+    '',
+    `1. 把这段加到 ~/.ssh/config，放在任何 \`Host *\` 段之前；已有 \`Host *.${input.hostSuffix}\` 段就替换它：`,
+    '',
+    input.sshConfig,
+    '',
+    `2. 把这几行加到 ~/.ssh/known_hosts；已有同一主机或 \`*.${input.hostSuffix}\` 的旧行就替换：`,
+    '',
+    input.knownHosts,
+    '',
+    `3. 运行 \`ssh -o BatchMode=yes ${input.verifyTarget} true\` 验证能直接登录，不应出现主机指纹确认。`,
   ].join('\n');
 }
 

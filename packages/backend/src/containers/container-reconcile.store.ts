@@ -576,6 +576,21 @@ export class ContainerReconcileStore {
       .execute();
   }
 
+  /**
+   * The full scan saw the instance as the route already describes it: the
+   * observation is fresh again. A route that disagrees keeps its old time
+   * until the reconciler rewrites it.
+   */
+  async confirmRouteObservation(containerId: string, instanceName: string, status: string): Promise<void> {
+    await this.database
+      .updateTable('control.container_ssh_routes')
+      .set({ observed_at: sql<Date>`clock_timestamp()` })
+      .where('container_id', '=', containerId)
+      .where('instance_name', '=', instanceName)
+      .where('instance_status', '=', status)
+      .execute();
+  }
+
   /** Record the CPU set the instance is now pinned to. */
   async recordCpuSet(containerId: string, cpus: readonly number[]): Promise<void> {
     await this.database

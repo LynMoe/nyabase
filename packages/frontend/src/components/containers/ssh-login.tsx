@@ -1,7 +1,12 @@
 import { useState } from 'react';
+import { useQuery } from '@tanstack/react-query';
 import { Copy, FileCode, KeyRound } from 'lucide-react';
-import { Link } from '@tanstack/react-router';
-import { type ContainerDto, type ListScope, formatSshClientConfig, formatSshProxyJump } from '@nyabase/common';
+import {
+  type ContainerDto,
+  type ListScope,
+  type SshClientConfigDto,
+  formatSshAgentSetupPrompt,
+} from '@nyabase/common';
 import { Button } from '../ui/button.js';
 import { Hint } from '../ui/hint.js';
 import { SectionCard } from '../layout/section-card.js';
@@ -10,7 +15,6 @@ import { StatusBadge } from '../layout/status-badge.js';
 import { sshStatusLabel } from '../../lib/status-labels.js';
 import { SshKeyNotice } from '../ssh/ssh-key-notice.js';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '../ui/dialog.js';
-import { usePublicSettings } from '../../hooks/use-public-settings.js';
 import { toast } from '../../hooks/use-toast.js';
 import { copyOneTimeSecret } from '../../lib/one-time-secret.js';
 import { useAuthStore } from '../../store/auth.js';
@@ -18,15 +22,16 @@ import { useActionMutation } from '../../hooks/use-action-mutation.js';
 import { useMySshKeys } from '../../hooks/use-my-ssh-keys.js';
 import { api } from '../../lib/api.js';
 import { useInvalidateContainer } from '../../lib/container-queries.js';
+import { queryKeys } from '../../lib/query-keys.js';
 import { scopedPath } from '../../lib/scoped-paths.js';
 
-/** How to log in over the jump host, the SSH state and the repair action. */
+/** The login command, the one-time client setup, the SSH state and the repair action. */
 export function SshLoginCard({ container, scope }: { container: ContainerDto; scope: ListScope }) {
   const [configOpen, setConfigOpen] = useState(false);
   const authUser = useAuthStore((state) => state.user);
   const ownContainer = scope !== 'all' || (authUser !== null && container.ownerId === authUser.id);
   const sshKeys = useMySshKeys(ownContainer);
-  const login = useSshLogin(container);
+  const login = useSshLogin(container, ownContainer);
   const invalidate = useInvalidateContainer(scope, container.id);
   const repairSsh = useActionMutation({
     mutationFn: () => api.post<{ woken: boolean }>(scopedPath(`/containers/${container.id}/actions/repair-ssh`, scope)),
@@ -35,8 +40,7 @@ export function SshLoginCard({ container, scope }: { container: ContainerDto; sc
     onSuccess: invalidate,
   });
   const repairPending = repairSsh.isPending;
-  const { proxyHost, jumpCommand, configSnippet, copyText } = login;
-  const hostName = container.ssh.hostName;
+  const { loginCommand, setupPrompt, unavailable, copyText } = login;
   const sshReady = container.ssh.ready;
   const repairDisabled = repairPending || container.lifecyclePhase !== 'active';
   return (
@@ -58,36 +62,38 @@ export function SshLoginCard({ container, scope }: { container: ContainerDto; sc
           <p className="text-sm text-muted-foreground">
             这是 {container.ownerName ?? '其他用户'} 的容器。SSH 代理只按公钥持有者自己的容器解析名字，登录命令只对所有者有效。
           </p>
-        ) : jumpCommand ? (
+        ) : loginCommand ? (
           <div className="flex items-stretch gap-2">
             <pre
               className="min-w-0 flex-1 overflow-x-auto whitespace-pre rounded-md border bg-muted/50 px-3 py-2 font-mono text-sm"
-              data-testid="ssh-jump-command"
+              data-testid="ssh-login-command"
             >
-              {jumpCommand}
+              {loginCommand}
             </pre>
             <Button
               variant="outline"
               className="h-auto shrink-0"
-              onClick={() => { void copyText(jumpCommand, '登录命令已复制'); }}
+              onClick={() => { void copyText(loginCommand, '登录命令已复制'); }}
               data-testid="open-ssh-login"
             >
               <Copy className="h-4 w-4" />复制
             </Button>
           </div>
         ) : (
-          <p className="text-sm text-muted-foreground">
-            {!proxyHost ? '管理员尚未配置 SSH 代理的公网地址，暂时无法生成登录命令。' : '容器还没有分配 IP，启动后即可登录。'}
-          </p>
+          <p className="text-sm text-muted-foreground">{unavailable}</p>
         )}
+        {ownContainer && setupPrompt ? (
+          <p className="text-xs text-muted-foreground">
+            首次登录前先在本机做一次「一次性 SSH 配置」：复制给本机的 AI agent 即可，以后新建的容器不用再配。
+          </p>
+        ) : null}
         <FieldGrid>
-          <Field label="主机名（经 SSH 代理解析）" value={hostName} mono />
           <Field label="登录用户" value={container.ssh.loginUser} mono />
           <Field label="容器 IP（内网）" value={container.routedIp} mono />
         </FieldGrid>
         {container.ssh.lastError ? <p className="break-all text-xs text-destructive">{sshErrorLabel(container.ssh.lastError)}</p> : null}
         <div className="flex flex-wrap gap-2">
-          <Button size="sm" variant="ghost" disabled={!configSnippet || !ownContainer} onClick={() => setConfigOpen(true)}>
+          <Button size="sm" variant="ghost" disabled={!setupPrompt || !ownContainer} onClick={() => setConfigOpen(true)}>
             <FileCode className="h-4 w-4" />一次性 SSH 配置
           </Button>
           <Hint
@@ -100,13 +106,7 @@ export function SshLoginCard({ container, scope }: { container: ContainerDto; sc
           </Hint>
         </div>
       </div>
-      <SshConfigDialog
-        open={configOpen}
-        onOpenChange={setConfigOpen}
-        hostName={hostName}
-        loginUser={container.ssh.loginUser || 'root'}
-        login={login}
-      />
+      <SshConfigDialog open={configOpen} onOpenChange={setConfigOpen} login={login} />
     </SectionCard>
   );
 }
@@ -114,37 +114,37 @@ export function SshLoginCard({ container, scope }: { container: ContainerDto; sc
 function SshConfigDialog({
   open,
   onOpenChange,
-  hostName,
-  loginUser,
   login,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  hostName: string;
-  loginUser: string;
   login: SshLogin;
 }) {
-  const { configSnippet, copyText } = login;
+  const { setupPrompt, copyText } = login;
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent>
         <DialogHeader>
           <DialogTitle>一次性 SSH 配置</DialogTitle>
           <DialogDescription>
-            加入本机 <code className="font-mono">~/.ssh/config</code> 后，你的所有容器都可以直接
-            {' '}<code className="font-mono">ssh {loginUser}@{hostName}</code> 登录，以后新建的容器也不用再配置。
+            把下面整段交给本机的 AI agent（Claude Code、Codex 等），它会写入
+            {' '}<code className="font-mono">~/.ssh/config</code> 和 <code className="font-mono">~/.ssh/known_hosts</code>。
+            配置一次后，你的所有容器都能直接登录，也不会再出现主机指纹确认。
           </DialogDescription>
         </DialogHeader>
-        {configSnippet ? (
+        {setupPrompt ? (
           <div className="space-y-3">
-            <pre className="overflow-x-auto rounded-md border bg-muted/50 px-3 py-2 font-mono text-xs" data-testid="ssh-jump-config">{configSnippet}</pre>
-            <Button variant="outline" onClick={() => { void copyText(configSnippet, 'SSH 配置已复制'); }}>
+            <pre
+              className="max-h-80 overflow-auto whitespace-pre rounded-md border bg-muted/50 px-3 py-2 font-mono text-xs"
+              data-testid="ssh-agent-setup"
+            >
+              {setupPrompt}
+            </pre>
+            <Button variant="outline" onClick={() => { void copyText(setupPrompt, 'SSH 配置说明已复制'); }}>
               <Copy className="h-4 w-4" />复制
             </Button>
-            <p className="text-sm text-muted-foreground">
-              想免去首次连接的主机指纹确认，到
-              {' '}<Link to="/profile" onClick={() => onOpenChange(false)} className="font-medium underline underline-offset-4">个人资料</Link>
-              {' '}复制 known_hosts 行。
+            <p className="text-xs text-muted-foreground">
+              管理员修改主机名后缀、轮换代理主机密钥或重置证书 CA 后需要重新配置。
             </p>
           </div>
         ) : null}
@@ -154,27 +154,39 @@ function SshConfigDialog({
 }
 
 /**
- * The ways to reach a container over the SSH jump host: the one-line command
- * (null until the proxy address and the container's IP are known) and the
- * one-time `~/.ssh/config` block for all of the owner's containers.
+ * The ways to reach one of your containers: `ssh <name>.<suffix>` (null until
+ * the proxy address and the container's IP are known) and the one-time client
+ * setup, worded for an AI agent, that makes that command work for all of them.
  */
-export function useSshLogin(container: ContainerDto) {
-  const { settings } = usePublicSettings();
+export function useSshLogin(container: ContainerDto, ownContainer: boolean) {
   const authUser = useAuthStore((state) => state.user);
-  const username = container.ownerName ?? authUser?.username ?? '<username>';
-  const host = container.ssh.proxyHost?.trim() || settings.sshProxy?.host || null;
-  const port = container.ssh.proxyPort ?? settings.sshProxy?.port ?? 22;
-  // `<name>.<suffix>`, and container names never contain a dot.
-  const hostSuffix = container.ssh.hostName.split('.').slice(1).join('.');
-  const proxyHost = host ? (port !== 22 ? `${host}:${port}` : host) : null;
+  const userId = authUser?.id ?? null;
+  const query = useQuery({
+    queryKey: queryKeys.sshClientConfig(userId ?? ''),
+    queryFn: () => api.get<SshClientConfigDto>(`/users/${userId}/ssh-client-config`),
+    enabled: ownContainer && userId !== null,
+    staleTime: 60_000,
+  });
+  const config = query.data;
   const loginUser = container.ssh.loginUser || 'root';
-  // The proxy resolves the name among the owner's containers; no address to copy.
-  const jumpCommand = host && container.routedIp
-    ? `ssh -J ${formatSshProxyJump({ username, host, port })} ${loginUser}@${container.ssh.hostName}`
+  // The client config defaults to root, so only another login user needs naming.
+  const target = loginUser === 'root' ? container.ssh.hostName : `${loginUser}@${container.ssh.hostName}`;
+  const setupPrompt = config?.sshConfig && config.knownHosts
+    ? formatSshAgentSetupPrompt({
+      sshConfig: config.sshConfig,
+      knownHosts: config.knownHosts,
+      hostSuffix: config.hostSuffix,
+      verifyTarget: target,
+    })
     : null;
-  const configSnippet = host && hostSuffix
-    ? formatSshClientConfig({ username, host, port, hostSuffix })
-    : null;
+  const loginCommand = setupPrompt && container.routedIp ? `ssh ${target}` : null;
+  const unavailable = query.isLoading
+    ? '正在加载 SSH 配置…'
+    : query.isError
+      ? 'SSH 配置加载失败，请稍后刷新。'
+      : !setupPrompt
+        ? '管理员尚未配置 SSH 代理的公网地址，暂时无法生成登录命令。'
+        : '容器还没有分配 IP，启动后即可登录。';
   const copyText = async (value: string, title: string) => {
     const ok = await copyOneTimeSecret(value);
     toast({
@@ -183,7 +195,7 @@ export function useSshLogin(container: ContainerDto) {
       variant: ok ? 'default' : 'destructive',
     });
   };
-  return { proxyHost, jumpCommand, configSnippet, copyText };
+  return { loginCommand, setupPrompt, unavailable, copyText };
 }
 
 export type SshLogin = ReturnType<typeof useSshLogin>;

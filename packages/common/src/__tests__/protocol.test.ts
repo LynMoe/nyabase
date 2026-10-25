@@ -36,6 +36,7 @@ import {
   zPutServerGrantRequest,
   zSshProxyInstanceRouteSnapshot,
   zSshProxyPauseAdmitCommand,
+  formatSshAgentSetupPrompt,
   formatSshClientConfig,
   formatSshKnownHosts,
   formatSshProxyJump,
@@ -227,7 +228,7 @@ describe('canonical container and volume contracts', () => {
     expect(formatSshProxyJump({ username: 'alice', host: 'ssh.example.com', port: 22 }))
       .toBe('alice@ssh.example.com');
     expect(formatSshClientConfig({ username: 'alice', host: 'ssh.example.com', port: 2222, hostSuffix: 'nya' }))
-      .toBe('Host *.nya\n  ProxyJump alice@ssh.example.com:2222');
+      .toBe('Host *.nya\n  User root\n  ProxyJump alice@ssh.example.com:2222');
     expect(formatSshKnownHosts({
       host: 'ssh.example.com',
       port: 2222,
@@ -235,6 +236,16 @@ describe('canonical container and volume contracts', () => {
       proxyHostKey: 'ssh-ed25519 AAAAproxy nyabase-ssh-proxy',
       hostCertificateAuthority: 'ssh-ed25519 AAAAca alice',
     })).toBe('[ssh.example.com]:2222 ssh-ed25519 AAAAproxy\n@cert-authority *.nya ssh-ed25519 AAAAca');
+    const prompt = formatSshAgentSetupPrompt({
+      sshConfig: 'Host *.nya\n  User root',
+      knownHosts: '@cert-authority *.nya ssh-ed25519 AAAAca',
+      hostSuffix: 'nya',
+      verifyTarget: 'work.nya',
+    });
+    expect(prompt.split('\n')[0]).toBe('帮我把下面的 SSH 配置配置到本机，不要改动其他已有条目：');
+    expect(prompt).toContain('\nHost *.nya\n  User root\n');
+    expect(prompt).toContain('\n@cert-authority *.nya ssh-ed25519 AAAAca\n');
+    expect(prompt).toContain('`ssh -o BatchMode=yes work.nya true`');
   });
 
   it('uses local or shared storage scopes without source aliases', () => {

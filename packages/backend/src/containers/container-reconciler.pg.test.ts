@@ -276,6 +276,33 @@ describePg('ContainerReconciler PostgreSQL status', () => {
     });
   });
 
+  it('refreshes a route observation only when the scan sees what the route says', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const { serverId, containerId } = await seedRunningContainer(database);
+      const instanceName = `nyc-${containerId.replaceAll('-', '')}`;
+      const old = new Date(Date.now() - 10 * 60_000);
+      await database.insertInto('control.container_ssh_routes').values({
+        container_id: containerId,
+        server_id: serverId,
+        instance_name: instanceName,
+        routed_ip: '10.0.0.5',
+        instance_status: 'running',
+        instance_started_at: null,
+        ssh_status: 'running',
+        last_error: null,
+        observed_at: old,
+      }).execute();
+      const store = new ContainerReconcileStore(database, {} as never);
+      const observedAt = async () => (await database.selectFrom('control.container_ssh_routes')
+        .select('observed_at').where('container_id', '=', containerId).executeTakeFirstOrThrow()).observed_at;
+
+      await store.confirmRouteObservation(containerId, instanceName, 'stopped');
+      expect((await observedAt()).getTime()).toBe(old.getTime());
+      await store.confirmRouteObservation(containerId, instanceName, 'running');
+      expect((await observedAt()).getTime()).toBeGreaterThan(Date.now() - 60_000);
+    });
+  });
+
   it('does not re-queue a scan intent that already failed for the same revision', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const { serverId, containerId } = await seedRunningContainer(database);

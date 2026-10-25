@@ -11,10 +11,12 @@ import type { PgTransactionManager } from '../platform/persistence-pg/transactio
 const HTTP_PROXY_ADVISORY_NAMESPACE = 1_856_214_887;
 
 /**
- * Age after which a binding shows the `container_stale` warning. Display only:
- * routing never depends on observation freshness (see `routableBindings`).
+ * Age after which a binding shows the `container_stale` warning: the 60 s full
+ * scan refreshes every route it sees unchanged, so this allows a couple of
+ * slow or skipped scans. Display only: routing never depends on observation
+ * freshness (see `routableBindings`).
  */
-export const ROUTE_STALE_MS = 120_000;
+export const ROUTE_STALE_MS = 180_000;
 
 export const DOMAIN_POOL_MUTATION_LOCK = 1;
 

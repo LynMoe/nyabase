@@ -182,6 +182,10 @@ export async function scanServerContainers(
     if (usage !== null) {
       await deps.store.recordRootUsage(desired.id, usage);
     }
+    if (actual?.document.state?.status) {
+      // Routes store the ContainerStatus form (`running`) of Incus's `Running`.
+      await deps.store.confirmRouteObservation(desired.id, actual.name, actual.document.state.status.toLowerCase());
+    }
     try {
       if (await scanNeedsUpdate(deps, desired, deriveInstanceName(desired.id), actual)) {
         await deps.store.enqueueScanIntent(desired, 'container.update');
