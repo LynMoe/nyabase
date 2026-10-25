@@ -1,8 +1,9 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   type CreateSharedVolumeRequest,
   type EffectiveAccessDto,
+  type EffectiveSharedBackendAccessDto,
   type IntentAcceptedDto,
   IntentResourceType,
   type PatchVolumeRequest,
@@ -28,7 +29,16 @@ import {
   shrinkNeverTooltip,
 } from '../../lib/storage-shrink.js';
 import { useOpenSession } from '../../hooks/use-dom-state.js';
-import { approxGibHint, formatGibInput } from '../../lib/utils.js';
+import { approxGibHint, formatGibInput, sharedBackendAvailableBytes } from '../../lib/utils.js';
+import { defaultResourceName } from '../../lib/default-names.js';
+import { SizeField } from '../ui/size-slider.js';
+import {
+  QuotaLine,
+  type QuotaLineQuota,
+  overQuotaMessage,
+  quotaFrom,
+  quotaSliderLimits,
+} from '../quota/quota-line.js';
 
 export interface SharedVolumeFormProps {
   sharedVolume?: SharedVolumeDto;
@@ -86,22 +96,98 @@ function useSharedVolumeSave(
   return { createShared, patch };
 }
 
+/**
+ * The prefilled name of a new shared volume: `vol-yymmdd`, skipping names the
+ * user's shared volumes already use (ignoring case). Typing replaces it.
+ */
+function useDefaultSharedVolumeName(enabled: boolean, initial: string) {
+  const [typed, setTyped] = useState<string | null>(null);
+  const volumes = useQuery({
+    queryKey: queryKeys.sharedVolumes.user,
+    queryFn: () => api.get<SharedVolumeDto[]>('/shared-volumes'),
+    enabled,
+  }).data;
+  const defaultName = useMemo(() => defaultResourceName('vol', (volumes ?? []).map((volume) => volume.name)), [volumes]);
+  return { name: typed ?? (enabled ? defaultName : initial), setName: setTyped };
+}
+
+/** The user's quota on the chosen backend, for the create form's quota line. */
+function sharedQuota(
+  failed: boolean,
+  access: EffectiveAccessDto | undefined,
+  backendAccess: EffectiveSharedBackendAccessDto | undefined,
+): QuotaLineQuota {
+  if (failed) return { kind: 'unknown' };
+  if (!access) return { kind: 'loading' };
+  if (!backendAccess) return { kind: 'unknown' };
+  return quotaFrom(backendAccess.limitBytes, (backendAccess.limitBytes ?? 0) - backendAccess.usedBytes);
+}
+
+/** The size input of an existing shared volume, with why it cannot shrink and the quota left. */
+function EditSizeField({
+  sizeBytes,
+  sizeGiB,
+  onSizeChange,
+  nextSize,
+  shrinkBlocked,
+  access,
+}: {
+  sizeBytes: number;
+  sizeGiB: string;
+  onSizeChange: (value: string) => void;
+  nextSize: number;
+  shrinkBlocked: boolean;
+  access: EffectiveSharedBackendAccessDto | undefined;
+}) {
+  return (
+    <FormField id="shared-volume-size" label="大小（GiB）">
+      <Input
+        id="shared-volume-size"
+        type="number"
+        min="0.001"
+        step="any"
+        value={sizeGiB}
+        onChange={(event) => onSizeChange(event.target.value)}
+        disabled={shrinkBlocked && Number.isFinite(nextSize) && nextSize < sizeBytes}
+        title={shrinkBlocked ? shrinkNeverTooltip() : undefined}
+      />
+      <p className="text-xs text-muted-foreground">
+        {Number.isFinite(nextSize) && nextSize > 0 ? approxGibHint(nextSize) : '请输入正数 GiB'}
+      </p>
+      {shrinkBlocked && (
+        <p className="text-xs text-muted-foreground" title={shrinkNeverTooltip()}>
+          {shrinkNeverTooltip()}
+        </p>
+      )}
+      {access && (
+        <p className="text-xs text-muted-foreground">
+          剩余 {formatRemainingBytes(access.limitBytes, access.usedBytes)}
+          {' / '}
+          额度 {formatGrantBytes(access.limitBytes)}
+        </p>
+      )}
+    </FormField>
+  );
+}
+
 function SharedVolumeFormBody({ sharedVolume: editing, open, onOpenChange }: SharedVolumeFormProps) {
-  const [name, setName] = useState(editing?.name ?? '');
+  const { name, setName } = useDefaultSharedVolumeName(open && !editing, editing?.name ?? '');
   const [sizeGiB, setSizeGiB] = useState(editing ? formatGibInput(editing.sizeBytes) : '10');
   const [sharedBackendId, setSharedBackendId] = useState(editing?.sharedBackendId ?? '');
   const [error, setError] = useState<string | null>(null);
 
-  const backends = useQuery({
+  const backendsQuery = useQuery({
     queryKey: queryKeys.sharedBackends.user,
     queryFn: () => api.get<SharedBackendDto[]>('/shared-backends'),
     enabled: open && !editing,
-  }).data ?? [];
-  const access = useQuery({
+  });
+  const backends = backendsQuery.data ?? [];
+  const accessQuery = useQuery({
     queryKey: queryKeys.meAccess,
     queryFn: () => api.get<EffectiveAccessDto>('/me/access'),
     enabled: open,
-  }).data;
+  });
+  const access = accessQuery.data;
   const selectedBackend = backends.find((backend) => backend.id === sharedBackendId);
   const liveSharedAccess = (access?.sharedBackends ?? []).find((item) => item.sharedBackendId === sharedBackendId);
   const noOnlineExecutor = editing
@@ -113,6 +199,14 @@ function SharedVolumeFormBody({ sharedVolume: editing, open, onOpenChange }: Sha
   const shrinkBlocked = path === 'never';
   const quotaError = editQuotaBlocked ? quotaIneffectiveResizeHint() : null;
   const description = !editing ? null : editQuotaBlocked ? quotaError : shrinkBlocked ? shrinkNeverTooltip() : null;
+  const createQuota = sharedQuota(accessQuery.isError, access, liveSharedAccess);
+  const createLimits = quotaSliderLimits(
+    'volume',
+    createQuota,
+    selectedBackend ? sharedBackendAvailableBytes(selectedBackend) : null,
+    Number.isFinite(nextSize) && nextSize > 0 ? nextSize : null,
+  );
+  const createOver = !editing && createLimits.over;
 
   const { createShared, patch } = useSharedVolumeSave(editing, onOpenChange, setError);
   const pending = createShared.isPending || patch.isPending;
@@ -135,6 +229,7 @@ function SharedVolumeFormBody({ sharedVolume: editing, open, onOpenChange }: Sha
       return patch.mutate(parsed.data);
     }
     if (!sharedBackendId) return fail('请选择共享后端');
+    if (createOver) return fail(overQuotaMessage(createQuota));
     const parsed = zCreateSharedVolumeRequest.safeParse({
       name: name.trim(),
       sizeBytes: nextSize,
@@ -155,26 +250,6 @@ function SharedVolumeFormBody({ sharedVolume: editing, open, onOpenChange }: Sha
           <FormField id="shared-volume-name" label="名称">
             <Input id="shared-volume-name" value={name} onChange={(event) => setName(event.target.value)} />
           </FormField>
-          <FormField id="shared-volume-size" label="大小（GiB）">
-            <Input
-              id="shared-volume-size"
-              type="number"
-              min="0.001"
-              step="any"
-              value={sizeGiB}
-              onChange={(event) => setSizeGiB(event.target.value)}
-              disabled={shrinkBlocked && Number.isFinite(nextSize) && nextSize < (editing?.sizeBytes ?? 0)}
-              title={shrinkBlocked ? shrinkNeverTooltip() : undefined}
-            />
-            <p className="text-xs text-muted-foreground">
-              {Number.isFinite(nextSize) && nextSize > 0 ? approxGibHint(nextSize) : '请输入正数 GiB'}
-            </p>
-            {shrinkBlocked && (
-              <p className="text-xs text-muted-foreground" title={shrinkNeverTooltip()}>
-                {shrinkNeverTooltip()}
-              </p>
-            )}
-          </FormField>
           {!editing && (
             <SelectField
               id="volume-shared-backend"
@@ -182,14 +257,36 @@ function SharedVolumeFormBody({ sharedVolume: editing, open, onOpenChange }: Sha
               value={sharedBackendId}
               onChange={setSharedBackendId}
               options={backends.map((backend): [string, string] => [backend.id, backend.displayName ?? backend.name])}
+              placeholder="选择共享后端"
+              loading={backendsQuery.isLoading}
+              emptyText="没有可用的共享后端"
+              emptyHint="你还没有任何共享后端的授权，请联系管理员。"
             />
           )}
-          {liveSharedAccess && (
-            <p className="text-xs text-muted-foreground">
-              剩余 {formatRemainingBytes(liveSharedAccess.limitBytes, liveSharedAccess.usedBytes)}
-              {' / '}
-              额度 {formatGrantBytes(liveSharedAccess.limitBytes)}
-            </p>
+          {editing ? (
+            <EditSizeField
+              sizeBytes={editing.sizeBytes}
+              sizeGiB={sizeGiB}
+              onSizeChange={setSizeGiB}
+              nextSize={nextSize}
+              shrinkBlocked={shrinkBlocked}
+              access={liveSharedAccess}
+            />
+          ) : (
+            <SizeField
+              id="shared-volume-size"
+              label="大小"
+              value={sizeGiB}
+              onChange={setSizeGiB}
+              scale={createLimits.scale}
+              availableGib={createLimits.availableGib}
+              invalid={createOver}
+              error={createOver ? overQuotaMessage(createQuota) : undefined}
+            >
+              {sharedBackendId ? (
+                <QuotaLine quota={createQuota} over={createOver} testId="shared-volume-create-remaining" />
+              ) : null}
+            </SizeField>
           )}
           {noOnlineExecutor && (
             <p className="text-xs text-muted-foreground" data-testid="shared-volume-no-executor">
@@ -204,7 +301,7 @@ function SharedVolumeFormBody({ sharedVolume: editing, open, onOpenChange }: Sha
           <Button variant="outline" onClick={() => onOpenChange(false)}>取消</Button>
           <Button
             onClick={submit}
-            disabled={pending || Boolean(floorError) || Boolean(quotaError) || shrinkBlocked}
+            disabled={pending || Boolean(floorError) || Boolean(quotaError) || shrinkBlocked || createOver}
             title={quotaError ?? (shrinkBlocked ? shrinkNeverTooltip() : undefined)}
           >
             {pending ? '提交中...' : '保存'}

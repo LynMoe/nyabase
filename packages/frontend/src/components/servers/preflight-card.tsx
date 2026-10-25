@@ -15,14 +15,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '../ui/card.js';
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '../ui/dialog.js';
 import { StatusBadge } from '../layout/status-badge.js';
 import { Input } from '../ui/input.js';
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '../ui/select.js';
-import { FormField } from '../layout/form-field.js';
+import { FormField, SelectField } from '../layout/form-field.js';
 import {
   preflightCheckLabel,
   preflightResultLabel,
@@ -40,7 +33,8 @@ export function PreflightCard({ server }: { server: ServerDto }) {
   const serverId = server.id;
   const [selectedPoolId, setSelectedPoolId] = useState('');
   const [probeAddress, setProbeAddress] = useState('');
-  const pools = useServerPools(serverId).data ?? [];
+  const poolsQuery = useServerPools(serverId);
+  const pools = poolsQuery.data ?? [];
   const invalidate = useInvalidateServer(serverId);
   const preflightQuery = useQuery({
     queryKey: queryKeys.servers.preflight(serverId),
@@ -87,21 +81,17 @@ export function PreflightCard({ server }: { server: ServerDto }) {
             <DialogHeader>
               <DialogTitle>运行前置检查</DialogTitle>
             </DialogHeader>
-            <FormField id="preflight-pool" label="探针存储池">
-              <Select
-                value={selectedPoolId || undefined}
-                onValueChange={setSelectedPoolId}
-              >
-                <SelectTrigger id="preflight-pool">
-                  <SelectValue placeholder="选择存储池" />
-                </SelectTrigger>
-                <SelectContent>
-                  {pools.filter((pool) => pool.registered).map((pool) => (
-                    <SelectItem key={pool.id} value={pool.id}>{pool.displayName ?? pool.incusName}</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </FormField>
+            <SelectField
+              id="preflight-pool"
+              label="探针存储池"
+              value={selectedPoolId}
+              onChange={setSelectedPoolId}
+              options={pools.filter((pool) => pool.registered).map((pool): [string, string] => [pool.id, pool.displayName ?? pool.incusName])}
+              placeholder="选择存储池"
+              loading={poolsQuery.isLoading}
+              emptyText="没有已登记的存储池"
+              emptyHint="先在「存储」中登记一个存储池，再运行前置检查。"
+            />
             <FormField id="preflight-address" label="探针地址">
               <Input id="preflight-address" value={probeAddress} onChange={(event) => setProbeAddress(event.target.value)} placeholder="10.20.0.10" />
             </FormField>

@@ -268,10 +268,14 @@ function ImageAssignSelect({
         onAssign(serverId);
         setResetKey((key) => key + 1);
       }}
-      disabled={disabled}
+      disabled={disabled || servers.length === 0}
     >
-      <SelectTrigger className="h-8 w-[220px] text-xs" aria-label={`为 ${imageAlias} 分配服务器`}>
-        <SelectValue placeholder="添加服务器..." />
+      <SelectTrigger
+        className="h-8 w-[220px] text-xs"
+        aria-label={`为 ${imageAlias} 分配服务器`}
+        title={servers.length === 0 ? '所有服务器都已分配这个镜像' : undefined}
+      >
+        <SelectValue placeholder={servers.length === 0 ? '没有可分配的服务器' : '添加服务器...'} />
       </SelectTrigger>
       <SelectContent>
         {servers.map((server) => (

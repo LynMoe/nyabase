@@ -14,7 +14,8 @@ function formatCompactCpu(cores: number): string {
   return `${cores} 核`;
 }
 
-function formatCompactBytes(bytes: number): string {
+/** Bytes as "16 GiB" (whole GiB stay whole), the unit every quota surface uses. */
+export function formatCompactBytes(bytes: number): string {
   if (bytes === 0) return '0 GiB';
   const gib = bytes / GIB;
   if (gib >= 0.95) {

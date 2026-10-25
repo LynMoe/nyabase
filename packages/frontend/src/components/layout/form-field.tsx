@@ -39,7 +39,12 @@ export function FormField({
   );
 }
 
-/** Labelled single-choice select over `[value, label]` pairs. */
+/**
+ * Labelled single-choice select over `[value, label]` pairs. With `emptyText`,
+ * a select that has nothing to offer (loaded, no options) is disabled and shows
+ * `emptyText` as its placeholder and `emptyHint` (why) below, instead of
+ * opening an empty dropdown; while `loading` it shows 加载中….
+ */
 export function SelectField({
   id,
   label,
@@ -48,6 +53,9 @@ export function SelectField({
   options,
   placeholder = '请选择',
   disabled = false,
+  loading = false,
+  emptyText,
+  emptyHint,
   error,
   hint,
 }: {
@@ -58,15 +66,25 @@ export function SelectField({
   options: Array<[string, string]>;
   placeholder?: string;
   disabled?: boolean;
+  loading?: boolean;
+  emptyText?: string;
+  emptyHint?: React.ReactNode;
   error?: string | null;
   hint?: React.ReactNode;
 }) {
+  const empty = !loading && emptyText !== undefined && options.length === 0;
+  const shownPlaceholder = loading ? '加载中…' : empty ? emptyText : placeholder;
   return (
-    <FormField id={id} label={label} error={error} hint={hint}>
+    <FormField id={id} label={label} error={error} hint={empty && emptyHint ? emptyHint : hint}>
       {/* Keyed on value so clearing it back to '' shows the placeholder again. */}
-      <Select key={value || 'empty'} value={value || undefined} onValueChange={onChange} disabled={disabled}>
-        <SelectTrigger id={id} aria-invalid={error ? true : undefined}>
-          <SelectValue placeholder={placeholder} />
+      <Select
+        key={value || 'empty'}
+        value={value || undefined}
+        onValueChange={onChange}
+        disabled={disabled || loading || empty}
+      >
+        <SelectTrigger id={id} aria-invalid={error ? true : undefined} data-empty={empty ? 'true' : undefined}>
+          <SelectValue placeholder={shownPlaceholder} />
         </SelectTrigger>
         <SelectContent>
           {options.map(([optionValue, optionLabel]) => (

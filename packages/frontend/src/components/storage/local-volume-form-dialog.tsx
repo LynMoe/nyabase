@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   type CreateVolumeRequest,
@@ -33,6 +33,9 @@ import {
 } from '../../lib/storage-shrink.js';
 import { useOpenSession } from '../../hooks/use-dom-state.js';
 import { approxGibHint, formatGib, formatGibInput, grantAvailableLabel } from '../../lib/utils.js';
+import { defaultResourceName } from '../../lib/default-names.js';
+import { SizeField } from '../ui/size-slider.js';
+import { QuotaLine, type QuotaLineQuota, overQuotaMessage, quotaFrom, quotaSliderLimits } from '../quota/quota-line.js';
 import { VolumeShrinkOrchestrationDialog } from './volume-shrink-orchestration-dialog.js';
 
 export interface LocalVolumeFormProps {
@@ -61,6 +64,46 @@ function useLocalPools(scope: ListScope, serverId: string, enabled: boolean) {
     queryFn: () => api.get<StoragePoolDto[]>(`/servers/${serverId}/storage-pools${storageSuffix(scope)}`),
     enabled: enabled && serverId.length > 0,
   });
+}
+
+function useStorageCapacity(scope: ListScope, serverId: string) {
+  return useQuery({
+    queryKey: scope === 'all'
+      ? (['storage-capacity', 'admin', serverId] as const)
+      : queryKeys.storageCapacity(serverId),
+    queryFn: () => api.get<StorageCapacityDto>(`/servers/${serverId}/storage-capacity${storageSuffix(scope)}`),
+    enabled: serverId.length > 0,
+  });
+}
+
+/**
+ * The prefilled name of a new volume: `vol-yymmdd`, skipping names the user's
+ * local volumes already use (ignoring case). Typing replaces it.
+ */
+function useDefaultVolumeName(enabled: boolean, initial: string) {
+  const [typed, setTyped] = useState<string | null>(null);
+  const volumes = useQuery({
+    queryKey: queryKeys.volumes.user,
+    queryFn: () => api.get<VolumeDto[]>('/volumes'),
+    enabled,
+  }).data;
+  const defaultName = useMemo(() => defaultResourceName('vol', (volumes ?? []).map((volume) => volume.name)), [volumes]);
+  return { name: typed ?? (enabled ? defaultName : initial), setName: setTyped };
+}
+
+/**
+ * Slider limits of a new volume on the chosen server and pool: the disk grant,
+ * or the pool's free space when the grant is unlimited.
+ */
+function useCreateSizeLimits(scope: ListScope, serverId: string, poolId: string, sizeBytes: number) {
+  const capacityQuery = useStorageCapacity(scope, serverId);
+  const capacity = capacityQuery.data;
+  const quota: QuotaLineQuota = capacityQuery.isError
+    ? { kind: 'unknown' }
+    : quotaFrom(capacity ? capacity.grantLimitBytes : undefined, capacity?.availableBytes);
+  const poolFree = capacity?.pools.find((pool) => pool.poolId === poolId)?.availableBytes ?? null;
+  const selected = Number.isFinite(sizeBytes) && sizeBytes > 0 ? sizeBytes : null;
+  return { quota, ...quotaSliderLimits('volume', quota, poolFree, selected) };
 }
 
 /** The create and edit requests of the local volume form; success closes the dialog. */
@@ -113,7 +156,7 @@ function LocalVolumeFormBody({
   lockedServerId,
   lockedPoolId,
 }: LocalVolumeFormProps) {
-  const [name, setName] = useState(editing?.name ?? '');
+  const { name, setName } = useDefaultVolumeName(open && !editing && scope === 'mine', editing?.name ?? '');
   const [sizeGiB, setSizeGiB] = useState(editing ? formatGibInput(editing.sizeBytes) : '10');
   const [serverId, setServerId] = useState(editing?.serverId ?? lockedServerId ?? '');
   const [poolId, setPoolId] = useState(editing?.poolId ?? lockedPoolId ?? '');
@@ -131,6 +174,8 @@ function LocalVolumeFormBody({
     ? quotaError
     : editQuotaBlocked ? quotaError : path === 'never' ? shrinkNeverTooltip() : null;
   const shrinkBlocked = path === 'never';
+  const createLimits = useCreateSizeLimits(scope, editing ? '' : serverId, poolId, nextSize);
+  const createOver = !editing && createLimits.over;
 
   const { createLocal, patch, invalidateVolumeLists } = useLocalVolumeSave(editing, scope, onOpenChange, setError);
   const pending = createLocal.isPending || patch.isPending;
@@ -140,6 +185,7 @@ function LocalVolumeFormBody({
     const fail = (message: string) => setError(message);
     if (!Number.isFinite(nextSize) || nextSize <= 0) return fail('请输入有效的容量（GiB）');
     if (createQuotaBlocked) return fail(quotaIneffectiveCreateHint());
+    if (createOver) return fail('超出剩余额度');
     if (editing) {
       if (editQuotaBlocked) return fail(quotaIneffectiveResizeHint());
       if (path === 'never') return fail(shrinkNeverTooltip());
@@ -174,28 +220,7 @@ function LocalVolumeFormBody({
           </DialogHeader>
           <div className="space-y-3">
             <FormField id="volume-name" label="名称">
-              <Input id="volume-name" value={name} onChange={(event) => setName(event.target.value)} />
-            </FormField>
-            <FormField id="volume-size" label="大小（GiB）">
-              <Input
-                id="volume-size"
-                type="number"
-                min="0.001"
-                step="any"
-                value={sizeGiB}
-                onChange={(event) => setSizeGiB(event.target.value)}
-                disabled={shrinkBlocked && Number.isFinite(nextSize) && nextSize < (editing?.sizeBytes ?? 0)}
-                title={shrinkBlocked ? shrinkNeverTooltip() : undefined}
-              />
-              <p className="text-xs text-muted-foreground">
-                {Number.isFinite(nextSize) && nextSize > 0 ? approxGibHint(nextSize) : '请输入正数 GiB'}
-              </p>
-              <CapacityHint scope={scope} serverId={serverId} poolId={poolId} />
-              {shrinkBlocked && (
-                <p className="text-xs text-muted-foreground" title={shrinkNeverTooltip()}>
-                  {shrinkNeverTooltip()}
-                </p>
-              )}
+              <Input id="volume-name" value={name} autoComplete="off" onChange={(event) => setName(event.target.value)} />
             </FormField>
             {!editing && (
               <PlacementFields
@@ -212,6 +237,33 @@ function LocalVolumeFormBody({
                 onPoolChange={setPoolId}
               />
             )}
+            {!editing ? (
+              <SizeField
+                id="volume-size"
+                label="大小"
+                value={sizeGiB}
+                onChange={setSizeGiB}
+                scale={createLimits.scale}
+                availableGib={createLimits.availableGib}
+                invalid={createOver}
+                error={createOver ? overQuotaMessage(createLimits.quota) : undefined}
+              >
+                {serverId ? (
+                  <QuotaLine quota={createLimits.quota} over={createOver} testId="volume-create-remaining" />
+                ) : null}
+              </SizeField>
+            ) : (
+              <EditSizeField
+                scope={scope}
+                serverId={serverId}
+                poolId={poolId}
+                sizeBytes={editing.sizeBytes}
+                sizeGiB={sizeGiB}
+                onSizeChange={setSizeGiB}
+                nextSize={nextSize}
+                shrinkBlocked={shrinkBlocked}
+              />
+            )}
             {(error || floorError || quotaError) && (
               <p className="text-sm text-destructive" data-testid={quotaError ? 'volume-quota-ineffective' : undefined}>
                 {error ?? floorError ?? quotaError}
@@ -222,7 +274,7 @@ function LocalVolumeFormBody({
             <Button variant="outline" onClick={() => onOpenChange(false)}>取消</Button>
             <Button
               onClick={submit}
-              disabled={pending || Boolean(floorError) || Boolean(quotaError) || shrinkBlocked}
+              disabled={pending || Boolean(floorError) || Boolean(quotaError) || shrinkBlocked || createOver}
               title={quotaError ?? (shrinkBlocked ? shrinkNeverTooltip() : undefined)}
             >
               {pending ? '提交中...' : path === 'requires_stop' ? '继续缩容编排' : '保存'}
@@ -247,15 +299,54 @@ function LocalVolumeFormBody({
   );
 }
 
+/** The size input of an existing volume, with the capacity hint and why it cannot shrink. */
+function EditSizeField({
+  scope,
+  serverId,
+  poolId,
+  sizeBytes,
+  sizeGiB,
+  onSizeChange,
+  nextSize,
+  shrinkBlocked,
+}: {
+  scope: ListScope;
+  serverId: string;
+  poolId: string;
+  sizeBytes: number;
+  sizeGiB: string;
+  onSizeChange: (value: string) => void;
+  nextSize: number;
+  shrinkBlocked: boolean;
+}) {
+  return (
+    <FormField id="volume-size" label="大小（GiB）">
+      <Input
+        id="volume-size"
+        type="number"
+        min="0.001"
+        step="any"
+        value={sizeGiB}
+        onChange={(event) => onSizeChange(event.target.value)}
+        disabled={shrinkBlocked && Number.isFinite(nextSize) && nextSize < sizeBytes}
+        title={shrinkBlocked ? shrinkNeverTooltip() : undefined}
+      />
+      <p className="text-xs text-muted-foreground">
+        {Number.isFinite(nextSize) && nextSize > 0 ? approxGibHint(nextSize) : '请输入正数 GiB'}
+      </p>
+      <CapacityHint scope={scope} serverId={serverId} poolId={poolId} />
+      {shrinkBlocked && (
+        <p className="text-xs text-muted-foreground" title={shrinkNeverTooltip()}>
+          {shrinkNeverTooltip()}
+        </p>
+      )}
+    </FormField>
+  );
+}
+
 /** Remaining capacity under the size field: physical for administrators, grant-based for owners. */
 function CapacityHint({ scope, serverId, poolId }: { scope: ListScope; serverId: string; poolId: string }) {
-  const capacity = useQuery({
-    queryKey: scope === 'all'
-      ? (['storage-capacity', 'admin', serverId] as const)
-      : queryKeys.storageCapacity(serverId),
-    queryFn: () => api.get<StorageCapacityDto>(`/servers/${serverId}/storage-capacity${storageSuffix(scope)}`),
-    enabled: serverId.length > 0,
-  }).data;
+  const capacity = useStorageCapacity(scope, serverId).data;
   if (scope === 'all') {
     const pool = (capacity?.pools ?? []).find((row) => row.poolId === poolId);
     return (
@@ -302,12 +393,14 @@ function PlacementFields({
   onServerChange: (serverId: string) => void;
   onPoolChange: (poolId: string) => void;
 }) {
-  const servers = useQuery({
+  const serversQuery = useQuery({
     queryKey: queryKeys.volumeForm.servers,
     queryFn: () => api.get<Array<ServerDto | UserServerDto>>('/servers'),
     enabled: scope !== 'all',
-  }).data ?? [];
-  const localPools = (useLocalPools(scope, serverId, true).data ?? []).filter((pool) => pool.registered);
+  });
+  const servers = serversQuery.data ?? [];
+  const poolsQuery = useLocalPools(scope, serverId, true);
+  const localPools = (poolsQuery.data ?? []).filter((pool) => pool.registered);
   return (
     <>
       <div className="grid gap-3 sm:grid-cols-2">
@@ -317,7 +410,11 @@ function PlacementFields({
           value={serverId}
           onChange={onServerChange}
           options={servers.map((server): [string, string] => [server.id, server.name])}
+          placeholder="选择服务器"
           disabled={serverLocked}
+          loading={serversQuery.isLoading}
+          emptyText={serverLocked ? undefined : '没有可用的服务器'}
+          emptyHint="你还没有可用的服务器，请联系管理员分配。"
         />
         <SelectField
           key={serverId || 'no-server'}
@@ -326,7 +423,11 @@ function PlacementFields({
           value={poolId}
           onChange={onPoolChange}
           options={localPools.map((pool): [string, string] => [pool.id, pool.displayName ?? pool.incusName])}
+          placeholder={serverId ? '选择存储池' : '先选择服务器'}
           disabled={!serverId || poolLocked}
+          loading={Boolean(serverId) && poolsQuery.isLoading}
+          emptyText={serverId && !poolLocked ? '没有可用的存储池' : undefined}
+          emptyHint="这台服务器上没有分配给你的存储池，请联系管理员。"
         />
       </div>
       {selectedPool && (

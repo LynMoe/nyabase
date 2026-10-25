@@ -7,15 +7,16 @@ import {
   type EffectiveAccessDto,
   type ImageDto,
   type IntentAcceptedDto,
+  type PerformanceUsageResponse,
   type StorageCapacityDto,
   type UserServerDto,
   zCreateContainerRequest,
 } from '@nyabase/common';
+import { Lock } from 'lucide-react';
 import { Button } from '../ui/button.js';
 import {
   Dialog,
   DialogContent,
-  DialogDescription,
   DialogFooter,
   DialogHeader,
   DialogTitle,
@@ -27,8 +28,11 @@ import { useMySshKeys } from '../../hooks/use-my-ssh-keys.js';
 import { SshKeyNotice } from '../ssh/ssh-key-notice.js';
 import { Checkbox } from '../ui/checkbox.js';
 import { ContainerCreateGpu } from '../gpu/gpu-sections.js';
-import { cn, gibToBytes } from '../../lib/utils.js';
-import { cpuCoresLabel } from '../../lib/cpu-set.js';
+import { GIB, gibToBytes } from '../../lib/utils.js';
+import { SizeField, parsePositiveGib } from '../ui/size-slider.js';
+import { QuotaLine, type QuotaLineQuota, quotaFrom } from '../quota/quota-line.js';
+import { sizeScale } from '../../lib/size-ladder.js';
+import { defaultResourceName } from '../../lib/default-names.js';
 import { api } from '../../lib/api.js';
 import { errorMessage } from '../../lib/api-error.js';
 import { queryKeys } from '../../lib/query-keys.js';
@@ -56,7 +60,6 @@ function CreateContainerBody({ open, onOpenChange, defaultServerId }: CreateCont
       <DialogContent data-testid="container-create-canonical">
         <DialogHeader>
           <DialogTitle>新建容器</DialogTitle>
-          <DialogDescription>创建后可通过 SSH 登录，规格之后也能调整。</DialogDescription>
         </DialogHeader>
         <form
           className="space-y-4"
@@ -69,11 +72,11 @@ function CreateContainerBody({ open, onOpenChange, defaultServerId }: CreateCont
           <FormField id="container-name" label="名称" error={form.errors.name} hint="字母、数字和连字符，例如 dev-ubuntu">
             <Input
               id="container-name"
-              value={form.form.name}
+              value={form.name}
               autoFocus
               autoComplete="off"
-              onChange={(event) => form.update('name', event.target.value)}
-              placeholder="dev-ubuntu"
+              onChange={(event) => form.setName(event.target.value)}
+              placeholder={form.defaultName}
             />
           </FormField>
           <PlacementFields form={form} />
@@ -93,58 +96,9 @@ function CreateContainerBody({ open, onOpenChange, defaultServerId }: CreateCont
   );
 }
 
-function RemainingPart({ label, value, over }: { label: string; value: string; over: boolean }) {
-  return (
-    <span className={cn(over && 'font-medium text-destructive')}>
-      {label} {value}
-    </span>
-  );
-}
-
-function UnitField({
-  id,
-  label,
-  value,
-  onChange,
-  error,
-  step = '1',
-}: {
-  id: string;
-  label: string;
-  value: string;
-  onChange: (value: string) => void;
-  error?: string;
-  step?: string;
-}) {
-  return (
-    <FormField id={id} label={label} error={error}>
-      <Input
-        id={id}
-        type="number"
-        inputMode="decimal"
-        min="0"
-        step={step}
-        value={value}
-        aria-invalid={error ? true : undefined}
-        onChange={(event) => onChange(event.target.value)}
-      />
-    </FormField>
-  );
-}
-
 /** Server and image pickers. */
 function PlacementFields({ form }: { form: CreateContainerForm }) {
-  const { servers, images, serversLoading } = form.data;
-  const serverPlaceholder = serversLoading
-    ? '加载中…'
-    : servers.length === 0
-      ? '暂无可用服务器'
-      : '选择服务器';
-  const imagePlaceholder = !form.form.serverId
-    ? '先选择服务器'
-    : form.noImagesForServer
-      ? '没有可用镜像'
-      : '选择镜像';
+  const { servers, images, serversLoading, imagesLoading } = form.data;
   return (
     <div className="grid gap-3 sm:grid-cols-2">
       <SelectField
@@ -157,10 +111,11 @@ function PlacementFields({ form }: { form: CreateContainerForm }) {
           form.setGpuPciAddresses(undefined);
         }}
         options={servers.map((server) => [server.id, server.name])}
-        placeholder={serverPlaceholder}
-        disabled={serversLoading || servers.length === 0}
+        placeholder="选择服务器"
+        loading={serversLoading}
+        emptyText="没有可用的服务器"
+        emptyHint="没有你可以使用的在线服务器，请联系管理员分配。"
         error={form.errors.serverId}
-        hint={!serversLoading && servers.length === 0 ? '没有你可以使用的在线服务器，请联系管理员分配。' : undefined}
       />
       <SelectField
         key={form.form.serverId || 'no-server'}
@@ -169,56 +124,77 @@ function PlacementFields({ form }: { form: CreateContainerForm }) {
         value={form.form.imageId}
         onChange={(value) => form.update('imageId', value)}
         options={images.map((image) => [image.id, image.alias])}
-        placeholder={imagePlaceholder}
-        disabled={!form.form.serverId || form.noImagesForServer}
+        placeholder={form.form.serverId ? '选择镜像' : '先选择服务器'}
+        disabled={!form.form.serverId}
+        loading={Boolean(form.form.serverId) && imagesLoading}
+        emptyText={form.form.serverId ? '没有可用的镜像' : undefined}
+        emptyHint="这台服务器还没有分配给你的镜像，请联系管理员。"
         error={form.errors.imageId}
-        hint={form.noImagesForServer ? '这台服务器还没有分配给你的镜像，请联系管理员。' : undefined}
       />
     </div>
   );
 }
 
-/** Memory / root disk inputs, the shared CPU set and the quota left on the chosen server. */
+/** The CPU the grant pins on the chosen server: shown, never chosen. */
+function CpuField({ cores, known }: { cores: number | null; known: boolean }) {
+  const text = !known ? '—' : cores === null ? '全部' : `${cores} 核`;
+  return (
+    <FormField id="container-cpu" label="CPU" hint={known ? '由授权决定' : '选择服务器后显示，由授权决定'}>
+      <div className="relative sm:w-1/2">
+        <Input
+          id="container-cpu"
+          readOnly
+          value={text}
+          data-testid="create-cpu"
+          className="cursor-not-allowed border-dashed bg-muted/50 pr-9 tabular-nums text-foreground focus-visible:ring-0 focus-visible:ring-offset-0"
+        />
+        <Lock className="pointer-events-none absolute right-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" aria-hidden />
+      </div>
+    </FormField>
+  );
+}
+
+/** Locked CPU, then memory and root disk sliders, each with the quota left on the chosen server. */
 function SpecFields({ form }: { form: CreateContainerForm }) {
-  const { memLeft, diskLeft, memOver, diskOver, onServer } = form;
-  const { selectedAccess, capacityQuery } = form.data;
+  const { memLeft, diskLeft, memOver, diskOver } = form;
+  const { selectedAccess } = form.data;
+  const starting = form.form.startAfterCreate;
   return (
     <>
-      <div className="grid gap-3 sm:grid-cols-2">
-        <UnitField
-          id="container-memory"
-          label="内存（GiB）"
-          value={form.form.memGib}
-          onChange={(value) => form.update('memGib', value)}
-          error={form.errors.memGib ?? (memOver && memLeft !== null ? `超出剩余额度 ${bytesText(memLeft)}` : undefined)}
-        />
-        <UnitField
-          id="container-root-size"
-          label="系统盘（GiB）"
-          value={form.form.rootSizeGib}
-          onChange={(value) => form.update('rootSizeGib', value)}
-          error={form.errors.rootSizeGib ?? (diskOver && diskLeft !== null ? `超出剩余容量 ${bytesText(diskLeft)}` : undefined)}
-        />
-      </div>
-      {selectedAccess ? (
-        <p className="text-xs text-muted-foreground" data-testid="create-remaining">
-          这台服务器上你还剩：
-          <RemainingPart label="内存" value={memLeft === null ? (onServer ? '不限' : '…') : bytesText(memLeft)} over={memOver} />
-          {' · '}
-          <RemainingPart
-            label="磁盘"
-            value={capacityQuery.isError ? '暂不可知' : diskLeft === null ? (capacityQuery.data ? '不限' : '…') : bytesText(diskLeft)}
-            over={diskOver}
+      <CpuField cores={selectedAccess?.cpuCores ?? null} known={Boolean(selectedAccess)} />
+      <SizeField
+        id="container-memory"
+        label="内存"
+        value={form.form.memGib}
+        onChange={(value) => form.update('memGib', value)}
+        scale={form.limits.memScale}
+        availableGib={starting && memLeft !== null ? memLeft / GIB : null}
+        invalid={memOver}
+        error={form.errors.memGib ?? (memOver && memLeft !== null ? `超出剩余额度 ${bytesText(memLeft)}` : undefined)}
+      >
+        {selectedAccess ? (
+          <QuotaLine
+            quota={form.limits.memQuota}
+            over={memOver}
+            inactiveHint={starting ? undefined : '不立即启动时不占内存额度，启动时再检查'}
+            testId="create-remaining-memory"
           />
-        </p>
-      ) : null}
-      {selectedAccess ? (
-        <p className="text-xs text-muted-foreground" data-testid="create-cpu-set">
-          CPU：与你在这台服务器上的其他容器共享同一组 CPU（
-          {selectedAccess.cpuCores === null ? '不限，使用全部未保留 CPU' : `${cpuCoresLabel(selectedAccess.cpuCores)}，按整核绑定`}
-          ）；内存额度按所有容器合计。
-        </p>
-      ) : null}
+        ) : null}
+      </SizeField>
+      <SizeField
+        id="container-root-size"
+        label="系统盘"
+        value={form.form.rootSizeGib}
+        onChange={(value) => form.update('rootSizeGib', value)}
+        scale={form.limits.diskScale}
+        availableGib={diskLeft === null ? null : diskLeft / GIB}
+        invalid={diskOver}
+        error={form.errors.rootSizeGib ?? (diskOver && diskLeft !== null ? `超出剩余容量 ${bytesText(diskLeft)}` : undefined)}
+      >
+        {selectedAccess ? (
+          <QuotaLine quota={form.limits.diskQuota} over={diskOver} testId="create-remaining-disk" />
+        ) : null}
+      </SizeField>
     </>
   );
 }
@@ -259,10 +235,16 @@ function useCreateContainerForm({
   const [gpuPciAddresses, setGpuPciAddresses] = useState<string[] | undefined>(undefined);
   const [errors, setErrors] = useState<FieldErrors>({});
   const [submitError, setSubmitError] = useState<string | null>(null);
+  const [nameTouched, setNameTouched] = useState(false);
   const data = useCreateContainerData(open, form.serverId);
   const { servers, images, selectedAccess } = data;
   const selected = servers.find((server) => server.id === form.serverId);
-  const noImagesForServer = Boolean(form.serverId) && !data.imagesQuery.isLoading && images.length === 0;
+  // Names are unique per owner, ignoring case: skip every name the user already has.
+  const defaultName = useMemo(
+    () => defaultResourceName('ins', (data.containersQuery.data ?? []).map((container) => container.name)),
+    [data.containersQuery.data],
+  );
+  const name = nameTouched ? form.name : defaultName;
 
   // The common case is one server and one image: pick them instead of asking.
   useEffect(() => {
@@ -276,8 +258,8 @@ function useCreateContainerForm({
     }
   }, [open, form.serverId, form.imageId, images]);
 
-  const memNumber = positiveNumber(form.memGib);
-  const rootNumber = positiveNumber(form.rootSizeGib);
+  const memNumber = parsePositiveGib(form.memGib);
+  const rootNumber = parsePositiveGib(form.rootSizeGib);
   const memBytes = memNumber === null ? null : gibToBytes(memNumber);
   const rootSizeBytes = rootNumber === null ? null : gibToBytes(rootNumber);
 
@@ -294,6 +276,7 @@ function useCreateContainerForm({
   const memOver = form.startAfterCreate && memLeft !== null && memBytes !== null && memBytes > memLeft;
   const diskOver = diskLeft !== null && rootSizeBytes !== null && rootSizeBytes > diskLeft;
   const overQuota = memOver || diskOver;
+  const limits = specLimits(data, memLeft);
 
   const create = useMutation({
     mutationFn: (body: CreateContainerRequest) => api.post<IntentAcceptedDto>('/containers', body),
@@ -311,14 +294,19 @@ function useCreateContainerForm({
     setSubmitError(null);
   };
 
+  const setName = (value: string) => {
+    setNameTouched(true);
+    update('name', value);
+  };
+
   const submit = () => {
-    const fieldErrors = validateForm(form);
+    const fieldErrors = validateForm({ ...form, name });
     setErrors(fieldErrors);
     if (Object.keys(fieldErrors).length > 0 || overQuota) return;
     const parsed = zCreateContainerRequest.safeParse({
       serverId: form.serverId,
       imageId: form.imageId,
-      name: form.name.trim(),
+      name: name.trim(),
       rootSizeBytes,
       memBytes,
       gpuPciAddresses: selected?.gpuEnabled ? gpuPciAddresses : undefined,
@@ -337,8 +325,10 @@ function useCreateContainerForm({
     submitError,
     data,
     selected,
-    noImagesForServer,
-    onServer,
+    name,
+    defaultName,
+    setName,
+    limits,
     memLeft,
     diskLeft,
     memOver,
@@ -372,6 +362,16 @@ function useCreateContainerData(open: boolean, serverId: string) {
     queryFn: () => api.get<StorageCapacityDto>(`/servers/${serverId}/storage-capacity`),
     enabled: open && serverId.length > 0,
   });
+  const liveAccess = liveServerAccess(accessQuery.data?.servers);
+  const selectedAccess = liveAccess.find((server) => server.serverId === serverId);
+  // Without a memory limit the slider runs up to the host's memory.
+  const memUnlimited = selectedAccess !== undefined && !selectedAccess.memBytes;
+  const usageQuery = useQuery({
+    queryKey: queryKeys.performance.servers('mine'),
+    queryFn: () => api.get<PerformanceUsageResponse>('/performance/usage'),
+    enabled: open && memUnlimited,
+  });
+  const hostMemBytes = usageQuery.data?.servers.find((server) => server.serverId === serverId)?.host.memory.limitBytes ?? null;
 
   const liveServerIds = useMemo(() => new Set(
     liveServerAccess(accessQuery.data?.servers).map((server) => server.serverId),
@@ -380,7 +380,6 @@ function useCreateContainerData(open: boolean, serverId: string) {
     () => (serversQuery.data ?? []).filter((server) => server.status === 'online' && liveServerIds.has(server.id)),
     [serversQuery.data, liveServerIds],
   );
-  const selectedAccess = liveServerAccess(accessQuery.data?.servers).find((server) => server.serverId === serverId);
   const images = useMemo(() => {
     const allowed = new Set(selectedAccess?.allowedImageIds ?? []);
     return (imagesQuery.data ?? []).filter((image) => allowed.has(image.id));
@@ -393,7 +392,39 @@ function useCreateContainerData(open: boolean, serverId: string) {
     servers,
     images,
     selectedAccess,
+    hostMemBytes,
     serversLoading: open && (serversQuery.isLoading || accessQuery.isLoading),
+    imagesLoading: imagesQuery.isLoading || accessQuery.isLoading,
+  };
+}
+
+type CreateContainerData = ReturnType<typeof useCreateContainerData>;
+
+/**
+ * Slider ranges and quota lines of the chosen server. Memory runs to the grant
+ * limit, or the host's memory when unlimited; the root disk to the disk grant,
+ * or the 4 TiB ladder when unlimited (its pool is not exposed to users).
+ */
+function specLimits(data: CreateContainerData, memLeft: number | null): {
+  memScale: ReturnType<typeof sizeScale>;
+  diskScale: ReturnType<typeof sizeScale>;
+  memQuota: QuotaLineQuota;
+  diskQuota: QuotaLineQuota;
+} {
+  const { selectedAccess, capacityQuery, containersQuery } = data;
+  const memLimit = selectedAccess?.memBytes || null;
+  const memMaxBytes = memLimit ?? data.hostMemBytes;
+  const capacity = capacityQuery.data;
+  const diskLimit = capacity?.grantLimitBytes || null;
+  return {
+    memScale: sizeScale('memory', memMaxBytes === null ? null : memMaxBytes / GIB),
+    diskScale: sizeScale('disk', diskLimit === null ? null : diskLimit / GIB),
+    memQuota: containersQuery.isError && memLimit !== null
+      ? { kind: 'unknown' }
+      : quotaFrom(selectedAccess ? memLimit : undefined, memLeft),
+    diskQuota: capacityQuery.isError
+      ? { kind: 'unknown' }
+      : quotaFrom(capacity ? capacity.grantLimitBytes : undefined, capacity?.availableBytes),
   };
 }
 
@@ -429,11 +460,6 @@ function bytesText(bytes: number): string {
   return formatConsumedQuotaParts({ cpuCores: null, memBytes: bytes, diskBytes: null })[0] ?? '';
 }
 
-function positiveNumber(value: string): number | null {
-  const parsed = Number(value);
-  return value.trim() !== '' && Number.isFinite(parsed) && parsed > 0 ? parsed : null;
-}
-
 /** Field-level problems of the form; empty when it can be submitted. */
 function validateForm(form: FormState): FieldErrors {
   const next: FieldErrors = {};
@@ -443,7 +469,7 @@ function validateForm(form: FormState): FieldErrors {
   else if (!NAME_RE.test(name)) next.name = '只能使用字母、数字和连字符，且不能以连字符开头';
   if (!form.serverId) next.serverId = '请选择服务器';
   if (!form.imageId) next.imageId = '请选择镜像';
-  if (positiveNumber(form.rootSizeGib) === null) next.rootSizeGib = '请输入大于 0 的容量';
-  if (positiveNumber(form.memGib) === null) next.memGib = '请输入大于 0 的内存';
+  if (parsePositiveGib(form.rootSizeGib) === null) next.rootSizeGib = '请输入大于 0 的容量';
+  if (parsePositiveGib(form.memGib) === null) next.memGib = '请输入大于 0 的内存';
   return next;
 }

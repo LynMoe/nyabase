@@ -680,13 +680,13 @@ const DIALOGS = [
   { name: 'dialog-create-volume', path: '/volumes', open: async (p) => {
     if (!await clickByText(p, '新建数据卷')) return false;
     await selectFirstOption(p, 'volume-server');
-    await p.getByText(/剩余|额度不限/).first().waitFor({ timeout: 5_000 });
+    await p.getByText(/剩余|额度 不限/).first().waitFor({ timeout: 5_000 });
     return true;
   } },
   { name: 'dialog-create-shared-volume', path: '/shared-volumes', open: async (p) => {
     if (!await clickByText(p, '新建共享卷')) return false;
     await selectFirstOption(p, 'volume-shared-backend');
-    await p.getByText(/剩余 .* \/ 额度/).first().waitFor({ timeout: 5_000 });
+    await p.getByText(/剩余 .* · 额度/).first().waitFor({ timeout: 5_000 });
     return true;
   } },
   { name: 'dialog-delete-volume', path: '/volumes', open: (p) => clickByText(p, '删除') },
