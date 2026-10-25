@@ -14,7 +14,8 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Input } from '../ui/input.js';
 import { FormField } from '../layout/form-field.js';
 import { approxGibHint, formatGibInput, gibToBytes } from '../../lib/utils.js';
-import { cpuCoresLabel, cpuSetLabel } from '../../lib/cpu-set.js';
+import { allocatedCores } from '../../lib/container-usage.js';
+import { cpuGrantLabel } from '../../lib/cpu-set.js';
 import {
   classifySizeChange,
   observedRootUsedBytes,
@@ -69,6 +70,7 @@ export function LimitsDialog({
   const [memGib, setMemGib] = useState(formatGibInput(container.memBytes));
   const [gpuSelection, setGpuSelection] = useState<string[]>(container.gpu?.pciAddresses ?? []);
   const memBytes = Number.isFinite(Number(memGib)) ? gibToBytes(Number(memGib)) : NaN;
+  const cores = allocatedCores(container);
 
   return (
     <Dialog open onOpenChange={onOpenChange}>
@@ -78,12 +80,12 @@ export function LimitsDialog({
         </DialogHeader>
         <div className="space-y-3">
           <div className="rounded-md border bg-muted/20 p-3 text-sm" data-testid="container-spec-cpu">
-            <p>
-              CPU：<span className="font-mono">{cpuSetLabel(container.cpuSet)}</span>
-              {serverAccess ? <span className="text-muted-foreground">（授权 {cpuCoresLabel(serverAccess.cpuCores)}）</span> : null}
+            <p className="tabular-nums">
+              CPU：{cores === null ? '待分配' : `${cores} 核`}
+              {serverAccess ? <span className="text-muted-foreground">（授权：{cpuGrantLabel(serverAccess.cpuCores)}）</span> : null}
             </p>
             <p className="mt-1 text-xs text-muted-foreground">
-              CPU 不能按容器调整：同一服务器上同一用户的所有容器共享一组按整核绑定的 CPU，核数由管理员在授权中设置。
+              CPU 不能按容器调整：核数由管理员在服务器授权中设置，你在这台服务器上的容器共用这些核。
             </p>
           </div>
           <UnitField

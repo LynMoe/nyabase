@@ -40,20 +40,6 @@ export function hostOccupancy(host: PerformanceHostSnapshot): {
   return { cpu, cpuTitle, memory, memoryTitle, disk, diskTitle, network, gpu, gpuTitle };
 }
 
-export function hostOccupancyLine(host: PerformanceHostSnapshot): string {
-  const parts = hostOccupancy(host);
-  return [`CPU ${parts.cpu}`, `内存 ${parts.memory}`, `磁盘 ${parts.disk}`, parts.network, parts.gpu ? `显存 ${parts.gpu}` : '']
-    .filter(Boolean)
-    .join(' · ');
-}
-
-export function hostOccupancyTitle(host: PerformanceHostSnapshot): string {
-  const parts = hostOccupancy(host);
-  return [parts.cpuTitle && `CPU ${parts.cpuTitle}`, parts.memoryTitle && `内存 ${parts.memoryTitle}`, parts.diskTitle && `磁盘 ${parts.diskTitle}`, parts.gpuTitle && `显存 ${parts.gpuTitle}`]
-    .filter(Boolean)
-    .join(' · ');
-}
-
 function formatCores(value: number): string {
   const text = Math.abs(value) >= 10 ? String(Math.round(value)) : value.toFixed(1);
   return `${text} 核`;

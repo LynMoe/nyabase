@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { getRouteApi, useNavigate } from '@tanstack/react-router';
-import { Gauge, History, Terminal, TriangleAlert } from 'lucide-react';
+import { Gauge, History, Info, Terminal, TriangleAlert } from 'lucide-react';
 import {
   ContainerStatus,
   IntentResourceType,
@@ -15,6 +15,7 @@ import {
 import { Alert, AlertDescription } from '../components/ui/alert.js';
 import { Button } from '../components/ui/button.js';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../components/ui/dialog.js';
+import { Hint } from '../components/ui/hint.js';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '../components/ui/tabs.js';
 import { Page, PageHeader } from '../components/layout/page-header.js';
 import { QueryView } from '../components/layout/query-view.js';
@@ -160,7 +161,10 @@ function ContainerDetailHeader({ container: c, scope }: { container: ContainerDt
       title={
         c ? (
           <span className="inline-flex flex-wrap items-center gap-2">
-            <span>{c.name}</span>
+            <span className="inline-flex items-center gap-1.5">
+              <span>{c.name}</span>
+              <InstanceNameHint instanceName={c.instanceName} />
+            </span>
             <StatusBadge
               label={containerStatusLabel(c.actual.status)}
               raw={c.actual.status}
@@ -214,6 +218,25 @@ function ContainerDetailHeader({ container: c, scope }: { container: ContainerDt
       onOpenChange={setIntentsOpen}
     />
     </>
+  );
+}
+
+/** The Incus instance name is for debugging and support, so it stays behind an info icon. */
+function InstanceNameHint({ instanceName }: { instanceName: string | null }) {
+  const text = instanceName ? `实例名 ${instanceName}` : '实例创建中';
+  return (
+    <Hint
+      content={instanceName ? <>实例名 <span className="font-mono">{instanceName}</span></> : text}
+    >
+      <button
+        type="button"
+        className="inline-flex rounded-sm text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        aria-label={text}
+        data-testid="container-instance-name"
+      >
+        <Info className="h-4 w-4" />
+      </button>
+    </Hint>
   );
 }
 

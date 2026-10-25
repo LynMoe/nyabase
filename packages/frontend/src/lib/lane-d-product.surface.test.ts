@@ -403,7 +403,10 @@ describe('lane D product UI copy', () => {
     expect(dashboard).not.toMatch(/formatConsumedQuotaParts/);
     expect(dashboard).not.toMatch(/nvidia-gpu/);
     expect(dashboard).not.toMatch(/GpuGrantMode/);
-    expect(dashboard).toMatch(/gpu\.pciAddresses/);
+    // The dashboard is summary cards plus the quota; per-container usage lives in the container list.
+    expect(dashboard).not.toMatch(/incus-container-resources|incus-server-resources/);
+    expect(quotaPage).not.toMatch(/绑定|formatCpuList|cpuSet/);
+    expect(quotaPage).toMatch(/cpuGrantLabel/);
     // One "remaining" line instead of ceiling + remaining + a capacity box.
     expect(create).toMatch(/create-remaining/);
     expect(create).toMatch(/formatConsumedQuotaParts/);

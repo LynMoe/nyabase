@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { cpuCoresLabel, cpuSetLabel, formatCpuList, groupCpuTopology, parseCpuList } from './cpu-set.js';
+import { cpuCoresLabel, cpuGrantLabel, formatCpuList, groupCpuTopology, parseCpuList } from './cpu-set.js';
 
 describe('formatCpuList', () => {
   it('folds consecutive ids into ranges', () => {
@@ -26,9 +26,9 @@ describe('parseCpuList', () => {
 });
 
 describe('cpu labels', () => {
-  it('labels container CPU sets and grant cores', () => {
-    expect(cpuSetLabel(null)).toBe('待分配');
-    expect(cpuSetLabel([2, 3, 8])).toBe('3 核 · 2-3,8');
+  it('labels grant cores', () => {
+    expect(cpuGrantLabel(null)).toBe('全部');
+    expect(cpuGrantLabel(4)).toBe('4 核');
     expect(cpuCoresLabel(null)).toBe('不限');
     expect(cpuCoresLabel(4)).toBe('4 核');
   });

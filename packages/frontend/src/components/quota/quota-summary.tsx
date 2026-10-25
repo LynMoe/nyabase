@@ -21,9 +21,10 @@ import {
   TableHeader,
   TableRow,
 } from '../ui/table.js';
-import { cn } from '../../lib/utils.js';
+import { UsageMeter } from '../performance/usage-meter.js';
 import { formatQuotaDimension, runningMemBytes } from '../../lib/grant-quota.js';
-import { cpuCoresLabel, formatCpuList } from '../../lib/cpu-set.js';
+import { sharedUnitPair } from '../../lib/container-usage.js';
+import { cpuGrantLabel } from '../../lib/cpu-set.js';
 import { graceServerAccess, liveServerAccess } from '../../lib/effective-access.js';
 import { queryKeys } from '../../lib/query-keys.js';
 import { queryPollInterval } from '../../lib/query-lifecycle.js';
@@ -94,7 +95,7 @@ function QuotaBody({
   return (
     <SectionCard
       title="我的额度"
-      description={empty ? undefined : '已分配 = 容器与数据卷占用的规格，不是实时用量；内存只统计运行中的容器。CPU 按核绑定，同一服务器上你的所有容器共享这组 CPU。'}
+      description={empty ? undefined : '已分配 = 容器与数据卷占用的规格，不是实时用量；内存只统计运行中的容器。'}
       flush={!empty}
     >
       {empty ? (
@@ -194,18 +195,12 @@ function ServerQuotaRow({
     : 0;
   const mem = formatQuotaDimension(grant.memBytes, memUsed);
   const disk = formatQuotaDimension(grant.diskBytes, diskUsed);
-  const pinned = containers.find((item) => item.cpuSet && item.cpuSet.length > 0)?.cpuSet ?? null;
   const gpu = formatGpuGrantSummary(grant.gpuPciAddresses);
   return (
     <TableRow>
       <TableCell className="font-medium">{name}</TableCell>
       <TableCell>
-        <div className="min-w-[7rem]" data-testid="quota-cpu">
-          <p className="text-sm">{grant.cpuCores === null ? '不限（全部未保留 CPU）' : cpuCoresLabel(grant.cpuCores)}</p>
-          <p className="mt-1 text-xs text-muted-foreground">
-            {pinned ? `绑定 CPU ${formatCpuList(pinned)} · ` : null}本服务器上你的容器共享
-          </p>
-        </div>
+        <p className="min-w-[5rem] text-sm tabular-nums" data-testid="quota-cpu">{cpuGrantLabel(grant.cpuCores)}</p>
       </TableCell>
       <TableCell>
         <QuotaCell used={mem.used} limit={mem.limit} remaining={mem.remaining} grant={grant.memBytes} consumed={memUsed} />
@@ -238,21 +233,12 @@ function QuotaCell({
   consumed: number;
 }) {
   const unlimited = grant === null;
-  const pct = unlimited ? 0 : Math.min(100, Math.round((consumed / grant) * 100));
+  const pair = sharedUnitPair(used, limit);
   return (
-    <div className="min-w-[7rem]">
-      <p className="text-sm">{used} / {limit}</p>
-      {!unlimited ? (
-        <>
-          <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-muted">
-            <div
-              className={cn('h-full rounded-full', pct >= 90 ? 'bg-destructive' : 'bg-primary')}
-              style={{ width: `${pct}%` }}
-            />
-          </div>
-          <p className="mt-1 text-xs text-muted-foreground">剩余 {remaining}</p>
-        </>
-      ) : null}
-    </div>
+    <UsageMeter
+      className="w-36"
+      reading={{ used: pair.used, total: pair.total, ratio: unlimited || grant <= 0 ? null : consumed / grant }}
+      detail={unlimited ? undefined : `剩余 ${remaining}`}
+    />
   );
 }

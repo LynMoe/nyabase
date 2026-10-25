@@ -1,7 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   canonicalPciAddress,
-  formatGpuSelectionLabel,
   type GpuContainerState,
   type GpuDeviceDto,
   type GpuGrant,
@@ -92,7 +91,11 @@ export function ContainerSpecGpu({
   );
 }
 
-/** Read-only GPU field on the container overview, grouped by card model. */
+/**
+ * The container's cards by model ("1 × RTX 4090"), hover for the PCI
+ * addresses. Shown under the GPU meter on the container overview; renders
+ * nothing without cards or while the inventory loads.
+ */
 export function ContainerOverviewGpu({
   gpu,
   serverId,
@@ -104,31 +107,21 @@ export function ContainerOverviewGpu({
 }) {
   const current = gpu?.pciAddresses ?? [];
   const query = useGpuDevices(serverId, scope, current.length > 0);
-  if (!gpu) return null;
   const inventory = Array.isArray(query.data?.items) ? query.data.items : [];
   const groups = query.data ? gpuModelGroups(current, inventory) : [];
+  if (groups.length === 0) return null;
   return (
-    <div>
-      <p className="text-xs text-muted-foreground">GPU</p>
-      {current.length === 0 ? (
-        <p className="text-sm">{formatGpuSelectionLabel(current, [])}</p>
-      ) : groups.length === 0 ? (
-        <p className="text-sm">
-          <TechnicalId label="GPU" value={current.join(', ')} visible={`${current.length} 张`} />
-        </p>
-      ) : (
-        <p className="flex flex-wrap gap-x-3 text-sm">
-          {groups.map((group) => (
-            <TechnicalId
-              key={group.model}
-              label="GPU"
-              value={group.addresses.join(', ')}
-              visible={group.label}
-            />
-          ))}
-        </p>
-      )}
-    </div>
+    <span className="flex flex-wrap gap-x-3">
+      {groups.map((group) => (
+        <TechnicalId
+          key={group.model}
+          label="GPU"
+          value={group.addresses.join(', ')}
+          visible={group.label}
+          className="inline max-w-full truncate text-xs"
+        />
+      ))}
+    </span>
   );
 }
 

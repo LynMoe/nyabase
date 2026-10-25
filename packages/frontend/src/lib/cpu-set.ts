@@ -37,10 +37,9 @@ export function parseCpuList(text: string): CpuListParse {
   return { ok: true, cpus: [...cpus].sort((a, b) => a - b) };
 }
 
-/** A container's applied CPU set: "2 核 · 2-3", or 待分配 before the first reconcile. */
-export function cpuSetLabel(cpuSet: readonly number[] | null): string {
-  if (!cpuSet || cpuSet.length === 0) return '待分配';
-  return `${cpuSet.length} 核 · ${formatCpuList(cpuSet)}`;
+/** A grant's cores on user surfaces; null means every core the server offers. */
+export function cpuGrantLabel(cores: number | null): string {
+  return cores === null ? '全部' : `${cores} 核`;
 }
 
 /** Whole cores of a grant; null means every unreserved CPU. */

@@ -44,6 +44,7 @@ const user = {
   username: 'admin',
   displayName: '平台管理员',
   status: 'active',
+  role: 'admin',
   createdAt: ISO,
   capabilities: CAPS,
   groups: [{ id: 'grp-admins', name: 'administrators', isSystem: true }],
@@ -139,15 +140,15 @@ const container = {
   rootSizePendingBytes: null,
   rootUsedBytes: 8 * 1024 ** 3,
   rootCapability: capability,
-  cpuMillis: 2000,
+  cpuSet: [0, 1, 2, 3],
   memBytes: 4 * 1024 ** 3,
-  gpu: null,
+  gpu: { nvidiaRuntime: true, pciAddresses: ['0000:01:00.0'] },
   powerIntent: 'running',
   lifecyclePhase: 'active',
   routedIp: '10.20.0.15',
   actual: { instanceName: 'c-dev-workspace', status: 'running', routedIp: '10.20.0.15', observedAt: ISO },
   ssh: {
-    enabled: true, status: 'running', ready: true, loginUser: 'ubuntu',
+    enabled: true, status: 'running', ready: true, loginUser: 'ubuntu', hostName: 'dev-workspace.nyabase.test',
     proxyHost: 'ssh.example.test', proxyPort: 2222,
     observedAt: ISO, lastError: null,
   },
@@ -157,6 +158,7 @@ const container = {
     kind: 'local', bindState: 'attached', onlineCancelAllowed: false,
     detachDrainedAt: null, createdAt: ISO, updatedAt: ISO,
   }],
+  sharedVolumes: [],
   needsAttention: false,
   failureCode: null,
   failureReason: null,
@@ -168,6 +170,23 @@ const container = {
   },
   createdAt: ISO,
   updatedAt: ISO,
+};
+
+const stoppedContainer = {
+  ...container,
+  id: 'ctr-2',
+  name: 'train-job',
+  instanceName: 'c-train-job',
+  cpuSet: [0, 1, 2, 3],
+  memBytes: 16 * 1024 ** 3,
+  rootUsedBytes: 31 * 1024 ** 3,
+  rootSizeBytes: 40 * 1024 ** 3,
+  gpu: null,
+  powerIntent: 'stopped',
+  routedIp: '10.20.0.16',
+  actual: { instanceName: 'c-train-job', status: 'stopped', routedIp: '10.20.0.16', observedAt: ISO },
+  volumes: [],
+  actions: { ...container.actions, start: actionOn, stop: actionOff, restart: actionOff },
 };
 
 const volume = {
@@ -280,7 +299,7 @@ const ownContainerUsage = {
   name: 'dev-workspace',
   cpu: { usageCores: 0.6, limitCores: 2, ratio: 0.3 },
   memory: { usedBytes: 1.6 * 1024 ** 3, limitBytes: 4 * 1024 ** 3, ratio: 0.4 },
-  gpu: { usedBytes: null, limitBytes: null, ratio: null, pciAddresses: [] },
+  gpu: { usedBytes: 6 * 1024 ** 3, limitBytes: 24 * 1024 ** 3, ratio: 0.25, pciAddresses: ['0000:01:00.0'] },
   disk: { usedBytes: 8 * 1024 ** 3, sizeBytes: 20 * 1024 ** 3, ratio: 0.4, readBytesPerSec: 0, writeBytesPerSec: 1024 },
   network: { rxBytesPerSec: 12 * 1024, txBytesPerSec: 4 * 1024 },
   volumes: [],
@@ -380,7 +399,7 @@ function mockApi(urlString, method) {
     return json({ items: [{ pciAddress: '0000:01:00.0', index: 0, model: 'RTX 4090' }], enabled: true });
   }
 
-  if (p === '/containers') return json([container]);
+  if (p === '/containers') return json([container, stoppedContainer]);
   if (p === '/containers/ctr-1') return json(container);
   if (p.endsWith('/containers/ctr-1/volumes')) return json(container.volumes);
   if (p === '/intents' && url.searchParams.get('resourceId') === 'ctr-1') return json({ items: [{
@@ -496,7 +515,7 @@ function mockApi(urlString, method) {
   if (p.includes('/server-grants')) {
     return json([{
       id: 'sg-1', scope: 'user', scopeId: 'user-alice', serverId: 'srv-1',
-      cpuMillis: 4000, memBytes: 8 * 1024 ** 3, diskBytes: 100 * 1024 ** 3,
+      cpuCores: 4, memBytes: 8 * 1024 ** 3, diskBytes: 100 * 1024 ** 3,
       gpu: { mode: 'none', pciAddresses: [] }, expiresAt: null, createdAt: ISO, updatedAt: ISO,
     }]);
   }
@@ -505,7 +524,7 @@ function mockApi(urlString, method) {
   if (p.includes('/effective-access')) {
     return json({
       servers: [{
-        serverId: 'srv-1', cpuMillis: 4000, memBytes: 8 * 1024 ** 3, diskBytes: 100 * 1024 ** 3,
+        serverId: 'srv-1', cpuCores: 4, memBytes: 8 * 1024 ** 3, diskBytes: 100 * 1024 ** 3,
         gpu: { mode: 'none', pciAddresses: [] }, expiresAt: null, purgeAt: null,
         accessPhase: 'live', allowedImageIds: ['img-1'],
       }],
@@ -529,7 +548,7 @@ function mockApi(urlString, method) {
     return json({
       servers: [{
         serverId: 'srv-1',
-        cpuMillis: 4000,
+        cpuCores: null,
         memBytes: 8 * 1024 ** 3,
         diskBytes: 200 * 1024 ** 3,
         gpuPciAddresses: ['0000:01:00.0'],

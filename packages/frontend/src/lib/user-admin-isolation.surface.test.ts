@@ -93,11 +93,16 @@ describe('user panel pages stay on scope=mine', () => {
     expect(detail).toMatch(/enabled: canManageVolumes,/);
   });
 
-  it('dashboard performance stays on the user usage API', () => {
-    const src = readPage('dashboard-page.tsx');
-    expect(src).toMatch(/\/performance\/usage'/);
-    expect(src).not.toMatch(/\/admin\/performance|scope=all/);
-    expect(src).not.toMatch(/PerformancePanel/);
+  it('container list usage reads the scoped usage API, never /admin/performance', () => {
+    const hook = readSrc('hooks/use-container-live-usage.ts');
+    expect(hook).toMatch(/scopedPath\('\/performance\/usage', scope\)/);
+    expect(hook).toMatch(/useHasRole\(Role\.Operator\)/);
+    expect(hook).not.toMatch(/\/admin\/performance/);
+    const table = readSrc('components/containers/container-table.tsx');
+    expect(table).toMatch(/useContainerLiveUsage\(admin \? 'all' : 'mine'\)/);
+    const dashboard = readPage('dashboard-page.tsx');
+    expect(dashboard).not.toMatch(/\/admin\/performance|scope=all/);
+    expect(dashboard).not.toMatch(/PerformancePanel/);
   });
 
   it('servers page mounts the scope=all performance view', () => {
@@ -113,7 +118,7 @@ describe('user panel pages stay on scope=mine', () => {
     expect(src).not.toMatch(/ViewMetricsAll/);
     expect(src).not.toMatch(/ManageContainersAny/);
     expect(src).not.toMatch(/\/manage\/containers/);
-    expect(src).toMatch(/to="\/containers\/\$containerId"/);
+    expect(src).toMatch(/to="\/containers"/);
   });
 
   it('quota summary never calls /admin/* and stays on user grant APIs', () => {
