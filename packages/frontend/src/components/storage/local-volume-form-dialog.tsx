@@ -35,6 +35,7 @@ import { useOpenSession } from '../../hooks/use-dom-state.js';
 import { approxGibHint, formatGib, formatGibInput, grantAvailableLabel } from '../../lib/utils.js';
 import { defaultResourceName } from '../../lib/default-names.js';
 import { SizeField } from '../ui/size-slider.js';
+import { useFittedDefaultSize } from '../../hooks/use-fitted-default-size.js';
 import { QuotaLine, type QuotaLineQuota, overQuotaMessage, quotaFrom, quotaSliderLimits } from '../quota/quota-line.js';
 import { VolumeShrinkOrchestrationDialog } from './volume-shrink-orchestration-dialog.js';
 
@@ -176,6 +177,13 @@ function LocalVolumeFormBody({
   const shrinkBlocked = path === 'never';
   const createLimits = useCreateSizeLimits(scope, editing ? '' : serverId, poolId, nextSize);
   const createOver = !editing && createLimits.over;
+  const sizeDefault = useFittedDefaultSize({
+    enabled: open && !editing,
+    defaultGib: 10,
+    stops: createLimits.scale.stops,
+    availableGib: createLimits.availableGib,
+    setText: setSizeGiB,
+  });
 
   const { createLocal, patch, invalidateVolumeLists } = useLocalVolumeSave(editing, scope, onOpenChange, setError);
   const pending = createLocal.isPending || patch.isPending;
@@ -242,7 +250,10 @@ function LocalVolumeFormBody({
                 id="volume-size"
                 label="大小"
                 value={sizeGiB}
-                onChange={setSizeGiB}
+                onChange={(value) => {
+                  sizeDefault.markTouched();
+                  setSizeGiB(value);
+                }}
                 scale={createLimits.scale}
                 availableGib={createLimits.availableGib}
                 invalid={createOver}

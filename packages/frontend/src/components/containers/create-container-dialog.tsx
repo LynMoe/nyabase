@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   type ContainerDto,
@@ -32,6 +32,7 @@ import { GIB, gibToBytes } from '../../lib/utils.js';
 import { SizeField, parsePositiveGib } from '../ui/size-slider.js';
 import { QuotaLine, type QuotaLineQuota, quotaFrom } from '../quota/quota-line.js';
 import { sizeScale } from '../../lib/size-ladder.js';
+import { useFittedDefaultSize } from '../../hooks/use-fitted-default-size.js';
 import { defaultResourceName } from '../../lib/default-names.js';
 import { api } from '../../lib/api.js';
 import { errorMessage } from '../../lib/api-error.js';
@@ -278,6 +279,28 @@ function useCreateContainerForm({
   const overQuota = memOver || diskOver;
   const limits = specLimits(data, memLeft);
 
+  // Until the user moves a slider, its default shrinks to fit what is left.
+  const setMemText = useCallback((memGib: string) => {
+    setForm((current) => (current.memGib === memGib ? current : { ...current, memGib }));
+  }, []);
+  const setRootText = useCallback((rootSizeGib: string) => {
+    setForm((current) => (current.rootSizeGib === rootSizeGib ? current : { ...current, rootSizeGib }));
+  }, []);
+  const memDefault = useFittedDefaultSize({
+    enabled: open,
+    defaultGib: Number(emptyForm.memGib),
+    stops: limits.memScale.stops,
+    availableGib: form.startAfterCreate && memLeft !== null ? memLeft / GIB : null,
+    setText: setMemText,
+  });
+  const rootDefault = useFittedDefaultSize({
+    enabled: open,
+    defaultGib: Number(emptyForm.rootSizeGib),
+    stops: limits.diskScale.stops,
+    availableGib: diskLeft === null ? null : diskLeft / GIB,
+    setText: setRootText,
+  });
+
   const create = useMutation({
     mutationFn: (body: CreateContainerRequest) => api.post<IntentAcceptedDto>('/containers', body),
     onSuccess: () => {
@@ -289,6 +312,8 @@ function useCreateContainerForm({
   });
 
   const update = <K extends keyof FormState>(key: K, value: FormState[K]) => {
+    if (key === 'memGib') memDefault.markTouched();
+    if (key === 'rootSizeGib') rootDefault.markTouched();
     setForm((current) => ({ ...current, [key]: value }));
     setErrors((current) => ({ ...current, [key]: undefined }));
     setSubmitError(null);

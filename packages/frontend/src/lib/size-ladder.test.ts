@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   clampToAvailable,
   fallbackMaxGib,
+  fitDefault,
   formatSizeValue,
   formatTickLabel,
   gibInputText,
@@ -135,5 +136,20 @@ describe('formatting', () => {
   it('writes input text without float noise', () => {
     expect(gibInputText(0.1 + 0.2)).toBe('0.3');
     expect(gibInputText(16)).toBe('16');
+  });
+});
+
+describe('fitDefault', () => {
+  const stops = [0.5, 1, 2, 4, 8];
+  it('keeps a default that fits or is unlimited', () => {
+    expect(fitDefault(stops, 2, 4)).toBe(2);
+    expect(fitDefault(stops, 2, null)).toBe(2);
+  });
+  it('drops to the largest stop within what is left', () => {
+    expect(fitDefault(stops, 2, 1.5)).toBe(1);
+    expect(fitDefault(stops, 20, 6)).toBe(4);
+  });
+  it('clamps when no stop fits', () => {
+    expect(fitDefault(stops, 2, 0.3)).toBe(0.3);
   });
 });

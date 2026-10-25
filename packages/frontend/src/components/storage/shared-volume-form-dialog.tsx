@@ -32,6 +32,7 @@ import { useOpenSession } from '../../hooks/use-dom-state.js';
 import { approxGibHint, formatGibInput, sharedBackendAvailableBytes } from '../../lib/utils.js';
 import { defaultResourceName } from '../../lib/default-names.js';
 import { SizeField } from '../ui/size-slider.js';
+import { useFittedDefaultSize } from '../../hooks/use-fitted-default-size.js';
 import {
   QuotaLine,
   type QuotaLineQuota,
@@ -207,6 +208,13 @@ function SharedVolumeFormBody({ sharedVolume: editing, open, onOpenChange }: Sha
     Number.isFinite(nextSize) && nextSize > 0 ? nextSize : null,
   );
   const createOver = !editing && createLimits.over;
+  const sizeDefault = useFittedDefaultSize({
+    enabled: open && !editing,
+    defaultGib: 10,
+    stops: createLimits.scale.stops,
+    availableGib: createLimits.availableGib,
+    setText: setSizeGiB,
+  });
 
   const { createShared, patch } = useSharedVolumeSave(editing, onOpenChange, setError);
   const pending = createShared.isPending || patch.isPending;
@@ -277,7 +285,10 @@ function SharedVolumeFormBody({ sharedVolume: editing, open, onOpenChange }: Sha
               id="shared-volume-size"
               label="大小"
               value={sizeGiB}
-              onChange={setSizeGiB}
+              onChange={(value) => {
+                sizeDefault.markTouched();
+                setSizeGiB(value);
+              }}
               scale={createLimits.scale}
               availableGib={createLimits.availableGib}
               invalid={createOver}

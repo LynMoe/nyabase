@@ -102,6 +102,17 @@ export function clampToAvailable(value: number, availableGib: number | null): nu
 }
 
 /**
+ * A form default that fits what is left: the default itself when it fits (or
+ * nothing limits it), otherwise the largest stop within `availableGib`, or the
+ * plain clamp when even the smallest stop is too big.
+ */
+export function fitDefault(stops: readonly number[], defaultGib: number, availableGib: number | null): number {
+  if (availableGib === null || defaultGib <= availableGib) return defaultGib;
+  const fitting = stops.filter((stop) => stop <= availableGib);
+  return fitting.length > 0 ? fitting[fitting.length - 1]! : clampToAvailable(defaultGib, availableGib);
+}
+
+/**
  * Indices of the stops that get a tick label: the max always, the first stop
  * and majors when they are at least `minGap` stops from an already labelled
  * one (chosen from the max downward so the max never loses its label).
