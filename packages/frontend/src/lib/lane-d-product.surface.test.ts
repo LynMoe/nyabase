@@ -356,8 +356,13 @@ describe('lane D product UI copy', () => {
     const ops = read('pages/ops-page.tsx');
     expect(ops).toMatch(/status', 'pending'/);
     expect(ops).toMatch(/status', 'failed'/);
-    expect(ops).toMatch(/加载更多/);
-    expect(ops).toMatch(/useInfiniteQuery/);
+    // Page-by-page (cursor stack), not infinite loading; the status segments
+    // use the shared SegmentedFilter so the active one is highlighted.
+    expect(ops).not.toMatch(/加载更多|useInfiniteQuery/);
+    expect(ops).toMatch(/useCursorPages\(/);
+    expect(ops).toMatch(/<Pagination[\s\S]*hasNext=/);
+    expect(ops).toMatch(/<SegmentedFilter/);
+    expect(ops).not.toMatch(/variant=\{segment === /);
     expect(ops).not.toMatch(/机器状态/);
     expect(ops).toMatch(/useState<IntentFilterState>\(\{ segment: 'all' \}\)/);
     expect(ops).not.toMatch(/enabled: segment != null/);

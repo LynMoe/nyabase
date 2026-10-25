@@ -10,26 +10,35 @@ import {
 } from './select.js';
 import { cn } from '../../lib/utils.js';
 
+/**
+ * Offset mode passes `total` and shows "第 x / y 页". Cursor mode (an API
+ * without a total count) passes `hasNext` instead and shows only "第 x 页".
+ * `busy` disables navigation while the requested page is loading.
+ */
+type PaginationProps = {
+  page: number;
+  pageSize: number;
+  pageSizes?: readonly number[];
+  onPageChange: (page: number) => void;
+  onPageSizeChange: (pageSize: number) => void;
+  busy?: boolean;
+  className?: string;
+} & ({ total: number; hasNext?: never } | { total?: never; hasNext: boolean });
+
 export function Pagination({
   page,
   pageSize,
   total,
+  hasNext,
   pageSizes = [25, 50, 100] as const,
   onPageChange,
   onPageSizeChange,
+  busy = false,
   className,
-}: {
-  page: number;
-  pageSize: number;
-  total: number;
-  pageSizes?: readonly number[];
-  onPageChange: (page: number) => void;
-  onPageSizeChange: (pageSize: number) => void;
-  className?: string;
-}): React.ReactNode {
-  const totalPages = Math.max(1, Math.ceil(total / Math.max(1, pageSize)));
-  const canPrev = page > 0;
-  const canNext = page + 1 < totalPages;
+}: PaginationProps): React.ReactNode {
+  const totalPages = total === undefined ? null : Math.max(1, Math.ceil(total / Math.max(1, pageSize)));
+  const canPrev = !busy && page > 0;
+  const canNext = !busy && (totalPages === null ? Boolean(hasNext) : page + 1 < totalPages);
 
   return (
     <div
@@ -38,8 +47,10 @@ export function Pagination({
         className,
       )}
     >
-      <span>
-        第 {Math.min(page + 1, totalPages)} / {totalPages} 页
+      <span data-testid="pagination-page">
+        {totalPages === null
+          ? `第 ${page + 1} 页`
+          : `第 ${Math.min(page + 1, totalPages)} / ${totalPages} 页`}
       </span>
       <div className="flex flex-wrap items-center gap-2">
         <label className="flex items-center gap-2 text-sm text-muted-foreground">
@@ -63,6 +74,7 @@ export function Pagination({
         <Button
           variant="outline"
           size="sm"
+          data-testid="pagination-prev"
           disabled={!canPrev}
           onClick={() => onPageChange(page - 1)}
         >
@@ -72,6 +84,7 @@ export function Pagination({
         <Button
           variant="outline"
           size="sm"
+          data-testid="pagination-next"
           disabled={!canNext}
           onClick={() => onPageChange(page + 1)}
         >

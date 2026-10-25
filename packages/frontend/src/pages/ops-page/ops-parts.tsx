@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query';
 import { type IntentDto, IntentKind, IntentResourceType, type ServerDto } from '@nyabase/common';
-import { Button } from '../../components/ui/button.js';
+import { SegmentedFilter } from '../../components/layout/list-search.js';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../../components/ui/select.js';
 import { api } from '../../lib/api.js';
 import { queryKeys } from '../../lib/query-keys.js';
@@ -19,12 +19,12 @@ import { formatIntentAttempt, statusBadgeVariant } from '../../lib/intent-visibi
 
 const ALL = '__all__';
 export const SEGMENTS = [
-  { id: 'all', label: '全部' },
-  { id: 'pending', label: '进行中' },
-  { id: 'failed', label: '失败' },
+  { value: 'all', label: '全部' },
+  { value: 'pending', label: '进行中' },
+  { value: 'failed', label: '失败' },
 ] as const;
 
-export type StatusSegment = (typeof SEGMENTS)[number]['id'];
+export type StatusSegment = (typeof SEGMENTS)[number]['value'];
 
 export interface IntentFilterState {
   segment: StatusSegment;
@@ -49,20 +49,12 @@ export function IntentFilters({
   }).data ?? [];
   return (
     <div className="flex flex-wrap items-center gap-2">
-      <div className="flex flex-wrap rounded-md bg-muted p-1">
-        {SEGMENTS.map((item) => (
-          <Button
-            key={item.id}
-            type="button"
-            size="sm"
-            variant={segment === item.id ? 'secondary' : 'ghost'}
-            className="h-8"
-            onClick={() => onChange({ segment: item.id })}
-          >
-            {item.label}
-          </Button>
-        ))}
-      </div>
+      <SegmentedFilter
+        label="状态"
+        value={segment}
+        options={SEGMENTS}
+        onChange={(value) => onChange({ segment: value })}
+      />
       <Select
         value={kind ?? ALL}
         onValueChange={(value) => onChange({ kind: value === ALL ? undefined : value as IntentKind })}

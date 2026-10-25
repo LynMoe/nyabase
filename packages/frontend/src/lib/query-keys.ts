@@ -112,6 +112,8 @@ export const queryKeys = {
     kind?: string;
     resourceType?: string;
     serverId?: string;
+    limit: number;
+    cursor?: string;
   }) => ['admin-intents', filters] as const,
   adminIntent: (id: string) => ['admin-intent', id] as const,
   grants: {

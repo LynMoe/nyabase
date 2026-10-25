@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { useInfiniteQuery } from '@tanstack/react-query';
+import { keepPreviousData, useQuery } from '@tanstack/react-query';
 import {
   roleAtLeast,
   Role,
@@ -10,29 +10,32 @@ import {
 } from '@nyabase/common';
 import { Activity } from 'lucide-react';
 import { api } from '../lib/api.js';
-import { Button } from '../components/ui/button.js';
+import { Pagination } from '../components/ui/pagination.js';
 import { IntentDetailDialog } from '../components/intents/intent-detail-dialog.js';
 import { Page, PageHeader } from '../components/layout/page-header.js';
 import { QueryView } from '../components/layout/query-view.js';
 import { SectionCard } from '../components/layout/section-card.js';
 import { useAuthStore } from '../store/auth.js';
+import { useCursorPages } from '../hooks/use-cursor-pages.js';
 import { intentPending } from '../lib/in-progress.js';
 import { queryKeys } from '../lib/query-keys.js';
 import { refetchWhileInProgress } from '../lib/query-lifecycle.js';
 import { IntentFilters, type IntentFilterState, type StatusSegment } from './ops-page/ops-parts.js';
 import { IntentsTable } from './ops-page/ops-parts.js';
 
-const PAGE_SIZE = 50;
+const PAGE_SIZES = [25, 50, 100] as const;
+type OpsPageSize = (typeof PAGE_SIZES)[number];
 
 function adminIntentsPath(filters: {
   segment: StatusSegment;
   kind?: IntentKind;
   resourceType?: IntentResourceType;
   serverId?: string;
+  limit: number;
   cursor?: string;
 }): string {
   const params = new URLSearchParams({ scope: 'all' });
-  params.set('limit', String(PAGE_SIZE));
+  params.set('limit', String(filters.limit));
   if (filters.segment === 'pending') params.set('status', 'pending');
   if (filters.segment === 'failed') params.set('status', 'failed');
   if (filters.kind) params.set('kind', filters.kind);
@@ -42,35 +45,46 @@ function adminIntentsPath(filters: {
   return `/intents?${params.toString()}`;
 }
 
+/**
+ * The list API is keyset-paginated without a total (counting the whole intent
+ * history per filter is not cheap), so pages are walked with a cursor stack:
+ * 上一页 / 下一页, back to page 1 whenever a filter or the page size changes.
+ * Only the page on screen is polled.
+ */
 export default function OpsPage() {
   const user = useAuthStore((state) => state.user);
   const canManageServers = user ? roleAtLeast(user.role, Role.Operator) : false;
   const [filters, setFilters] = useState<IntentFilterState>({ segment: 'all' });
+  const [pageSize, setPageSize] = useState<OpsPageSize>(50);
   const [selected, setSelected] = useState<IntentDto | null>(null);
   const { segment, kind, resourceType } = filters;
   const serverId = canManageServers ? filters.serverId : undefined;
+  const pages = useCursorPages(JSON.stringify([segment, kind, resourceType, serverId, pageSize]));
 
-  const intentsQuery = useInfiniteQuery({
+  const intentsQuery = useQuery({
     queryKey: queryKeys.adminIntents({
       status: segment === 'all' ? undefined : segment,
       kind,
       resourceType,
       serverId,
+      limit: pageSize,
+      cursor: pages.cursor,
     }),
-    queryFn: ({ pageParam }) => api.get<CursorPaginatedResponse<IntentDto>>(adminIntentsPath({
+    queryFn: () => api.get<CursorPaginatedResponse<IntentDto>>(adminIntentsPath({
       segment,
       kind,
       resourceType,
       serverId,
-      cursor: pageParam,
+      limit: pageSize,
+      cursor: pages.cursor,
     })),
-    initialPageParam: undefined as string | undefined,
-    getNextPageParam: (lastPage) => lastPage.nextCursor ?? undefined,
+    placeholderData: keepPreviousData,
     refetchInterval: (query) => refetchWhileInProgress(query.state, {
       steadyIntervalMs: 15_000,
-      isSettled: (data) => data.pages.every((page) => page.items.every((item) => !intentPending(item.status))),
+      isSettled: (data) => data.items.every((item) => !intentPending(item.status)),
     }),
   });
+  const turning = intentsQuery.isPlaceholderData;
 
   return (
     <Page testId="ops-page">
@@ -87,35 +101,34 @@ export default function OpsPage() {
         flush
       >
         <QueryView query={intentsQuery} resourceName="操作记录" loadingLabel="加载操作记录...">
-          {(data) => {
-            const items = data.pages.flatMap((page) => page.items);
-            if (items.length === 0) {
-              return (
-                <div className="flex flex-col items-center gap-2 px-6 py-12 text-center">
-                  <Activity className="h-10 w-10 text-muted-foreground/40" />
-                  <p className="text-sm font-medium">暂无操作记录。</p>
-                </div>
-              );
-            }
-            return (
-              <>
-                <IntentsTable items={items} linkServers={canManageServers} onSelect={setSelected} />
-                {intentsQuery.hasNextPage && (
-                  <div className="border-t px-6 py-3">
-                    <Button
-                      variant="outline"
-                      disabled={intentsQuery.isFetchingNextPage}
-                      onClick={() => { void intentsQuery.fetchNextPage(); }}
-                    >
-                      {intentsQuery.isFetchingNextPage ? '加载中...' : '加载更多'}
-                    </Button>
-                  </div>
-                )}
-              </>
-            );
-          }}
+          {(data) => data.items.length === 0 ? (
+            <div className="flex flex-col items-center gap-2 px-6 py-12 text-center">
+              <Activity className="h-10 w-10 text-muted-foreground/40" />
+              <p className="text-sm font-medium">{pages.page > 0 ? '这一页已没有操作记录。' : '暂无操作记录。'}</p>
+            </div>
+          ) : (
+            <div className={turning ? 'opacity-60 transition-opacity' : undefined} aria-busy={turning}>
+              <IntentsTable items={data.items} linkServers={canManageServers} onSelect={setSelected} />
+            </div>
+          )}
         </QueryView>
       </SectionCard>
+      {intentsQuery.data && (
+        <Pagination
+          page={pages.page}
+          pageSize={pageSize}
+          pageSizes={PAGE_SIZES}
+          hasNext={intentsQuery.data.nextCursor != null}
+          busy={turning}
+          onPageChange={(next) => {
+            if (next < pages.page) pages.previous();
+            else pages.next(intentsQuery.data?.nextCursor);
+          }}
+          onPageSizeChange={(size) => {
+            setPageSize(size === 25 || size === 100 ? size : 50);
+          }}
+        />
+      )}
       <IntentDetailDialog
         intent={selected}
         open={selected != null}
