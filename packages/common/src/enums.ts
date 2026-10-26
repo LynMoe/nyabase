@@ -104,6 +104,7 @@ export enum NodeMetricName {
   NetworkBridgeFilterPresent = 'nyabase_node_network_bridge_filter_present',
   NetworkBridgeFilterAddress = 'nyabase_node_network_bridge_filter_address',
   Ipv6GuardPresent = 'nyabase_node_ipv6_guard_present',
+  FirewallPresent = 'nyabase_node_firewall_present',
 }
 
 export enum PreflightStatus {

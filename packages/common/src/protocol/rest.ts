@@ -20,7 +20,6 @@ import type {
   PreflightReport,
 } from './rest-schema.js';
 import type { GpuContainerState, GpuHealthDto } from '../gpu/dto.js';
-import type { FirewallSyncState } from './firewall.js';
 import type { ConfigSourceName, ConfigValueKind } from '../config/definition.js';
 
 export type {
@@ -279,10 +278,9 @@ export interface ServerAgentDto {
   connectedAt: string | null;
   /** Expiry of the outstanding enrollment token, if one was issued and not yet used. */
   enrollmentExpiresAt: string | null;
-  /** Live from the connected agent (null while disconnected); without it guests are not started. */
+  /** ipv6Guard, firewall (FirewallSyncState): live from the agent, null while disconnected; guests need both. */
   ipv6Guard: { present: boolean; error: string | null } | null;
-  /** Egress firewall sync (null while disconnected); without it guests are not started. */
-  firewall: { state: Exclude<FirewallSyncState, 'offline'>; error: string | null } | null;
+  firewall: { state: 'synced' | 'pending' | 'failed'; error: string | null } | null;
 }
 
 export interface ServerCpuDto {

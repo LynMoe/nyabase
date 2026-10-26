@@ -81,6 +81,7 @@ export const NODE_METRIC_DEFINITIONS: Readonly<Record<NodeMetricFamily, NodeMetr
   nyabase_node_network_bridge_filter_present: { type: 'gauge', labels: [] },
   nyabase_node_network_bridge_filter_address: { type: 'gauge', labels: ['address'] },
   nyabase_node_ipv6_guard_present: { type: 'gauge', labels: [] },
+  nyabase_node_firewall_present: { type: 'gauge', labels: [] },
   nyabase_container_cpu_usage_seconds_total: { type: 'counter', labels: ['container_id'] },
   nyabase_container_cpu_limit_cores: { type: 'gauge', labels: ['container_id'] },
   nyabase_container_mem_used_bytes: { type: 'gauge', labels: ['container_id'] },

@@ -66,6 +66,7 @@ export const NODE_METRIC_NAMES = [
   'nyabase_node_network_bridge_filter_present',
   'nyabase_node_network_bridge_filter_address',
   'nyabase_node_ipv6_guard_present',
+  'nyabase_node_firewall_present',
   'nyabase_container_cpu_usage_seconds_total',
   'nyabase_container_cpu_limit_cores',
   'nyabase_container_mem_used_bytes',
