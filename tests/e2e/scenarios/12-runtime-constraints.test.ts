@@ -117,7 +117,7 @@ describe('runtime constraints on managed instances', () => {
     );
     const eth0 = one.devices.eth0!;
     assert.match(eth0.host_name ?? '', /^nyh[0-9a-f]{12}$/);
-    assert.equal(eth0['security.port_isolation'], 'true');
+    assert.equal(eth0['security.port_isolation'], undefined, 'guests on one host reach each other');
     assert.match(eth0['limits.ingress'] ?? '', /^\d+Mbit$/);
     assert.match(eth0['limits.egress'] ?? '', /^\d+Mbit$/);
     assert.match(one.devices.root!['limits.read'] ?? '', /^\d+MB$/);
