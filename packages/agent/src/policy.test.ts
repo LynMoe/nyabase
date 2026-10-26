@@ -45,7 +45,6 @@ function instanceDocument(overrides: Record<string, unknown> = {}): Record<strin
         'ipv4.address': '10.0.0.5',
         'security.ipv4_filtering': 'true',
         'security.mac_filtering': 'true',
-        'security.port_isolation': 'true',
         'limits.ingress': '1000Mbit',
       },
       [ATTACHMENT]: { type: 'disk', pool: 'default', source: VOLUME, path: '/data' },
@@ -172,18 +171,19 @@ describe('agent Incus policy', () => {
       .toBe(false);
   });
 
-  it('requires guest NICs to be port-isolated', async () => {
+  it('does not require guest NICs to be port-isolated', async () => {
     const devices = instanceDocument().devices as Record<string, Record<string, string>>;
     const create = (eth0: Record<string, string>) => check({
       method: 'POST',
       path: '/1.0/instances',
       body: body(instanceDocument({ devices: { ...devices, eth0 } })),
     });
-    expect((await create(devices.eth0!)).allowed).toBe(true);
-    expect((await create({ ...devices.eth0, 'security.port_isolation': 'false' })).allowed).toBe(false);
     const unisolated = { ...devices.eth0 };
     delete unisolated['security.port_isolation'];
-    expect((await create(unisolated)).allowed).toBe(false);
+    expect((await create(unisolated)).allowed).toBe(true);
+    expect((await create({ ...devices.eth0, 'security.port_isolation': 'false' })).allowed).toBe(true);
+    expect((await create({ ...devices.eth0, 'security.port_isolation': 'true' })).allowed).toBe(true);
+    expect((await create({ ...devices.eth0, 'security.port_isolation': 'yes' })).allowed).toBe(false);
   });
 
   it('marks every request that brings a guest NIC up as needing the IPv6 guard', async () => {

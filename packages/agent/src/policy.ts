@@ -496,7 +496,11 @@ function checkNic(name: string, device: Readonly<Record<string, string>>): Polic
   if (name !== 'eth0') return deny('the only NIC is eth0');
   if (!onlyKeys(device, NIC_KEYS)) return deny('eth0 has refused keys');
   if (device.nictype !== 'bridged' || !device.parent) return deny('eth0 must be a bridged NIC');
-  if (device['security.port_isolation'] !== 'true') return deny('eth0 must be port-isolated from other guests');
+  // Guests on one host reach each other like guests on different hosts; the
+  // key stays allowed so documents echoed back from older instances still pass.
+  if (![undefined, 'true', 'false'].includes(device['security.port_isolation'])) {
+    return deny('eth0 security.port_isolation must be true or false');
+  }
   if (!MANAGED_NIC_HOST_NAME_PATTERN.test(device.host_name ?? '')) {
     return deny('eth0 host_name must carry the IPv6 guard prefix');
   }
