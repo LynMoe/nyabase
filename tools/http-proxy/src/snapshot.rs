@@ -2,12 +2,12 @@ use crate::config::MAX_SNAPSHOT_STALE_AFTER_MS;
 use crate::protocol::ProxySnapshot;
 use anyhow::{anyhow, Context, Result};
 use proxy_common::clock::{absolute_snapshot_remaining, now_ms};
-use rustls::pki_types::CertificateDer;
+use rustls::pki_types::pem::PemObject;
+use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::server::{ClientHello, ResolvesServerCert};
 use rustls::sign::CertifiedKey;
 use serde::Deserialize;
 use std::collections::HashMap;
-use std::io::BufReader;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
@@ -372,15 +372,16 @@ impl DomainCert {
         }
         let cert_pem = pool.certificate_pem.context("missing certificate")?;
         let key_pem = pool.private_key_pem.context("missing private key")?;
-        let mut cert_reader = BufReader::new(cert_pem.as_bytes());
-        let certs = rustls_pemfile::certs(&mut cert_reader)
+        let certs = CertificateDer::pem_slice_iter(cert_pem.as_bytes())
             .collect::<std::result::Result<Vec<CertificateDer<'static>>, _>>()?;
         if certs.is_empty() {
             return Err(anyhow!("HTTP TLS pool contains no certificates"));
         }
-        let mut key_reader = BufReader::new(key_pem.as_bytes());
-        let key = rustls_pemfile::private_key(&mut key_reader)?
-            .ok_or_else(|| anyhow!("missing private key"))?;
+        let key =
+            PrivateKeyDer::from_pem_slice(key_pem.as_bytes()).map_err(|error| match error {
+                rustls::pki_types::pem::Error::NoItemsFound => anyhow!("missing private key"),
+                error => error.into(),
+            })?;
         let signing_key = rustls::crypto::ring::sign::any_supported_type(&key)?;
         let certified_key = CertifiedKey::new(certs, signing_key);
         certified_key

@@ -1,0 +1,11 @@
+# `cargo audit` policy for the SSH and HTTP proxies. CI runs `cargo audit` from
+# tools/, where cargo-audit reads this file; run it from there locally too.
+[advisories]
+ignore = [
+  # Marvin attack on RSA private-key operations, pulled in through russh. The proxy
+  # never holds an RSA private key: its host key is the Ed25519 key the Backend
+  # generates (ssh-keygen -t ed25519), and RSA is only used to verify users'
+  # public-key signatures, which the advisory does not affect. No fixed rsa
+  # release exists yet; drop this entry once russh ships one.
+  "RUSTSEC-2023-0071",
+]

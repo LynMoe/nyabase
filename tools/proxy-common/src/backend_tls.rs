@@ -7,6 +7,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use rustls::pki_types::pem::{self, SectionKind};
+use rustls::pki_types::CertificateDer;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
 const MAX_BACKEND_CA_PEM_BYTES: u64 = 1024 * 1024;
@@ -86,13 +88,14 @@ pub fn backend_tls_config_from_pem(name: &str, pem: &[u8]) -> Result<Arc<rustls:
     let mut reader = BufReader::new(pem);
     let mut roots = rustls::RootCertStore::empty();
     let mut certificates = 0usize;
-    for item in rustls_pemfile::read_all(&mut reader) {
-        let item = item.map_err(|_| anyhow::anyhow!("{name} contains invalid PEM"))?;
-        let rustls_pemfile::Item::X509Certificate(certificate) = item else {
+    while let Some((kind, der)) =
+        pem::from_buf(&mut reader).map_err(|_| anyhow::anyhow!("{name} contains invalid PEM"))?
+    {
+        if kind != SectionKind::Certificate {
             anyhow::bail!("{name} may contain only CA certificates");
-        };
+        }
         roots
-            .add(certificate)
+            .add(CertificateDer::from(der))
             .map_err(|_| anyhow::anyhow!("{name} contains an invalid CA certificate"))?;
         certificates += 1;
     }

@@ -4,6 +4,6 @@
 # scripts/check-rust-proxies.sh does); rustup installs the toolchain on first
 # use. Bump it deliberately, together with a full proxy test run.
 [toolchain]
-channel = "1.95.0"
+channel = "1.99.1"
 profile = "minimal"
 components = ["rustfmt", "clippy"]

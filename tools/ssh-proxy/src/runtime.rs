@@ -591,7 +591,7 @@ impl ConnectionState {
         let id =
             match self
                 .next_child_id
-                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
                     current.checked_add(1)
                 }) {
                 Ok(id) => id,
@@ -716,7 +716,7 @@ impl ConnectionState {
     pub(crate) fn channel_closed(&self) {
         let _ = self
             .channels
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
                 value.checked_sub(1)
             });
     }
