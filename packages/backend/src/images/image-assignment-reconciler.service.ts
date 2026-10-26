@@ -1,7 +1,8 @@
-import { Injectable, OnModuleInit } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { AuditService } from '../iam/audit.service.js';
 import { NyabaseConfigService } from '../platform/config/nyabase-config.service.js';
 import { IncusError, type IncusClientPort } from '../incus/index.js';
+import { AuditAction } from '@nyabase/common';
 import { IntentRepository, type IntentFailure, type IntentRecord } from '../reconcile/intent.repository.js';
 import { intentFailure } from '../reconcile/intent-model.js';
 import type {
@@ -14,8 +15,8 @@ import { ReconcilerRegistry } from '../reconcile/reconciler-registry.service.js'
 import { ImageReconcileStore, type AssignmentRow } from './image-reconcile.store.js';
 import {
   ImagePullNotConfirmedError,
+  deleteImageCopy,
   deleteManagedImage,
-  deletePreviousImageIfUnused,
   ensureAliasOnFingerprint,
   ensurePulled,
   canDeleteManagedImage,
@@ -38,10 +39,11 @@ export class ImageAssignmentReconciler implements ManagedReconciler, OnModuleIni
   readonly resourceType = 'image_assignment' as const;
   private readonly source: ImageAssignmentSource;
   private readonly pulls = new Map<string, Promise<void>>();
+  private readonly logger = new Logger(ImageAssignmentReconciler.name);
 
   constructor(
     private readonly store: ImageReconcileStore,
-    config: NyabaseConfigService,
+    private readonly config: NyabaseConfigService,
     private readonly intents: IntentRepository,
     private readonly audit: AuditService,
     private readonly registry: ReconcilerRegistry,
@@ -124,7 +126,51 @@ export class ImageAssignmentReconciler implements ManagedReconciler, OnModuleIni
         },
       });
     }
+    if (client && images) await this.removeUnneededCopies(serverId, client, images, signal);
     await this.scanImageCleanup(serverId, images);
+  }
+
+  /**
+   * Remove the image copies nyabase recorded on this server that nothing there
+   * needs any more: versions an operator deleted, kept versions of an image no
+   * longer assigned here once no container on the server uses them, and copies
+   * of deleted images. Driven by each full scan from the database state, so a
+   * server that is offline or busy catches up later. The preflight probe's
+   * pinned image stays.
+   */
+  private async removeUnneededCopies(
+    serverId: string,
+    client: IncusClientPort,
+    images: readonly Image[],
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const present = images.map((image) => imageFingerprint(image)).filter((value): value is string => !!value);
+    await this.store.forgetMissingCopies(serverId, present);
+    const unused = images
+      .filter((image) => imageUsedBy(image).length === 0)
+      .map((image) => imageFingerprint(image))
+      .filter((value): value is string => !!value);
+    const preflight = this.config.get<string>('incus.preflightImageFingerprint')?.trim().toLowerCase();
+    const keep = preflight ? [preflight] : [];
+    for (const fingerprint of await this.store.listUnneededCopies(serverId, unused, keep)) {
+      if (signal?.aborted) return;
+      try {
+        const removed = await this.store.removeCopyIfUnneeded(serverId, fingerprint, () => deleteImageCopy(client, fingerprint));
+        if (!removed) continue;
+        await this.audit.log(null, AuditAction.IncusMutate, removed.imageId ?? serverId, removed.imageId ? 'image' : 'server', {
+          method: 'DELETE',
+          path: `/1.0/images/${fingerprint}`,
+          instanceName: fingerprint,
+          serverId,
+          reason: 'image_copy_unneeded',
+        });
+        this.logger.log(`Removed image copy ${fingerprint} from server ${serverId}: nothing there needs it`);
+      } catch (error) {
+        this.logger.warn(`Removing image copy ${fingerprint} from server ${serverId} failed: ${String(error)}`);
+        // The rest would fail the same way; the next scan retries.
+        if (error instanceof IncusError && error.code === 'SERVER_UNREACHABLE') return;
+      }
+    }
   }
 
   /**
@@ -210,7 +256,7 @@ export class ImageAssignmentReconciler implements ManagedReconciler, OnModuleIni
     return this.reconcileEnsure(context, context.client, assignment, desired, actual);
   }
 
-  /** Make the desired image present on the server, aliased, and the previous copy retired. */
+  /** Make the desired image present on the server and aliased; earlier versions stay. */
   private async reconcileEnsure(
     context: ReconcileRunContext,
     client: IncusClientPort,
@@ -218,25 +264,6 @@ export class ImageAssignmentReconciler implements ManagedReconciler, OnModuleIni
     desired: ImageAssignmentSource,
     actual: Image | undefined,
   ): Promise<ReconcileOutcome> {
-    const leftover = await this.store.findLeftoverPinnedContainers(
-      assignment.server_id,
-      assignment.image_id,
-      desired.fingerprint,
-    );
-    if (leftover) {
-      return {
-        outcome: 'failed',
-        failure: intentFailure(
-          'IMAGE_IN_USE',
-          'Stop and delete instances still pinned to the previous image fingerprint',
-          {
-            serverId: assignment.server_id,
-            previousFingerprint: leftover,
-            desiredFingerprint: desired.fingerprint,
-          },
-        ),
-      };
-    }
     const resolved = actual ?? await this.pullAndResolve(context, client, assignment, desired);
     if ('outcome' in resolved) return resolved;
     const fingerprint = imageFingerprint(resolved);
@@ -260,7 +287,6 @@ export class ImageAssignmentReconciler implements ManagedReconciler, OnModuleIni
         ),
       };
     }
-    const previous = assignment.managed_fingerprint;
     const imagesForAlias = (await client.listImages(1)).metadata;
     await ensureAliasOnFingerprint(
       this.audit,
@@ -270,26 +296,8 @@ export class ImageAssignmentReconciler implements ManagedReconciler, OnModuleIni
       fingerprint,
       context.intent,
     );
-    const previousInUse = await deletePreviousImageIfUnused(
-      this.audit,
-      client,
-      previous,
-      fingerprint,
-      context.intent,
-    );
-    if (previousInUse) {
-      return {
-        outcome: 'failed',
-        failure: intentFailure(
-          'IMAGE_IN_USE',
-          'Stop and delete instances still using the previous image fingerprint',
-          {
-            previousFingerprint: previous,
-            desiredFingerprint: fingerprint,
-          },
-        ),
-      };
-    }
+    // The previous copy stays: containers created from it keep that version, and an
+    // operator deletes the version (and its copies) once nothing uses it.
     await this.store.recordEnsured(assignment, fingerprint);
     return { outcome: 'succeeded', observedRevision: assignment.revision };
   }
@@ -406,6 +414,7 @@ export class ImageAssignmentReconciler implements ManagedReconciler, OnModuleIni
       return done();
     }
     await deleteManagedImage(this.audit, client, managed, intent);
+    await this.store.forgetCopy(assignment.server_id, managed);
     await this.store.bumpCleanupGeneration(assignment.image_id);
     await this.store.markAssignmentDeleted(assignment, true);
     return done();
@@ -498,6 +507,7 @@ export class ImageAssignmentReconciler implements ManagedReconciler, OnModuleIni
       };
     }
     await deleteManagedImage(this.audit, client, fingerprint, context.intent);
+    if (context.intent.serverId) await this.store.forgetCopy(context.intent.serverId, fingerprint);
     return null;
   }
 }

@@ -277,6 +277,11 @@ lab 场景 API 测试，不在 CI 里跑；CI 只跑 `pnpm e2e:check`（e2e 包 
   实例名与 guest 主机名保持 `nyc-<id>`。改服务器名唤醒全量扫描改写这两个键（被搁置 / failed 的容器扫描跳过，等下一个 intent），不记 `container.drift_corrected`（`isDisplayConfigKey`）。
   控制台默认命令是 `bash -l`（没有 bash 才 `sh -l`）：dash 登录 shell 不读 `~/.bashrc`，提示符只在 bash 里生效。
   容器名仍只许 `[A-Za-z0-9-]`（SSH 按名路由）、≤ 16 个字符；服务器名任意可见字符与空格、≤ 32 列（中文 2 列，common 的 `displayWidth`）。
+- 镜像版本（`infra.image_versions`、`images/image-versions.service.ts`）：repull 只切镜像的当前指纹，已有容器保持创建时的
+  `image_fingerprint`，ensure 绝不删除旧版副本（容器重建只从本机按指纹找镜像，catalog 只留最新版），`recordEnsured` 也不改写已有的当前指纹。
+  旧版只能由运维删除，且只在不是当前版本、没有任何容器（不分阶段）引用时；删除只写 `deleted_at`，副本由镜像 reconciler 的全量扫描
+  按库里状态移除（`listUnneededCopies` / `removeCopyIfUnneeded`），只碰 `infra.image_copies` 里记录为本服务器拉取的副本
+  （aya-1 等主机不专用，宿主机自己的同指纹镜像不能删），记录不随镜像行级联删除。没有一次性的删除 intent——它会被同资源的 settle 吞掉。
 - 进程数 / 网卡带宽 / 磁盘读写是可在线编辑的系统设置 `containers.*`，统一作用于所有容器（CephFS 卷不限 IO）。
 - 漂移：平台拥有整份实例文档，只放过 `volatile.*`、`image.*`；未知配置键、多出的设备、设备内多出的键、
   非空 profiles 都算漂移，写回时整份覆盖并记审计 `container.drift_corrected`。

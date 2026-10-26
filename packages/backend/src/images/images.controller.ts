@@ -23,6 +23,7 @@ import { RequireRole, CurrentActor } from '../iam/decorators.js';
 import type { Actor } from '../iam/actor.js';
 import { acceptedIntent } from '../reconcile/accepted-intent.js';
 import { ImagesService } from './images.service.js';
+import { ImageVersionsService } from './image-versions.service.js';
 import { requireUserId } from '../iam/actor.js';
 
 /**
@@ -32,7 +33,10 @@ import { requireUserId } from '../iam/actor.js';
  */
 @Controller('images')
 export class ImagesController {
-  constructor(private readonly images: ImagesService) {}
+  constructor(
+    private readonly images: ImagesService,
+    private readonly versions: ImageVersionsService,
+  ) {}
 
   @Get()
   list(
@@ -64,6 +68,26 @@ export class ImagesController {
       image: result.image,
       intents: result.intents.map(acceptedIntent),
     };
+  }
+
+  /** Every version of the image and the containers created from each. */
+  @Get(':id/versions')
+  @RequireRole(Role.Operator)
+  listVersions(@Param('id') id: string) {
+    return this.versions.list(id);
+  }
+
+  /** Delete a version no container uses; each server's next scan removes its copy. */
+  @Delete(':id/versions/:fingerprint')
+  @RequireRole(Role.Operator)
+  @HttpCode(HttpStatus.ACCEPTED)
+  async deleteVersion(
+    @Param('id') id: string,
+    @Param('fingerprint') fingerprint: string,
+    @CurrentActor() actor: Actor,
+  ) {
+    await this.versions.delete(requireUserId(actor), id, fingerprint);
+    return { deleted: true };
   }
 
   @Get(':id')

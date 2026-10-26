@@ -7,6 +7,7 @@ import {
   type EffectiveAccessDto,
   type ImageAssignmentDto,
   type ImageDto,
+  type ImageVersionDto,
   type IntentAcceptedDto,
 } from '@nyabase/common';
 import { ApiError } from '../client/api.js';
@@ -64,6 +65,26 @@ describe('image assignment and visibility', () => {
     assert.equal(await api.status('PUT', `/images/${h.state.image.id}/assignments/${h.server.id}`, {}), 403);
     assert.equal(await api.status('DELETE', `/images/${h.state.image.id}/assignments/${h.server.id}`), 403);
     assert.equal(await api.status('POST', '/images', { alias: h.state.image.alias }), 403);
+    assert.equal(await api.status('GET', `/images/${h.state.image.id}/versions`), 403);
+    assert.equal(await api.status('DELETE', `/images/${h.state.image.id}/versions/${'0'.repeat(64)}`), 403);
+  });
+
+  it('lists the current version with the containers created from it and refuses to delete it', async () => {
+    const owner = await h.newUser('imgver');
+    await h.grantServer(owner, h.server);
+    const container = await h.createContainer(owner, h.server);
+    const image = await h.api.get<AdminImageDto>(`/images/${h.state.image.id}`, { scope: 'all' });
+    const versions = await h.api.get<ImageVersionDto[]>(`/images/${image.id}/versions`);
+    const current = versions.find((entry) => entry.current);
+    assert.ok(current, 'one version is current');
+    assert.equal(current.fingerprint, image.fingerprint);
+    assert.equal(current.deletable, false);
+    assert.ok(current.containers.some((entry) => entry.id === container.id), 'the new container uses the current version');
+    await assert.rejects(
+      h.api.delete(`/images/${image.id}/versions/${current.fingerprint}`),
+      (error: unknown) => error instanceof ApiError && error.status === 409 && error.code === 'IMAGE_VERSION_CURRENT',
+    );
+    assert.equal(await h.api.status('DELETE', `/images/${image.id}/versions/not-a-fingerprint`), 400);
   });
 
   it('stops offering the image once its assignment is removed, and restores it', async (t) => {

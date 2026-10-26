@@ -9,7 +9,7 @@ export function parseGroupDetailTab(value: unknown): GroupDetailTab {
     : 'overview';
 }
 
-export const IMAGE_DETAIL_TABS = ['overview', 'assignments'] as const;
+export const IMAGE_DETAIL_TABS = ['overview', 'versions', 'assignments'] as const;
 export type ImageDetailTab = (typeof IMAGE_DETAIL_TABS)[number];
 
 export function parseImageDetailTab(value: unknown): ImageDetailTab {

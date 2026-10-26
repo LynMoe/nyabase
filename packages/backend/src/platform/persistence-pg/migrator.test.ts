@@ -29,6 +29,7 @@ describe('SQL migration discovery', () => {
       { version: '000002', name: 'http-proxy-binding-counters' },
       { version: '000003', name: 'ssh-proxy-history' },
       { version: '000004', name: 'firewall' },
+      { version: '000005', name: 'image-versions' },
     ]);
     const [initial] = migrations;
     expect(initial.sql).toContain('CREATE TABLE iam.users');

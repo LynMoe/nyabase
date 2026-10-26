@@ -1,9 +1,8 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { sql, type Kysely } from 'kysely';
+import { sql, type ExpressionBuilder, type Kysely } from 'kysely';
 import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 import type { IntentFailure } from '../reconcile/intent.repository.js';
-import { sameFingerprint } from './image-assignment-ops.js';
 
 export interface AssignmentRow {
   id: string;
@@ -38,6 +37,43 @@ const ASSIGNMENT_COLUMNS = [
   'i.fingerprint as desired_fingerprint',
   'i.cleanup_generation as cleanup_generation',
 ] as const;
+
+/**
+ * Whether the server still needs its copy (`copy.fingerprint`): it is the
+ * current fingerprint of any image, an assignment on the server manages or
+ * observes it (one being removed included: its own deletion handles that copy),
+ * a container on the server was created from it (it may have to be recreated
+ * from it), or it is an undeleted version of an image still assigned here.
+ */
+function copyNeeded(
+  expression: ExpressionBuilder<NyabaseDatabase & { copy: NyabaseDatabase['infra.image_copies'] }, 'copy'>,
+  serverId: string,
+) {
+  const { exists, selectFrom, or } = expression;
+  return or([
+    exists(selectFrom('infra.images as i')
+      .select('i.id')
+      .whereRef('i.fingerprint', '=', 'copy.fingerprint')),
+    exists(selectFrom('infra.image_server_assignments as a')
+      .select('a.id')
+      .where('a.server_id', '=', serverId)
+      .where((inner) => inner.or([
+        inner('a.managed_fingerprint', '=', inner.ref('copy.fingerprint')),
+        inner('a.observed_fingerprint', '=', inner.ref('copy.fingerprint')),
+      ]))),
+    exists(selectFrom('control.containers as c')
+      .select('c.id')
+      .where('c.server_id', '=', serverId)
+      .whereRef('c.image_fingerprint', '=', 'copy.fingerprint')),
+    exists(selectFrom('infra.image_versions as kept')
+      .innerJoin('infra.image_server_assignments as a', 'a.image_id', 'kept.image_id')
+      .select('kept.image_id')
+      .whereRef('kept.fingerprint', '=', 'copy.fingerprint')
+      .where('kept.deleted_at', 'is', null)
+      .where('a.server_id', '=', serverId)
+      .where('a.lifecycle_phase', '!=', 'deleting')),
+  ]);
+}
 
 /** Every SQL statement the image assignment reconciler issues. */
 @Injectable()
@@ -145,28 +181,6 @@ export class ImageReconcileStore {
       .executeTakeFirst();
   }
 
-  /** A container on the server still pinned to an older fingerprint of this image. */
-  async findLeftoverPinnedContainers(
-    serverId: string,
-    imageId: string,
-    desiredFingerprint: string | null,
-  ): Promise<string | null> {
-    if (desiredFingerprint === null || desiredFingerprint === undefined) return null;
-    const rows = await this.database
-      .selectFrom('control.containers')
-      .select('image_fingerprint')
-      .where('server_id', '=', serverId)
-      .where('image_id', '=', imageId)
-      .where('lifecycle_phase', '!=', 'deleting')
-      .where('image_fingerprint', 'is not', null)
-      .execute();
-    const leftover = rows.find((row) => (
-      row.image_fingerprint
-      && !sameFingerprint(row.image_fingerprint, desiredFingerprint)
-    ));
-    return leftover?.image_fingerprint ?? null;
-  }
-
   /** The assignment now holds the fingerprint; the image's desired fingerprint follows. */
   async recordEnsured(assignment: AssignmentRow, fingerprint: string): Promise<void> {
     await this.database
@@ -182,10 +196,106 @@ export class ImageReconcileStore {
       })
       .where('id', '=', assignment.id)
       .execute();
-    await this.database
+    // Only an image added without a fingerprint learns it here. A pinned image
+    // keeps its own: an ensure that finishes after a repull must not undo it.
+    const learned = await this.database
       .updateTable('infra.images')
       .set({ fingerprint })
       .where('id', '=', assignment.image_id)
+      .where('fingerprint', 'is', null)
+      .returning(['id', 'description'])
+      .executeTakeFirst();
+    // A late ensure of a deleted version leaves it deleted (no conflict update).
+    await this.database
+      .insertInto('infra.image_versions')
+      .values({
+        image_id: assignment.image_id,
+        fingerprint,
+        description: learned ? learned.description : null,
+      })
+      .onConflict((conflict) => conflict.columns(['image_id', 'fingerprint']).doNothing())
+      .execute();
+    await this.database
+      .insertInto('infra.image_copies')
+      .values({ server_id: assignment.server_id, fingerprint })
+      .onConflict((conflict) => conflict.columns(['server_id', 'fingerprint'])
+        .doUpdateSet({ recorded_at: sql<Date>`clock_timestamp()` }))
+      .execute();
+  }
+
+  // --- image copies ------------------------------------------------------------
+
+  /**
+   * Forget copies that are gone from the server. A copy recorded in the last few
+   * minutes is left alone: its pull may have finished after the scan listed the
+   * server (every ensure refreshes `recorded_at`).
+   */
+  async forgetMissingCopies(serverId: string, present: readonly string[]): Promise<void> {
+    let query = this.database
+      .deleteFrom('infra.image_copies')
+      .where('server_id', '=', serverId)
+      .where('recorded_at', '<', sql<Date>`clock_timestamp() - interval '5 minutes'`);
+    if (present.length > 0) query = query.where('fingerprint', 'not in', [...present]);
+    await query.execute();
+  }
+
+  /**
+   * Of the copies nyabase recorded on the server and that are present there,
+   * the ones nothing needs any more (see `copyNeeded`). Copies nyabase never
+   * recorded on this server, such as the host owner's own images, are never listed.
+   */
+  async listUnneededCopies(
+    serverId: string,
+    present: readonly string[],
+    keep: readonly string[],
+  ): Promise<string[]> {
+    if (present.length === 0) return [];
+    let query = this.database
+      .selectFrom('infra.image_copies as copy')
+      .select('copy.fingerprint')
+      .where('copy.server_id', '=', serverId)
+      .where('copy.fingerprint', 'in', [...present])
+      .where((expression) => expression.not(copyNeeded(expression, serverId)));
+    if (keep.length > 0) query = query.where('copy.fingerprint', 'not in', [...keep]);
+    return (await query.execute()).map((row) => row.fingerprint);
+  }
+
+  /**
+   * Delete one copy if it is still unneeded, rechecked right before the Incus
+   * call (no transaction is held across it). A repull back to this fingerprint
+   * landing in that instant finds the copy gone and the next scan's ensure
+   * pulls it again. Returns the image id to audit against, or null when kept.
+   */
+  async removeCopyIfUnneeded(
+    serverId: string,
+    fingerprint: string,
+    remove: () => Promise<void>,
+  ): Promise<{ imageId: string | null } | null> {
+    const unneeded = await this.database
+      .selectFrom('infra.image_copies as copy')
+      .select('copy.fingerprint')
+      .where('copy.server_id', '=', serverId)
+      .where('copy.fingerprint', '=', fingerprint)
+      .where((expression) => expression.not(copyNeeded(expression, serverId)))
+      .executeTakeFirst();
+    if (!unneeded) return null;
+    await remove();
+    await this.forgetCopy(serverId, fingerprint);
+    const version = await this.database
+      .selectFrom('infra.image_versions')
+      .select('image_id')
+      .where('fingerprint', '=', fingerprint)
+      .orderBy('image_id')
+      .executeTakeFirst();
+    return { imageId: version?.image_id ?? null };
+  }
+
+  /** The copy is gone from the server. */
+  async forgetCopy(serverId: string, fingerprint: string): Promise<void> {
+    await this.database
+      .deleteFrom('infra.image_copies')
+      .where('server_id', '=', serverId)
+      .where('fingerprint', '=', fingerprint)
       .execute();
   }
 

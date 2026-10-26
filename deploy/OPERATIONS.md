@@ -1915,11 +1915,23 @@ agent policy 用同一条规则（`@nyabase/common` 的 `imageSourceServerProble
 
 开放 create 之前：
 
-1. 控制面已部署「assignment 只留当前指纹」的 ensure 逻辑。
-2. catalog 已发布烘焙 squashfs；`preflightImageFingerprint` **非空** 且等于
+1. catalog 已发布烘焙 squashfs；`preflightImageFingerprint` **非空** 且等于
    该 combined squashfs 指纹。
-3. 停删旧指纹容器后 `repull` / assign；`managed_fingerprint` 等于 catalog。
-4. 服务器 preflight 通过。
+2. 镜像已 assign 到服务器，`managed_fingerprint` 等于 catalog。
+3. 服务器 preflight 通过。
+
+**版本**：catalog 只列每个镜像的最新版本。「拉取最新版本」（`POST /images/:id/repull`）
+把镜像切到 catalog 当前指纹，新建容器用它；已有容器不动，各服务器上的旧版副本保留
+（去掉别名），因为容器丢失实例时要从本机按指纹重建，而 catalog 已经拿不到旧版。
+镜像详情的「版本」页（`GET /images/:id/versions`）列出每个版本和由它创建的容器；
+不是当前版本、且没有任何容器（任何阶段，包括 failed / 被搁置的）用它时，
+`DELETE /images/:id/versions/:fingerprint` 删除这个版本（`infra.image_versions.deleted_at`）。
+副本由每台服务器的全量扫描移除，且只移除 nyabase 在**这台**服务器上拉取过的副本（`infra.image_copies`，
+ensure 成功时记录；宿主机主人自己缓存的镜像即使指纹相同也不碰）。仍是某个镜像的当前指纹、被本机分配管理 / 观测、
+被本机容器引用、是仍分配到本机的镜像的未删除版本、或等于 `incus.preflightImageFingerprint` 时保留。
+所以取消分配、删除整个镜像后，本机没有容器使用的旧版副本也在之后的扫描中移除；离线或忙的服务器之后补上。
+每个副本在删除前一刻复核一次（不在 Incus 调用期间持有事务或行锁）；恰好在这一瞬间 repull 回到该指纹时，下一次扫描的 ensure 会重新拉取。
+旧版不会自动删除；重新拉到已删除的指纹会把它恢复为版本。
 
 catalog DTO 的 version 字符串是 bake serial（`v20260921_nb01`），不是项目
 `version: 2`。回滚发更新日期的新 `bake.serial`，不要复用更旧的 YYYYMMDD 键。

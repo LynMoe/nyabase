@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query';
 import { getRouteApi, useNavigate } from '@tanstack/react-router';
-import { Gauge, Server } from 'lucide-react';
+import { Gauge, History, Server } from 'lucide-react';
 import type { AdminImageDto } from '@nyabase/common';
 import { api } from '../lib/api.js';
 import { Page, PageHeader } from '../components/layout/page-header.js';
@@ -11,11 +11,13 @@ import { queryKeys } from '../lib/query-keys.js';
 import { refetchWhileInProgress } from '../lib/query-lifecycle.js';
 import { type ImageDetailTab } from '../lib/detail-tabs.js';
 import { ImageAssignmentsTab, ImageHeaderActions, ImageOverviewTab } from './image-detail-page/image-tabs.js';
+import { ImageVersionsTab } from './image-detail-page/image-versions-tab.js';
 
 const routeApi = getRouteApi('/images/$id');
 
 const TAB_ITEMS = [
   ['overview', '概览', Gauge],
+  ['versions', '版本', History],
   ['assignments', '分配', Server],
 ] as const;
 
@@ -67,6 +69,9 @@ export default function ImageDetailPage() {
             </TabsList>
             <TabsContent value="overview" className="space-y-6">
               <ImageOverviewTab image={loaded} />
+            </TabsContent>
+            <TabsContent value="versions" className="space-y-6">
+              <ImageVersionsTab image={loaded} />
             </TabsContent>
             <TabsContent value="assignments" className="space-y-6">
               <ImageAssignmentsTab image={loaded} />

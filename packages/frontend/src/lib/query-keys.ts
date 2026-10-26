@@ -46,6 +46,7 @@ export const queryKeys = {
     catalog: ['images', 'admin', 'catalog'] as const,
     userActive: ['images', 'user', 'active'] as const,
     detail: (imageId: string) => ['images', 'admin', imageId] as const,
+    versions: (imageId: string) => ['images', 'admin', imageId, 'versions'] as const,
     assignments: (imageId: string) => ['image-assignments', imageId] as const,
   },
   users: {

@@ -149,6 +149,24 @@ export interface InfrastructureImageTable {
   updated_at: InfrastructureGeneratedTimestamp;
 }
 
+/** A fingerprint the image has been pulled at; see migration 000005. */
+export interface InfrastructureImageVersionTable {
+  image_id: string;
+  fingerprint: string;
+  description: string | null;
+  created_at: InfrastructureGeneratedTimestamp;
+  /** Deleted by an operator; servers drop the copy once nothing needs it. */
+  deleted_at: InfrastructureTimestamp | null;
+}
+
+/** An image copy nyabase pulled onto (or adopted on) a server; see migration 000005. */
+export interface InfrastructureImageCopyTable {
+  server_id: string;
+  fingerprint: string;
+  /** Last ensure that held the copy. */
+  recorded_at: InfrastructureGeneratedTimestamp;
+}
+
 export interface InfrastructureImageServerAssignmentTable {
   id: string;
   image_id: string;
@@ -175,5 +193,7 @@ export interface InfrastructureDatabase {
   'infra.storage_pools': InfrastructureStoragePoolTable;
   'infra.shared_backends': InfrastructureSharedBackendTable;
   'infra.images': InfrastructureImageTable;
+  'infra.image_versions': InfrastructureImageVersionTable;
+  'infra.image_copies': InfrastructureImageCopyTable;
   'infra.image_server_assignments': InfrastructureImageServerAssignmentTable;
 }

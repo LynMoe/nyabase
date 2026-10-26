@@ -6,10 +6,11 @@ import { ImageCatalogService } from './image-catalog.js';
 import { ImageReconcileStore } from './image-reconcile.store.js';
 import { ImagesController } from './images.controller.js';
 import { ImagesService } from './images.service.js';
+import { ImageVersionsService } from './image-versions.service.js';
 
 @Module({
   imports: [ReconcileModule, SshModule],
-  providers: [ImageCatalogService, ImagesService, ImageReconcileStore, ImageAssignmentReconciler],
+  providers: [ImageCatalogService, ImagesService, ImageVersionsService, ImageReconcileStore, ImageAssignmentReconciler],
   controllers: [
     ImagesController,
   ],

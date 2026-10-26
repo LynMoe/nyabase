@@ -95,6 +95,7 @@ function useInvalidateImage(id: string) {
   const queryClient = useQueryClient();
   return () => {
     void queryClient.invalidateQueries({ queryKey: queryKeys.images.detail(id) });
+    void queryClient.invalidateQueries({ queryKey: queryKeys.images.versions(id) });
     void queryClient.invalidateQueries({ queryKey: queryKeys.images.admin });
     void queryClient.invalidateQueries({ queryKey: ['resource-intent-failures'] });
   };
@@ -108,10 +109,10 @@ export function ImageHeaderActions({ image }: { image: AdminImageDto }) {
   const repullImage = useMutation({
     mutationFn: () => api.post<unknown>(`/images/${image.id}/repull`),
     onSuccess: () => {
-      toast({ title: '已从镜像源重新拉取' });
+      toast({ title: '已开始拉取最新版本', description: '新建容器将使用新版本，已有容器保持原版本' });
       invalidate();
     },
-    onError: (error) => toast({ title: '重新拉取失败', description: errorMessage(error), variant: 'destructive' }),
+    onError: (error) => toast({ title: '拉取最新版本失败', description: errorMessage(error), variant: 'destructive' }),
   });
   const deleteImage = useMutation({
     mutationFn: () => api.delete<unknown>(`/images/${image.id}`),
@@ -126,7 +127,7 @@ export function ImageHeaderActions({ image }: { image: AdminImageDto }) {
   return (
     <>
       <Button variant="outline" onClick={() => repullImage.mutate()} disabled={repullImage.isPending}>
-        <RefreshCw className="h-4 w-4" />重新拉取
+        <RefreshCw className="h-4 w-4" />拉取最新版本
       </Button>
       <MoreActions actions={[{ label: '移除镜像', icon: Trash2, destructive: true, onSelect: () => setDeleteOpen(true) }]} />
       <ConfirmDialog

@@ -139,6 +139,12 @@ async function assertImageGone(client: IncusClientPort, fingerprint: string): Pr
   }
 }
 
+/** Delete an image copy and confirm it is gone (the caller audits). */
+export async function deleteImageCopy(client: IncusClientPort, fingerprint: string): Promise<void> {
+  await deleteImageConfirmed(client, fingerprint);
+  await assertImageGone(client, fingerprint);
+}
+
 /** Delete a managed image from the server. */
 export async function deleteManagedImage(
   audit: AuditService,
@@ -151,8 +157,7 @@ export async function deleteManagedImage(
     path: `/1.0/images/${fingerprint}`,
     instanceName: fingerprint,
   });
-  await deleteImageConfirmed(client, fingerprint);
-  await assertImageGone(client, fingerprint);
+  await deleteImageCopy(client, fingerprint);
 }
 
 /** Point the alias at the fingerprint, replacing any other target. */
@@ -182,32 +187,6 @@ export async function ensureAliasOnFingerprint(
     target: fingerprint,
     type: 'container',
   });
-}
-
-/** Remove the superseded image; true when something still uses it and it must stay. */
-export async function deletePreviousImageIfUnused(
-  audit: AuditService,
-  client: IncusClientPort,
-  previous: string | null,
-  desiredFingerprint: string,
-  intent: IntentRecord,
-): Promise<boolean> {
-  if (!previous || sameFingerprint(previous, desiredFingerprint)) return false;
-  let image: Image | undefined;
-  try {
-    image = (await client.getImage(previous)).metadata;
-  } catch (error) {
-    if (isNotFound(error)) return false;
-    throw error;
-  }
-  if (imageUsedBy(image).length > 0) return true;
-  await auditIncusMutate(audit, intent, {
-    method: 'DELETE',
-    path: `/1.0/images/${previous}`,
-    instanceName: previous,
-  });
-  await deleteImageConfirmed(client, previous);
-  return false;
 }
 
 /**

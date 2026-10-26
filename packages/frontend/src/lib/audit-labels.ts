@@ -62,6 +62,7 @@ const AUDIT_ACTION_LABELS: Record<string, string> = {
   [AuditAction.CreateImage]: '创建镜像',
   [AuditAction.UpdateImage]: '更新镜像',
   [AuditAction.DeleteImage]: '删除镜像',
+  [AuditAction.DeleteImageVersion]: '删除镜像历史版本',
   [AuditAction.EnsureImageAssignment]: '分配镜像',
   [AuditAction.DeleteImageAssignment]: '取消镜像分配',
   [AuditAction.UpsertServerGrant]: '更新服务器授权',

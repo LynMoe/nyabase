@@ -19,7 +19,6 @@ import { applyGuestNetwork } from './containers/guest-network.adapter.js';
 import type { AuditService } from './iam/audit.service.js';
 import {
   deleteManagedImage,
-  deletePreviousImageIfUnused,
   ensureAliasOnFingerprint,
   ensurePulled,
 } from './images/image-assignment-ops.js';
@@ -254,8 +253,6 @@ describe('the agent policy accepts what the Backend sends', () => {
     }, SERVER_ID, intent);
     const images = (await client.listImages(1)).metadata;
     await ensureAliasOnFingerprint(audit, client, images, 'nyabase/debian-12', FINGERPRINT, intent);
-    const other = images.find((image) => image.fingerprint !== FINGERPRINT)!.fingerprint!;
-    await deletePreviousImageIfUnused(audit, client, other, FINGERPRINT, intent);
     await deleteManagedImage(audit, client, FINGERPRINT, intent);
     expect(tunnel.refusals).toEqual([]);
     expect(tunnel.mutations).toEqual(expect.arrayContaining([

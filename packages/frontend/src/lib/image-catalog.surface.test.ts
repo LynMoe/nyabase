@@ -21,17 +21,27 @@ describe('image catalog UI', () => {
     expect(catalog).toMatch(/'\/images\/catalog'/);
     expect(catalog).toMatch(/\{ alias \}/);
     expect(catalog).not.toMatch(/loginUser/);
-    expect(list).toMatch(/重新拉取/);
+    expect(list).toMatch(/拉取最新版本/);
     expect(list).toMatch(/移除/);
     expect(list).toMatch(/image\.alias/);
     expect(list).not.toMatch(/image\.name/);
     expect(detail).not.toMatch(/ImageFormDialog/);
     expect(detail).not.toMatch(/\b(?:loaded|image)\.name\b/);
     expect(detail).toMatch(/\b(?:loaded|image)\.alias/);
-    expect(detail).toMatch(/重新拉取/);
+    expect(detail).toMatch(/拉取最新版本/);
     expect(detail).toMatch(/IntentResourceType\.ImageAssignment/);
     expect(detail).toMatch(/已开始移除镜像/);
     expect(detail).not.toMatch(/镜像删除意图已提交/);
+  });
+
+  it('lists image versions with their containers and deletes only unused ones', () => {
+    const detail = read('pages/image-detail-page.tsx');
+    const versions = read('pages/image-detail-page/image-versions-tab.tsx');
+    expect(detail).toMatch(/ImageVersionsTab/);
+    expect(versions).toMatch(/\/versions`/);
+    expect(versions).toMatch(/api\.delete<[^>]*>\(`\/images\/\$\{image\.id\}\/versions\/\$\{fingerprint\}`\)/);
+    expect(versions).toMatch(/version\.deletable \?/);
+    expect(versions).toMatch(/ResourceRef kind="container"/);
   });
 
   it('renders intent history errors and does not share limit=20/50 query keys', () => {

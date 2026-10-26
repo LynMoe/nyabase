@@ -36,10 +36,10 @@ export default function ImagesPage() {
   const repullImage = useMutation({
     mutationFn: (imageId: string) => api.post<unknown>(`/images/${imageId}/repull`),
     onSuccess: () => {
-      toast({ title: '已从镜像源重新拉取' });
+      toast({ title: '已开始拉取最新版本', description: '新建容器将使用新版本，已有容器保持原版本' });
       invalidate();
     },
-    onError: (error) => toast({ title: '重新拉取失败', description: errorMessage(error), variant: 'destructive' }),
+    onError: (error) => toast({ title: '拉取最新版本失败', description: errorMessage(error), variant: 'destructive' }),
   });
   const deleteImage = useMutation({
     mutationFn: (imageId: string) => api.delete<unknown>(`/images/${imageId}`),

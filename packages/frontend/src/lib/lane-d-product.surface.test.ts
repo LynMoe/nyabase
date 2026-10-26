@@ -129,13 +129,13 @@ describe('lane D product UI copy', () => {
     expect(catalog).toMatch(/'\/images\/catalog'/);
     expect(catalog).toMatch(/\{ alias \}/);
     expect(catalog).not.toMatch(/loginUser/);
-    expect(list).toMatch(/重新拉取/);
+    expect(list).toMatch(/拉取最新版本/);
     expect(list).toMatch(/移除/);
     expect(list).toMatch(/image\.alias/);
     expect(list).not.toMatch(/image\.name/);
     expect(detail).not.toMatch(/ImageFormDialog/);
     expect(detail).not.toMatch(/loaded\.name/);
-    expect(detail).toMatch(/重新拉取/);
+    expect(detail).toMatch(/拉取最新版本/);
   });
 
   it('admin volumes nav requires ManageVolumes', () => {

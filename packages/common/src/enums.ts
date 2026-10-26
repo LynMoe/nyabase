@@ -229,6 +229,7 @@ export enum AuditAction {
   CreateImage = 'image.create',
   UpdateImage = 'image.update',
   DeleteImage = 'image.delete',
+  DeleteImageVersion = 'image.version.delete',
   EnsureImageAssignment = 'image_assignment.ensure',
   DeleteImageAssignment = 'image_assignment.delete',
   UpsertServerGrant = 'grant.server.upsert',

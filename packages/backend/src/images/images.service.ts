@@ -35,6 +35,7 @@ import { isoDate, numberValue } from '../platform/domain-utils.js';
 import { acceptedIntent } from '../reconcile/accepted-intent.js';
 import { ImageCatalogService } from './image-catalog.js';
 import { assertActorRole } from '../iam/administration.js';
+import { recordImageVersion } from './image-versions.service.js';
 
 type ImageRow = Awaited<ReturnType<ImagesService['findById']>>;
 type ImageAssignmentRow = Awaited<ReturnType<ImagesService['assignments']>>[number];
@@ -129,6 +130,8 @@ export class ImagesService {
         .where('revision', '=', image.revision)
         .returningAll()
         .executeTakeFirstOrThrow();
+      // The previous fingerprint stays a version for the containers created from it.
+      await recordImageVersion(transaction, imageId, entry.fingerprint, entry.description);
       const assignments = await transaction
         .selectFrom('infra.image_server_assignments')
         .selectAll()
@@ -213,6 +216,7 @@ export class ImagesService {
           message: `Image alias ${input.alias} is already in the catalog`,
         });
       }
+      if (fingerprint) await recordImageVersion(transaction, created.id, fingerprint, created.description);
       await this.audit.append(transaction, actorId, AuditAction.CreateImage, created.id, 'image', {
         alias: created.alias,
       });

@@ -86,7 +86,7 @@ export function ImageList({
                     disabled={image.deleting || busyId === image.id}
                     onClick={() => onRepull(image)}
                   >
-                    <RefreshCw className="h-3.5 w-3.5" />重新拉取
+                    <RefreshCw className="h-3.5 w-3.5" />拉取最新版本
                   </Button>
                   <Button
                     size="sm"
