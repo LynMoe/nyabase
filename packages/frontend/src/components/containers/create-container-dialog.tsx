@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
+  CONTAINER_NAME_MAX_LENGTH,
+  CONTAINER_NAME_RE,
   type ContainerDto,
   ContainerPowerIntent,
   type CreateContainerRequest,
@@ -70,7 +72,7 @@ function CreateContainerBody({ open, onOpenChange, defaultServerId }: CreateCont
             form.submit();
           }}
         >
-          <FormField id="container-name" label="名称" error={form.errors.name} hint="字母、数字和连字符，例如 dev-ubuntu">
+          <FormField id="container-name" label="名称" error={form.errors.name} hint={`字母、数字和连字符，最多 ${CONTAINER_NAME_MAX_LENGTH} 个字符，例如 dev-ubuntu`}>
             <Input
               id="container-name"
               value={form.name}
@@ -473,8 +475,6 @@ const emptyForm: FormState = {
   startAfterCreate: true,
 };
 
-const NAME_RE = /^[A-Za-z0-9][A-Za-z0-9-]*$/;
-
 /** Remaining room under a grant; null when the grant does not limit it. */
 function remaining(limit: number | null, used: number): number | null {
   if (limit === null || limit === 0) return null;
@@ -490,8 +490,8 @@ function validateForm(form: FormState): FieldErrors {
   const next: FieldErrors = {};
   const name = form.name.trim();
   if (!name) next.name = '请输入容器名称';
-  else if (name.length > 63) next.name = '名称最长 63 个字符';
-  else if (!NAME_RE.test(name)) next.name = '只能使用字母、数字和连字符，且不能以连字符开头';
+  else if (name.length > CONTAINER_NAME_MAX_LENGTH) next.name = `名称最长 ${CONTAINER_NAME_MAX_LENGTH} 个字符`;
+  else if (!CONTAINER_NAME_RE.test(name)) next.name = '只能使用字母、数字和连字符，且不能以连字符开头';
   if (!form.serverId) next.serverId = '请选择服务器';
   if (!form.imageId) next.imageId = '请选择镜像';
   if (parsePositiveGib(form.rootSizeGib) === null) next.rootSizeGib = '请输入大于 0 的容量';

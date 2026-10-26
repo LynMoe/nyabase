@@ -2,6 +2,7 @@ export * from './constants.js';
 export * from './enums.js';
 export * from './errors.js';
 export * from './utils.js';
+export * from './display-name.js';
 export * from './config/definition.js';
 export * from './protocol/ws.js';
 export * from './protocol/rest.js';

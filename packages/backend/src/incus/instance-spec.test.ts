@@ -22,6 +22,7 @@ function input(overrides: Partial<InstanceSpecInput['container']> = {}): Instanc
   return {
     container: {
       id: containerId,
+      name: 'web-01',
       serverId,
       revision: 7,
       imageFingerprint: 'a'.repeat(64),
@@ -38,6 +39,7 @@ function input(overrides: Partial<InstanceSpecInput['container']> = {}): Instanc
     },
     server: {
       id: serverId,
+      name: 'Aya 1号机',
       parentInterface: 'eno1',
     },
     attachments: [
@@ -98,6 +100,8 @@ describe('buildDesiredInstanceSpec', () => {
         'user.nyabase.container_id': containerId.replaceAll('-', ''),
         'user.nyabase.server_id': serverId.replaceAll('-', ''),
         'user.nyabase.revision': '7',
+        'user.nyabase.display.container': 'web-01',
+        'user.nyabase.display.server': 'Aya 1号机',
       },
       devices: {
         root: {

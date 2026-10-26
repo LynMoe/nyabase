@@ -20,6 +20,8 @@ export interface ContainerRow {
   owner_id: string;
   /** The user-facing name; the host certificate is issued for it. */
   name: string;
+  /** The server's display name, shown in the guest's shell prompt. */
+  server_name: string;
   image_id: string;
   revision: number;
   image_fingerprint: string;
@@ -187,6 +189,7 @@ export class ContainerReconcileStore {
         'c.lifecycle_phase as lifecycle_phase',
         'p.incus_name as root_pool_name',
         'p.resize_family as root_resize_family',
+        's.name as server_name',
         's.parent_interface as parent_interface',
         's.dns_servers as dns_servers',
         'i.login_user as login_user',

@@ -13,7 +13,7 @@ export function dateStamp(date: Date): string {
  * A default name such as `ins-261025` that none of `taken` uses (compared
  * case-insensitively); collisions get `-2`, `-3`, … appended. The result is
  * lower-case ASCII letters, digits and hyphens, so it passes both the
- * container (`^[A-Za-z0-9][A-Za-z0-9-]*$`, ≤ 63) and the volume name rules.
+ * container (`^[A-Za-z0-9][A-Za-z0-9-]*$`, ≤ 16) and the volume name rules.
  */
 export function defaultResourceName(
   prefix: DefaultNamePrefix,

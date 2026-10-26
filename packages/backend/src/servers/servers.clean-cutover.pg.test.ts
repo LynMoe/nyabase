@@ -83,6 +83,38 @@ describePg('server agent onboarding and removal', () => {
     });
   });
 
+  it('wakes a scan when the display name changes, so containers relabel their prompt', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const transactions = new PgTransactionManager(database);
+      const agents = { disconnect: vi.fn(), isConnected: vi.fn(() => false), current: vi.fn(() => undefined) };
+      const audit = { append: vi.fn() };
+      const wake = { wake: vi.fn() };
+      const service = new ServersService(
+        database,
+        transactions,
+        {} as never,
+        audit as never,
+        { invalidate: vi.fn() } as never,
+        agents as never,
+        new AgentEnrollmentService(database, transactions, audit as never, agents as never),
+        wake as never,
+      );
+      const operatorId = await seedUser(database, undefined, UserStatus.Active, Role.Operator);
+      const created = await service.create(operatorId, {
+        name: 'Aya 1号机',
+        slug: `rename-${randomUUID().slice(0, 8)}`,
+        parentInterface: 'vmbr0',
+        dnsServers: [],
+        reservedCpus: [],
+      });
+
+      const same = await service.update(operatorId, created.id, { expectedRevision: created.revision, name: 'Aya 1号机' });
+      expect(wake.wake).not.toHaveBeenCalled();
+      await service.update(operatorId, created.id, { expectedRevision: same.revision, name: 'Aya 2号机' });
+      expect(wake.wake).toHaveBeenCalledWith({ reason: 'scan' });
+    });
+  });
+
   it('rejects stale revision and control-plane-cascades referenced servers', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const actor = await seedUser(database, undefined, UserStatus.Active, Role.Operator);

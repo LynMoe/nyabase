@@ -80,6 +80,7 @@ function containerRow(overrides: Partial<ContainerRow> = {}): ContainerRow {
     server_id: SERVER_ID,
     owner_id: '8d9eafb0-c1d2-4e3f-a4b5-66778899aabb',
     name: 'dev',
+    server_name: 'Aya 1号机',
     image_id: '9eafb0c1-d2e3-4f40-b5c6-778899aabbcc',
     revision: 3,
     image_fingerprint: FINGERPRINT,

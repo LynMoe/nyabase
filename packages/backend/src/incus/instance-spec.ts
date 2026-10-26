@@ -15,6 +15,8 @@ export interface InstanceImageSourceInput {
 
 export interface InstanceSpecContainerInput {
   readonly id: string;
+  /** The user-facing name, shown in the guest's shell prompt. */
+  readonly name: string;
   readonly serverId: string;
   readonly revision: number;
   readonly imageFingerprint: string;
@@ -40,6 +42,8 @@ export interface ContainerRuntimeLimits {
 
 export interface InstanceSpecServerInput {
   readonly id: string;
+  /** The display name, shown in the guest's shell prompt. */
+  readonly name: string;
   readonly parentInterface: string;
   readonly imageSource?: InstanceImageSourceInput;
 }
@@ -277,6 +281,14 @@ export function mergeInstanceSpecContributions(
   return { ...base, config, devices };
 }
 
+export const DISPLAY_CONTAINER_NAME_KEY = 'user.nyabase.display.container';
+export const DISPLAY_SERVER_NAME_KEY = 'user.nyabase.display.server';
+
+/** Labels that only change what the guest shows; rewriting them is not drift worth auditing. */
+export function isDisplayConfigKey(key: string): boolean {
+  return key === DISPLAY_CONTAINER_NAME_KEY || key === DISPLAY_SERVER_NAME_KEY;
+}
+
 export function buildDesiredInstanceSpec(input: InstanceSpecInput): DesiredInstanceSpec {
   const { container, server } = input;
   const containerId = uuid32(container.id, 'container_id');
@@ -311,6 +323,9 @@ export function buildDesiredInstanceSpec(input: InstanceSpecInput): DesiredInsta
     'user.nyabase.container_id': containerId,
     'user.nyabase.server_id': serverId,
     'user.nyabase.revision': String(revision),
+    // Read by the image's shell prompt through /dev/incus; the instance name stays nyc-<id>.
+    [DISPLAY_CONTAINER_NAME_KEY]: container.name,
+    [DISPLAY_SERVER_NAME_KEY]: server.name,
   };
   const devices: Record<string, Record<string, string>> = {
     root: {

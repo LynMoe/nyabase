@@ -32,10 +32,10 @@ import {
   parseCidr,
 } from '../utils.js';
 import { normalizeOpenSshPublicKey } from './ssh-public-key.js';
+import { CONTAINER_NAME_MAX_LENGTH, CONTAINER_NAME_RE, serverNameProblem } from '../display-name.js';
 import { zGpuPciAddresses } from '../gpu/schema.js';
 
 const USERNAME_RE = /^[a-z0-9_-]+$/;
-const RESOURCE_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9-]*$/;
 const SERVER_SLUG_RE = /^[a-z0-9][a-z0-9_-]*$/;
 const NETWORK_INTERFACE_RE = /^[A-Za-z0-9_.:-]+$/;
 const LOGIN_USER_RE = /^[a-z_][a-z0-9_-]{0,31}$/;
@@ -68,7 +68,11 @@ export const zIpv4Cidr = z.string().superRefine((value, context) => {
 }).transform(canonicalIpv4Cidr);
 
 const zName = z.string().trim().min(1).max(128);
-const zResourceName = z.string().min(1).max(63).regex(RESOURCE_NAME_RE);
+const zContainerName = z.string().min(1).max(CONTAINER_NAME_MAX_LENGTH).regex(CONTAINER_NAME_RE);
+const zServerName = z.string().trim().transform((value) => value.normalize('NFC')).superRefine((value, context) => {
+  const problem = serverNameProblem(value);
+  if (problem) context.addIssue({ code: z.ZodIssueCode.custom, message: problem });
+});
 const zServerSlug = z.string().min(1).max(64).regex(SERVER_SLUG_RE);
 const zNetworkInterface = z.string().min(1).max(64).regex(NETWORK_INTERFACE_RE);
 const zOptionalText = (max: number) => z.string().max(max).nullable().optional();
@@ -232,7 +236,7 @@ export const zReservedCpus = z.array(z.number().int().min(0).max(MAX_SERVER_LOGI
   .refine((cpus) => new Set(cpus).size === cpus.length, 'Reserved CPUs must be unique');
 
 export const zCreateServerRequest = z.object({
-  name: zName,
+  name: zServerName,
   slug: zServerSlug,
   parentInterface: zNetworkInterface,
   dnsServers: z.array(zIpv4Address).max(8),
@@ -241,7 +245,7 @@ export const zCreateServerRequest = z.object({
 
 export const zPatchServerRequest = z.object({
   expectedRevision: zExpectedRevision,
-  name: zName.optional(),
+  name: zServerName.optional(),
   slug: zServerSlug.optional(),
   parentInterface: zNetworkInterface.optional(),
   dnsServers: z.array(zIpv4Address).max(8).optional(),
@@ -447,7 +451,7 @@ export const zAttachVolumeRequest = z.object({
 export const zCreateContainerRequest = z.object({
   serverId: zResourceIdentity,
   imageId: zResourceIdentity,
-  name: zResourceName,
+  name: zContainerName,
   rootSizeBytes: zPositiveBytes,
   memBytes: zPositiveBytes,
   /**

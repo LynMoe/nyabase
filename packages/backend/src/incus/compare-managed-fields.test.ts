@@ -32,6 +32,7 @@ function applyManagedFields(
 const baseInput: InstanceSpecInput = {
   container: {
     id: '11111111-1111-4111-8111-111111111111',
+    name: 'dev',
     serverId: '22222222-2222-4222-8222-222222222222',
     revision: 3,
     imageFingerprint: 'b'.repeat(64),
@@ -43,6 +44,7 @@ const baseInput: InstanceSpecInput = {
   },
   server: {
     id: '22222222-2222-4222-8222-222222222222',
+    name: 'lab-a',
     parentInterface: 'ens3',
   },
   attachments: [],

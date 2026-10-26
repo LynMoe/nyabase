@@ -211,8 +211,10 @@ export class ServersService {
         'server',
         input,
       );
-      // Containers on this server move off newly reserved CPUs (and onto freed ones).
-      if (input.reservedCpus !== undefined) afterCommit(transaction, () => this.wake.wake({ reason: 'scan' }));
+      // Containers on this server move off newly reserved CPUs (and onto freed ones),
+      // and pick up a new name for their shell prompt.
+      const renamed = input.name !== undefined && input.name !== current.name;
+      if (input.reservedCpus !== undefined || renamed) afterCommit(transaction, () => this.wake.wake({ reason: 'scan' }));
       return updated;
     });
     return (await this.toDtos([row]))[0]!;

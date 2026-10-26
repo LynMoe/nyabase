@@ -7,6 +7,7 @@ import {
   compareManagedFields,
   deriveInstanceName,
   IncusError,
+  isDisplayConfigKey,
   observeRootQuotaPending,
   type DesiredInstanceSpec,
   type IncusClientPort,
@@ -689,6 +690,10 @@ export class ContainerReconciler implements ManagedReconciler, OnModuleInit {
 
   /** A full scan found the instance changed outside the platform; record what is being reverted. */
   private async auditDrift(intent: IntentRecord, diff: ManagedFieldsDiff): Promise<void> {
+    // A renamed server rewrites its containers' display labels on the next scan; that is not drift.
+    const config = Object.keys(diff.config).filter((key) => !isDisplayConfigKey(key));
+    const devices = Object.keys(diff.devices);
+    if (config.length === 0 && devices.length === 0 && diff.profiles !== true) return;
     await this.audit.log(
       intent.requestedBy,
       AuditAction.ContainerDriftCorrected,
@@ -697,8 +702,8 @@ export class ContainerReconciler implements ManagedReconciler, OnModuleInit {
       {
         serverId: intent.serverId,
         intentId: intent.id,
-        config: Object.keys(diff.config).slice(0, 64),
-        devices: Object.keys(diff.devices).slice(0, 64),
+        config: config.slice(0, 64),
+        devices: devices.slice(0, 64),
         profiles: diff.profiles === true,
       },
     );

@@ -672,6 +672,47 @@ describe('container reconciler §15.1 fixture-driven Incus mocks', () => {
     expect(putBodies).toHaveLength(0);
   });
 
+  it('rewrites a stale display label on a full scan without auditing it as drift', async () => {
+    const audit = { log: vi.fn().mockResolvedValue(undefined) };
+    const { reconciler, client, putBodies } = await harness({
+      status: 'Stopped',
+      powerIntent: 'stopped',
+      documentExtras: { config: { 'user.nyabase.display.server': 'old-name' } },
+      audit,
+    });
+
+    const outcome = await reconciler.reconcile(context(client, { request: { source: 'full_scan' } }));
+    expect(outcome).toEqual({ outcome: 'succeeded', observedRevision: 3 });
+    expect(putBodies).toHaveLength(1);
+    expect(putBodies[0]!.config['user.nyabase.display.server']).toBe('lab-a');
+    expect(audit.log).not.toHaveBeenCalledWith(
+      expect.anything(),
+      AuditAction.ContainerDriftCorrected,
+      expect.anything(),
+      expect.anything(),
+      expect.anything(),
+    );
+  });
+
+  it('audits real drift found next to a stale display label without listing the label', async () => {
+    const audit = { log: vi.fn().mockResolvedValue(undefined) };
+    const { reconciler, client } = await harness({
+      status: 'Stopped',
+      powerIntent: 'stopped',
+      documentExtras: { config: { 'user.nyabase.display.server': 'old-name', 'operator.note': 'x' } },
+      audit,
+    });
+
+    await reconciler.reconcile(context(client, { request: { source: 'full_scan' } }));
+    expect(audit.log).toHaveBeenCalledWith(
+      null,
+      AuditAction.ContainerDriftCorrected,
+      CONTAINER_ID,
+      'container',
+      expect.objectContaining({ config: ['operator.note'], devices: [] }),
+    );
+  });
+
   it('audits Incus createInstance as IncusMutate', async () => {
     const audit = { log: vi.fn().mockResolvedValue(undefined) };
     const { reconciler, client, expectedName } = await harness({
@@ -864,6 +905,8 @@ function containerRow(options: HarnessOptions) {
     id: CONTAINER_ID,
     server_id: SERVER_ID,
     owner_id: '33333333-3333-4333-8333-333333333333',
+    name: 'dev',
+    server_name: 'lab-a',
     image_id: '44444444-4444-4444-8444-444444444444',
     revision: 3,
     image_fingerprint: IMAGE_FINGERPRINT,
@@ -935,6 +978,7 @@ function desiredFrom(options: HarnessOptions): DesiredInstanceSpec {
   return buildDesiredInstanceSpec({
     container: {
       id: CONTAINER_ID,
+      name: 'dev',
       serverId: SERVER_ID,
       revision: 3,
       imageFingerprint: IMAGE_FINGERPRINT,
@@ -948,6 +992,7 @@ function desiredFrom(options: HarnessOptions): DesiredInstanceSpec {
     },
     server: {
       id: SERVER_ID,
+      name: 'lab-a',
       parentInterface: PARENT,
     },
     attachments: (options.attachments ?? []).map((item) => ({

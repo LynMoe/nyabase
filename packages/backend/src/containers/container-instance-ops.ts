@@ -130,6 +130,7 @@ export function buildContainerSpec(
   const base = buildDesiredInstanceSpec({
     container: {
       id: row.id,
+      name: row.name,
       serverId: row.server_id,
       revision: row.revision,
       imageFingerprint: row.image_fingerprint,
@@ -143,6 +144,7 @@ export function buildContainerSpec(
     },
     server: {
       id: row.server_id,
+      name: row.server_name,
       parentInterface: row.parent_interface ?? '',
     },
     attachments,

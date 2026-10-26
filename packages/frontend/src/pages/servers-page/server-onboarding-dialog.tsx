@@ -1,6 +1,11 @@
 import { useEffect, useState } from 'react';
 import { useMutation } from '@tanstack/react-query';
-import { type CreatedServerDto, type CreateServerRequest, zCreateServerRequest } from '@nyabase/common';
+import {
+  type CreatedServerDto,
+  type CreateServerRequest,
+  SERVER_NAME_MAX_WIDTH,
+  zCreateServerRequest,
+} from '@nyabase/common';
 import { Button } from '../../components/ui/button.js';
 import {
   Dialog,
@@ -35,7 +40,7 @@ const emptyOnboardingForm: OnboardingForm = {
 };
 
 const FIELDS: Array<[keyof OnboardingForm, string, string]> = [
-  ['name', '显示名称', 'prod-incus-1'],
+  ['name', `显示名称（最宽 ${SERVER_NAME_MAX_WIDTH} 列，中文算 2）`, 'prod-incus-1'],
   ['slug', '标识', 'prod-incus-1'],
   ['parentInterface', 'LAN 网桥 (vmbr)', 'vmbr0'],
   ['dnsServers', 'DNS（逗号分隔）', '1.1.1.1,8.8.8.8'],
