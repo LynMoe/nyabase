@@ -6,6 +6,7 @@ import {
   type ListScope,
   type SshClientConfigDto,
   formatSshAgentSetupPrompt,
+  formatSshJumpCommand,
 } from '@nyabase/common';
 import { Button } from '../ui/button.js';
 import { Hint } from '../ui/hint.js';
@@ -40,7 +41,7 @@ export function SshLoginCard({ container, scope }: { container: ContainerDto; sc
     onSuccess: invalidate,
   });
   const repairPending = repairSsh.isPending;
-  const { loginCommand, setupPrompt, unavailable, copyText } = login;
+  const { loginCommand, jumpCommand, setupPrompt, unavailable, copyText } = login;
   const sshReady = container.ssh.ready;
   const repairDisabled = repairPending || container.lifecyclePhase !== 'active';
   return (
@@ -63,30 +64,15 @@ export function SshLoginCard({ container, scope }: { container: ContainerDto; sc
             这是 {container.ownerName ?? '其他用户'} 的容器。SSH 代理只按公钥持有者自己的容器解析名字，登录命令只对所有者有效。
           </p>
         ) : loginCommand ? (
-          <div className="flex items-stretch gap-2">
-            <pre
-              className="min-w-0 flex-1 overflow-x-auto whitespace-pre rounded-md border bg-muted/50 px-3 py-2 font-mono text-sm"
-              data-testid="ssh-login-command"
-            >
-              {loginCommand}
-            </pre>
-            <Button
-              variant="outline"
-              className="h-auto shrink-0"
-              onClick={() => { void copyText(loginCommand, '登录命令已复制'); }}
-              data-testid="open-ssh-login"
-            >
-              <Copy className="h-4 w-4" />复制
-            </Button>
+          <div className="space-y-2">
+            <CommandLine command={loginCommand} copyText={copyText} testId="ssh-login-command" />
+            {jumpCommand ? (
+              <CommandLine label="未配置" command={jumpCommand} copyText={copyText} testId="ssh-jump-command" />
+            ) : null}
           </div>
         ) : (
           <p className="text-sm text-muted-foreground">{unavailable}</p>
         )}
-        {ownContainer && setupPrompt ? (
-          <p className="text-xs text-muted-foreground">
-            首次登录前先在本机做一次「一次性 SSH 配置」：复制给本机的 AI agent 即可，以后新建的容器不用再配。
-          </p>
-        ) : null}
         <FieldGrid>
           <Field label="登录用户" value={container.ssh.loginUser} mono />
           <Field label="容器 IP（内网）" value={container.routedIp} mono />
@@ -108,6 +94,41 @@ export function SshLoginCard({ container, scope }: { container: ContainerDto; sc
       </div>
       <SshConfigDialog open={configOpen} onOpenChange={setConfigOpen} login={login} />
     </SectionCard>
+  );
+}
+
+/** One copyable command; a labelled one is the smaller alternative under the main command. */
+function CommandLine({
+  command,
+  label,
+  copyText,
+  testId,
+}: {
+  command: string;
+  label?: string;
+  copyText: SshLogin['copyText'];
+  testId: string;
+}) {
+  return (
+    <div className="flex items-center gap-2">
+      {label ? <span className="shrink-0 text-xs text-muted-foreground">{label}</span> : null}
+      <pre
+        className={`min-w-0 flex-1 overflow-x-auto whitespace-pre rounded-md border bg-muted/50 font-mono ${label ? 'px-2 py-1 text-xs' : 'px-3 py-2 text-sm'}`}
+        data-testid={testId}
+      >
+        {command}
+      </pre>
+      <Button
+        variant="outline"
+        size={label ? 'icon' : 'default'}
+        className={label ? 'h-7 w-7 shrink-0' : 'h-auto shrink-0 self-stretch'}
+        aria-label="复制"
+        onClick={() => { void copyText(command, '登录命令已复制'); }}
+        data-testid={`copy-${testId}`}
+      >
+        <Copy className="h-4 w-4" />{label ? null : '复制'}
+      </Button>
+    </div>
   );
 }
 
@@ -155,8 +176,9 @@ function SshConfigDialog({
 
 /**
  * The ways to reach one of your containers: `ssh <name>.<suffix>` (null until
- * the proxy address and the container's IP are known) and the one-time client
- * setup, worded for an AI agent, that makes that command work for all of them.
+ * the proxy address and the container's IP are known), the same login through
+ * `ssh -J` for a client without the setup, and the one-time client setup,
+ * worded for an AI agent, that makes the short command work for all of them.
  */
 export function useSshLogin(container: ContainerDto, ownContainer: boolean) {
   const authUser = useAuthStore((state) => state.user);
@@ -180,6 +202,15 @@ export function useSshLogin(container: ContainerDto, ownContainer: boolean) {
     })
     : null;
   const loginCommand = setupPrompt && container.routedIp ? `ssh ${target}` : null;
+  const jumpCommand = loginCommand && config?.proxy && authUser
+    ? formatSshJumpCommand({
+      username: authUser.username,
+      host: config.proxy.host,
+      port: config.proxy.port,
+      loginUser,
+      hostName: container.ssh.hostName,
+    })
+    : null;
   const unavailable = query.isLoading
     ? '正在加载 SSH 配置…'
     : query.isError
@@ -195,7 +226,7 @@ export function useSshLogin(container: ContainerDto, ownContainer: boolean) {
       variant: ok ? 'default' : 'destructive',
     });
   };
-  return { loginCommand, setupPrompt, unavailable, copyText };
+  return { loginCommand, jumpCommand, setupPrompt, unavailable, copyText };
 }
 
 export type SshLogin = ReturnType<typeof useSshLogin>;

@@ -230,6 +230,20 @@ export function formatSshProxyJump(input: { username: string; host: string; port
   return `${input.username}@${host}${input.port === 22 ? '' : `:${input.port}`}`;
 }
 
+/**
+ * `ssh -J` to one container without the client config: the login user is
+ * named, and the full host name keeps the container's host certificate valid.
+ */
+export function formatSshJumpCommand(input: {
+  username: string;
+  host: string;
+  port: number;
+  loginUser: string;
+  hostName: string;
+}): string {
+  return `ssh -J ${formatSshProxyJump(input)} ${input.loginUser}@${input.hostName}`;
+}
+
 /** One `~/.ssh/config` block that reaches every one of the user's containers by name. */
 export function formatSshClientConfig(input: {
   username: string;

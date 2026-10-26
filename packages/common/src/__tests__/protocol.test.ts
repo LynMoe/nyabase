@@ -39,6 +39,7 @@ import {
   formatSshAgentSetupPrompt,
   formatSshClientConfig,
   formatSshKnownHosts,
+  formatSshJumpCommand,
   formatSshProxyJump,
   sshContainerHostName,
   zSharedVolumeScope,
@@ -227,6 +228,12 @@ describe('canonical container and volume contracts', () => {
     expect(sshContainerHostName('Work', 'nya')).toBe('work.nya');
     expect(formatSshProxyJump({ username: 'alice', host: 'ssh.example.com', port: 22 }))
       .toBe('alice@ssh.example.com');
+    expect(formatSshJumpCommand({
+      username: 'alice', host: 'ssh.example.com', port: 2222, loginUser: 'root', hostName: 'work.nya',
+    })).toBe('ssh -J alice@ssh.example.com:2222 root@work.nya');
+    expect(formatSshJumpCommand({
+      username: 'alice', host: '2001:db8::1', port: 22, loginUser: 'ubuntu', hostName: 'work.nya',
+    })).toBe('ssh -J alice@[2001:db8::1] ubuntu@work.nya');
     expect(formatSshClientConfig({ username: 'alice', host: 'ssh.example.com', port: 2222, hostSuffix: 'nya' }))
       .toBe('Host *.nya\n  User root\n  ProxyJump alice@ssh.example.com:2222');
     expect(formatSshKnownHosts({
