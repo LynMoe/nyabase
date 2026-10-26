@@ -29,7 +29,7 @@ export const zSeriesQuery = zUsageFields.extend({
 
 /**
  * `scope=mine` (default) is the caller's own usage; `scope=all` needs the
- * operator role and is the only scope that takes `userId`.
+ * user admin role and is the only scope that takes `userId`.
  */
 @Controller('performance')
 export class PerformanceController {

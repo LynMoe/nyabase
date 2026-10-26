@@ -6,8 +6,10 @@ import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.
 /**
  * The administration rules, in one place:
  *
- *  - Users and groups are administered by admins only (the route guard says so;
- *    `assertActorRole` re-checks inside the write transaction).
+ *  - Users and groups are administered by user admins and admins (the route
+ *    guard says so; `assertActorRole` re-checks inside the write transaction).
+ *    Only an admin changes roles or administers an admin
+ *    (`assertCanAdministerUser`).
  *  - The final active administrator is protected.
  *  - Every IAM write serialises on one advisory lock, so these checks see the
  *    state they will commit against.
@@ -29,7 +31,7 @@ export async function assertActorRole(
   transaction: Transaction<NyabaseDatabase>,
   actorId: string,
   minimum: Role,
-): Promise<void> {
+): Promise<Role> {
   await lockIamPolicy(transaction);
   const actor = await transaction.selectFrom('iam.users')
     .select(['role', 'status'])
@@ -40,6 +42,31 @@ export async function assertActorRole(
       code: 'ROLE_REQUIRED',
       message: `The actor does not hold the required role: ${minimum}`,
       requiredRole: minimum,
+    });
+  }
+  return actor.role as Role;
+}
+
+/**
+ * The actor may administer `targetId` (edit, disable, delete, remove SSH
+ * keys): user admins administer everyone but admins, admins everyone. The
+ * target's role is read under the IAM lock, so a concurrent promotion cannot
+ * slip past it.
+ */
+export async function assertCanAdministerUser(
+  transaction: Transaction<NyabaseDatabase>,
+  actorId: string,
+  targetId: string,
+): Promise<void> {
+  if (await assertActorRole(transaction, actorId, Role.UserAdmin) === Role.Admin) return;
+  const target = await transaction.selectFrom('iam.users')
+    .select('role')
+    .where('id', '=', targetId)
+    .executeTakeFirst();
+  if (target?.role === Role.Admin) {
+    throw new ForbiddenException({
+      code: 'ADMINISTRATOR_PROTECTED',
+      message: 'Only an admin can administer an admin',
     });
   }
 }

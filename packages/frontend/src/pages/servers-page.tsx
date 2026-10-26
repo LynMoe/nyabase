@@ -31,7 +31,7 @@ import { relativeTime } from '../lib/utils.js';
 export default function ServersPage() {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
-  const canViewMetrics = useHasRole(Role.Operator);
+  const canViewMetrics = useHasRole(Role.Admin);
   const usageQuery = useQuery({
     queryKey: queryKeys.performance.servers('all'),
     queryFn: () => api.get<PerformanceAdminUsageResponse>('/performance/usage?scope=all'),

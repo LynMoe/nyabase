@@ -28,7 +28,7 @@ export interface RuntimeDependencyMetrics {
  * connection strings, server/user IDs, SQL text, and raw errors.
  */
 @Controller('admin/metrics')
-@RequireRole(Role.Operator)
+@RequireRole(Role.Admin)
 export class AdminRuntimeMetricsController {
   constructor(
     @Inject(PG_POOL) private readonly pool: Pool,

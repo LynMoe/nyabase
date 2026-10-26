@@ -74,11 +74,11 @@ export class SharedBackendsService {
 
   /**
    * `scope=mine`: backends the caller holds a live grant for.
-   * `scope=all`: every backend (operator, to grant them); executor details,
+   * `scope=all`: every backend (user admin, to grant them); executor details,
    * like the executor routes, only for admins.
    */
   async list(actor: Actor, scope: ListScope): Promise<SharedBackendDto[]> {
-    assertListScope(actor, scope, Role.Operator);
+    assertListScope(actor, scope, Role.UserAdmin);
     return scope === 'all'
       ? this.listAll(hasRole(actor, Role.Admin))
       : this.listGranted(requireUserId(actor));
@@ -96,7 +96,8 @@ export class SharedBackendsService {
   private async listAll(withExecutors: boolean): Promise<SharedBackendDto[]> {
     const rows = await this.repository.list();
     const committed = await this.committedUsedByBackendIds(rows.map((row) => row.id));
-    if (!withExecutors) return rows.map((row) => this.toDto(row, committed.get(row.id) ?? 0));
+    // Without the admin view (user admins granting backends): capacity only, as in `listGranted`.
+    if (!withExecutors) return rows.map((row) => userView(this.toDto(row, committed.get(row.id) ?? 0)));
     const executors = await this.storagePools.listExecutorsByBackendIds(rows.map((row) => row.id));
     return rows.map((row) => this.toDto(row, committed.get(row.id) ?? 0, executors.get(row.id) ?? []));
   }
@@ -120,15 +121,9 @@ export class SharedBackendsService {
       .map((access) => access.sharedBackendId));
     const rows = await this.repository.list();
     const committed = await this.committedUsedByBackendIds(rows.map((row) => row.id));
-    // Users see capacity, not where or how the backend is mounted.
     return rows
       .filter((row) => ids.has(row.id))
-      .map((row) => ({
-        ...this.toDto(row, committed.get(row.id) ?? 0),
-        identityKey: '',
-        cephFsid: '',
-        serverIds: [],
-      }));
+      .map((row) => userView(this.toDto(row, committed.get(row.id) ?? 0)));
   }
 
   listExecutors(backendId: string) {
@@ -373,4 +368,9 @@ export class SharedBackendsService {
     if (executors !== undefined) dto.executors = executors;
     return dto;
   }
+}
+
+/** Users see capacity, not where or how the backend is mounted. */
+function userView(dto: SharedBackendDto): SharedBackendDto {
+  return { ...dto, identityKey: '', cephFsid: '', serverIds: [] };
 }

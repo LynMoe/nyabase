@@ -61,13 +61,13 @@ function toDto(intent: IntentRecord): IntentDto {
 function typeRole(resourceType: IntentRecord['resourceType']): Role | null {
   switch (resourceType) {
     case IntentResourceType.Container:
-      return Role.Operator;
+      return Role.UserAdmin;
     case IntentResourceType.Volume:
-      return Role.Admin;
+      return Role.UserAdmin;
     case IntentResourceType.Server:
-      return Role.Operator;
+      return Role.Admin;
     case IntentResourceType.ImageAssignment:
-      return Role.Operator;
+      return Role.Admin;
     default:
       return null;
   }
@@ -236,8 +236,8 @@ export class IntentsController {
     options: IntentListOptions,
     resourceIds: string[] | undefined,
   ) {
-    if (!hasRole(actor, Role.Operator)) {
-      throw new ForbiddenException('scope=all requires the operator role');
+    if (!hasRole(actor, Role.UserAdmin)) {
+      throw new ForbiddenException('scope=all requires the user_admin role');
     }
     if (resourceIds) {
       const required = typeRole(options.resourceType!);
@@ -246,7 +246,7 @@ export class IntentsController {
       }
       return this.intents.list(options);
     }
-    // `?serverId=` only narrows: an operator still sees no volume intents there.
+    // `?serverId=` only narrows: a user admin still sees no server intents there.
     const allowedTypes = (Object.values(IntentResourceType) as IntentRecord['resourceType'][])
       .filter((type) => {
         const required = typeRole(type);
@@ -265,9 +265,9 @@ export class IntentsController {
   /**
    * Why the actor may see or retry the intent. `own`: they own its resource
    * (any role). `administrator`: `scope=all`, or an intent they issued against
-   * a resource they do not own (an earlier admin override, or an operator-only
+   * a resource they do not own (an earlier admin override, or an admin-only
    * resource) — both need the role that governs the resource type *now*, so a
-   * demoted operator keeps no access through intents they once requested.
+   * demoted user admin keeps no access through intents they once requested.
    * Anything else is a 404 (403 for `scope=all` without the role).
    */
   private async basis(

@@ -29,6 +29,7 @@ import { AuditService } from '../iam/audit.service.js';
 import { SessionRevocationService } from '../iam/session-revocation.service.js';
 import {
   assertActorRole,
+  assertCanAdministerUser,
   assertNotLastAdministrator,
   hasActiveAdministrator,
   lockIamPolicy,
@@ -129,7 +130,9 @@ export class UsersService {
         occupied.map((row) => row.numeric_id),
       );
       if (typeof options.actorId === 'string') {
-        await assertActorRole(transaction, options.actorId, Role.Admin);
+        // Only an admin hands out a role above user.
+        const minimum = (dto.role ?? Role.User) === Role.User ? Role.UserAdmin : Role.Admin;
+        await assertActorRole(transaction, options.actorId, minimum);
       }
       if (await transaction.selectFrom('iam.users')
         .select('id')
@@ -284,7 +287,10 @@ export class UsersService {
           userId: id,
         });
       }
-      if (actorId) await assertActorRole(transaction, actorId, Role.Admin);
+      if (actorId) {
+        await assertCanAdministerUser(transaction, actorId, id);
+        if (dto.role !== undefined) await assertActorRole(transaction, actorId, Role.Admin);
+      }
       if (dto.status === UserStatus.Deleted || dto.status === UserStatus.Deleting) {
         throw new BadRequestException({
           code: 'USER_DELETED_STATUS_RESERVED',
@@ -369,7 +375,7 @@ export class UsersService {
    */
   async deleteUserPermanently(actor: Actor, userId: string): Promise<{ deleted: boolean }> {
     await this.transactions.run(async (transaction) => {
-      await assertActorRole(transaction, requireUserId(actor), Role.Admin);
+      await assertCanAdministerUser(transaction, requireUserId(actor), userId);
       const user = await transaction.selectFrom('iam.users')
         .select(['id', 'status'])
         .where('id', '=', userId)

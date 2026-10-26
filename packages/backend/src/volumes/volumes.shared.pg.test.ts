@@ -716,7 +716,7 @@ describePg('shared volume quota reservations', () => {
 });
 
 describePg('shared volume actor scope', () => {
-  it('shows a shared volume to its owner and an admin, never to others or an operator', async () => {
+  it('shows a shared volume to its owner and to user admins with scope=all, never to others', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const { userId, backendId } = await seedSharedBackend(database);
       const otherId = randomUUID();
@@ -725,7 +725,7 @@ describePg('shared volume actor scope', () => {
       const owner = testActor(userId);
       const other = testActor(otherId);
       const sharedAdmin = testActor(randomUUID(), Role.Admin);
-      const operator = testActor(randomUUID(), Role.Operator);
+      const userAdmin = testActor(randomUUID(), Role.UserAdmin);
       const created = await service.createShared(owner, {
         name: 'scoped',
         sizeBytes: 100,
@@ -738,16 +738,17 @@ describePg('shared volume actor scope', () => {
       expect((await service.listShared(sharedAdmin, { scope: 'all' })).map((row) => row.id))
         .toEqual([created.id]);
       await expect(service.listShared(owner, { scope: 'all' })).rejects.toMatchObject({ status: 403 });
-      await expect(service.listShared(operator, { scope: 'all' })).rejects.toMatchObject({ status: 403 });
+      expect((await service.listShared(userAdmin, { scope: 'all' })).map((row) => row.id))
+        .toEqual([created.id]);
 
       await expect(service.getShared(sharedAdmin, created.id, 'all')).resolves.toMatchObject({ id: created.id });
       await expect(service.getShared(sharedAdmin, created.id)).rejects.toMatchObject({ status: 404 });
       await expect(service.getShared(other, created.id, 'all')).rejects.toMatchObject({ status: 403 });
       await expect(service.getShared(other, created.id)).rejects.toMatchObject({ status: 404 });
-      await expect(service.getShared(operator, created.id)).rejects.toMatchObject({ status: 404 });
+      await expect(service.getShared(userAdmin, created.id)).rejects.toMatchObject({ status: 404 });
       await expect(service.patchShared(other, created.id, { expectedRevision: 1, name: 'nope' }))
         .rejects.toMatchObject({ status: 404 });
-      await expect(service.deleteShared(operator, created.id)).rejects.toMatchObject({ status: 404 });
+      await expect(service.deleteShared(userAdmin, created.id)).rejects.toMatchObject({ status: 404 });
 
       // the administrator renames it without holding a backend grant
       await expect(service.patchShared(sharedAdmin, created.id, {

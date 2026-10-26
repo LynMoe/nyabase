@@ -56,7 +56,7 @@ describe('image assignment and visibility', () => {
     assert.ok(live.accessPhase === 'live' && live.allowedImageIds.includes(h.state.image.id));
   });
 
-  it('keeps image administration to operators and admins', async () => {
+  it('keeps image administration to admins', async () => {
     const user = await h.newUser('imgadm');
     const api = user.session.api;
     assert.equal(await api.status('GET', '/images?scope=all'), 403);

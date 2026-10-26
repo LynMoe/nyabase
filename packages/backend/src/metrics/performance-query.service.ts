@@ -88,14 +88,14 @@ export class PerformanceQueryService {
 
   /**
    * `scope=mine`: the caller's own containers on granted servers.
-   * `scope=all`: every server, container and person (operator).
+   * `scope=all`: every server, container and person (user admin).
    */
   async usage(
     actor: Actor,
     query: PerformanceQuery,
     scope: ListScope,
   ): Promise<PerformanceUsageResponse | PerformanceAdminUsageResponse | PerformanceSelfResponse> {
-    assertListScope(actor, scope, Role.Operator);
+    assertListScope(actor, scope, Role.UserAdmin);
     adminUserFilter(query, scope);
     return scope === 'all'
       ? this.scopedUsage(requireUserId(actor), query, 'all')
@@ -107,7 +107,7 @@ export class PerformanceQueryService {
     query: PerformanceQuery,
     scope: ListScope,
   ): Promise<PerformanceSeriesResponse | PerformanceMultiSeriesResponse> {
-    assertListScope(actor, scope, Role.Operator);
+    assertListScope(actor, scope, Role.UserAdmin);
     adminUserFilter(query, scope);
     return scope === 'all'
       ? this.scopedSeries(requireUserId(actor), query, 'all')

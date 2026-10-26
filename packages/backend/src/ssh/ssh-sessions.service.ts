@@ -222,7 +222,7 @@ function detailWindow(filter: StatsFilter): RawBuilder<unknown> {
 /**
  * Reads the SSH connection history. By default (`scope=mine`) a user sees
  * the connections they made, which only ever reach their own containers;
- * `scope=all` is the operator view of everyone's.
+ * `scope=all` is the user admin view of everyone's.
  */
 @Injectable()
 export class SshSessionsService {
@@ -232,7 +232,7 @@ export class SshSessionsService {
   ) {}
 
   async list(actor: Actor, query: SshSessionListQuery): Promise<CursorPaginatedResponse<SshSessionDto>> {
-    assertListScope(actor, query.scope, Role.Operator);
+    assertListScope(actor, query.scope, Role.UserAdmin);
     const conditions: RawBuilder<unknown>[] = [];
     const userId = query.scope === 'mine' ? requireUserId(actor) : query.userId;
     if (userId) conditions.push(sql`c.user_id = ${userId}`);
@@ -264,7 +264,7 @@ export class SshSessionsService {
 
   async detail(actor: Actor, id: string, scopeParam: unknown): Promise<SshSessionDetailDto> {
     const scope = zListScope.parse(scopeParam);
-    assertListScope(actor, scope, Role.Operator);
+    assertListScope(actor, scope, Role.UserAdmin);
     if (!zUuid.safeParse(id).success) throw new NotFoundException('SSH session not found');
     const result = await sql<ConnectionRow>`
       SELECT c.*, ${TARGETS} AS targets
@@ -290,7 +290,7 @@ export class SshSessionsService {
   }
 
   async stats(actor: Actor, query: SshSessionStatsQuery): Promise<SshSessionStatsDto> {
-    assertListScope(actor, query.scope, Role.Operator);
+    assertListScope(actor, query.scope, Role.UserAdmin);
     const today = Math.floor(Date.now() / DAY_MS) * DAY_MS;
     const since = new Date(today - (query.days - 1) * DAY_MS);
     const filter: StatsFilter = {
@@ -470,7 +470,7 @@ export class SshSessionsService {
     };
   }
 
-  /** Unauthenticated connections over the last `hours`, for operators. */
+  /** Unauthenticated connections over the last `hours`, for admins. */
   async refusals(hours: number): Promise<SshProxyRefusalsDto> {
     const since = new Date(Date.now() - hours * 3_600_000);
     const hourly = await sql<{ hour: Date; count: string }>`

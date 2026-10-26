@@ -75,7 +75,7 @@ describePg('API IAM bootstrap', () => {
       const context = createBootstrapContext(database);
       const demoted = await database.insertInto('iam.users').values({
         id: randomUUID(), numeric_id: 7, username: 'admin', password_hash: 'unused',
-        display_name: 'Administrator', status: UserStatus.Active, role: Role.Operator, auth_version: 0,
+        display_name: 'Administrator', status: UserStatus.Active, role: Role.UserAdmin, auth_version: 0,
       }).returning('id').executeTakeFirstOrThrow();
       await database.insertInto('iam.users').values({
         id: randomUUID(), numeric_id: 8, username: 'other-admin', password_hash: 'unused',
@@ -87,7 +87,7 @@ describePg('API IAM bootstrap', () => {
 
       const row = await database.selectFrom('iam.users').select('role').where('id', '=', demoted.id)
         .executeTakeFirstOrThrow();
-      expect(row.role).toBe(Role.Operator);
+      expect(row.role).toBe(Role.UserAdmin);
     });
   });
 

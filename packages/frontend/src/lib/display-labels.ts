@@ -24,10 +24,10 @@ export function roleLabel(role: string): string {
   switch (role) {
     case Role.User:
       return '用户';
-    case Role.Operator:
-      return '运维';
+    case Role.UserAdmin:
+      return '用户管理员';
     case Role.Admin:
-      return '管理员';
+      return '超级管理员';
     default:
       return role;
   }
@@ -129,6 +129,6 @@ export { lifecyclePhaseLabel, serverStatusLabel } from './status-labels.js';
 
 export const ROLE_OPTIONS: Array<[string, string]> = [
   [Role.User, roleLabel(Role.User)],
-  [Role.Operator, roleLabel(Role.Operator)],
+  [Role.UserAdmin, roleLabel(Role.UserAdmin)],
   [Role.Admin, roleLabel(Role.Admin)],
 ];

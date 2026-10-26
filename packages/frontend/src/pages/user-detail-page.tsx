@@ -19,7 +19,7 @@ export default function UserDetailPage() {
   const { tab } = routeApi.useSearch();
   const navigate = useNavigate({ from: '/users/$id' });
   const currentUserId = useAuthStore((state) => state.user?.id);
-  const canManageUsers = useHasRole(Role.Admin);
+  const canManageUsers = useHasRole(Role.UserAdmin);
   const userQuery = useQuery({
     queryKey: queryKeys.users.detail(id),
     queryFn: () => api.get<UserDto>(`/users/${id}`),

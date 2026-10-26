@@ -10,19 +10,22 @@ import { Role, roleAtLeast } from '@nyabase/common';
 export type AccessRule = Role;
 
 export const ACCESS = {
-  servers: Role.Operator,
+  servers: Role.Admin,
   network: Role.Admin,
   sharedBackends: Role.Admin,
-  images: Role.Operator,
-  manageContainers: Role.Operator,
-  ops: Role.Operator,
-  sshProxy: Role.Operator,
-  httpProxyOps: Role.Operator,
-  adminUsage: Role.Operator,
-  users: Role.Operator,
-  groups: Role.Operator,
-  audit: Role.Operator,
-  systemSettings: Role.Operator,
+  images: Role.Admin,
+  manageContainers: Role.UserAdmin,
+  manageVolumes: Role.UserAdmin,
+  ops: Role.UserAdmin,
+  /** The page and its connection history; live status, host keys and refusals need `sshProxyOps`. */
+  sshProxy: Role.UserAdmin,
+  sshProxyOps: Role.Admin,
+  httpProxyOps: Role.Admin,
+  adminUsage: Role.UserAdmin,
+  users: Role.UserAdmin,
+  groups: Role.UserAdmin,
+  audit: Role.UserAdmin,
+  systemSettings: Role.Admin,
 } as const satisfies Record<string, AccessRule>;
 
 export function canAccess(role: Role | undefined, rule: AccessRule): boolean {

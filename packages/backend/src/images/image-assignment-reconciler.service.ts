@@ -132,7 +132,7 @@ export class ImageAssignmentReconciler implements ManagedReconciler, OnModuleIni
 
   /**
    * Remove the image copies nyabase recorded on this server that nothing there
-   * needs any more: versions an operator deleted, kept versions of an image no
+   * needs any more: versions an admin deleted, kept versions of an image no
    * longer assigned here once no container on the server uses them, and copies
    * of deleted images. Driven by each full scan from the database state, so a
    * server that is offline or busy catches up later. The preflight probe's
@@ -297,7 +297,7 @@ export class ImageAssignmentReconciler implements ManagedReconciler, OnModuleIni
       context.intent,
     );
     // The previous copy stays: containers created from it keep that version, and an
-    // operator deletes the version (and its copies) once nothing uses it.
+    // admin deletes the version (and its copies) once nothing uses it.
     await this.store.recordEnsured(assignment, fingerprint);
     return { outcome: 'succeeded', observedRevision: assignment.revision };
   }

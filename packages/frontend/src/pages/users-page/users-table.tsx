@@ -42,7 +42,7 @@ function DeleteUserButton({ availability, onDelete }: { availability: ActionAvai
 /** `users` are the rows to show; `allUsers` is the full list the last-admin rule is evaluated against. */
 export function UsersTable({ users: visibleUsers, allUsers }: { users: UserDto[]; allUsers: UserDto[] }) {
   const viewer = useAuthStore((state) => state.user);
-  const canManage = useHasRole(Role.Admin);
+  const canManage = useHasRole(Role.UserAdmin);
   const queryClient = useQueryClient();
   const [deleteUser, setDeleteUser] = useState<UserDto | null>(null);
   const remove = useMutation({

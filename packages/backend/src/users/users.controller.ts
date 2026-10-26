@@ -23,9 +23,10 @@ import {
 } from '@nyabase/common';
 
 /**
- * Users. Everyone manages their own record and SSH keys; reading other users
- * needs the operator role, changing them (including roles) the admin role.
- * Anyone else is refused with 403.
+ * Users. Everyone manages their own record and SSH keys; user admins read,
+ * create and change other users except admins (`assertCanAdministerUser` in
+ * the service); roles and admins are changed by admins only. Anyone else is
+ * refused with 403.
  */
 @Controller('users')
 export class UsersController {
@@ -36,22 +37,25 @@ export class UsersController {
   ) {}
 
   @Get()
-  @RequireRole(Role.Operator)
+  @RequireRole(Role.UserAdmin)
   async listUsers() {
     return this.usersService.listDtos();
   }
 
   @Post()
-  @RequireRole(Role.Admin)
+  @RequireRole(Role.UserAdmin)
   async createUser(@Body() body: unknown, @CurrentActor() actor: Actor) {
     const dto = zCreateUserRequest.parse(body);
+    if (dto.role !== undefined && dto.role !== Role.User && !hasRole(actor, Role.Admin)) {
+      throw new ForbiddenException();
+    }
     const user = await this.usersService.createUser(dto, { actorId: actor.userId });
     return this.usersService.toDto(user);
   }
 
   @Get(':id')
   async getUser(@Param('id') id: string, @CurrentActor() actor: Actor) {
-    this.assertSelfOr(actor, id, Role.Operator);
+    this.assertSelfOr(actor, id, Role.UserAdmin);
     const user = await this.usersService.findById(id);
     return this.usersService.toDto(user);
   }
@@ -62,7 +66,7 @@ export class UsersController {
     @Body() body: unknown,
     @CurrentActor() actor: Actor,
   ) {
-    this.assertSelfOr(actor, id, Role.Admin);
+    this.assertSelfOr(actor, id, Role.UserAdmin);
     const dto = zUpdateUserRequest.parse(body);
     if (dto.role !== undefined && !hasRole(actor, Role.Admin)) throw new ForbiddenException();
     if (this.isSelfService(actor, id, dto)) {
@@ -80,7 +84,7 @@ export class UsersController {
   }
 
   @Delete(':id')
-  @RequireRole(Role.Admin)
+  @RequireRole(Role.UserAdmin)
   @HttpCode(200)
   async deleteUser(@Param('id') id: string, @CurrentActor() actor: Actor) {
     if (actor.userId === id) throw new ForbiddenException("Can't delete yourself");
@@ -92,7 +96,7 @@ export class UsersController {
   @Get(':id/ssh-keys')
   async listSshKeys(@Param('id') id: string, @CurrentActor() actor: Actor) {
     if (actor.userId !== id) {
-      this.assertSelfOr(actor, id, Role.Admin);
+      this.assertSelfOr(actor, id, Role.UserAdmin);
       await this.usersService.findById(id);
     }
     return this.sshKeys.listSshKeys(id);
@@ -124,7 +128,7 @@ export class UsersController {
     @Param('keyId') keyId: string,
     @CurrentActor() actor: Actor,
   ) {
-    this.assertSelfOr(actor, id, Role.Admin);
+    this.assertSelfOr(actor, id, Role.UserAdmin);
     await this.sshKeys.deleteSshKey(id, keyId, requireUserId(actor));
   }
 
@@ -136,7 +140,8 @@ export class UsersController {
    * Your own record follows the self-service rules (password changes need the
    * current password; status and role are not yours to change). An admin who
    * sends an administrator-shaped change to their own record (status, role, or
-   * a password without the current one) is handled as an administrator.
+   * a password without the current one) is handled as an administrator. A user
+   * admin is not: a stolen session must not reset its own password.
    */
   private isSelfService(
     actor: Actor,

@@ -66,7 +66,7 @@ describePg('credential revocation on password change, reset and account changes'
       await context.users.updateUser(context.user.id, { displayName: 'Renamed' }, context.admin.id);
       expect(context.revoked).toEqual([]);
 
-      await context.users.updateUser(context.user.id, { role: Role.Operator }, context.admin.id);
+      await context.users.updateUser(context.user.id, { role: Role.UserAdmin }, context.admin.id);
       expect(context.revoked).toEqual([context.user.id]);
       await context.users.updateUser(context.user.id, { status: UserStatus.Disabled }, context.admin.id);
       expect(context.revoked).toEqual([context.user.id, context.user.id]);

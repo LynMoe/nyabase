@@ -24,13 +24,15 @@ describe('sidebar navigation', () => {
     ]);
   });
 
-  it('offers operators the operations pages but not admin-only resources', () => {
-    const items = visibleNavSections(Role.Operator).flatMap((section) => section.items).map((item) => item.to);
-    expect(items).toContain('/servers');
-    expect(items).toContain('/servers/usage');
-    expect(items).toContain('/users');
-    expect(items).not.toContain('/network');
-    expect(items).not.toContain('/shared-backends');
+  it('offers user admins people and their resources, but no infrastructure', () => {
+    const items = visibleNavSections(Role.UserAdmin).flatMap((section) => section.items).map((item) => item.to);
+    for (const to of ['/users', '/groups', '/manage/containers', '/manage/volumes', '/ops', '/servers/usage',
+      '/ssh-proxy', '/audit']) {
+      expect(items).toContain(to);
+    }
+    for (const to of ['/servers', '/network', '/shared-backends', '/images', '/http-proxy-ops', '/system-settings']) {
+      expect(items).not.toContain(to);
+    }
   });
 
   it('offers admins every page', () => {

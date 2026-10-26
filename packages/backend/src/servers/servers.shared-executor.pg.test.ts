@@ -47,7 +47,7 @@ async function placeOn(
 describePg('server removal and shared backend executors', () => {
   it('keeps a shared volume placed only on the deleted server while an unreachable peer reaches the backend', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
-      const actor = await seedUser(database, undefined, UserStatus.Active, Role.Operator);
+      const actor = await seedUser(database, undefined, UserStatus.Active, Role.Admin);
       const ownerId = await seedUser(database);
       const backendId = await seedBackend(database);
       const serverS = await seedServer(database);
@@ -76,7 +76,7 @@ describePg('server removal and shared backend executors', () => {
 
   it('releases a shrink reservation that only the removed server\'s placement still held', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
-      const actor = await seedUser(database, undefined, UserStatus.Active, Role.Operator);
+      const actor = await seedUser(database, undefined, UserStatus.Active, Role.Admin);
       const ownerId = await seedUser(database);
       const backendId = await seedBackend(database);
       const serverS = await seedServer(database);
@@ -103,7 +103,7 @@ describePg('server removal and shared backend executors', () => {
 
   it('refuses to remove the last executor of a backend with volumes unless forced, then keeps live volumes', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
-      const actor = await seedUser(database, undefined, UserStatus.Active, Role.Operator);
+      const actor = await seedUser(database, undefined, UserStatus.Active, Role.Admin);
       const ownerId = await seedUser(database);
       const backendId = await seedBackend(database);
       const serverS = await seedServer(database);
@@ -174,7 +174,7 @@ describePg('server removal and shared backend executors', () => {
 
   it('removes the last executor of a backend without volumes', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
-      const actor = await seedUser(database, undefined, UserStatus.Active, Role.Operator);
+      const actor = await seedUser(database, undefined, UserStatus.Active, Role.Admin);
       const backendId = await seedBackend(database);
       const serverS = await seedServer(database);
       await seedBackendPool(database, serverS, backendId);

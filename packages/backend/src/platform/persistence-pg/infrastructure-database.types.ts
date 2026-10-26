@@ -155,7 +155,7 @@ export interface InfrastructureImageVersionTable {
   fingerprint: string;
   description: string | null;
   created_at: InfrastructureGeneratedTimestamp;
-  /** Deleted by an operator; servers drop the copy once nothing needs it. */
+  /** Deleted by an admin; servers drop the copy once nothing needs it. */
   deleted_at: InfrastructureTimestamp | null;
 }
 

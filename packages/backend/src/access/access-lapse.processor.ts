@@ -49,7 +49,7 @@ const MAX_PAIRS_PER_PASS = 128;
  * Runs every minute and right after IAM writes commit (`AccessChangeNotifier`).
  * Each pair is leased through `ReconcileClaimRepository` (resource_type
  * `access_lapse`), so replicas never work on the same pair; stop and purge go
- * through the same code as the operator purge, as `SYSTEM_ACTOR` (NULL
+ * through the same code as the administrator purge, as `SYSTEM_ACTOR` (NULL
  * attribution in audit rows and intents).
  */
 @Injectable()

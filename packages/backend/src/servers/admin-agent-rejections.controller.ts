@@ -13,7 +13,7 @@ export class AdminAgentRejectionsController {
   constructor(private readonly rejections: AgentCredentialRejections) {}
 
   @Get()
-  @RequireRole(Role.Operator)
+  @RequireRole(Role.Admin)
   list(): RejectedAgentCredentialDto[] {
     return this.rejections.list();
   }

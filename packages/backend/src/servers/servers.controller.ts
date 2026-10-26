@@ -29,7 +29,9 @@ import { requireUserId } from '../iam/actor.js';
 
 /**
  * Servers: `scope=mine` (default) is the user view of granted servers;
- * `scope=all` and every lifecycle operation need the operator role.
+ * `scope=all` reaches every server (user admins get the user view, to grant
+ * them and to read their containers' servers); the full DTO and every
+ * lifecycle operation are admin-only.
  */
 @Controller('servers')
 export class ServersController {
@@ -45,7 +47,7 @@ export class ServersController {
   }
 
   @Post()
-  @RequireRole(Role.Operator)
+  @RequireRole(Role.Admin)
   create(@CurrentActor() actor: Actor, @Body() body: unknown) {
     return this.servers.create(requireUserId(actor), zCreateServerRequest.parse(body));
   }
@@ -61,7 +63,7 @@ export class ServersController {
 
   /** Issue a fresh one-time agent enrollment token (shown once). */
   @Post(':id/agent-enrollment')
-  @RequireRole(Role.Operator)
+  @RequireRole(Role.Admin)
   rotateEnrollment(
     @Param('id') id: string,
     @CurrentActor() actor: Actor,
@@ -72,7 +74,7 @@ export class ServersController {
   }
 
   @Get(':id/preflight')
-  @RequireRole(Role.Operator)
+  @RequireRole(Role.Admin)
   preflight(@Param('id') id: string) {
     return this.servers.findDtoById(id).then((server) => ({
       status: server.preflightStatus,
@@ -82,7 +84,7 @@ export class ServersController {
   }
 
   @Post(':id/preflight')
-  @RequireRole(Role.Operator)
+  @RequireRole(Role.Admin)
   @HttpCode(HttpStatus.ACCEPTED)
   async preflightRun(
     @Param('id') id: string,
@@ -101,7 +103,7 @@ export class ServersController {
   }
 
   @Patch(':id')
-  @RequireRole(Role.Operator)
+  @RequireRole(Role.Admin)
   update(
     @Param('id') id: string,
     @CurrentActor() actor: Actor,
@@ -111,7 +113,7 @@ export class ServersController {
   }
 
   @Delete(':id')
-  @RequireRole(Role.Operator)
+  @RequireRole(Role.Admin)
   delete(
     @Param('id') id: string,
     @CurrentActor() actor: Actor,

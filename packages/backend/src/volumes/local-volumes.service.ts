@@ -65,7 +65,7 @@ export class LocalVolumesService {
     filters: { scope?: ListScope; serverId?: string } = {},
   ): Promise<VolumeDto[]> {
     const scope = filters.scope ?? 'mine';
-    assertListScope(actor, scope, Role.Admin);
+    assertListScope(actor, scope, Role.UserAdmin);
     const rows = await this.repository.listByKind(
       'local',
       scope === 'mine' ? { ownerId: requireUserId(actor) } : { serverId: filters.serverId },
@@ -81,14 +81,14 @@ export class LocalVolumesService {
 
   /**
    * `scope=mine`: the caller's own storage on a server they hold a grant for.
-   * `scope=all`: the server-wide view for operators.
+   * `scope=all`: the server-wide view for user admins.
    */
   async capacity(
     actor: Actor,
     serverId: string,
     scope: ListScope = 'mine',
   ): Promise<StorageCapacityDto> {
-    assertListScope(actor, scope, Role.Operator);
+    assertListScope(actor, scope, Role.UserAdmin);
     return scope === 'all'
       ? this.capacityRules.serverWideCapacity(serverId)
       : this.capacityRules.ownerCapacity(requireUserId(actor), serverId);

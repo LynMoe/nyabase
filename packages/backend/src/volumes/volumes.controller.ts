@@ -75,7 +75,7 @@ export class VolumesController {
 export class StorageCapacityController {
   constructor(private readonly service: LocalVolumesService) {}
 
-  /** `scope=mine` is the caller's grant view; `scope=all` is server-wide (operator). */
+  /** `scope=mine` is the caller's grant view; `scope=all` is server-wide (user admin). */
   @Get()
   get(
     @Param('serverId') serverId: string,

@@ -129,7 +129,7 @@ export const MAX_SSH_SESSION_PAGE_SIZE = 200;
 export const MAX_SSH_SESSION_STATS_DAYS = 365;
 
 /**
- * `GET /ssh-sessions`: your own connections by default; `scope=all` (operator)
+ * `GET /ssh-sessions`: your own connections by default; `scope=all` (user admin)
  * lists everyone's and unlocks the `userId` / `serverId` filters.
  */
 export const zSshSessionListQuery = z.object({

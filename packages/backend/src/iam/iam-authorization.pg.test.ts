@@ -36,7 +36,7 @@ describePg('PostgreSQL canonical authorization', () => {
   }
 
   async function grantManager(database: Parameters<typeof seedUser>[0]): Promise<string> {
-    return seedUser(database, undefined, UserStatus.Active, Role.Operator);
+    return seedUser(database, undefined, UserStatus.Active, Role.UserAdmin);
   }
 
   it('merges a direct grant with group grants instead of picking a winner', async () => {
@@ -58,7 +58,7 @@ describePg('PostgreSQL canonical authorization', () => {
       const actorId = await seedUser(database);
 
       await expect(database.transaction().execute((transaction) =>
-        assertActorRole(transaction, actorId, Role.Operator))).rejects.toBeInstanceOf(ForbiddenException);
+        assertActorRole(transaction, actorId, Role.UserAdmin))).rejects.toBeInstanceOf(ForbiddenException);
     });
   });
 
@@ -114,7 +114,7 @@ describePg('PostgreSQL canonical authorization', () => {
     });
   });
 
-  it('refuses grant mutations from an actor without the operator role and for unknown holders', async () => {
+  it('refuses grant mutations from an actor without the user admin role and for unknown holders', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const { grants } = services(database);
       const plain = testActor(await seedUser(database));

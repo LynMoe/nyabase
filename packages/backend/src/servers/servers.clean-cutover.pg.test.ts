@@ -36,7 +36,7 @@ describePg('server agent onboarding and removal', () => {
         { wake: vi.fn() } as never,
         { agentStatuses: vi.fn(async () => new Map()) } as never,
       );
-      const operatorId = await seedUser(database, undefined, UserStatus.Active, Role.Operator);
+      const operatorId = await seedUser(database, undefined, UserStatus.Active, Role.Admin);
       const created = await service.create(operatorId, {
         name: 'agent node',
         slug: `agent-${randomUUID().slice(0, 8)}`,
@@ -101,7 +101,7 @@ describePg('server agent onboarding and removal', () => {
         wake as never,
         { agentStatuses: vi.fn(async () => new Map()) } as never,
       );
-      const operatorId = await seedUser(database, undefined, UserStatus.Active, Role.Operator);
+      const operatorId = await seedUser(database, undefined, UserStatus.Active, Role.Admin);
       const created = await service.create(operatorId, {
         name: 'Aya 1号机',
         slug: `rename-${randomUUID().slice(0, 8)}`,
@@ -119,7 +119,7 @@ describePg('server agent onboarding and removal', () => {
 
   it('rejects stale revision and control-plane-cascades referenced servers', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
-      const actor = await seedUser(database, undefined, UserStatus.Active, Role.Operator);
+      const actor = await seedUser(database, undefined, UserStatus.Active, Role.Admin);
       const serverId = randomUUID();
       await database
         .insertInto('infra.servers')
@@ -204,7 +204,7 @@ describePg('server agent onboarding and removal', () => {
 
   it('refuses a server that still holds resources, then force-cascades it without Incus and keeps shared volumes a peer reaches', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
-      const actor = await seedUser(database, undefined, UserStatus.Active, Role.Operator);
+      const actor = await seedUser(database, undefined, UserStatus.Active, Role.Admin);
       const ownerId = randomUUID();
       const serverS = randomUUID();
       const serverT = randomUUID();
@@ -592,7 +592,7 @@ describePg('server agent onboarding and removal', () => {
 
   it('does not GC a never-mounted shared volume when deleting an unrelated server', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
-      const actor = await seedUser(database, undefined, UserStatus.Active, Role.Operator);
+      const actor = await seedUser(database, undefined, UserStatus.Active, Role.Admin);
       const ownerId = randomUUID();
       const unrelated = randomUUID();
       const peer = randomUUID();

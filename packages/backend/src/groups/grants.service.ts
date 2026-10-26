@@ -318,13 +318,13 @@ export class GrantsService {
 
   // Shared helpers -----------------------------------------------------------
 
-  /** Every grant mutation needs the operator role (re-read in the transaction) and an existing holder. */
+  /** Every grant mutation needs the user admin role (re-read in the transaction) and an existing holder. */
   private async beginMutation(
     transaction: Transaction<NyabaseDatabase>,
     actor: Actor,
     subject: GrantSubject,
   ): Promise<void> {
-    await assertActorRole(transaction, requireUserId(actor), Role.Operator);
+    await assertActorRole(transaction, requireUserId(actor), Role.UserAdmin);
     await this.requireSubject(transaction, subject);
   }
 

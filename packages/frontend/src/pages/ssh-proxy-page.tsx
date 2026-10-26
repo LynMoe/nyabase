@@ -17,7 +17,7 @@ import { queryPollInterval } from '../lib/query-lifecycle.js';
 import { queryKeys } from '../lib/query-keys.js';
 import { useSshProxyMutations } from './ssh-proxy-page/use-ssh-proxy-mutations.js';
 import { RefusalsSection } from './ssh-proxy-page/refusals-section.js';
-import { parseSshProxyTab, SshProxyTabsList } from './ssh-proxy-page/tabs.js';
+import { parseSshProxyTab, SshProxyTabsList, visibleSshProxyTab } from './ssh-proxy-page/tabs.js';
 import {
   emptyStatus,
   formatTime,
@@ -29,9 +29,9 @@ import {
 const routeApi = getRouteApi('/ssh-proxy/');
 
 export default function SshProxyPage() {
-  const { tab } = routeApi.useSearch();
   const navigate = useNavigate({ from: '/ssh-proxy/' });
-  const canViewStatus = useHasRole(ACCESS.sshProxy);
+  const canViewStatus = useHasRole(ACCESS.sshProxyOps);
+  const tab = visibleSshProxyTab(routeApi.useSearch().tab, canViewStatus);
   const canManageSettings = canViewStatus;
   const [disconnectOpen, setDisconnectOpen] = useState(false);
   const [rotateOpen, setRotateOpen] = useState(false);
@@ -99,7 +99,7 @@ export default function SshProxyPage() {
           void navigate({ search: { tab: parseSshProxyTab(value) }, replace: true });
         }}
       >
-        <SshProxyTabsList />
+        <SshProxyTabsList canOperate={canViewStatus} />
         <TabsContent value="live" className="space-y-6">
           {canViewStatus && (
             <QueryView query={statusQuery} resourceName="SSH 代理状态" loadingLabel="加载 SSH 代理状态...">
@@ -130,7 +130,7 @@ export default function SshProxyPage() {
           {tab === 'stats' ? <SshSessionStats scope="all" /> : null}
         </TabsContent>
         <TabsContent value="refusals">
-          {tab === 'refusals' ? <RefusalsSection /> : null}
+          {tab === 'refusals' && canViewStatus ? <RefusalsSection /> : null}
         </TabsContent>
       </Tabs>
 

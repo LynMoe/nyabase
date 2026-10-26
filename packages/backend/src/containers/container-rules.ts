@@ -168,9 +168,9 @@ export type ContainerAccess = 'owner' | 'admin' | 'system';
 
 /**
  * The one container authorisation rule: the owner gets the owner rules (live
- * server grant and its limits) whatever their role; `scope=all` (operator
+ * server grant and its limits) whatever their role; `scope=all` (user admin
  * role required, else 403) is the explicit override that gets the
- * administrator rules (no server-grant limits), also on the operator's own
+ * administrator rules (no server-grant limits), also on the user admin's own
  * containers; the system always passes. Anyone else's container is a 404.
  */
 export function assertCanAccess(
@@ -178,7 +178,7 @@ export function assertCanAccess(
   row: { owner_id: string },
   scope: ListScope,
 ): ContainerAccess {
-  assertListScope(actor, scope, Role.Operator);
+  assertListScope(actor, scope, Role.UserAdmin);
   if (isSystemActor(actor)) return 'system';
   if (scope === 'all') return 'admin';
   if (row.owner_id === actor.userId) return 'owner';

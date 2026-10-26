@@ -204,13 +204,13 @@ export class HttpProxyBindingsService {
     private readonly traffic: HttpProxyTrafficService,
   ) {}
 
-  /** `scope=mine`: the caller's bindings; `scope=all`: every binding (operator). */
+  /** `scope=mine`: the caller's bindings; `scope=all`: every binding (user admin). */
   async listBindings(
     actor: Actor,
     scope: ListScope,
     proxyOnline: boolean,
   ): Promise<HttpProxyBindingDto[]> {
-    assertListScope(actor, scope, Role.Operator);
+    assertListScope(actor, scope, Role.UserAdmin);
     let query = this.database
       .selectFrom('interaction.http_proxy_bindings')
       .selectAll()
@@ -365,9 +365,9 @@ export class HttpProxyBindingsService {
     return (await this.bindingDtos([saved], requesterId, false, this.database))[0]!;
   }
 
-  /** `scope=all` is the operator override, e.g. to clear another user's abusive bindings. */
+  /** `scope=all` is the user admin override, e.g. to clear another user's abusive bindings. */
   async deleteBinding(actor: Actor, id: string, scope: ListScope = 'mine'): Promise<void> {
-    assertListScope(actor, scope, Role.Operator);
+    assertListScope(actor, scope, Role.UserAdmin);
     const requesterId = requireUserId(actor);
     await runSerializable(this.transactions, async (transaction) => {
       const binding = await transaction

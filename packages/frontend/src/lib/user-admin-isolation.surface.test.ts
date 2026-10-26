@@ -96,7 +96,7 @@ describe('user panel pages stay on scope=mine', () => {
   it('container list usage reads the scoped usage API, never /admin/performance', () => {
     const hook = readSrc('hooks/use-container-live-usage.ts');
     expect(hook).toMatch(/scopedPath\('\/performance\/usage', scope\)/);
-    expect(hook).toMatch(/useHasRole\(Role\.Operator\)/);
+    expect(hook).toMatch(/useHasRole\(Role\.UserAdmin\)/);
     expect(hook).not.toMatch(/\/admin\/performance/);
     const table = readSrc('components/containers/container-table.tsx');
     expect(table).toMatch(/useContainerLiveUsage\(admin \? 'all' : 'mine'\)/);
@@ -108,7 +108,7 @@ describe('user panel pages stay on scope=mine', () => {
   it('servers page mounts the scope=all performance view', () => {
     const src = readPage('servers-page.tsx');
     expect(src).toMatch(/\/performance\/usage\?scope=all'/);
-    expect(src).toMatch(/useHasRole\(Role\.Operator\)/);
+    expect(src).toMatch(/useHasRole\(Role\.Admin\)/);
     expect(src).not.toMatch(/PerformancePanel/);
   });
 

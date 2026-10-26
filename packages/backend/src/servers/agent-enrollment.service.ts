@@ -66,7 +66,7 @@ export class AgentEnrollmentService {
 
   rotate(actorId: string, serverId: string, expectedRevision: number): Promise<ServerEnrollmentDto> {
     return this.transactions.run(async (transaction) => {
-      await assertActorRole(transaction, actorId, Role.Operator);
+      await assertActorRole(transaction, actorId, Role.Admin);
       const server = await transaction
         .selectFrom('infra.servers')
         .select(['id', 'revision'])

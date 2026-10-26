@@ -117,25 +117,12 @@ describePg('System settings PostgreSQL authority', () => {
     });
   });
 
-  it('keeps audit retention admin-only and refuses values that would wipe the log', async () => {
+  it('refuses audit retention values that would wipe the log', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
-      const operatorId = await seedActor(database, 'operator');
       const adminId = await seedActor(database, 'admin');
       const authority = makeAuthority(database, makeConfig(), databaseAudit());
       const initial = await authority.initialize();
 
-      await expect(database.transaction().execute((transaction) =>
-        authority.update(transaction, operatorId, { 'audit.retentionMaxEntries': 20_000 }, initial.revision)))
-        .rejects.toMatchObject({ response: expect.objectContaining({ code: 'ROLE_REQUIRED' }) });
-      // Session lifetimes decide how long a stolen session lives: admin only too.
-      for (const change of [
-        { 'auth.refreshTokenExpiresDays': 365 },
-        { 'auth.sessionMaxLifetimeDays': 365 },
-      ]) {
-        await expect(database.transaction().execute((transaction) =>
-          authority.update(transaction, operatorId, change, initial.revision)))
-          .rejects.toMatchObject({ response: expect.objectContaining({ code: 'ROLE_REQUIRED' }) });
-      }
       await expect(database.transaction().execute((transaction) =>
         authority.update(transaction, adminId, { 'audit.retentionMaxEntries': 1 }, initial.revision)))
         .rejects.toThrow('Invalid config value for audit.retentionMaxEntries');
@@ -145,10 +132,6 @@ describePg('System settings PostgreSQL authority', () => {
       const next = await database.transaction().execute((transaction) =>
         authority.update(transaction, adminId, { 'audit.retentionMaxEntries': 0 }, initial.revision));
       expect(next.values['audit.retentionMaxEntries']).toBe(0);
-      // Operators keep editing the rest.
-      await expect(database.transaction().execute((transaction) =>
-        authority.update(transaction, operatorId, { 'branding.title': 'Ops' }, next.revision)))
-        .resolves.toMatchObject({ revision: next.revision + 1 });
     });
   });
 
@@ -356,7 +339,7 @@ async function appendAudit(
 
 async function seedActor(
   database: Kysely<NyabaseDatabase>,
-  role: 'admin' | 'operator' = 'admin',
+  role: 'admin' | 'user_admin' = 'admin',
 ): Promise<string> {
   const id = randomUUID();
   await database

@@ -8,8 +8,8 @@ import { RolesGuard } from './guards.js';
 class PlainController {
   open() {}
 
-  @RequireRole(Role.Operator)
-  operatorOnly() {}
+  @RequireRole(Role.UserAdmin)
+  userAdminOnly() {}
 
   @RequireRole(Role.Admin)
   adminOnly() {}
@@ -18,8 +18,8 @@ class PlainController {
   publicRoute() {}
 }
 
-@RequireRole(Role.Operator)
-class OperatorController {
+@RequireRole(Role.UserAdmin)
+class UserAdminController {
   inherited() {}
 
   @RequireRole(Role.User)
@@ -39,14 +39,14 @@ describe('RolesGuard', () => {
   });
 
   it('builds the actor from the user row that authentication already loaded', () => {
-    const context = makeContext(PlainController, 'open', '/api/containers', Role.Operator);
+    const context = makeContext(PlainController, 'open', '/api/containers', Role.UserAdmin);
     const request = context.switchToHttp().getRequest();
     request.authContext = { authVersion: 7 };
 
     expect(guard.canActivate(context)).toBe(true);
     expect(request.actor).toEqual({
       userId: 'user-a',
-      role: Role.Operator,
+      role: Role.UserAdmin,
       authKind: 'jwt',
       authVersion: 7,
     });
@@ -63,23 +63,23 @@ describe('RolesGuard', () => {
   });
 
   it('enforces the minimum role, with roles strictly nested', () => {
-    const operatorRoute = (role: Role) => makeContext(PlainController, 'operatorOnly', '/api/admin/x', role);
+    const userAdminRoute = (role: Role) => makeContext(PlainController, 'userAdminOnly', '/api/admin/x', role);
     const adminRoute = (role: Role) => makeContext(PlainController, 'adminOnly', '/api/admin/x', role);
 
-    expect(() => guard.canActivate(operatorRoute(Role.User))).toThrow(ForbiddenException);
-    expect(guard.canActivate(operatorRoute(Role.Operator))).toBe(true);
-    expect(guard.canActivate(operatorRoute(Role.Admin))).toBe(true);
+    expect(() => guard.canActivate(userAdminRoute(Role.User))).toThrow(ForbiddenException);
+    expect(guard.canActivate(userAdminRoute(Role.UserAdmin))).toBe(true);
+    expect(guard.canActivate(userAdminRoute(Role.Admin))).toBe(true);
     expect(() => guard.canActivate(adminRoute(Role.User))).toThrow(ForbiddenException);
-    expect(() => guard.canActivate(adminRoute(Role.Operator))).toThrow(ForbiddenException);
+    expect(() => guard.canActivate(adminRoute(Role.UserAdmin))).toThrow(ForbiddenException);
     expect(guard.canActivate(adminRoute(Role.Admin))).toBe(true);
   });
 
   it('lets a method-level role override the class-level one', () => {
-    expect(() => guard.canActivate(makeContext(OperatorController, 'inherited', '/api/admin/x', Role.User)))
+    expect(() => guard.canActivate(makeContext(UserAdminController, 'inherited', '/api/admin/x', Role.User)))
       .toThrow(ForbiddenException);
-    expect(guard.canActivate(makeContext(OperatorController, 'inherited', '/api/admin/x', Role.Operator)))
+    expect(guard.canActivate(makeContext(UserAdminController, 'inherited', '/api/admin/x', Role.UserAdmin)))
       .toBe(true);
-    expect(guard.canActivate(makeContext(OperatorController, 'openToUsers', '/api/admin/x', Role.User)))
+    expect(guard.canActivate(makeContext(UserAdminController, 'openToUsers', '/api/admin/x', Role.User)))
       .toBe(true);
   });
 

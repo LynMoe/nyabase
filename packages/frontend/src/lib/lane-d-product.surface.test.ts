@@ -15,7 +15,7 @@ function readDir(rel: string): string {
 }
 
 describe('lane D product UI copy', () => {
-  it('gates pool register without expanding Operator caps', () => {
+  it('gates pool register to admins', () => {
     const src = [
       read('pages/server-detail-page.tsx'),
       read('components/servers/pools-card.tsx'),
@@ -345,12 +345,12 @@ describe('lane D product UI copy', () => {
     expect(coreGrant).not.toMatch(/GpuGrantMode/);
   });
 
-  it('gates /ops with the operator role', () => {
+  it('gates /ops with the user admin role', () => {
     const nav = read('lib/navigation.ts');
     expect(nav).toMatch(/to: '\/ops'/);
     expect(nav).toMatch(/操作记录/);
     expect(nav).toMatch(/access: ACCESS\.ops/);
-    expect(read('lib/route-access.ts')).toMatch(/ops: Role\.Operator/);
+    expect(read('lib/route-access.ts')).toMatch(/ops: Role\.UserAdmin/);
     const route = read('routes/ops/index.tsx');
     expect(route).toMatch(/RequireAccess rule=\{ACCESS\.ops\}/);
     const ops = read('pages/ops-page.tsx');
@@ -368,7 +368,7 @@ describe('lane D product UI copy', () => {
     expect(ops).not.toMatch(/enabled: segment != null/);
     expect(ops).not.toMatch(/选择『全部』『进行中』或『失败』加载意图/);
     expect(ops).not.toMatch(/默认不加载/);
-    expect(ops).toMatch(/Role\.Operator/);
+    expect(ops).toMatch(/Role\.UserAdmin/);
     expect(ops).not.toMatch(/WebSocket|useWebSocket/);
     const dialog = read('components/intents/intent-detail-dialog.tsx');
     expect(dialog).toMatch(/sm:max-w-3xl/);

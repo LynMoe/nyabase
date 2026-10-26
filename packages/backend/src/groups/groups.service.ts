@@ -118,7 +118,7 @@ export class GroupsService {
     input: { name: string; description?: string },
   ): Promise<GroupDto> {
     const group = await this.transactions.run(async (transaction) => {
-      await assertActorRole(transaction, requireUserId(actor), Role.Admin);
+      await assertActorRole(transaction, requireUserId(actor), Role.UserAdmin);
       const duplicate = await transaction.selectFrom('iam.groups')
         .select('id')
         .where('name', '=', input.name)
@@ -160,7 +160,7 @@ export class GroupsService {
         .executeTakeFirst();
       if (!current) throw new NotFoundException('Group not found');
       const group = toIamGroup(current);
-      await assertActorRole(transaction, requireUserId(actor), Role.Admin);
+      await assertActorRole(transaction, requireUserId(actor), Role.UserAdmin);
       if (group.revision !== expectedRevision) {
         throw new ConflictException({ code: 'REVISION_CONFLICT', current: this.toDto(group) });
       }
@@ -191,7 +191,7 @@ export class GroupsService {
   /** Members and the group's grants go with it (foreign keys cascade); coverage lapses. */
   async delete(actor: Actor, id: string): Promise<{ deleted: boolean }> {
     await this.transactions.run(async (transaction) => {
-      await assertActorRole(transaction, requireUserId(actor), Role.Admin);
+      await assertActorRole(transaction, requireUserId(actor), Role.UserAdmin);
       await this.requireGroup(transaction, id);
       await transaction.deleteFrom('iam.groups').where('id', '=', id).execute();
       await this.audit.append(
@@ -221,7 +221,7 @@ export class GroupsService {
 
   async addMember(actor: Actor, groupId: string, userId: string): Promise<{ changed: boolean }> {
     const changed = await this.transactions.run(async (transaction) => {
-      await assertActorRole(transaction, requireUserId(actor), Role.Admin);
+      await assertActorRole(transaction, requireUserId(actor), Role.UserAdmin);
       await this.requireGroup(transaction, groupId);
       const user = await transaction.selectFrom('iam.users')
         .select('status')
@@ -250,7 +250,7 @@ export class GroupsService {
 
   async removeMember(actor: Actor, groupId: string, userId: string): Promise<{ changed: boolean }> {
     const changed = await this.transactions.run(async (transaction) => {
-      await assertActorRole(transaction, requireUserId(actor), Role.Admin);
+      await assertActorRole(transaction, requireUserId(actor), Role.UserAdmin);
       await this.requireGroup(transaction, groupId);
       const deleted = await transaction.deleteFrom('iam.group_members')
         .where('group_id', '=', groupId)

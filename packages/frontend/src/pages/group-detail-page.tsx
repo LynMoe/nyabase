@@ -26,8 +26,8 @@ export default function GroupDetailPage() {
   const { id } = routeApi.useParams();
   const { tab } = routeApi.useSearch();
   const navigate = useNavigate({ from: '/groups/$id' });
-  const canManageGrants = useHasRole(Role.Operator);
-  const canManageGroups = useHasRole(Role.Admin);
+  const canManageGrants = useHasRole(Role.UserAdmin);
+  const canManageGroups = useHasRole(Role.UserAdmin);
   const groupQuery = useQuery({
     queryKey: queryKeys.groups.detail(id),
     queryFn: () => api.get<GroupDto>(`/admin/groups/${id}`),
@@ -81,7 +81,7 @@ export default function GroupDetailPage() {
               {canManageGrants ? (
                 <CanonicalGrantPanel subject={loaded} kind="groups" />
               ) : (
-                <p className="text-sm text-muted-foreground">查看与编辑授权需要运维及以上角色。</p>
+                <p className="text-sm text-muted-foreground">查看与编辑授权需要用户管理员及以上角色。</p>
               )}
             </TabsContent>
           </Tabs>

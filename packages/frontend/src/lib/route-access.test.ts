@@ -3,9 +3,9 @@ import { Role } from '@nyabase/common';
 import { ACCESS, canAccess } from './route-access.js';
 
 describe('role-based route access', () => {
-  it('nests roles: admin sees everything an operator sees', () => {
+  it('nests roles: admin sees everything a user admin sees', () => {
     for (const rule of Object.values(ACCESS)) {
-      if (canAccess(Role.Operator, rule)) expect(canAccess(Role.Admin, rule)).toBe(true);
+      if (canAccess(Role.UserAdmin, rule)) expect(canAccess(Role.Admin, rule)).toBe(true);
     }
   });
 
@@ -14,21 +14,18 @@ describe('role-based route access', () => {
     for (const rule of Object.values(ACCESS)) expect(canAccess(undefined, rule)).toBe(false);
   });
 
-  it('lets operators view and manage the SSH and HTTP proxy pages, not plain users', () => {
-    for (const rule of [ACCESS.sshProxy, ACCESS.httpProxyOps]) {
-      expect(canAccess(Role.Operator, rule)).toBe(true);
-      expect(canAccess(Role.Admin, rule)).toBe(true);
-      expect(canAccess(Role.User, rule)).toBe(false);
+  it('gives user admins people and their resources', () => {
+    for (const rule of [ACCESS.users, ACCESS.groups, ACCESS.manageContainers, ACCESS.manageVolumes,
+      ACCESS.ops, ACCESS.adminUsage, ACCESS.audit, ACCESS.sshProxy]) {
+      expect(canAccess(Role.UserAdmin, rule)).toBe(true);
     }
   });
 
-  it('keeps platform-wide resources admin-only and operations operator-level', () => {
-    expect(canAccess(Role.Operator, ACCESS.network)).toBe(false);
-    expect(canAccess(Role.Operator, ACCESS.sharedBackends)).toBe(false);
-    expect(canAccess(Role.Admin, ACCESS.network)).toBe(true);
-    for (const rule of [ACCESS.servers, ACCESS.images, ACCESS.manageContainers, ACCESS.audit,
-      ACCESS.systemSettings, ACCESS.users, ACCESS.groups, ACCESS.ops, ACCESS.adminUsage]) {
-      expect(canAccess(Role.Operator, rule)).toBe(true);
+  it('keeps infrastructure and system settings admin-only', () => {
+    for (const rule of [ACCESS.servers, ACCESS.network, ACCESS.sharedBackends, ACCESS.images,
+      ACCESS.httpProxyOps, ACCESS.sshProxyOps, ACCESS.systemSettings]) {
+      expect(canAccess(Role.UserAdmin, rule)).toBe(false);
+      expect(canAccess(Role.Admin, rule)).toBe(true);
     }
   });
 });

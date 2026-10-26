@@ -23,10 +23,10 @@ const EMPTY: ContainerLiveUsageIndex = { byContainer: new Map(), staleServers: n
 /**
  * Live per-container samples for a container list. The user list reads its
  * own rows from `/performance/usage`; the admin list reads every container
- * from `?scope=all`, which needs the operator role.
+ * from `?scope=all`, which needs the user admin role.
  */
 export function useContainerLiveUsage(scope: ListScope): ContainerLiveUsageIndex {
-  const canViewAll = useHasRole(Role.Operator);
+  const canViewAll = useHasRole(Role.UserAdmin);
   const query = useQuery({
     queryKey: queryKeys.performance.servers(scope),
     queryFn: () => api.get<PerformanceUsageResponse | PerformanceAdminUsageResponse>(scopedPath('/performance/usage', scope)),

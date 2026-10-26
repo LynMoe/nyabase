@@ -149,7 +149,7 @@ export class ImageVersionsService {
       });
     }
     await this.transactions.run(async (transaction) => {
-      await assertActorRole(transaction, actorId, Role.Operator);
+      await assertActorRole(transaction, actorId, Role.Admin);
       // Repulls and container creation lock the image row too.
       const image = await transaction
         .selectFrom('infra.images')

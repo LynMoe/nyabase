@@ -28,7 +28,7 @@ describePg('HttpProxyBindingsService ownership (PostgreSQL)', () => {
       );
       const ownerId = await seedUser(database, 'binding-owner');
       const otherId = await seedUser(database, 'binding-other');
-      const operatorId = await seedUser(database, 'binding-operator', UserStatus.Active, Role.Operator);
+      const userAdminId = await seedUser(database, 'binding-user-admin', UserStatus.Active, Role.UserAdmin);
       const serverId = await seedServer(database);
       const poolId = await seedPool(database, serverId);
       const imageId = await seedImage(database);
@@ -58,8 +58,8 @@ describePg('HttpProxyBindingsService ownership (PostgreSQL)', () => {
         expect.objectContaining({ id: binding.id, targetPort: 8000, containerId }),
       ]);
 
-      // The explicit operator override still reaches it.
-      await service.deleteBinding(testActor(operatorId, Role.Operator), binding.id, 'all');
+      // The explicit user admin override still reaches it.
+      await service.deleteBinding(testActor(userAdminId, Role.UserAdmin), binding.id, 'all');
       await expect(service.listBindings(owner, 'mine', true)).resolves.toEqual([]);
     });
   });

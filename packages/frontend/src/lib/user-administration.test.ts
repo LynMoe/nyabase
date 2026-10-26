@@ -6,31 +6,39 @@ function user(id: string, role: Role, status = UserStatus.Active): UserDto {
   return { id, username: id, displayName: id, status, createdAt: '2026-01-01T00:00:00Z', role, groups: [] };
 }
 
+const ALLOWED = { allowed: true, reason: null };
+
 describe('user administration availability', () => {
   const root = user('root', Role.Admin);
-  const ops = user('ops', Role.Operator);
+  const manager = user('manager', Role.UserAdmin);
   const member = user('member', Role.User);
 
   it('counts only active admins', () => {
-    expect(activeAdminCount([root, ops, user('gone', Role.Admin, UserStatus.Disabled)])).toBe(1);
+    expect(activeAdminCount([root, manager, user('gone', Role.Admin, UserStatus.Disabled)])).toBe(1);
   });
 
-  it('offers nothing to operators and users', () => {
-    for (const viewer of [ops, member]) {
-      const result = userActionAvailability(viewer, member, [root, ops, member]);
-      expect(result.changeRole.allowed).toBe(false);
-      expect(result.disable.allowed).toBe(false);
-      expect(result.delete.allowed).toBe(false);
-    }
+  it('offers nothing to plain users', () => {
+    const result = userActionAvailability(member, member, [root, manager, member]);
+    expect(Object.values(result).every((action) => !action.allowed)).toBe(true);
   });
 
   it('lets an admin manage other users', () => {
     const result = userActionAvailability(root, member, [root, member]);
-    expect(result).toEqual({
-      changeRole: { allowed: true, reason: null },
-      disable: { allowed: true, reason: null },
-      delete: { allowed: true, reason: null },
-    });
+    expect(result).toEqual({ edit: ALLOWED, changeRole: ALLOWED, disable: ALLOWED, delete: ALLOWED });
+  });
+
+  it('lets a user admin manage users and user admins, but not roles', () => {
+    for (const target of [member, user('peer', Role.UserAdmin)]) {
+      const result = userActionAvailability(manager, target, [root, manager, member]);
+      expect(result).toMatchObject({ edit: ALLOWED, disable: ALLOWED, delete: ALLOWED });
+      expect(result.changeRole).toMatchObject({ allowed: false, reason: '只有超级管理员可以修改角色' });
+    }
+  });
+
+  it('keeps admins out of a user admin\'s reach', () => {
+    const result = userActionAvailability(manager, root, [root, manager]);
+    expect(Object.values(result).every((action) => !action.allowed)).toBe(true);
+    expect(result.edit.reason).toBe('只有超级管理员可以管理超级管理员');
   });
 
   it('never lets an admin delete themselves', () => {
@@ -41,7 +49,7 @@ describe('user administration availability', () => {
   });
 
   it('protects the last active admin from demotion, disabling and deletion', () => {
-    const result = userActionAvailability(root, root, [root, ops]);
+    const result = userActionAvailability(root, root, [root, manager]);
     expect(result.changeRole.allowed).toBe(false);
     expect(result.disable.allowed).toBe(false);
     expect(result.delete.allowed).toBe(false);

@@ -152,7 +152,7 @@ describePg('SSH connection history (PostgreSQL)', () => {
         zSshSessionListQuery.parse({ state: 'open' }),
       )).items).toHaveLength(0);
       expect((await sessions.list(
-        testActor(bob, Role.Operator),
+        testActor(bob, Role.UserAdmin),
         zSshSessionListQuery.parse({ scope: 'all', serverId: serverB }),
       )).items).toHaveLength(1);
     });
@@ -174,9 +174,9 @@ describePg('SSH connection history (PostgreSQL)', () => {
       await expect(sessions.list(testActor(bob), zSshSessionListQuery.parse({ scope: 'all' })))
         .rejects.toBeInstanceOf(ForbiddenException);
       expect(() => zSshSessionListQuery.parse({ userId: alice })).toThrow();
-      const all = await sessions.list(testActor(bob, Role.Operator), zSshSessionListQuery.parse({ scope: 'all' }));
+      const all = await sessions.list(testActor(bob, Role.UserAdmin), zSshSessionListQuery.parse({ scope: 'all' }));
       expect(all.items).toHaveLength(2);
-      const detail = await sessions.detail(testActor(bob, Role.Operator), aliceSession.id, 'all');
+      const detail = await sessions.detail(testActor(bob, Role.UserAdmin), aliceSession.id, 'all');
       expect(detail.username).toBe('alice');
     });
   });

@@ -62,7 +62,7 @@ export class SharedVolumesService {
     filters: { scope?: ListScope; attachableOnServerId?: string } = {},
   ): Promise<SharedVolumeDto[]> {
     const scope = filters.scope ?? 'mine';
-    assertListScope(actor, scope, Role.Admin);
+    assertListScope(actor, scope, Role.UserAdmin);
     const rows = await this.repository.listByKind(
       'shared',
       scope === 'mine' ? { ownerId: requireUserId(actor) } : {},

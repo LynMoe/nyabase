@@ -37,25 +37,31 @@ Vite 通过 alias 将 `@nyabase/common` 指向 `src/index.ts`，但 `index.ts` �
   包装或 `'user' | 'admin'` 参数。内部调用方（授权到期等）用 `SYSTEM_ACTOR`：没有用户行，`userId` 为 `null`，它写的 audit `actor_id` / intent `requested_by` 等归属一律为 NULL（前端显示「系统」）；
   只有真实用户才能做的事用 `requireUserId(actor)`。
 - 角色不会隐式放宽对所属资源的访问：容器、本地卷、共享卷（以及 intents 的详情 / 重试）默认只按所有者规则（自己的 → `owner`，含授权 / 配额检查，不论角色；别人的 → 404），
-  `?scope=all`（所有读写路由都认，管理后台发送）才是显式管理员覆盖：需要该路由对应的角色（容器 operator，卷 admin，否则 403），走管理员规则（无用户授权限制，自己的资源也一样）。
+  `?scope=all`（所有读写路由都认，管理后台发送）才是显式管理员覆盖：需要该路由对应的角色（容器、卷都是 user_admin，否则 403），走管理员规则（无用户授权限制，自己的资源也一样）。
 - 列表默认 `?scope=mine`；`?scope=all` 需要对应最低角色（`assertListScope(actor, scope, minimum)`，否则 403），管理员专属过滤参数只在 `scope=all` 下可用：查询 schema 用 common 的 `onlyWithScopeAll(...)` refinement，`scope=mine` 带上即 400（卷列表的 `serverId`、`/performance/*` 的 `userId`），service 的 mine 路径也不读它们。
   DTO 形状不同的详情（servers、images、shared-backends）同样用 `?scope=all` 取管理员视图。
-- 只有运维 / 管理员能做的操作在方法（或类）上声明 `@RequireRole(Role.Operator | Role.Admin)`，方法级覆盖类级；
+  servers（列表与详情）、服务器存储池、shared-backends（列表）的 `scope=all` user_admin 也能读（发授权、看容器所在服务器），
+  但对非 admin 只返回用户形状的 DTO（不含设置）；images 与 shared-backends 详情的 `scope=all` 仅 admin。
+- 只有用户管理员 / 超级管理员能做的操作在方法（或类）上声明 `@RequireRole(Role.UserAdmin | Role.Admin)`，方法级覆盖类级；
   `http-api-roles.contract.test.ts` 固定每条路由的最低角色。`/admin/*` 路由没有声明时 `RolesGuard` 返回 403。
-  角色严格嵌套（admin ⊇ operator ⊇ user）；service 里用 `hasRole(actor, min)`（system actor 恒为 true）。
+  角色严格嵌套（admin ⊇ user_admin ⊇ user）；service 里用 `hasRole(actor, min)`（system actor 恒为 true）。
   事务内复核用 `iam/administration.ts` 的 `assertActorRole(transaction, actorId, min)`。
 - intents 只有 `GET /intents`、`GET /intents/:id`、`POST /intents/:id/retry` 一个 controller；
   某个资源的操作历史用 `?resourceType=&resourceId=`（多个 id 用逗号分隔，例如镜像的所有分配）。
 
 ## 授权模型（`iam/`、`groups/`、`access/`）
 
-- 角色（`user` / `operator` / `admin`）存在 `iam.users.role`，每个请求从库里读，改角色立即生效（不 bump `auth_version`）。
+- 角色（`user` / `user_admin` / `admin`）存在 `iam.users.role`（没有 operator：迁移 000007 把它降成 user），每个请求从库里读，改角色立即生效（不 bump `auth_version`）。
   没有系统组：组只用于批量发放资源授权。不存在系统用户。`users/iam-bootstrap.service.ts` 启动时只在**没有任何 active admin** 时补救：创建保留账号 `admin`，
   或把已存在的 active `admin` 提升为 admin（审计归属 NULL）；已有 active admin 时什么都不做（不会撤销降级），`admin` 被禁用且无其他 admin 则报 `ADMIN_BOOTSTRAP_UNAVAILABLE`。资源授权（服务器、数据盘池、共享后端）可授给用户或组，
   同一用户对同一资源可有多条；`iam.effective_*_access` 只合并**当前有效**（未过期）的授权，且只含 active 用户：
   配额逐项取最大（NULL = 不限，**0 不是"不限"**，DB CHECK 要求 `> 0`）、GPU 并集、到期取最晚。
   所有授权判断只读这些视图（`iam/effective-access.ts` 每类资源一个解析函数）；没有授权缓存、epoch 或 `authz_version`。
-- 管理规则只在 `iam/administration.ts`：用户 / 组的管理与改角色（`POST /users`、`PATCH /users/:id` 的 `role`）仅 admin，授权的增删改 operator；
+- 用户管理员（user_admin）管人和人的资源：用户、组（含成员，组里有 admin 也一样）、所有授权（含给自己）、所有容器（含控制台）与数据卷、清除；
+  能看审计、容器 / 卷的 intents、全平台用量、SSH 连接历史；HTTP 绑定的 `scope=all`（列出 / 删除他人的绑定）也是 user_admin，但只经 API（HTTP 代理页仅 admin）。
+  user_admin 改自己的记录一律走自助路径（改密码要当前密码），只有 admin 能以管理员身份改自己。服务器、镜像、共享后端、存储池、IP 池、防火墙、代理运维与系统设置（整页）仅 admin。
+- 管理规则只在 `iam/administration.ts`：用户 / 组 / 授权的增删改 user_admin；改角色（`PATCH /users/:id` 的 `role`、`POST /users` 带非 user 角色）仅 admin；
+  管理（改资料 / 重置密码 / 停用 / 删除 / 删 SSH 公钥）某个 admin 只能是 admin（`assertCanAdministerUser`，`ADMINISTRATOR_PROTECTED`）；
   "最后一个活跃管理员"保护（降级 / 禁用 / 删除 `role='admin' AND status='active'` 的最后一人被拒，`LAST_ACTIVE_ADMINISTRATOR`）。
   所有 IAM 写操作用 `lockIamPolicy`（advisory lock）串行化。
 - 撤销 = 立即到期：删除授权 / 移出组 / 删除组都不会被拒绝，IAM 写操作在 `afterCommit` 里通知 `AccessChangeNotifier`，
@@ -190,7 +196,7 @@ SSH 连接历史（`tools/ssh-proxy/src/history.rs`、`backend/src/ssh/ssh-histo
 按（代理实例 `proxyId:instanceId`，序号）幂等 upsert：计数只增、关闭一经记录就保留、真实关闭覆盖 `lost`，所以记录乱序、重复都无妨。
 记录在代理的有界发件箱里等 `historyAck`，后端提交后才确认（累计确认，所以存储失败后丢弃后续帧直到代理重发）；字节数由 status 帧每 30 s 落库。
 未认证连接只按（窗口、地址、原因）计数。代理消失 10 分钟后其未关闭连接记为 `lost`；超过 `ssh.proxyHistoryRetentionDays` 的明细折叠进
-`ssh_proxy_daily_usage` 后删除，统计同时读明细与汇总。`GET /ssh-sessions` 遵循 scope 规则（mine = 自己发起的连接，all = operator）。
+`ssh_proxy_daily_usage` 后删除，统计同时读明细与汇总。`GET /ssh-sessions` 遵循 scope 规则（mine = 自己发起的连接，all = user_admin）。
 
 代理快照（`tools/`、`http-proxy/`、`ssh/`、`proxy-snapshots/`）：租约（`validUntil`）是撤销的上限，构建失败时什么都不发，
 代理在租约到期后 fail closed；**不得**用新租约重发旧路由（会让撤销活过租约），失败只在 error 日志里写明何时 fail closed。
@@ -279,7 +285,7 @@ lab 场景 API 测试，不在 CI 里跑；CI 只跑 `pnpm e2e:check`（e2e 包 
   容器名仍只许 `[A-Za-z0-9-]`（SSH 按名路由）、≤ 16 个字符；服务器名任意可见字符与空格、≤ 32 列（中文 2 列，common 的 `displayWidth`）。
 - 镜像版本（`infra.image_versions`、`images/image-versions.service.ts`）：repull 只切镜像的当前指纹，已有容器保持创建时的
   `image_fingerprint`，ensure 绝不删除旧版副本（容器重建只从本机按指纹找镜像，catalog 只留最新版），`recordEnsured` 也不改写已有的当前指纹。
-  旧版只能由运维删除，且只在不是当前版本、没有任何容器（不分阶段）引用时；删除只写 `deleted_at`，副本由镜像 reconciler 的全量扫描
+  旧版只能由 admin 删除，且只在不是当前版本、没有任何容器（不分阶段）引用时；删除只写 `deleted_at`，副本由镜像 reconciler 的全量扫描
   按库里状态移除（`listUnneededCopies` / `removeCopyIfUnneeded`），只碰 `infra.image_copies` 里记录为本服务器拉取的副本
   （aya-1 等主机不专用，宿主机自己的同指纹镜像不能删），记录不随镜像行级联删除。没有一次性的删除 intent——它会被同资源的 settle 吞掉。
 - 进程数 / 网卡带宽 / 磁盘读写是可在线编辑的系统设置 `containers.*`，统一作用于所有容器（CephFS 卷不限 IO）。

@@ -51,8 +51,8 @@ interface GpuDevice {
 }
 
 export function useGpuNames(serverId: string | undefined, scope: ListScope): ReadonlyMap<string, string> {
-  const operator = useHasRole(Role.Operator);
-  const privileged = scope === 'all' || operator;
+  const userAdmin = useHasRole(Role.UserAdmin);
+  const privileged = scope === 'all' || userAdmin;
   const query = useQuery({
     queryKey: queryKeys.gpu.devices(serverId ?? '', privileged ? 'all' : 'mine'),
     enabled: Boolean(serverId),

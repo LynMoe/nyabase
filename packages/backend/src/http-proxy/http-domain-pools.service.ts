@@ -75,10 +75,10 @@ export class HttpDomainPoolsService {
 
   /**
    * `scope=mine`: the enabled pools bindings may use (no certificate material).
-   * `scope=all`: every pool, including disabled ones (operator).
+   * `scope=all`: every pool, including disabled ones (admin).
    */
   async listPools(actor: Actor, scope: ListScope): Promise<HttpDomainPoolDto[] | HttpDomainPoolPublicDto[]> {
-    assertListScope(actor, scope, Role.Operator);
+    assertListScope(actor, scope, Role.Admin);
     return scope === 'all' ? this.listDomainPools() : this.listEnabledDomainPools();
   }
 
@@ -123,7 +123,7 @@ export class HttpDomainPoolsService {
     }
     try {
       const row = await runSerializable(this.transactions, async (transaction) => {
-        await assertActorRole(transaction, actorId, Role.Operator);
+        await assertActorRole(transaction, actorId, Role.Admin);
         await lockHttpProxy(transaction, DOMAIN_POOL_MUTATION_LOCK);
         await this.assertDisjointFromOtherPools(transaction, wildcardDomain);
         const count = await this.domainPoolCount(transaction);
@@ -169,7 +169,7 @@ export class HttpDomainPoolsService {
     const dto = zPatchHttpDomainPoolRequest.parse(input);
     try {
       const row = await runSerializable(this.transactions, async (transaction) => {
-        await assertActorRole(transaction, actorId, Role.Operator);
+        await assertActorRole(transaction, actorId, Role.Admin);
         await lockHttpProxy(transaction, DOMAIN_POOL_MUTATION_LOCK);
         const current = await transaction
           .selectFrom('interaction.http_domain_pools')
@@ -257,7 +257,7 @@ export class HttpDomainPoolsService {
 
   async deleteDomainPool(actorId: string, id: string): Promise<void> {
     await runSerializable(this.transactions, async (transaction) => {
-      await assertActorRole(transaction, actorId, Role.Operator);
+      await assertActorRole(transaction, actorId, Role.Admin);
       await lockHttpProxy(transaction, DOMAIN_POOL_MUTATION_LOCK);
       const row = await transaction
         .selectFrom('interaction.http_domain_pools')

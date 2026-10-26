@@ -15,13 +15,12 @@ import {
   MAX_SSH_PUBLIC_KEYS_PER_USER,
   MAX_SSH_PUBLIC_KEY_TEXT_LENGTH,
   normalizeOpenSshPublicKey,
-  Role,
   UserStatus,
 } from '@nyabase/common';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
-import { assertActorRole } from '../iam/administration.js';
+import { assertCanAdministerUser } from '../iam/administration.js';
 import { requireUserId, type Actor } from '../iam/actor.js';
 import { AuditService } from '../iam/audit.service.js';
 import { AuthService, currentPasswordIncorrect } from '../iam/auth.service.js';
@@ -166,7 +165,7 @@ export class UserSshKeysService {
   async deleteSshKey(userId: string, keyId: string, actorId: string): Promise<void> {
     await this.transactions.run(async (transaction) => {
       if (actorId !== userId) {
-        await assertActorRole(transaction, actorId, Role.Admin);
+        await assertCanAdministerUser(transaction, actorId, userId);
       }
       const user = await transaction.selectFrom('iam.users')
         .select('status').where('id', '=', userId).executeTakeFirst();

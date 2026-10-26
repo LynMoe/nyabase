@@ -23,7 +23,7 @@ import { ContainerControlService } from './container-control.service.js';
 
 /**
  * One surface for owners and administrators. Authorization is decided by
- * `ContainerControlService`: the owner by default, operators on anyone's
+ * `ContainerControlService`: the owner by default, user admins on anyone's
  * container only with the explicit `?scope=all`.
  */
 @Controller('containers')

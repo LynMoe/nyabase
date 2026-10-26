@@ -10,7 +10,7 @@ export type VolumeKind = 'local' | 'shared';
 
 /**
  * The one volume authorisation rule: the owner gets the owner rules whatever
- * their role; `scope=all` (admin role required, else 403) is the explicit
+ * their role; `scope=all` (user admin role required, else 403) is the explicit
  * override that gets the administrator rules (no per-user grant limits), also
  * on the admin's own volumes. Everything else, including a row of the other
  * kind, is a 404.
@@ -43,7 +43,7 @@ function accessOf(
   scope: ListScope,
   notFound: string,
 ): VolumeAccess {
-  assertListScope(actor, scope, Role.Admin);
+  assertListScope(actor, scope, Role.UserAdmin);
   if (isSystemActor(actor) || scope === 'all') return 'admin';
   if (ownerId === actor.userId) return 'owner';
   throw new NotFoundException(notFound);

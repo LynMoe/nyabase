@@ -111,7 +111,7 @@ export class ImagesService {
     const current = await this.findById(imageId);
     const entry = await this.catalog.requireAlias(current.alias);
     const result = await this.transactions.run(async (transaction) => {
-      await assertActorRole(transaction, actorId, Role.Operator);
+      await assertActorRole(transaction, actorId, Role.Admin);
       const image = await this.lockById(imageId, transaction);
       if (!image.is_active || image.deleting) {
         throw new ConflictException({
@@ -180,7 +180,7 @@ export class ImagesService {
 
   async create(actorId: string, input: CreateImageRequest, fingerprint: string | null = null): Promise<AdminImageDto> {
     const row = await this.transactions.run(async (transaction) => {
-      await assertActorRole(transaction, actorId, Role.Operator);
+      await assertActorRole(transaction, actorId, Role.Admin);
       await lockImageCapacity(transaction);
       const count = await transaction.selectFrom('infra.images')
         .select(({ fn }) => fn.countAll<number>().as('count'))
@@ -231,7 +231,7 @@ export class ImagesService {
     scope: ListScope,
     activeOnly = false,
   ): Promise<ImageDto[] | AdminImageDto[]> {
-    assertListScope(actor, scope, Role.Operator);
+    assertListScope(actor, scope, Role.Admin);
     return scope === 'all'
       ? this.listAll(activeOnly)
       : this.listAccessible(requireUserId(actor), activeOnly);
@@ -239,7 +239,7 @@ export class ImagesService {
 
   /** `scope=mine` is the user view of an image the caller may use; `scope=all` adds assignments (`ManageImages`). */
   async get(actor: Actor, id: string, scope: ListScope): Promise<ImageDto | AdminImageDto> {
-    assertListScope(actor, scope, Role.Operator);
+    assertListScope(actor, scope, Role.Admin);
     if (scope === 'all') return this.findAdminDtoById(id);
     const image = await this.findById(id);
     if (!await this.access.isImageAccessible(requireUserId(actor), image.id) || image.deleting) {
@@ -319,7 +319,7 @@ export class ImagesService {
     input: PatchImageRequest,
   ): Promise<AdminImageDto> {
     const row = await this.transactions.run(async (transaction) => {
-      await assertActorRole(transaction, actorId, Role.Operator);
+      await assertActorRole(transaction, actorId, Role.Admin);
       const current = await this.lockById(id, transaction);
       const updated = await transaction.updateTable('infra.images')
         .set({
@@ -347,7 +347,7 @@ export class ImagesService {
 
   async delete(actorId: string, id: string) {
     const result = await this.transactions.run(async (transaction) => {
-      await assertActorRole(transaction, actorId, Role.Operator);
+      await assertActorRole(transaction, actorId, Role.Admin);
       const current = await this.lockById(id, transaction);
       const container = await transaction.selectFrom('control.containers')
         .select('id')
@@ -426,7 +426,7 @@ export class ImagesService {
     intent: Awaited<ReturnType<IntentRepository['ensurePending']>>;
   }> {
     const result = await this.transactions.run(async (transaction) => {
-      await assertActorRole(transaction, actorId, Role.Operator);
+      await assertActorRole(transaction, actorId, Role.Admin);
       const image = await this.lockById(imageId, transaction);
       if (!image.is_active || image.deleting) {
         throw new ConflictException({
@@ -540,7 +540,7 @@ export class ImagesService {
     intents: Array<Awaited<ReturnType<IntentRepository['ensurePending']>>>;
   }> {
     const result = await this.transactions.run(async (transaction) => {
-      await assertActorRole(transaction, actorId, Role.Operator);
+      await assertActorRole(transaction, actorId, Role.Admin);
       const image = await this.findById(imageId, transaction);
       const assignment = await transaction
         .selectFrom('infra.image_server_assignments')

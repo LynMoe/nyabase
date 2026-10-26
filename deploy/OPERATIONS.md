@@ -87,7 +87,7 @@ and is closed again before dependency shutdown. Its database check borrows a
 connection from the request pool, so concurrent probes share one check and the
 verdict is reused for one second. The probes are for local monitoring only;
 the TLS edge example below does not expose `/api/health/` publicly.
-Authenticated operators and administrators can query `/api/admin/metrics/runtime` for aggregate
+Administrators can query `/api/admin/metrics/runtime` for aggregate
 PostgreSQL pool pressure and bounded telemetry queue health;
 the response intentionally contains no SQL, keys, identities, or raw errors.
 
@@ -1218,7 +1218,7 @@ one address.
 6. **Fix the servers that are refused.** Their agents log `Backend rejected
    the agent credential` and the servers do not come `online`. The Backend
    lists every refused agent at the top of the servers page (服务器; `GET
-   /api/admin/agent-rejections`, operator), with the server id its credential
+   /api/admin/agent-rejections`, admin), with the server id its credential
    claims, the client address it dialed from, the reason and how often it
    tried, and logs a warning once per server id. The list is kept in memory:
    it shows the agents that dialed in since the Backend started (a refused
@@ -1438,6 +1438,12 @@ and remove older ones by tag (`docker image rm nyabase-backend:<tag>`). Do not
 run `docker image prune -a` on this host: it deletes every image no container
 uses, including the previous release.
 
+Migration `000007_user-admin-role` removes the `operator` role: every operator
+becomes a plain `user` (their server, image and proxy duties are admin-only now).
+Before upgrading, list them (`SELECT username FROM iam.users WHERE role =
+'operator'`) and, after the upgrade, make the ones who administer people
+`user_admin` (用户管理员) or `admin` on the users page.
+
 A database created by a pre-launch build is not upgradable to the launch
 build: before launch the single baseline migration was edited in place, so its
 checksum no longer matches (`Applied migration 000001_initial no longer
@@ -1601,7 +1607,7 @@ from the product SLO and measured baseline, not from this example deployment.
   address or IPv6 /48 (`iam/login-throttling.ts`). A distributed set of source
   addresses can therefore still make many guesses per second against a known
   username, and can saturate the gate so that legitimate logins get `429`.
-  Give every admin and operator account a long random password (a password
+  Give every admin and user-admin account a long random password (a password
   manager's generated secret, not a memorable one).
 - SSH public keys are globally unique: adding a key that any account already
   holds fails with `409 SSH_KEY_IN_USE` without revealing the owner.
@@ -1638,12 +1644,19 @@ from the product SLO and measured baseline, not from this example deployment.
   mechanism used by the target environment (see **Rotating secrets**); do not
   commit either file. The exception is `ssh.keyEncryptionSecret`: it encrypts
   data at rest and has no in-place rotation (see the backup contract).
-- Audit retention (`audit.retentionDays`, `audit.retentionMaxEntries`) is
-  admin-only in the system settings page and cannot be set below 30 days or
-  10,000 entries (0 disables that limit), so an operator cannot purge the trail.
+- Roles are `user`, `user_admin` (用户管理员) and `admin` (超级管理员), strictly
+  nested. A user admin administers users (except admins; no role changes,
+  creates plain users only), groups, every grant, every container (console
+  included) and volume, and the 14-day purge; it sees the audit log, all
+  intents except server and image ones, platform-wide usage and SSH connection
+  history. Servers, images, shared backends, storage pools, IP pools, the
+  firewall, proxy operations and system settings are admin-only.
+- Audit retention (`audit.retentionDays`, `audit.retentionMaxEntries`) is set
+  in the admin-only system settings page and cannot be set below 30 days or
+  10,000 entries (0 disables that limit), so the trail cannot be purged.
 - Each user holds at most 32 HTTP bindings and 64 active-or-draining hostnames.
-  Operators can delete any user's binding from the HTTP proxy page
-  (`DELETE /api/http-proxy/bindings/:id?scope=all`).
+  Admins can delete any user's binding from the HTTP proxy page; user admins
+  can through the API (`DELETE /api/http-proxy/bindings/:id?scope=all`).
 - Keep PostgreSQL TLS policy out of `DATABASE_URL`: URL-level `ssl`,
   `sslmode`, certificate and key parameters are rejected because
   `node-postgres` would otherwise let them override the fail-closed pool

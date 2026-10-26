@@ -3,12 +3,12 @@ import {
   type EffectiveAccessDto,
   GRANT_EXPIRY_GRACE_DAYS,
   type GrantExpiryPhase,
-  type ServerDto,
   type ServerGrantDto,
   type SharedBackendDto,
   type SharedBackendGrantDto,
   type StoragePoolDto,
   type StoragePoolGrantDto,
+  type UserServerDto,
 } from '@nyabase/common';
 import { api } from '../../lib/api.js';
 import { graceServerAccess } from '../../lib/effective-access.js';
@@ -51,11 +51,11 @@ export function useLapsedServers(subject: GrantSubject) {
   return graceServerAccess(data?.servers);
 }
 
-/** Every server an administrator could grant. */
+/** Every server an administrator could grant (user admins get the user DTO). */
 export function useGrantServers() {
   return useQuery({
     queryKey: queryKeys.grants.targets.servers,
-    queryFn: () => api.get<ServerDto[]>('/servers?scope=all'),
+    queryFn: () => api.get<UserServerDto[]>('/servers?scope=all'),
   });
 }
 
@@ -128,17 +128,17 @@ export function isoOrNull(value: string): string | null {
   return Number.isNaN(date.getTime()) ? null : date.toISOString();
 }
 
-export function serverName(id: string, servers: ServerDto[]): string {
+export function serverName(id: string, servers: UserServerDto[]): string {
   return servers.find((server) => server.id === id)?.name ?? truncateId(id);
 }
 
-export function poolFullName(id: string, pools: StoragePoolDto[], servers: ServerDto[]): string | undefined {
+export function poolFullName(id: string, pools: StoragePoolDto[], servers: UserServerDto[]): string | undefined {
   const pool = pools.find((item) => item.id === id);
   if (!pool) return undefined;
   return `${pool.displayName ?? pool.incusName} · ${serverName(pool.serverId, servers)}`;
 }
 
-export function poolName(id: string, pools: StoragePoolDto[], servers: ServerDto[]): string {
+export function poolName(id: string, pools: StoragePoolDto[], servers: UserServerDto[]): string {
   return poolFullName(id, pools, servers) ?? truncateId(id);
 }
 

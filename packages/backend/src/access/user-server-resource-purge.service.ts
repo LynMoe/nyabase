@@ -77,7 +77,7 @@ export class UserServerResourcePurgeService {
   ): Promise<PurgeUserServerResourcesResult> {
     return this.transactions.run(
       async (transaction) => {
-        if (!isSystemActor(actor)) await assertActorRole(transaction, requireUserId(actor), Role.Admin);
+        if (!isSystemActor(actor)) await assertActorRole(transaction, requireUserId(actor), Role.UserAdmin);
         return this.purgeServerInTransaction(transaction, actor, userId, serverId);
       },
       { isolationLevel: 'read committed', maxAttempts: 5 },

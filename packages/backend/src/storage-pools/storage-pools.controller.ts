@@ -17,7 +17,7 @@ import { requireUserId } from '../iam/actor.js';
 
 /**
  * Storage pools of a server. Listing is `scope=mine` (pools the caller may
- * use) or `scope=all` (operator); discovery and
+ * use) or `scope=all` (user admin and up); discovery and
  * registration changes are administrator-only.
  */
 @Controller('servers/:serverId/storage-pools')
@@ -34,7 +34,7 @@ export class StoragePoolsController {
   }
 
   @Post('discover')
-  @RequireRole(Role.Operator)
+  @RequireRole(Role.Admin)
   @HttpCode(HttpStatus.OK)
   discover(@Param('serverId') serverId: string, @CurrentActor() actor: Actor) {
     return this.service.discover(requireUserId(actor), serverId);

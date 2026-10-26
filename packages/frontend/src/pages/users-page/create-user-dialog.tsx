@@ -12,9 +12,12 @@ import { ROLE_OPTIONS } from '../../lib/display-labels.js';
 import { queryKeys } from '../../lib/query-keys.js';
 import { toast } from '../../hooks/use-toast.js';
 import { copyOneTimeSecret } from '../../lib/one-time-secret.js';
+import { useHasRole } from '../../lib/use-role.js';
 
 export function CreateUserDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (open: boolean) => void }) {
   const queryClient = useQueryClient();
+  // Only an admin hands out a role above user; user admins create plain users.
+  const canChooseRole = useHasRole(Role.Admin);
   const [form, setForm] = useState({ username: '', displayName: '', password: '', role: Role.User as Role });
   const [error, setError] = useState<string | null>(null);
   const [createdCreds, setCreatedCreds] = useState<{ username: string; password: string } | null>(null);
@@ -105,13 +108,15 @@ export function CreateUserDialog({ open, onOpenChange }: { open: boolean; onOpen
                   </FormField>
                 );
               })}
-              <SelectField
-                id="new-user-role"
-                label="角色"
-                value={form.role}
-                onChange={(value) => setForm((current) => ({ ...current, role: value as Role }))}
-                options={ROLE_OPTIONS}
-              />
+              {canChooseRole ? (
+                <SelectField
+                  id="new-user-role"
+                  label="角色"
+                  value={form.role}
+                  onChange={(value) => setForm((current) => ({ ...current, role: value as Role }))}
+                  options={ROLE_OPTIONS}
+                />
+              ) : null}
               {error && <p className="text-sm text-destructive">{error}</p>}
             </div>
             <DialogFooter>

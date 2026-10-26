@@ -292,7 +292,7 @@ describe('UserServerResourcePurgeService grant expiry actions', () => {
     await adminFixture.service.purge(testActor('admin-1', Role.Admin), 'user-1', 'server-1');
 
     // The administrator's role is re-read first, in a read-committed transaction.
-    expect(assertActorRole).toHaveBeenCalledWith({}, 'admin-1', Role.Admin);
+    expect(assertActorRole).toHaveBeenCalledWith({}, 'admin-1', Role.UserAdmin);
     expect(adminFixture.transactions.run).toHaveBeenCalledWith(
       expect.any(Function),
       expect.objectContaining({ isolationLevel: 'read committed' }),

@@ -64,16 +64,29 @@ describePg('UsersService.deleteUserPermanently', () => {
     });
   });
 
-  it('is admin-only, re-checked in the transaction', async () => {
+  it('needs the user admin role, re-checked in the transaction', async () => {
     await withPostgresTestDatabase(async (fixture) => {
-      const context = await usersPgFixture(fixture, { actorRole: Role.Operator });
+      const context = await usersPgFixture(fixture, { actorRole: Role.User });
 
       await expect(context.users.deleteUserPermanently(
-        testActor(context.actorId, Role.Operator),
+        testActor(context.actorId, Role.UserAdmin),
         context.userId,
       )).rejects.toMatchObject({ response: { code: 'ROLE_REQUIRED' } });
       expect((await fixture.database.selectFrom('iam.users').select('status')
         .where('id', '=', context.userId).executeTakeFirstOrThrow()).status).toBe(UserStatus.Active);
+    });
+  });
+
+  it('lets a user admin delete users but not admins', async () => {
+    await withPostgresTestDatabase(async (fixture) => {
+      const context = await usersPgFixture(fixture, { actorRole: Role.UserAdmin });
+      const actor = testActor(context.actorId, Role.UserAdmin);
+      const admin = await seedUser(fixture.database, undefined, UserStatus.Active, Role.Admin);
+
+      await expect(context.users.deleteUserPermanently(actor, admin))
+        .rejects.toMatchObject({ response: { code: 'ADMINISTRATOR_PROTECTED' } });
+      await expect(context.users.deleteUserPermanently(actor, context.userId))
+        .resolves.toEqual({ deleted: true });
     });
   });
 

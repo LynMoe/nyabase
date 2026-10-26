@@ -101,7 +101,7 @@ export class ContainerControlService {
     filters: { scope?: ListScope; serverId?: string } = {},
   ): Promise<ContainerDto[]> {
     const scope = filters.scope ?? 'mine';
-    assertListScope(actor, scope, Role.Operator);
+    assertListScope(actor, scope, Role.UserAdmin);
     const rows = await this.repository.list({
       ownerId: scope === 'mine' ? requireUserId(actor) : undefined,
       serverId: filters.serverId,
@@ -588,12 +588,12 @@ export class ContainerControlService {
     );
   }
 
-  /** Re-checks the operator role against the database inside the transaction. */
+  /** Re-checks the user admin role against the database inside the transaction. */
   private async assertAdminInTransaction(
     transaction: Transaction<NyabaseDatabase>,
     actor: Actor,
   ): Promise<void> {
-    await assertActorRole(transaction, requireUserId(actor), Role.Operator);
+    await assertActorRole(transaction, requireUserId(actor), Role.UserAdmin);
   }
 
   /** The owner must hold current coverage of the container's server. */

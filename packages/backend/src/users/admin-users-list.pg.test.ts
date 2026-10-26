@@ -18,7 +18,7 @@ describePg('Admin user bulk projection', () => {
         revision: 1,
       }).execute();
       const rows = [
-        userRow(randomUUID(), 1001, 'listed-active', UserStatus.Active, Role.Operator),
+        userRow(randomUUID(), 1001, 'listed-active', UserStatus.Active, Role.UserAdmin),
         userRow(randomUUID(), 1002, 'listed-disabled', UserStatus.Disabled),
         userRow(randomUUID(), 1003, 'listed-deleting', UserStatus.Deleting),
         userRow(randomUUID(), 1004, 'listed-deleted', UserStatus.Deleted),
@@ -49,7 +49,7 @@ describePg('Admin user bulk projection', () => {
       ]);
       expect(listed.some((user) => user.status === UserStatus.Deleted)).toBe(false);
       const active = listed.find((user) => user.username === 'listed-active');
-      expect(active?.role).toBe(Role.Operator);
+      expect(active?.role).toBe(Role.UserAdmin);
       expect(active?.groups).toEqual([{ id: groupId, name: 'Projection group' }]);
       expect(listed.find((user) => user.username === 'listed-disabled')?.role).toBe(Role.User);
     });

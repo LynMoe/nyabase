@@ -390,12 +390,12 @@ describe('cookie-backed auth session', () => {
 
   it('revalidates an in-memory session with /me instead of rotating the cookie', async () => {
     signIn();
-    const promoted: UserDto = { ...alice, role: Role.Operator };
+    const promoted: UserDto = { ...alice, role: Role.UserAdmin };
     const fetchMock = vi.fn().mockResolvedValue(json(promoted));
     vi.stubGlobal('fetch', fetchMock);
     await app.bootstrapAuthSession();
     expect(fetchMock.mock.calls.map(([url]) => url)).toEqual(['/api/auth/me']);
-    expect(app.useAuthStore.getState().user?.role).toBe(Role.Operator);
+    expect(app.useAuthStore.getState().user?.role).toBe(Role.UserAdmin);
   });
 
   it('never replays an old-principal request after a new login changes the auth epoch', async () => {

@@ -17,7 +17,7 @@ import { HttpDomainPoolsService } from './http-domain-pools.service.js';
 import { HttpProxyBindingsService } from './http-proxy-bindings.service.js';
 import { requireUserId } from '../iam/actor.js';
 
-/** HTTP proxy bindings: owners manage their own; `scope=all` lists everyone's (operator). */
+/** HTTP proxy bindings: owners manage their own; `scope=all` lists everyone's (user admin). */
 @Controller('http-proxy/bindings')
 export class HttpProxyController {
   constructor(
@@ -52,7 +52,7 @@ export class HttpProxyController {
   }
 }
 
-/** Domain pools: enabled ones for everyone (`scope=mine`); management is operator-only. */
+/** Domain pools: enabled ones for everyone (`scope=mine`); management is admin-only. */
 @Controller('http-proxy/domain-pools')
 export class HttpProxyDomainPoolsController {
   constructor(
@@ -66,7 +66,7 @@ export class HttpProxyDomainPoolsController {
   }
 
   @Post()
-  @RequireRole(Role.Operator)
+  @RequireRole(Role.Admin)
   async create(@CurrentActor() actor: Actor, @Body() body: unknown) {
     const result = await this.service.createDomainPool(requireUserId(actor), body);
     this.gateway.scheduleBroadcast('domain_pool_created');
@@ -74,7 +74,7 @@ export class HttpProxyDomainPoolsController {
   }
 
   @Patch(':id')
-  @RequireRole(Role.Operator)
+  @RequireRole(Role.Admin)
   async update(
     @CurrentActor() actor: Actor,
     @Param('id') id: string,
@@ -87,7 +87,7 @@ export class HttpProxyDomainPoolsController {
 
   @Delete(':id')
   @HttpCode(204)
-  @RequireRole(Role.Operator)
+  @RequireRole(Role.Admin)
   async remove(@CurrentActor() actor: Actor, @Param('id') id: string) {
     await this.service.deleteDomainPool(requireUserId(actor), id);
     this.gateway.scheduleBroadcast('domain_pool_deleted');
@@ -99,7 +99,7 @@ export class HttpProxyStatusController {
   constructor(private gateway: HttpProxyGateway) {}
 
   @Get()
-  @RequireRole(Role.Operator)
+  @RequireRole(Role.Admin)
   status() {
     return this.gateway.getStatus();
   }

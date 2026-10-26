@@ -48,19 +48,19 @@ export class ImagesController {
   }
 
   @Get('catalog')
-  @RequireRole(Role.Operator)
+  @RequireRole(Role.Admin)
   catalog() {
     return this.images.listCatalog();
   }
 
   @Post()
-  @RequireRole(Role.Operator)
+  @RequireRole(Role.Admin)
   create(@Body() body: unknown, @CurrentActor() actor: Actor) {
     return this.images.addFromCatalog(requireUserId(actor), zAddCatalogImageRequest.parse(body));
   }
 
   @Post(':id/repull')
-  @RequireRole(Role.Operator)
+  @RequireRole(Role.Admin)
   @HttpCode(HttpStatus.ACCEPTED)
   async repull(@Param('id') id: string, @CurrentActor() actor: Actor) {
     const result = await this.images.repull(requireUserId(actor), id);
@@ -72,14 +72,14 @@ export class ImagesController {
 
   /** Every version of the image and the containers created from each. */
   @Get(':id/versions')
-  @RequireRole(Role.Operator)
+  @RequireRole(Role.Admin)
   listVersions(@Param('id') id: string) {
     return this.versions.list(id);
   }
 
   /** Delete a version no container uses; each server's next scan removes its copy. */
   @Delete(':id/versions/:fingerprint')
-  @RequireRole(Role.Operator)
+  @RequireRole(Role.Admin)
   @HttpCode(HttpStatus.ACCEPTED)
   async deleteVersion(
     @Param('id') id: string,
@@ -100,13 +100,13 @@ export class ImagesController {
   }
 
   @Get(':id/status')
-  @RequireRole(Role.Operator)
+  @RequireRole(Role.Admin)
   async status(@Param('id') id: string) {
     return this.images.getServerStatuses(await this.images.findById(id));
   }
 
   @Get(':id/assignments')
-  @RequireRole(Role.Operator)
+  @RequireRole(Role.Admin)
   assignments(@Param('id') id: string) {
     return this.images.assignments(id).then((rows) =>
       rows.map((row) => ({
@@ -130,13 +130,13 @@ export class ImagesController {
   }
 
   @Get(':id/assignments/status')
-  @RequireRole(Role.Operator)
+  @RequireRole(Role.Admin)
   async statusAssignments(@Param('id') id: string) {
     return this.images.getServerStatuses(await this.images.findById(id));
   }
 
   @Put(':id/assignments/:serverId')
-  @RequireRole(Role.Operator)
+  @RequireRole(Role.Admin)
   @HttpCode(HttpStatus.ACCEPTED)
   async ensureAssignment(
     @Param('id') id: string,
@@ -158,7 +158,7 @@ export class ImagesController {
   }
 
   @Delete(':id/assignments/:serverId')
-  @RequireRole(Role.Operator)
+  @RequireRole(Role.Admin)
   @HttpCode(HttpStatus.ACCEPTED)
   async deleteAssignment(
     @Param('id') id: string,
@@ -188,7 +188,7 @@ export class ImagesController {
   }
 
   @Patch(':id')
-  @RequireRole(Role.Operator)
+  @RequireRole(Role.Admin)
   update(
     @Param('id') id: string,
     @Body() body: unknown,
@@ -198,7 +198,7 @@ export class ImagesController {
   }
 
   @Delete(':id')
-  @RequireRole(Role.Operator)
+  @RequireRole(Role.Admin)
   delete(@Param('id') id: string, @CurrentActor() actor: Actor) {
     return this.images.delete(requireUserId(actor), id);
   }

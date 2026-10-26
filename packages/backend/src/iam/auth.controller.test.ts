@@ -15,7 +15,7 @@ const user = {
   username: 'alice',
   displayName: 'Alice',
   status: 'active',
-  role: 'operator',
+  role: 'user_admin',
   createdAt: new Date('2026-01-01T00:00:00Z'),
 };
 
@@ -48,7 +48,7 @@ describe('AuthController refresh cookie transport', () => {
 
     expect(body).not.toHaveProperty('refreshToken');
     expect(body.accessToken).toBe('access-1');
-    expect(body.user).toMatchObject({ role: 'operator' });
+    expect(body.user).toMatchObject({ role: 'user_admin' });
     expect(body.user).not.toHaveProperty('capabilities');
     expect(response.cookie).toHaveBeenCalledWith(SECURE_REFRESH_COOKIE_NAME, 'r1', {
       httpOnly: true,

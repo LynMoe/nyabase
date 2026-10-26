@@ -59,16 +59,16 @@ describePg('IamAuthRepository role loading', () => {
   it('carries the current role on every authentication path', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const repository = new IamAuthRepository(database, new PgTransactionManager(database));
-      const userId = await seedUser(database, 'role-user', UserStatus.Active, Role.Operator);
+      const userId = await seedUser(database, 'role-user', UserStatus.Active, Role.UserAdmin);
 
       // JWT path: the guard resolves the user by id on every request.
-      await expect(repository.findUserById(userId)).resolves.toMatchObject({ role: Role.Operator });
-      await expect(repository.findUserByUsername('role-user')).resolves.toMatchObject({ role: Role.Operator });
+      await expect(repository.findUserById(userId)).resolves.toMatchObject({ role: Role.UserAdmin });
+      await expect(repository.findUserByUsername('role-user')).resolves.toMatchObject({ role: Role.UserAdmin });
 
       // Refresh rotation returns the user row too.
       await repository.issueRefreshSession(userId, { id: randomUUID(), hash: hex('1'), expiresInMs: 60_000 }, 5);
       const rotated = await repository.rotateRefreshSession(rotation(hex('1'), hex('3'), hex('2')));
-      expect(rotated).toMatchObject({ kind: 'rotated', user: { role: Role.Operator } });
+      expect(rotated).toMatchObject({ kind: 'rotated', user: { role: Role.UserAdmin } });
 
       // A role change is visible on the very next read: no auth_version bump needed.
       await database.updateTable('iam.users').set({ role: Role.Admin }).where('id', '=', userId).execute();

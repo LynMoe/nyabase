@@ -30,7 +30,7 @@ import { useCatalogUsers, useGroupMembers, useInvalidateGroup } from '../../lib/
 import { useHasRole } from '../../lib/use-role.js';
 
 export function GroupMembersTab({ groupId, memberFallback }: { groupId: string; memberFallback: GroupMemberDto[] }) {
-  const canManage = useHasRole(Role.Admin);
+  const canManage = useHasRole(Role.UserAdmin);
   const [addOpen, setAddOpen] = useState(false);
   const [removeTarget, setRemoveTarget] = useState<{ userId: string; label: string } | null>(null);
   const members = useGroupMembers(groupId, canManage).data ?? memberFallback;

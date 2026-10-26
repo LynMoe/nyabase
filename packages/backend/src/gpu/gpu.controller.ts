@@ -12,19 +12,19 @@ import type { Actor } from '../iam/actor.js';
 import { GpuService } from './gpu.service.js';
 import { requireUserId } from '../iam/actor.js';
 
-/** GPU of a server: enablement is operator-only; device listing is `scope`d. */
+/** GPU of a server: enablement is admin-only; device listing is `scope`d. */
 @Controller('servers/:serverId')
 export class GpuController {
   constructor(private readonly gpu: GpuService) {}
 
   @Get('gpu')
-  @RequireRole(Role.Operator)
+  @RequireRole(Role.Admin)
   get(@Param('serverId') serverId: string) {
     return this.gpu.getServerGpu(serverId);
   }
 
   @Patch('gpu')
-  @RequireRole(Role.Operator)
+  @RequireRole(Role.Admin)
   patch(
     @Param('serverId') serverId: string,
     @CurrentActor() actor: Actor,

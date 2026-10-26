@@ -11,7 +11,7 @@ const describePg = process.env.NYABASE_TEST_DATABASE_URL ? describe : describe.s
 describePg('clean Incus image assignment contract', () => {
   it('allows admins to fill min_root_size_bytes when automatic discovery is unavailable', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
-      const actor = await seedUser(database, undefined, UserStatus.Active, Role.Operator);
+      const actor = await seedUser(database, undefined, UserStatus.Active, Role.Admin);
       const imageId = randomUUID();
       await database.insertInto('infra.images').values({
         id: imageId,
@@ -59,7 +59,7 @@ describePg('clean Incus image assignment contract', () => {
 
   it('keeps assignment PUT idempotent and schedules fingerprint-safe cleanup', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
-      const actor = await seedUser(database, undefined, UserStatus.Active, Role.Operator);
+      const actor = await seedUser(database, undefined, UserStatus.Active, Role.Admin);
       const imageId = randomUUID();
       const serverId = randomUUID();
       await database.insertInto('infra.images').values({
@@ -174,7 +174,7 @@ describePg('clean Incus image assignment contract', () => {
 
   it('serializes image deletion with assignment creation on the image row', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
-      const actor = await seedUser(database, undefined, UserStatus.Active, Role.Operator);
+      const actor = await seedUser(database, undefined, UserStatus.Active, Role.Admin);
       const imageId = randomUUID();
       const serverId = randomUUID();
       await database.insertInto('infra.images').values({

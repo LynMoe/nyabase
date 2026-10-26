@@ -158,7 +158,7 @@ function GroupIdentityCard({ group }: { group: GroupDto }) {
 
 /** Identity of the group; editable by admins. */
 export function GroupOverviewTab({ group }: { group: GroupDto }) {
-  const canManage = useHasRole(Role.Admin);
+  const canManage = useHasRole(Role.UserAdmin);
   const members = useGroupMembers(group.id, canManage).data;
   const viewed = {
     ...group,

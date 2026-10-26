@@ -27,6 +27,7 @@ import {
   intentStatusLabel,
 } from '../../lib/status-labels.js';
 import { useHasRole } from '../../lib/use-role.js';
+import { ACCESS } from '../../lib/route-access.js';
 import { ResourceRef } from '../refs/resource-ref.js';
 import { StatusBadge } from '../layout/status-badge.js';
 import { Button } from '../ui/button.js';
@@ -48,9 +49,9 @@ function intentImageId(intent: IntentDto): string {
 }
 
 function VolumeIntentRef({ id }: { id: string }) {
-  const isAdmin = useHasRole(Role.Admin);
-  const hasLocal = isAdmin;
-  const hasShared = isAdmin;
+  const canManageVolumes = useHasRole(Role.UserAdmin);
+  const hasLocal = canManageVolumes;
+  const hasShared = canManageVolumes;
   const local = useQuery({
     queryKey: queryKeys.volumes.admin,
     queryFn: () => api.get<VolumeDto[]>('/volumes?scope=all'),
@@ -126,7 +127,7 @@ export function IntentDetailDialog({
   onOpenChange: (open: boolean) => void;
   onRetried: () => void;
 }) {
-  const canManageServers = useHasRole(Role.Operator);
+  const canManageServers = useHasRole(ACCESS.servers);
   const detailQuery = useQuery({
     queryKey: queryKeys.adminIntent(intent?.id ?? ''),
     queryFn: () => {

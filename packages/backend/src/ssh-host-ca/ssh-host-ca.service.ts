@@ -30,7 +30,7 @@ export class SshHostCaService {
   /**
    * A host certificate for `hostPublicKey` from the owner's CA, or null when
    * the stored CA key cannot be opened (ssh.keyEncryptionSecret changed; an
-   * operator resets the authorities to recover).
+   * admin resets the authorities to recover).
    */
   async certify(input: {
     ownerId: string;

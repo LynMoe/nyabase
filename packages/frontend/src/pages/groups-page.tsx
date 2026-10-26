@@ -21,7 +21,7 @@ import { useHasRole } from '../lib/use-role.js';
 import { isPermanentQueryError } from '../lib/query-lifecycle.js';
 
 export default function GroupsPage() {
-  const canManageGroups = useHasRole(Role.Admin);
+  const canManageGroups = useHasRole(Role.UserAdmin);
   const queryClient = useQueryClient();
   const [createOpen, setCreateOpen] = useState(false);
   const [deleteGroup, setDeleteGroup] = useState<GroupDto | null>(null);

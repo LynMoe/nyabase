@@ -10,9 +10,7 @@ import {
   AuditAction,
   controlPlaneConfigDefinitions,
   getControlPlaneConfigDefinition,
-  Role,
 } from '@nyabase/common';
-import { assertActorRole } from '../iam/administration.js';
 import { AuditService } from '../iam/audit.service.js';
 import {
   NyabaseConfigService,
@@ -158,9 +156,6 @@ export class SystemSettingsAuthorityService implements OnApplicationBootstrap {
         || definition.restartRequired
       ) {
         throw new BadRequestException(`Config key is not editable: ${key}`);
-      }
-      if (definition.adminOnly) {
-        await assertActorRole(transaction, actorId, Role.Admin);
       }
       if (this.config.field(definition.key).envValuePresent) {
         throw new BadRequestException(

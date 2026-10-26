@@ -69,7 +69,7 @@ export class GpuService {
     await this.requireServer(serverId);
     if (input.enabled) {
       await this.transactions.run(async (transaction) => {
-        await assertActorRole(transaction, actorId, Role.Operator);
+        await assertActorRole(transaction, actorId, Role.Admin);
         await transaction
           .updateTable('infra.servers')
           .set({ gpu_enabled: true, gpu_enabled_by: actorId })
@@ -93,7 +93,7 @@ export class GpuService {
     } else {
       try {
         await this.transactions.run(async (transaction) => {
-          await assertActorRole(transaction, actorId, Role.Operator);
+          await assertActorRole(transaction, actorId, Role.Admin);
           await assertGpuCanDisable({
             count: async () => await this.claims.countForServer(serverId, transaction)
               + await this.claims.countOccupyingContainers(serverId, transaction),
@@ -122,7 +122,7 @@ export class GpuService {
 
   /** `scope=mine`: devices the caller's grant allows; `scope=all`: the full inventory (`ManageServers`/`ManageGrants`). */
   async listDevices(actor: Actor, serverId: string, scope: ListScope): Promise<GpuDevicesResponseDto> {
-    assertListScope(actor, scope, Role.Operator);
+    assertListScope(actor, scope, Role.UserAdmin);
     return scope === 'all'
       ? this.listAllDevices(serverId)
       : this.listGrantedDevices(requireUserId(actor), serverId);

@@ -40,7 +40,7 @@ export default function ServerDetailPage() {
   const [deleteOpen, setDeleteOpen] = useState(false);
   /** Set once the server refused because it still holds resources or is a shared backend's last executor. */
   const [heldResources, setHeldResources] = useState<HeldResources | null>(null);
-  const canManageServers = useHasRole(Role.Operator);
+  const canManageServers = useHasRole(Role.Admin);
 
   const serverQuery = useQuery({
     queryKey: queryKeys.servers.detail(id),

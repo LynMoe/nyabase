@@ -23,7 +23,7 @@ import { SharedBackendsService } from './shared-backends.service.js';
 
 /**
  * Shared backends: `scope=mine` (default) lists the granted ones;
- * `scope=all` lists every backend for operators (executor details for admins);
+ * `scope=all` lists every backend for user admins (executor details for admins);
  * `scope=all` detail, executors and every mutation are admin-only.
  */
 @Controller('shared-backends')

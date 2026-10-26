@@ -28,7 +28,7 @@ import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
 import { AccessResolverService } from '../iam/access-resolver.service.js';
 import { AuditService } from '../iam/audit.service.js';
-import { assertListScope, type Actor, requireUserId } from '../iam/actor.js';
+import { assertListScope, hasRole, type Actor, requireUserId } from '../iam/actor.js';
 import { numberValue, isoDate, poolLabel } from '../platform/domain-utils.js';
 import { lockServerOnboarding } from '../platform/persistence-pg/advisory-locks.js';
 import { releaseSettledShrinkReservations } from '../platform/persistence-pg/committed-bytes.js';
@@ -54,7 +54,7 @@ export class ServersService {
 
   async create(actorId: string, input: CreateServerRequest): Promise<CreatedServerDto> {
     const { row, enrollment } = await this.transactions.run(async (transaction) => {
-      await assertActorRole(transaction, actorId, Role.Operator);
+      await assertActorRole(transaction, actorId, Role.Admin);
       await lockServerOnboarding(transaction);
       const count = await transaction
         .selectFrom('infra.servers')
@@ -112,18 +112,24 @@ export class ServersService {
 
   /**
    * `scope=mine`: the servers the caller holds a grant for, as user DTOs.
-   * `scope=all`: every server, as full DTOs (`ManageServers` or `ManageGrants`).
+   * `scope=all`: every server; full DTOs for admins, user DTOs for user admins
+   * (enough to grant them, none of the server's settings).
    */
   async list(actor: Actor, scope: ListScope): Promise<ServerDto[] | UserServerDto[]> {
-    assertListScope(actor, scope, Role.Operator);
-    if (scope === 'all') return this.findAllDtos();
+    assertListScope(actor, scope, Role.UserAdmin);
+    if (scope === 'all') {
+      return hasRole(actor, Role.Admin) ? this.findAllDtos() : this.toUserDtos(await this.findAll());
+    }
     return this.findUserDtosByIds(await this.access.listAccessibleServers(requireUserId(actor)));
   }
 
-  /** `scope=mine` needs a grant (404 otherwise); `scope=all` needs `ManageServers`. */
+  /**
+   * `scope=mine` needs a grant (404 otherwise); `scope=all` is the full DTO for
+   * admins and the user DTO for user admins, as in `list`.
+   */
   async get(actor: Actor, id: string, scope: ListScope): Promise<ServerDto | UserServerDto> {
-    assertListScope(actor, scope, Role.Operator);
-    if (scope === 'all') return this.findDtoById(id);
+    assertListScope(actor, scope, Role.UserAdmin);
+    if (scope === 'all') return hasRole(actor, Role.Admin) ? this.findDtoById(id) : this.findUserDtoById(id);
     if (!(await this.access.listAccessibleServers(requireUserId(actor))).includes(id)) {
       throw new NotFoundException('Server not found');
     }
@@ -175,7 +181,7 @@ export class ServersService {
 
   async update(actorId: string, id: string, input: PatchServerRequest): Promise<ServerDto> {
     const row = await this.transactions.run(async (transaction) => {
-      await assertActorRole(transaction, actorId, Role.Operator);
+      await assertActorRole(transaction, actorId, Role.Admin);
       const current = await transaction
         .selectFrom('infra.servers')
         .selectAll()
@@ -236,7 +242,7 @@ export class ServersService {
    */
   async delete(actorId: string, id: string, expectedRevision?: number, force = false): Promise<void> {
     await this.transactions.run(async (transaction) => {
-      await assertActorRole(transaction, actorId, Role.Operator);
+      await assertActorRole(transaction, actorId, Role.Admin);
       const server = await this.findById(id, transaction);
       if (expectedRevision !== undefined && Number(server.revision) !== expectedRevision) {
         throw new ConflictException({ code: 'REVISION_CONFLICT' });

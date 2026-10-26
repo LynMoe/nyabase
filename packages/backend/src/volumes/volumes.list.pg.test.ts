@@ -182,9 +182,9 @@ describePg('local volume actor scope', () => {
       expect((await service.list(volumeAdmin, { scope: 'all' })).map((row) => row.id)).toEqual([volumeId]);
       expect(await service.list(volumeAdmin, {})).toEqual([]);
       await expect(service.list(owner, { scope: 'all' })).rejects.toMatchObject({ status: 403 });
-      // An operator is not enough for volumes
-      await expect(service.list(testActor(randomUUID(), Role.Operator), { scope: 'all' }))
-        .rejects.toMatchObject({ status: 403 });
+      // A user admin manages everyone's volumes.
+      expect((await service.list(testActor(randomUUID(), Role.UserAdmin), { scope: 'all' })).map((row) => row.id))
+        .toEqual([volumeId]);
 
       await expect(service.get(owner, volumeId)).resolves.toMatchObject({ id: volumeId });
       await expect(service.get(volumeAdmin, volumeId, 'all')).resolves.toMatchObject({ id: volumeId });

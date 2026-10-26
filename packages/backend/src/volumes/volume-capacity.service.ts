@@ -410,7 +410,7 @@ export class VolumeCapacityService {
     };
   }
 
-  /** `scope=all`: the server-wide view for operators. */
+  /** `scope=all`: the server-wide view for user admins. */
   async serverWideCapacity(
     serverId: string,
   ): Promise<StorageCapacityDto> {

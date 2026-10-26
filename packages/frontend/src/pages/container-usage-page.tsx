@@ -34,7 +34,7 @@ export default function ContainerUsagePage({
   scope: ListScope;
 }) {
   const admin = scope === 'all';
-  const canView = useHasRole(Role.Operator);
+  const canView = useHasRole(Role.UserAdmin);
   const [range, setRange] = useState<PerformanceRange>('1h');
   const selfQuery = useQuery({
     queryKey: queryKeys.performance.self(scope, containerId),

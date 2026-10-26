@@ -92,7 +92,7 @@ try {
   const guard = app.get(RolesGuard);
 
   const handler = function handler() {};
-  Reflect.defineMetadata(ROLE_KEY, Role.Operator, handler);
+  Reflect.defineMetadata(ROLE_KEY, Role.UserAdmin, handler);
   const contextFor = (role) => ({
     getHandler: () => handler,
     getClass: () => class TestController {},
@@ -110,7 +110,7 @@ try {
     if (!(error instanceof ForbiddenException)) throw error;
   }
   if (guard.canActivate(contextFor(Role.Admin)) !== true) {
-    throw new Error('RolesGuard refused an admin on an operator route');
+    throw new Error('RolesGuard refused an admin on a user admin route');
   }
   console.log('ROLE_GUARD_PASS');
 } finally {

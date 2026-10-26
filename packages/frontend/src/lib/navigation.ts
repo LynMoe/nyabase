@@ -1,6 +1,7 @@
 import type { Role } from '@nyabase/common';
 import {
   Activity,
+  Archive,
   Box,
   Boxes,
   Cable,
@@ -39,7 +40,7 @@ export type NavSection = {
 
 /**
  * Sidebar structure. The first section is the personal workspace; admin
- * surfaces are grouped by what the operator is looking after. Every item has
+ * surfaces are grouped by what the administrator is looking after. Every item has
  * its own icon so the collapsed mobile sheet is still scannable.
  */
 export const NAV_SECTIONS: NavSection[] = [
@@ -67,6 +68,7 @@ export const NAV_SECTIONS: NavSection[] = [
     label: '运行',
     items: [
       { to: '/manage/containers', icon: Boxes, label: '全平台容器', access: ACCESS.manageContainers },
+      { to: '/manage/volumes', icon: Archive, label: '全平台数据卷', access: ACCESS.manageVolumes },
       { to: '/ops', icon: ListChecks, label: '操作记录', access: ACCESS.ops },
       { to: '/servers/usage', icon: ChartColumn, label: '全平台用量', access: ACCESS.adminUsage },
       { to: '/ssh-proxy', icon: Cable, label: 'SSH 代理', access: ACCESS.sshProxy },

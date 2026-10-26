@@ -1,5 +1,5 @@
 /*
- * REST: GET /admin/agent-rejections (operator). Not part of the agent
+ * REST: GET /admin/agent-rejections (admin). Not part of the agent
  * protocol (protocol/agent.ts), so changing it never needs an agent release.
  */
 

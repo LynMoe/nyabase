@@ -10,7 +10,7 @@ import {
 } from '@nyabase/common';
 import type { Kysely } from 'kysely';
 import { listPoolAccess, listServerAccess } from '../iam/effective-access.js';
-import { assertListScope, type Actor, requireUserId } from '../iam/actor.js';
+import { assertListScope, hasRole, type Actor, requireUserId } from '../iam/actor.js';
 import type { IncusClientPort } from '../incus/index.js';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
@@ -52,13 +52,15 @@ export class StoragePoolsService {
 
   /**
    * `scope=mine`: pools the caller may use, as user DTOs. `scope=all`: every
-   * pool of the server including unregistered ones (operator).
+   * pool of the server; admins see unregistered ones and the admin DTO, user
+   * admins the registered ones as user DTOs (enough to grant them).
    */
   async listForServer(actor: Actor, serverId: string, scope: ListScope): Promise<StoragePoolDto[]> {
-    assertListScope(actor, scope, Role.Operator);
-    return scope === 'all'
-      ? this.list(serverId, true)
-      : this.listVisible(requireUserId(actor), serverId);
+    assertListScope(actor, scope, Role.UserAdmin);
+    if (scope === 'mine') return this.listVisible(requireUserId(actor), serverId);
+    if (hasRole(actor, Role.Admin)) return this.list(serverId, true);
+    const rows = await this.repository.list(serverId);
+    return rows.map((row) => toUserPoolDto(row)).filter(isLocalPoolDto);
   }
 
   async list(serverId?: string, includeUnregistered = false): Promise<StoragePoolDto[]> {

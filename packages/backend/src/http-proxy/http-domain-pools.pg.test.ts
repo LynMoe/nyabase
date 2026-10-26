@@ -42,28 +42,28 @@ describePg('HTTP domain pools stay disjoint (PostgreSQL)', () => {
         audit,
         new HttpProxyTrafficService(database),
       );
-      const operatorId = await seedUser(database, 'pool-operator', undefined, Role.Operator);
+      const adminId = await seedUser(database, 'pool-admin', undefined, Role.Admin);
       const ownerId = await seedUser(database, 'pool-tenant');
       const serverId = await seedServer(database);
       const poolId = await seedPool(database, serverId);
       const imageId = await seedImage(database);
       const containerId = await seedContainer(database, { ownerId, serverId, poolId, imageId });
 
-      const outer = await pools.createDomainPool(operatorId, { wildcardDomain: '*.example.test' });
-      const sibling = await pools.createDomainPool(operatorId, { wildcardDomain: '*.deep.example.org' });
-      await expect(pools.createDomainPool(operatorId, { wildcardDomain: '*.a.example.test' }))
+      const outer = await pools.createDomainPool(adminId, { wildcardDomain: '*.example.test' });
+      const sibling = await pools.createDomainPool(adminId, { wildcardDomain: '*.deep.example.org' });
+      await expect(pools.createDomainPool(adminId, { wildcardDomain: '*.a.example.test' }))
         .rejects.toEqual(expect.any(ConflictException));
-      await expect(pools.createDomainPool(operatorId, { wildcardDomain: '*.a.example.test' }))
+      await expect(pools.createDomainPool(adminId, { wildcardDomain: '*.a.example.test' }))
         .rejects.toEqual(errorCode('HTTP_PROXY_DOMAIN_POOL_OVERLAP'));
       // A pool that would contain an existing one is refused too.
-      await expect(pools.createDomainPool(operatorId, { wildcardDomain: '*.example.org' }))
+      await expect(pools.createDomainPool(adminId, { wildcardDomain: '*.example.org' }))
         .rejects.toEqual(errorCode('HTTP_PROXY_DOMAIN_POOL_OVERLAP'));
-      await expect(pools.createDomainPool(operatorId, { wildcardDomain: '*.example.test' }))
+      await expect(pools.createDomainPool(adminId, { wildcardDomain: '*.example.test' }))
         .rejects.toEqual(errorCode('HTTP_PROXY_DOMAIN_POOL_EXISTS'));
       // Moving a pool under another is the same conflict; a disjoint rename is fine.
-      await expect(pools.updateDomainPool(operatorId, sibling.id, { wildcardDomain: '*.b.example.test' }))
+      await expect(pools.updateDomainPool(adminId, sibling.id, { wildcardDomain: '*.b.example.test' }))
         .rejects.toEqual(errorCode('HTTP_PROXY_DOMAIN_POOL_OVERLAP'));
-      await expect(pools.updateDomainPool(operatorId, sibling.id, { wildcardDomain: '*.example.net' }))
+      await expect(pools.updateDomainPool(adminId, sibling.id, { wildcardDomain: '*.example.net' }))
         .resolves.toEqual(expect.objectContaining({ wildcardDomain: '*.example.net' }));
 
       // A pool nested by hand (e.g. created before this check) still cannot be

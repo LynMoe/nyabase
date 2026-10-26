@@ -47,7 +47,7 @@ export function UserDetailTabs({
   user: UserDto;
   onTab: (tab: UserDetailTab) => void;
 }) {
-  const canManageGrants = useHasRole(Role.Operator);
+  const canManageGrants = useHasRole(Role.UserAdmin);
   return (
     <Tabs
       value={tab}
@@ -68,7 +68,7 @@ export function UserDetailTabs({
         {canManageGrants ? (
           <CanonicalGrantPanel subject={user} kind="users" />
         ) : (
-          <p className="text-sm text-muted-foreground">查看与编辑授权需要运维及以上角色。</p>
+          <p className="text-sm text-muted-foreground">查看与编辑授权需要用户管理员及以上角色。</p>
         )}
       </TabsContent>
     </Tabs>
@@ -77,7 +77,7 @@ export function UserDetailTabs({
 
 /** Identity, role and group membership of a user. */
 function UserOverviewTab({ user }: { user: UserDto }) {
-  const canManageUsers = useHasRole(Role.Admin);
+  const canManageUsers = useUserAvailability(user).edit.allowed;
   const [identityOpen, setIdentityOpen] = useState(false);
   return (
     <>
@@ -185,7 +185,7 @@ export function UserIdentityDialog({ user, onClose }: { user: UserDto; onClose: 
           onChange={(next) => setRole(next as Role)}
           options={ROLE_OPTIONS}
           disabled={!roleAvailability.allowed}
-          hint={roleAvailability.reason ?? '运维可管理服务器、镜像与授权；管理员可管理用户、用户组与存储。'}
+          hint={roleAvailability.reason ?? '用户管理员可管理用户、用户组、授权、容器与数据卷；超级管理员另管服务器、镜像、网络与系统设置。'}
         />
         <DialogFooter>
           <Button variant="outline" onClick={() => onOpenChange(false)}>取消</Button>
@@ -326,6 +326,7 @@ export function UserHeaderActions({ user }: { user: UserDto }) {
     },
     onError: (error) => toast({ title: '删除用户失败', description: errorMessage(error), variant: 'destructive' }),
   });
+  if (!availability.edit.allowed) return null;
 
   return (
     <>

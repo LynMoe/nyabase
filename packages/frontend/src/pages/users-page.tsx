@@ -17,7 +17,7 @@ import { CreateUserDialog } from './users-page/create-user-dialog.js';
 import { UsersTable } from './users-page/users-table.js';
 
 export default function UsersPage() {
-  const canManageUsers = useHasRole(Role.Admin);
+  const canManageUsers = useHasRole(Role.UserAdmin);
   const [createOpen, setCreateOpen] = useState(false);
   const [query, setQuery] = useState('');
   const usersQuery = useQuery({

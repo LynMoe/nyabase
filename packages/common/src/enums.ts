@@ -114,14 +114,18 @@ export enum PreflightStatus {
   Failed = 'failed',
 }
 
-/** Platform roles, strictly nested: admin ⊇ operator ⊇ user. */
+/**
+ * Platform roles, strictly nested: admin ⊇ user_admin ⊇ user. A user admin
+ * administers people and their resources (users, groups, grants, every
+ * container and volume); infrastructure and system settings are admin-only.
+ */
 export enum Role {
   User = 'user',
-  Operator = 'operator',
+  UserAdmin = 'user_admin',
   Admin = 'admin',
 }
 
-const ROLE_RANK: Record<Role, number> = { [Role.User]: 0, [Role.Operator]: 1, [Role.Admin]: 2 };
+const ROLE_RANK: Record<Role, number> = { [Role.User]: 0, [Role.UserAdmin]: 1, [Role.Admin]: 2 };
 
 /** True when `role` is `minimum` or a role above it. */
 export function roleAtLeast(role: Role, minimum: Role): boolean {

@@ -13,7 +13,7 @@ export class AdminCatalogController {
   constructor(private readonly persistence: CatalogPersistence) {}
 
   @Get('users')
-  @RequireRole(Role.Operator)
+  @RequireRole(Role.UserAdmin)
   async listUsers() {
     const rows = await this.persistence.listUsers();
     return rows.map((user) => ({
@@ -25,7 +25,7 @@ export class AdminCatalogController {
   }
 
   @Get('groups')
-  @RequireRole(Role.Operator)
+  @RequireRole(Role.UserAdmin)
   async listGroups() {
     const rows = await this.persistence.listGroups();
     return rows.map((group) => ({
@@ -35,7 +35,7 @@ export class AdminCatalogController {
   }
 
   @Get('grant-servers')
-  @RequireRole(Role.Operator)
+  @RequireRole(Role.UserAdmin)
   async listGrantServers() {
     const rows = await this.persistence.listServers();
     return rows.map((server) => ({
@@ -49,7 +49,7 @@ export class AdminCatalogController {
   }
 
   @Get('metric-servers')
-  @RequireRole(Role.Operator)
+  @RequireRole(Role.UserAdmin)
   async listMetricServers() {
     const rows = await this.persistence.listServers();
     return rows.map((server) => ({

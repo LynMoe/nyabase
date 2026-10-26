@@ -104,9 +104,9 @@ const volumeId = '00000000-0000-4000-8000-000000000002';
 describe('IntentsController GET /intents', () => {
   it('scope=all lists only intents whose resource type the actor can administer', async () => {
     const { controller: c, intents } = controller({});
-    const operator = testActor(USER_ID, Role.Operator);
+    const userAdmin = testActor(USER_ID, Role.UserAdmin);
 
-    await c.list(operator, { scope: 'all' });
+    await c.list(userAdmin, { scope: 'all' });
 
     expect(intents.list).toHaveBeenCalledWith({
       limit: 500,
@@ -117,19 +117,18 @@ describe('IntentsController GET /intents', () => {
       serverId: undefined,
       resourceTypes: [
         IntentResourceType.Container,
-        IntentResourceType.ImageAssignment,
-        IntentResourceType.Server,
+        IntentResourceType.Volume,
       ],
     });
   });
 
-  it('scope=all needs the operator role (403 otherwise)', async () => {
+  it('scope=all needs the user admin role (403 otherwise)', async () => {
     const { controller: c, intents } = controller({});
     await expect(c.list(testActor(USER_ID), { scope: 'all' })).rejects.toBeInstanceOf(ForbiddenException);
     expect(intents.list).not.toHaveBeenCalled();
   });
 
-  it('scope=all for an admin also lists volume intents', async () => {
+  it('scope=all for an admin also lists server and image intents', async () => {
     const { controller: c, intents } = controller({});
     await c.list(testActor(USER_ID, Role.Admin), { scope: 'all' });
     expect(intents.list).toHaveBeenCalledWith(expect.objectContaining({
@@ -145,7 +144,7 @@ describe('IntentsController GET /intents', () => {
   it('forwards filters and an explicit limit', async () => {
     const serverId = '00000000-0000-4000-8000-000000000003';
     const { controller: c, intents } = controller({});
-    await c.list(testActor(USER_ID, Role.Operator), {
+    await c.list(testActor(USER_ID, Role.UserAdmin), {
       scope: 'all',
       resourceType: IntentResourceType.Container,
       serverId,
@@ -166,8 +165,8 @@ describe('IntentsController GET /intents', () => {
   it('returns an empty page when the actor cannot administer the requested resourceType', async () => {
     const { controller: c, intents } = controller({});
     const result = await c.list(
-      testActor(USER_ID, Role.Operator),
-      { scope: 'all', resourceType: IntentResourceType.Volume },
+      testActor(USER_ID, Role.UserAdmin),
+      { scope: 'all', resourceType: IntentResourceType.Server },
     );
     expect(result).toEqual({ items: [], nextCursor: null });
     expect(intents.list).not.toHaveBeenCalled();
@@ -211,12 +210,12 @@ describe('IntentsController GET /intents', () => {
     const { controller: c, intents } = controller({
       authority: { ownerId: OTHER_ID },
     });
-    await expect(c.list(testActor(USER_ID), {
+    await expect(c.list(testActor(USER_ID, Role.UserAdmin), {
       scope: 'all',
       resourceType: IntentResourceType.ImageAssignment,
       resourceId: 'a1,a2',
     })).rejects.toBeInstanceOf(ForbiddenException);
-    await c.list(testActor(USER_ID, Role.Operator), {
+    await c.list(testActor(USER_ID, Role.Admin), {
       scope: 'all',
       resourceType: IntentResourceType.ImageAssignment,
       resourceId: 'a1,a2',
@@ -257,11 +256,15 @@ describe('IntentsController GET /intents/:id and retry', () => {
     // the role alone does not widen the default scope
     await expect(c.get(foreign.id, testActor(USER_ID, Role.Admin))).rejects.toBeInstanceOf(NotFoundException);
     await expect(c.get(foreign.id, testActor(USER_ID), 'all')).rejects.toBeInstanceOf(ForbiddenException);
-    // volume intents are admin-only
-    await expect(c.get(foreign.id, testActor(USER_ID, Role.Operator), 'all'))
-      .rejects.toBeInstanceOf(ForbiddenException);
-    await expect(c.get(foreign.id, testActor(USER_ID, Role.Admin), 'all'))
+    // volume intents are for user admins, server intents for admins only
+    await expect(c.get(foreign.id, testActor(USER_ID, Role.UserAdmin), 'all'))
       .resolves.toMatchObject({ id: foreign.id });
+    const server = intent({ resourceType: IntentResourceType.Server });
+    const { controller: onServer } = controller({ findById: vi.fn().mockResolvedValue(server) });
+    await expect(onServer.get(server.id, testActor(USER_ID, Role.UserAdmin), 'all'))
+      .rejects.toBeInstanceOf(ForbiddenException);
+    await expect(onServer.get(server.id, testActor(USER_ID, Role.Admin), 'all'))
+      .resolves.toMatchObject({ id: server.id });
   });
 
   it('hides other people\'s intents and missing intents with 404', async () => {
@@ -274,7 +277,7 @@ describe('IntentsController GET /intents/:id and retry', () => {
   });
 
   it('hides an intent you requested on someone else\'s resource once you lost the role', async () => {
-    // An operator issued it with scope=all against another user's container, then was demoted.
+    // A user admin issued it with scope=all against another user's container, then was demoted.
     const issued = intent({ requestedBy: USER_ID, resourceType: IntentResourceType.Container });
     const retried = intent({ id: '00000000-0000-4000-8000-000000000099', status: IntentStatus.Pending, failure: null, failureCode: null });
     const demoted = controller({
@@ -287,18 +290,18 @@ describe('IntentsController GET /intents/:id and retry', () => {
       .rejects.toBeInstanceOf(NotFoundException);
     expect(demoted.intents.retry).not.toHaveBeenCalled();
 
-    // Still an operator: visible, and the retry re-checks the role in a transaction.
-    const operator = controller({
+    // Still a user admin: visible, and the retry re-checks the role in a transaction.
+    const userAdmin = controller({
       findById: vi.fn().mockResolvedValue(issued),
       retry: vi.fn().mockResolvedValue(retried),
       authority: { ownerId: OTHER_ID },
-      liveRole: Role.Operator,
+      liveRole: Role.UserAdmin,
     });
-    await expect(operator.controller.get(issued.id, testActor(USER_ID, Role.Operator)))
+    await expect(userAdmin.controller.get(issued.id, testActor(USER_ID, Role.UserAdmin)))
       .resolves.toMatchObject({ id: issued.id });
-    await expect(operator.controller.retry(issued.id, testActor(USER_ID, Role.Operator), {}))
+    await expect(userAdmin.controller.retry(issued.id, testActor(USER_ID, Role.UserAdmin), {}))
       .resolves.toMatchObject({ id: retried.id });
-    expect(operator.access.runWithActorRole).toHaveBeenCalled();
+    expect(userAdmin.access.runWithActorRole).toHaveBeenCalled();
 
     // Demoted between the guard and the retry: 404, nothing mutated.
     const raced = controller({
@@ -306,7 +309,7 @@ describe('IntentsController GET /intents/:id and retry', () => {
       authority: { ownerId: OTHER_ID },
       liveRole: Role.User,
     });
-    await expect(raced.controller.retry(issued.id, testActor(USER_ID, Role.Operator), {}))
+    await expect(raced.controller.retry(issued.id, testActor(USER_ID, Role.UserAdmin), {}))
       .rejects.toBeInstanceOf(NotFoundException);
     expect(raced.intents.retry).not.toHaveBeenCalled();
   });
@@ -331,8 +334,8 @@ describe('IntentsController GET /intents/:id and retry', () => {
     await expect(demoted.controller.list(testActor(USER_ID), {})).resolves.toMatchObject({ items: [] });
     const owner = controller({ list: list(), authority: { ownerId: USER_ID } });
     await expect(owner.controller.list(testActor(USER_ID), {})).resolves.toMatchObject({ items: [{ id: issued.id }] });
-    const operator = controller({ list: list(), authority: { ownerId: OTHER_ID } });
-    await expect(operator.controller.list(testActor(USER_ID, Role.Operator), {}))
+    const userAdmin = controller({ list: list(), authority: { ownerId: OTHER_ID } });
+    await expect(userAdmin.controller.list(testActor(USER_ID, Role.UserAdmin), {}))
       .resolves.toMatchObject({ items: [{ id: issued.id }] });
   });
 
@@ -390,11 +393,11 @@ describe('IntentsController GET /intents/:id and retry', () => {
     expect(intents.retry).not.toHaveBeenCalled();
   });
 
-  it('refuses to retry what you cannot see (404) and mutates nothing, even as an operator without scope=all', async () => {
+  it('refuses to retry what you cannot see (404) and mutates nothing, even as a user admin without scope=all', async () => {
     const foreign = intent({ resourceType: IntentResourceType.Container });
     const { controller: c, intents } = controller({ findById: vi.fn().mockResolvedValue(foreign) });
     await expect(c.retry(foreign.id, testActor(USER_ID), {})).rejects.toBeInstanceOf(NotFoundException);
-    await expect(c.retry(foreign.id, testActor(USER_ID, Role.Operator), {}))
+    await expect(c.retry(foreign.id, testActor(USER_ID, Role.UserAdmin), {}))
       .rejects.toBeInstanceOf(NotFoundException);
     await expect(c.retry(foreign.id, testActor(USER_ID), {}, 'all')).rejects.toBeInstanceOf(ForbiddenException);
     expect(intents.retry).not.toHaveBeenCalled();
@@ -406,11 +409,11 @@ describe('IntentsController GET /intents/:id and retry', () => {
     const allowed = controller({
       findById: vi.fn().mockResolvedValue(foreign),
       retry: vi.fn().mockResolvedValue(retried),
-      liveRole: Role.Operator,
+      liveRole: Role.UserAdmin,
     });
     const result = await allowed.controller.retry(
       foreign.id,
-      testActor(USER_ID, Role.Operator),
+      testActor(USER_ID, Role.UserAdmin),
       {},
       'all',
     );
@@ -433,7 +436,7 @@ describe('IntentsController GET /intents/:id and retry', () => {
     });
     await expect(revoked.controller.retry(
       foreign.id,
-      testActor(USER_ID, Role.Operator),
+      testActor(USER_ID, Role.UserAdmin),
       {},
       'all',
     )).rejects.toBeInstanceOf(NotFoundException);
@@ -449,23 +452,22 @@ describe('IntentsController server-scoped visibility (old /admin/servers/:id/int
     intent({ id: '00000000-0000-4000-8000-0000000000c3', resourceType: IntentResourceType.ImageAssignment }),
   ];
 
-  it('keeps the per-type role filter on a server: no volume intents for an operator', async () => {
+  it('keeps the per-type role filter on a server: no server or image intents for a user admin', async () => {
     const { controller: c, intents } = controller({
       list: vi.fn().mockResolvedValue({ items: onServer, nextCursor: null }),
       authority: { ownerId: null },
     });
-    await c.list(testActor(USER_ID, Role.Operator), { scope: 'all', serverId });
+    await c.list(testActor(USER_ID, Role.UserAdmin), { scope: 'all', serverId });
     expect(intents.list).toHaveBeenCalledWith(expect.objectContaining({
       serverId,
       limit: 500,
       resourceTypes: [
         IntentResourceType.Container,
-        IntentResourceType.ImageAssignment,
-        IntentResourceType.Server,
+        IntentResourceType.Volume,
       ],
     }));
-    await expect(c.list(testActor(USER_ID, Role.Operator), {
-      scope: 'all', serverId, resourceType: IntentResourceType.Volume,
+    await expect(c.list(testActor(USER_ID, Role.UserAdmin), {
+      scope: 'all', serverId, resourceType: IntentResourceType.ImageAssignment,
     })).resolves.toEqual({ items: [], nextCursor: null });
     expect(intents.list).toHaveBeenCalledOnce();
 
@@ -473,18 +475,17 @@ describe('IntentsController server-scoped visibility (old /admin/servers/:id/int
     await admin.controller.list(testActor(USER_ID, Role.Admin), { scope: 'all', serverId });
     expect(admin.intents.list).toHaveBeenCalledWith(expect.objectContaining({
       serverId,
-      resourceTypes: expect.arrayContaining([IntentResourceType.Volume]),
+      resourceTypes: expect.arrayContaining([IntentResourceType.ImageAssignment, IntentResourceType.Server]),
     }));
   });
 
-  it('without a serverId an operator keeps the resource type filter', async () => {
+  it('without a serverId a user admin keeps the resource type filter', async () => {
     const { controller: c, intents } = controller({});
-    await c.list(testActor(USER_ID, Role.Operator), { scope: 'all' });
+    await c.list(testActor(USER_ID, Role.UserAdmin), { scope: 'all' });
     expect(intents.list).toHaveBeenCalledWith(expect.objectContaining({
       resourceTypes: [
         IntentResourceType.Container,
-        IntentResourceType.ImageAssignment,
-        IntentResourceType.Server,
+        IntentResourceType.Volume,
       ],
     }));
   });
@@ -497,18 +498,18 @@ describe('IntentsController server-scoped visibility (old /admin/servers/:id/int
 
   it('per-resource scope=all lists follow the role by kind, no more', async () => {
     const volume = controller({ authority: { ownerId: null } });
-    await volume.controller.list(testActor(USER_ID, Role.Admin), {
+    await volume.controller.list(testActor(USER_ID, Role.UserAdmin), {
       scope: 'all', resourceType: IntentResourceType.Volume, resourceId: 'v1',
     });
-    await expect(volume.controller.list(testActor(USER_ID, Role.Operator), {
-      scope: 'all', resourceType: IntentResourceType.Volume, resourceId: 'v1',
-    })).rejects.toBeInstanceOf(ForbiddenException);
     const container = controller({ authority: { ownerId: null } });
     await expect(container.controller.list(testActor(USER_ID), {
       scope: 'all', resourceType: IntentResourceType.Container, resourceId: 'c1',
     })).rejects.toBeInstanceOf(ForbiddenException);
     const image = controller({ authority: { ownerId: null } });
-    await image.controller.list(testActor(USER_ID, Role.Operator), {
+    await expect(image.controller.list(testActor(USER_ID, Role.UserAdmin), {
+      scope: 'all', resourceType: IntentResourceType.ImageAssignment, resourceId: 'a1,a2',
+    })).rejects.toBeInstanceOf(ForbiddenException);
+    await image.controller.list(testActor(USER_ID, Role.Admin), {
       scope: 'all', resourceType: IntentResourceType.ImageAssignment, resourceId: 'a1,a2',
     });
     expect(image.intents.list).toHaveBeenCalledOnce();

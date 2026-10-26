@@ -23,7 +23,7 @@ import {
 } from '../iam/audit.repository.js';
 
 @Controller('audit')
-@RequireRole(Role.Operator)
+@RequireRole(Role.UserAdmin)
 export class AuditController {
   constructor(private readonly repository: AuditRepository) {}
 

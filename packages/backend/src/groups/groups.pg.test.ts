@@ -49,23 +49,30 @@ describePg('GroupsService', () => {
     });
   });
 
-  it('managing groups is admin-only, re-checked in the transaction', async () => {
+  it('managing groups needs the user admin role, re-checked in the transaction', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const { service } = setup(database);
       const admin = await actorWithRole(database, Role.Admin);
-      const operator = await actorWithRole(database, Role.Operator);
+      const userAdmin = await actorWithRole(database, Role.UserAdmin);
+      const plain = await actorWithRole(database, Role.User);
       const group = await service.create(admin, { name: 'managed' });
       const member = await seedUser(database);
 
-      await expect(service.create(operator, { name: 'nope' }))
+      await expect(service.create(plain, { name: 'nope' }))
         .rejects.toMatchObject({ response: { code: 'ROLE_REQUIRED' } });
-      await expect(service.update(operator, group.id, { description: 'x' }, group.revision))
+      await expect(service.update(plain, group.id, { description: 'x' }, group.revision))
         .rejects.toMatchObject({ response: { code: 'ROLE_REQUIRED' } });
-      await expect(service.addMember(operator, group.id, member))
+      await expect(service.addMember(plain, group.id, member))
         .rejects.toMatchObject({ response: { code: 'ROLE_REQUIRED' } });
-      await expect(service.delete(operator, group.id))
+      await expect(service.delete(plain, group.id))
         .rejects.toMatchObject({ response: { code: 'ROLE_REQUIRED' } });
       await expect(service.create(admin, { name: 'managed' })).rejects.toMatchObject({ status: 409 });
+
+      // A user admin manages any group, including one with an admin in it.
+      const managed = await service.create(userAdmin, { name: 'by-user-admin' });
+      await service.addMember(userAdmin, managed.id, member);
+      await service.addMember(userAdmin, managed.id, admin.userId!);
+      await service.delete(userAdmin, managed.id);
     });
   });
 

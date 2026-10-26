@@ -28,13 +28,13 @@ export class UserGrantsController {
   ) {}
 
   @Get('server-grants')
-  @RequireRole(Role.Operator)
+  @RequireRole(Role.UserAdmin)
   listServerGrants(@Param('userId') userId: string) {
     return this.grants.listServerGrants(subject(userId));
   }
 
   @Put('server-grants/:serverId')
-  @RequireRole(Role.Operator)
+  @RequireRole(Role.UserAdmin)
   upsertServerGrant(
     @Param('userId') userId: string,
     @Param('serverId') serverId: string,
@@ -45,7 +45,7 @@ export class UserGrantsController {
   }
 
   @Delete('server-grants/:serverId')
-  @RequireRole(Role.Operator)
+  @RequireRole(Role.UserAdmin)
   deleteServerGrant(
     @Param('userId') userId: string,
     @Param('serverId') serverId: string,
@@ -55,13 +55,13 @@ export class UserGrantsController {
   }
 
   @Get('storage-pool-grants')
-  @RequireRole(Role.Operator)
+  @RequireRole(Role.UserAdmin)
   listStoragePoolGrants(@Param('userId') userId: string) {
     return this.grants.listStoragePoolGrants(subject(userId));
   }
 
   @Put('storage-pool-grants/:poolId')
-  @RequireRole(Role.Operator)
+  @RequireRole(Role.UserAdmin)
   upsertStoragePoolGrant(
     @Param('userId') userId: string,
     @Param('poolId') poolId: string,
@@ -77,7 +77,7 @@ export class UserGrantsController {
   }
 
   @Delete('storage-pool-grants/:poolId')
-  @RequireRole(Role.Operator)
+  @RequireRole(Role.UserAdmin)
   deleteStoragePoolGrant(
     @Param('userId') userId: string,
     @Param('poolId') poolId: string,
@@ -87,13 +87,13 @@ export class UserGrantsController {
   }
 
   @Get('shared-backend-grants')
-  @RequireRole(Role.Operator)
+  @RequireRole(Role.UserAdmin)
   listSharedBackendGrants(@Param('userId') userId: string) {
     return this.grants.listSharedBackendGrants(subject(userId));
   }
 
   @Put('shared-backend-grants/:backendId')
-  @RequireRole(Role.Operator)
+  @RequireRole(Role.UserAdmin)
   upsertSharedBackendGrant(
     @Param('userId') userId: string,
     @Param('backendId') backendId: string,
@@ -109,7 +109,7 @@ export class UserGrantsController {
   }
 
   @Delete('shared-backend-grants/:backendId')
-  @RequireRole(Role.Operator)
+  @RequireRole(Role.UserAdmin)
   deleteSharedBackendGrant(
     @Param('userId') userId: string,
     @Param('backendId') backendId: string,
@@ -119,7 +119,7 @@ export class UserGrantsController {
   }
 
   @Get('effective-access')
-  @RequireRole(Role.Operator)
+  @RequireRole(Role.UserAdmin)
   async effectiveAccess(@Param('userId') userId: string): Promise<EffectiveAccessDto> {
     await this.grants.assertSubjectExists(subject(userId));
     return {

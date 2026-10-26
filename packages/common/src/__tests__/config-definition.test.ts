@@ -34,7 +34,6 @@ describe('control-plane config definition', () => {
       'auth.refreshTokenExpiresDays',
       'auth.sessionMaxLifetimeDays',
     ]);
-    expect(auth.every((field) => field.adminOnly)).toBe(true);
     expect(controlPlaneConfigManifest.find((field) => field.key === 'auth.sessionMaxLifetimeDays'))
       .toMatchObject({ defaultValue: 30, valueKind: 'number', restartRequired: false });
   });

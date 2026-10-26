@@ -97,14 +97,18 @@ function createService(
 const manager = testActor('99999999-9999-4999-8999-999999999999', Role.Admin);
 
 describe('SharedBackendsService registration guards', () => {
-  it('refuses scope=all below the operator role and accepts operators for lists', async () => {
+  it('refuses scope=all below the user admin role and gives user admins the capacity-only list', async () => {
     const { service } = createService();
     const user = testActor('44444444-4444-4444-8444-444444444444');
     await expect(service.list(user, 'all')).rejects.toBeInstanceOf(ForbiddenException);
     await expect(service.get(user, baseRow.id, 'all')).rejects.toBeInstanceOf(ForbiddenException);
-    const operatorView = await service.list(testActor('g', Role.Operator), 'all');
-    expect(operatorView.every((backend) => backend.executors === undefined)).toBe(true);
-    await expect(service.get(testActor('g', Role.Operator), baseRow.id, 'all'))
+    const userAdminView = await service.list(testActor('g', Role.UserAdmin), 'all');
+    expect(userAdminView.length).toBeGreaterThan(0);
+    for (const backend of userAdminView) {
+      expect(backend.executors).toBeUndefined();
+      expect(backend).toMatchObject({ identityKey: '', cephFsid: '', serverIds: [] });
+    }
+    await expect(service.get(testActor('g', Role.UserAdmin), baseRow.id, 'all'))
       .rejects.toBeInstanceOf(ForbiddenException);
   });
 

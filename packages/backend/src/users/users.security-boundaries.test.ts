@@ -19,9 +19,9 @@ describe('pickNextUserNumericId', () => {
 const describePg = process.env.NYABASE_TEST_DATABASE_URL ? describe : describe.skip;
 
 describePg('UsersService authorization boundaries', () => {
-  it('denies administration to an actor that is not an admin', async () => {
+  it('denies administration to an actor below user admin', async () => {
     await withPostgresTestDatabase(async (fixture) => {
-      for (const role of [Role.User, Role.Operator]) {
+      for (const role of [Role.User]) {
         const context = await usersPgFixture(fixture, { actorRole: role });
         await expect(context.users.updateUser(
           context.userId,
@@ -34,6 +34,35 @@ describePg('UsersService authorization boundaries', () => {
         )).rejects.toMatchObject({ response: expect.objectContaining({ code: 'ROLE_REQUIRED' }) });
         await fixture.database.deleteFrom('iam.users').execute();
       }
+    });
+  });
+
+  it('lets a user admin administer users and user admins, but not admins or roles', async () => {
+    await withPostgresTestDatabase(async (fixture) => {
+      const context = await usersPgFixture(fixture, { actorRole: Role.UserAdmin });
+      const peer = await seedUser(fixture.database, undefined, UserStatus.Active, Role.UserAdmin);
+      const admin = await seedUser(fixture.database, undefined, UserStatus.Active, Role.Admin);
+
+      await expect(context.users.updateUser(context.userId, { displayName: 'Renamed' }, context.actorId))
+        .resolves.toMatchObject({ displayName: 'Renamed' });
+      await expect(context.users.updateUser(peer, { status: UserStatus.Disabled }, context.actorId))
+        .resolves.toMatchObject({ status: UserStatus.Disabled });
+      await expect(context.users.updateUser(admin, { password: 'password-2' }, context.actorId))
+        .rejects.toMatchObject({ response: expect.objectContaining({ code: 'ADMINISTRATOR_PROTECTED' }) });
+      await expect(context.users.updateUser(admin, { status: UserStatus.Disabled }, context.actorId))
+        .rejects.toMatchObject({ response: expect.objectContaining({ code: 'ADMINISTRATOR_PROTECTED' }) });
+      await expect(context.users.updateUser(context.userId, { role: Role.UserAdmin }, context.actorId))
+        .rejects.toMatchObject({ response: expect.objectContaining({ code: 'ROLE_REQUIRED' }) });
+
+      const created = await context.users.createUser(
+        { username: 'by-user-admin', password: 'password-1', displayName: 'New' },
+        { actorId: context.actorId },
+      );
+      expect(created.role).toBe(Role.User);
+      await expect(context.users.createUser(
+        { username: 'elevated', password: 'password-1', displayName: 'New', role: Role.UserAdmin },
+        { actorId: context.actorId },
+      )).rejects.toMatchObject({ response: expect.objectContaining({ code: 'ROLE_REQUIRED' }) });
     });
   });
 
@@ -77,16 +106,16 @@ describePg('UsersService authorization boundaries', () => {
         { username: 'plain-user', password: 'password-1', displayName: 'Plain' },
         { actorId: context.actorId },
       );
-      const operator = await context.users.createUser(
-        { username: 'new-operator', password: 'password-1', displayName: 'Operator', role: Role.Operator },
+      const userAdmin = await context.users.createUser(
+        { username: 'new-user-admin', password: 'password-1', displayName: 'User admin', role: Role.UserAdmin },
         { actorId: context.actorId },
       );
 
       expect(plain.role).toBe(Role.User);
-      expect(operator.role).toBe(Role.Operator);
+      expect(userAdmin.role).toBe(Role.UserAdmin);
       expect(context.audit.append).toHaveBeenCalledWith(
-        expect.anything(), context.actorId, 'user.create', operator.id, 'user',
-        expect.objectContaining({ role: Role.Operator }),
+        expect.anything(), context.actorId, 'user.create', userAdmin.id, 'user',
+        expect.objectContaining({ role: Role.UserAdmin }),
       );
     });
   });
@@ -100,18 +129,18 @@ describePg('UsersService role changes and the last-administrator guard', () => {
         .select('auth_version').where('id', '=', context.userId).executeTakeFirstOrThrow();
 
       const updated = await context.users.updateUser(
-        context.userId, { role: Role.Operator }, context.actorId,
+        context.userId, { role: Role.UserAdmin }, context.actorId,
       );
 
-      expect(updated.role).toBe(Role.Operator);
+      expect(updated.role).toBe(Role.UserAdmin);
       const row = await fixture.database.selectFrom('iam.users')
         .select(['role', 'auth_version']).where('id', '=', context.userId).executeTakeFirstOrThrow();
-      expect(row).toEqual({ role: Role.Operator, auth_version: before.auth_version });
+      expect(row).toEqual({ role: Role.UserAdmin, auth_version: before.auth_version });
       expect(context.audit.append).toHaveBeenCalledWith(
         expect.anything(), context.actorId, 'user.role_changed', context.userId, 'user',
-        { from: Role.User, to: Role.Operator },
+        { from: Role.User, to: Role.UserAdmin },
       );
-      expect(await context.users.toDto(updated)).toMatchObject({ role: Role.Operator });
+      expect(await context.users.toDto(updated)).toMatchObject({ role: Role.UserAdmin });
     });
   });
 
@@ -130,12 +159,12 @@ describePg('UsersService role changes and the last-administrator guard', () => {
       const context = await usersPgFixture(fixture);
       await seedUser(fixture.database, undefined, UserStatus.Disabled, Role.Admin);
 
-      await expect(context.users.updateUser(context.actorId, { role: Role.Operator }, context.actorId))
+      await expect(context.users.updateUser(context.actorId, { role: Role.UserAdmin }, context.actorId))
         .rejects.toMatchObject({ response: { code: 'LAST_ACTIVE_ADMINISTRATOR' } });
 
       await context.users.updateUser(context.userId, { role: Role.Admin }, context.actorId);
-      await expect(context.users.updateUser(context.actorId, { role: Role.Operator }, context.actorId))
-        .resolves.toMatchObject({ role: Role.Operator });
+      await expect(context.users.updateUser(context.actorId, { role: Role.UserAdmin }, context.actorId))
+        .resolves.toMatchObject({ role: Role.UserAdmin });
     });
   });
 
@@ -161,8 +190,8 @@ describePg('UsersService role changes and the last-administrator guard', () => {
         context.userId, { status: UserStatus.Disabled }, context.actorId,
       )).resolves.toMatchObject({ status: UserStatus.Disabled });
       await expect(context.users.updateUser(
-        context.userId, { role: Role.Operator }, context.actorId,
-      )).resolves.toMatchObject({ role: Role.Operator });
+        context.userId, { role: Role.UserAdmin }, context.actorId,
+      )).resolves.toMatchObject({ role: Role.UserAdmin });
     });
   });
 });

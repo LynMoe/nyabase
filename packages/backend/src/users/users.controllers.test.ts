@@ -1,4 +1,4 @@
-import { ForbiddenException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException } from '@nestjs/common';
 import { describe, expect, it, vi } from 'vitest';
 import { UserStatus, Role } from '@nyabase/common';
 import { testActor } from '../iam/actor.test-helper.js';
@@ -74,22 +74,36 @@ describe('user routes: self, administrator, everyone else', () => {
     await expect(controller.addSshKey('user-b', {}, user)).rejects.toBeInstanceOf(ForbiddenException);
   });
 
-  it('lets operators and admins read others, but only admins change them', async () => {
+  it('lets user admins and admins read and change others (the service guards admins)', async () => {
     const findById = vi.fn().mockResolvedValue({ id: 'user-b' });
     const updateUser = vi.fn().mockResolvedValue({ id: 'user-b' });
     const listSshKeys = vi.fn().mockResolvedValue([]);
-    const controller = controllerWith({ findById, updateUser, listSshKeys });
-    const manager = testActor('admin-a', Role.Admin);
-    const granter = testActor('admin-g', Role.Operator);
+    const deleteSshKey = vi.fn().mockResolvedValue(undefined);
+    const controller = controllerWith({ findById, updateUser, listSshKeys, deleteSshKey });
+    const admin = testActor('admin-a', Role.Admin);
+    const userAdmin = testActor('ua-a', Role.UserAdmin);
 
-    await expect(controller.getUser('user-b', manager)).resolves.toBeDefined();
-    await expect(controller.getUser('user-b', granter)).resolves.toBeDefined();
-    await controller.updateUser('user-b', { displayName: 'B' }, manager);
-    expect(updateUser).toHaveBeenCalledWith('user-b', { displayName: 'B' }, 'admin-a');
-    await expect(controller.updateUser('user-b', { displayName: 'B' }, granter))
-      .rejects.toBeInstanceOf(ForbiddenException);
-    await expect(controller.listSshKeys('user-b', manager)).resolves.toEqual([]);
-    await expect(controller.listSshKeys('user-b', granter)).rejects.toBeInstanceOf(ForbiddenException);
+    for (const manager of [admin, userAdmin]) {
+      await expect(controller.getUser('user-b', manager)).resolves.toBeDefined();
+      await controller.updateUser('user-b', { displayName: 'B' }, manager);
+      expect(updateUser).toHaveBeenLastCalledWith('user-b', { displayName: 'B' }, manager.userId);
+      await expect(controller.listSshKeys('user-b', manager)).resolves.toEqual([]);
+      await controller.deleteSshKey('user-b', 'key', manager);
+      expect(deleteSshKey).toHaveBeenLastCalledWith('user-b', 'key', manager.userId);
+    }
+  });
+
+  it('keeps a user admin on the self-service route for their own record', async () => {
+    const updateUser = vi.fn();
+    const updateSelf = vi.fn().mockResolvedValue({ id: 'ua-a' });
+    const controller = controllerWith({ updateUser, updateSelf });
+    const userAdmin = testActor('ua-a', Role.UserAdmin);
+
+    await controller.updateUser('ua-a', { password: 'new-password-1' }, userAdmin);
+    expect(updateSelf).toHaveBeenCalledWith('ua-a', { password: 'new-password-1' }, undefined);
+    await expect(controller.updateUser('ua-a', { status: UserStatus.Disabled }, userAdmin))
+      .rejects.toBeInstanceOf(BadRequestException);
+    expect(updateUser).not.toHaveBeenCalled();
   });
 
   it('treats an administrator-shaped change to your own record as administration', async () => {
@@ -113,10 +127,10 @@ describe('user roles over HTTP', () => {
     const admin = testActor('admin-a', Role.Admin);
 
     await controller.createUser({
-      username: 'newbie', password: 'password-1', displayName: 'New', role: Role.Operator,
+      username: 'newbie', password: 'password-1', displayName: 'New', role: Role.UserAdmin,
     }, admin);
     expect(createUser).toHaveBeenCalledWith(
-      { username: 'newbie', password: 'password-1', displayName: 'New', role: Role.Operator },
+      { username: 'newbie', password: 'password-1', displayName: 'New', role: Role.UserAdmin },
       { actorId: 'admin-a' },
     );
     await expect(controller.createUser({
@@ -124,23 +138,39 @@ describe('user roles over HTTP', () => {
     }, admin)).rejects.toThrow();
   });
 
+  it('lets user admins create plain users only', async () => {
+    const createUser = vi.fn().mockResolvedValue({ id: 'new' });
+    const controller = controllerWith({ createUser });
+    const userAdmin = testActor('ua-a', Role.UserAdmin);
+    const base = { username: 'newbie', password: 'password-1', displayName: 'New' };
+
+    await controller.createUser(base, userAdmin);
+    await controller.createUser({ ...base, role: Role.User }, userAdmin);
+    expect(createUser).toHaveBeenCalledTimes(2);
+    for (const role of [Role.UserAdmin, Role.Admin]) {
+      await expect(controller.createUser({ ...base, role }, userAdmin))
+        .rejects.toBeInstanceOf(ForbiddenException);
+    }
+    expect(createUser).toHaveBeenCalledTimes(2);
+  });
+
   it('lets only admins change a role, including their own', async () => {
     const updateUser = vi.fn().mockResolvedValue({ id: 'user-b' });
     const updateSelf = vi.fn();
     const controller = controllerWith({ updateUser, updateSelf });
 
-    await controller.updateUser('user-b', { role: Role.Operator }, testActor('admin-a', Role.Admin));
-    expect(updateUser).toHaveBeenCalledWith('user-b', { role: Role.Operator }, 'admin-a');
-    await controller.updateUser('admin-a', { role: Role.Operator }, testActor('admin-a', Role.Admin));
-    expect(updateUser).toHaveBeenLastCalledWith('admin-a', { role: Role.Operator }, 'admin-a');
+    await controller.updateUser('user-b', { role: Role.UserAdmin }, testActor('admin-a', Role.Admin));
+    expect(updateUser).toHaveBeenCalledWith('user-b', { role: Role.UserAdmin }, 'admin-a');
+    await controller.updateUser('admin-a', { role: Role.UserAdmin }, testActor('admin-a', Role.Admin));
+    expect(updateUser).toHaveBeenLastCalledWith('admin-a', { role: Role.UserAdmin }, 'admin-a');
     expect(updateSelf).not.toHaveBeenCalled();
 
-    // Nobody promotes themselves, and operators cannot touch roles.
+    // Nobody promotes themselves, and user admins cannot touch roles.
     await expect(controller.updateUser('user-a', { role: Role.Admin }, testActor('user-a')))
       .rejects.toBeInstanceOf(ForbiddenException);
-    await expect(controller.updateUser('op-a', { role: Role.Admin }, testActor('op-a', Role.Operator)))
+    await expect(controller.updateUser('ua-a', { role: Role.Admin }, testActor('ua-a', Role.UserAdmin)))
       .rejects.toBeInstanceOf(ForbiddenException);
-    await expect(controller.updateUser('user-b', { role: Role.User }, testActor('op-a', Role.Operator)))
+    await expect(controller.updateUser('user-b', { role: Role.User }, testActor('ua-a', Role.UserAdmin)))
       .rejects.toBeInstanceOf(ForbiddenException);
     expect(updateUser).toHaveBeenCalledTimes(2);
     expect(updateSelf).not.toHaveBeenCalled();

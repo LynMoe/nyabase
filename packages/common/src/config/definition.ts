@@ -22,8 +22,6 @@ export interface ConfigFieldDefinition<T = unknown> {
   sourceOrder: ConfigSourceOrder;
   secret: boolean;
   editable: boolean;
-  /** Only admins may change it online (operators see it read-only). */
-  adminOnly?: boolean;
   restartRequired: boolean;
   public: boolean;
   label: string;
@@ -269,11 +267,10 @@ export const controlPlaneConfigDefinitions = [
     valueKind: 'number',
     secret: false,
     editable: true,
-    adminOnly: true,
     restartRequired: false,
     public: false,
     label: 'Refresh token days',
-    description: 'Idle timeout in days: a browser session that is not refreshed within this window expires. Each refresh extends it, up to auth.sessionMaxLifetimeDays. Admin only.',
+    description: 'Idle timeout in days: a browser session that is not refreshed within this window expires. Each refresh extends it, up to auth.sessionMaxLifetimeDays.',
   }),
   field({
     key: 'auth.sessionMaxLifetimeDays',
@@ -284,11 +281,10 @@ export const controlPlaneConfigDefinitions = [
     valueKind: 'number',
     secret: false,
     editable: true,
-    adminOnly: true,
     restartRequired: false,
     public: false,
     label: 'Session max lifetime days',
-    description: 'Absolute lifetime of a browser session in days, counted from login. Refreshing never extends a session past it; the user signs in again. Applies to existing sessions on their next refresh. Admin only.',
+    description: 'Absolute lifetime of a browser session in days, counted from login. Refreshing never extends a session past it; the user signs in again. Applies to existing sessions on their next refresh.',
   }),
   field({
     key: 'auth.cookieSecure',
@@ -553,11 +549,10 @@ export const controlPlaneConfigDefinitions = [
     valueKind: 'number',
     secret: false,
     editable: true,
-    adminOnly: true,
     restartRequired: false,
     public: false,
     label: 'Audit retention days',
-    description: 'Number of days to keep audit logs (at least 30). Set to 0 to disable age-based cleanup. Admin only.',
+    description: 'Number of days to keep audit logs (at least 30). Set to 0 to disable age-based cleanup.',
   }),
   field({
     key: 'audit.retentionMaxEntries',
@@ -568,11 +563,10 @@ export const controlPlaneConfigDefinitions = [
     valueKind: 'number',
     secret: false,
     editable: true,
-    adminOnly: true,
     restartRequired: false,
     public: false,
     label: 'Audit max entries',
-    description: 'Maximum number of audit logs to keep (at least 10000). Set to 0 to disable count-based cleanup. Admin only.',
+    description: 'Maximum number of audit logs to keep (at least 10000). Set to 0 to disable count-based cleanup.',
   }),
   field({
     key: 'metrics.victoriaMetricsUrl',
@@ -730,7 +724,6 @@ export const controlPlaneConfigManifest = controlPlaneConfigDefinitions.map((def
   sourceOrder: [...definition.sourceOrder],
   secret: definition.secret,
   editable: definition.editable,
-  adminOnly: definition.adminOnly === true,
   restartRequired: definition.restartRequired,
   public: definition.public,
   label: definition.label,

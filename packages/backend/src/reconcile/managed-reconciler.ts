@@ -33,9 +33,9 @@ export function failedOutcome(
   return { outcome: 'failed', failure: intentFailure(code, message, details) };
 }
 
-/** Who owns a resource (null: nobody, operator-only). */
+/** Who owns a resource (null: nobody, admin-only). */
 /**
- * Who owns a resource (`null` for operator-managed types). `resourceAuthorities`
+ * Who owns a resource (`null` for admin-managed types). `resourceAuthorities`
  * omits owned resources that no longer exist, so intents can tell "deleted"
  * from "someone else's".
  */

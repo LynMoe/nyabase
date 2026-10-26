@@ -13,7 +13,7 @@ import { SshSessionsService } from './ssh-sessions.service.js';
 
 /**
  * SSH proxy connection history. `scope=mine` (the default) is the caller's
- * own connections; `scope=all` needs the operator role.
+ * own connections; `scope=all` needs the user admin role.
  */
 @Controller('ssh-sessions')
 export class SshSessionsController {

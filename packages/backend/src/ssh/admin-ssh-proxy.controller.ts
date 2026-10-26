@@ -39,26 +39,26 @@ export class AdminSshProxyController {
   ) {}
 
   @Get('status')
-  @RequireRole(Role.Operator)
+  @RequireRole(Role.Admin)
   status() {
     return this.sshProxyGateway.getStatus();
   }
 
   /** Unauthenticated connections (refused keys, scanners, limits) summed per address and reason. */
   @Get('refusals')
-  @RequireRole(Role.Operator)
+  @RequireRole(Role.Admin)
   refusals(@Query() query: Record<string, unknown>): Promise<SshProxyRefusalsDto> {
     return this.sessions.refusals(zSshProxyRefusalsQuery.parse(query).hours);
   }
 
   @Post('disconnect-all')
   @HttpCode(200)
-  @RequireRole(Role.Operator)
+  @RequireRole(Role.Admin)
   async disconnectAll(@CurrentUser() actor: UserRecord) {
     const requestId = randomBytes(12).toString('hex');
     await this.accessResolver.runWithActorRole(
       actor.id,
-      Role.Operator,
+      Role.Admin,
       (transaction) => this.audit.append(
         transaction,
         actor.id,
@@ -78,11 +78,11 @@ export class AdminSshProxyController {
    */
   @Post('host-authorities/reset')
   @HttpCode(200)
-  @RequireRole(Role.Operator)
+  @RequireRole(Role.Admin)
   async resetHostAuthorities(@CurrentUser() actor: UserRecord): Promise<{ reset: number }> {
     const reset = await this.accessResolver.runWithActorRole(
       actor.id,
-      Role.Operator,
+      Role.Admin,
       async (transaction) => {
         const count = await this.hostCa.resetAll(transaction);
         await this.audit.append(
@@ -102,18 +102,18 @@ export class AdminSshProxyController {
   }
 
   @Get('host-key')
-  @RequireRole(Role.Operator)
+  @RequireRole(Role.Admin)
   async hostKey(@CurrentUser() actor: UserRecord): Promise<SshProxyHostKeySummaryDto> {
     return this.hostKeyDto(actor.id);
   }
 
   @Post('host-key/rotate')
   @HttpCode(200)
-  @RequireRole(Role.Operator)
+  @RequireRole(Role.Admin)
   async rotateHostKey(@CurrentUser() actor: UserRecord): Promise<SshProxyHostKeySummaryDto> {
     const rotated = await this.sshIdentities.rotateProxyHostKey(
       async (manager) => {
-        await assertActorRole(manager, actor.id, Role.Operator);
+        await assertActorRole(manager, actor.id, Role.Admin);
       },
       (transaction, key) => this.audit.append(
         transaction,
@@ -143,7 +143,7 @@ export class AdminSshProxyController {
   private async hostKeyDto(actorId: string): Promise<SshProxyHostKeySummaryDto> {
     const hostKey = await this.sshIdentities.getProxyHostKeySummary(
       async (manager) => {
-        await assertActorRole(manager, actorId, Role.Operator);
+        await assertActorRole(manager, actorId, Role.Admin);
       },
     );
     return {

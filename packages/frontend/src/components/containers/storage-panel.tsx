@@ -197,7 +197,7 @@ export function StoragePanel({ container, scope }: { container: ContainerDto; sc
 
 function useVolumeCaps(scope: ListScope) {
   const admin = scope === 'all';
-  const isAdmin = useHasRole(Role.Admin);
+  const isAdmin = useHasRole(Role.UserAdmin);
   const canManageVolumes = isAdmin;
   const canManageSharedVolumes = isAdmin;
   return {

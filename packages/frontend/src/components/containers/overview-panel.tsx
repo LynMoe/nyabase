@@ -56,7 +56,7 @@ function SpecCard({
   onEdit: () => void;
 }) {
   const admin = scope === 'all';
-  const canViewMetrics = useHasRole(Role.Operator);
+  const canViewMetrics = useHasRole(Role.UserAdmin);
   const metricsDenied = admin && !canViewMetrics;
   const { data: occupancy } = useQuery({
     queryKey: queryKeys.performance.self(scope, container.id),

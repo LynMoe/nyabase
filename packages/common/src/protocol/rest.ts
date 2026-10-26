@@ -154,9 +154,8 @@ export interface SystemSettingFieldDto {
   envValuePresent: boolean;
   defaultValue: unknown;
   secret: boolean;
-  /** Editable online by the caller: false when env-overridden or admin-only for a non-admin. */
+  /** Editable online: false when env-overridden. */
   editable: boolean;
-  adminOnly: boolean;
   restartRequired: boolean;
   public: boolean;
   label: string;

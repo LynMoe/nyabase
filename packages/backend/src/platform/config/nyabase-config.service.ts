@@ -104,7 +104,6 @@ export class NyabaseConfigService implements OnModuleInit {
         secret: definition.secret,
         // An env value outranks the database row, so an online edit would be refused.
         editable: definition.editable && !definition.restartRequired && !resolved.envValuePresent,
-        adminOnly: definition.adminOnly === true,
         restartRequired: definition.restartRequired,
         public: definition.public,
         label: definition.label,

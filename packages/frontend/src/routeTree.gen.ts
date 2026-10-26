@@ -9,41 +9,42 @@
 // Additionally, you should also exclude this file from your linter and/or formatter to prevent it from being checked or modified.
 
 import { Route as rootRouteImport } from './routes/__root'
-import { Route as ProfileRouteImport } from './routes/profile'
-import { Route as LoginRouteImport } from './routes/login'
 import { Route as IndexRouteImport } from './routes/index'
-import { Route as VolumesIndexRouteImport } from './routes/volumes/index'
-import { Route as UsersIndexRouteImport } from './routes/users/index'
-import { Route as UsageIndexRouteImport } from './routes/usage/index'
-import { Route as SystemSettingsIndexRouteImport } from './routes/system-settings/index'
-import { Route as SshProxyIndexRouteImport } from './routes/ssh-proxy/index'
-import { Route as SharedVolumesIndexRouteImport } from './routes/shared-volumes/index'
-import { Route as SharedBackendsIndexRouteImport } from './routes/shared-backends/index'
-import { Route as ServersIndexRouteImport } from './routes/servers/index'
-import { Route as QuotaIndexRouteImport } from './routes/quota/index'
-import { Route as OpsIndexRouteImport } from './routes/ops/index'
-import { Route as NetworkIndexRouteImport } from './routes/network/index'
-import { Route as ImagesIndexRouteImport } from './routes/images/index'
-import { Route as HttpProxyIndexRouteImport } from './routes/http-proxy/index'
-import { Route as HttpProxyOpsIndexRouteImport } from './routes/http-proxy-ops/index'
-import { Route as GroupsIndexRouteImport } from './routes/groups/index'
-import { Route as ContainersIndexRouteImport } from './routes/containers/index'
+import { Route as LoginRouteImport } from './routes/login'
+import { Route as ProfileRouteImport } from './routes/profile'
 import { Route as AuditIndexRouteImport } from './routes/audit/index'
-import { Route as UsersIdRouteImport } from './routes/users/$id'
-import { Route as SharedBackendsIdRouteImport } from './routes/shared-backends/$id'
-import { Route as ServersUsageRouteImport } from './routes/servers/usage'
-import { Route as ServersIdRouteImport } from './routes/servers/$id'
-import { Route as ImagesIdRouteImport } from './routes/images/$id'
-import { Route as GroupsIdRouteImport } from './routes/groups/$id'
+import { Route as ContainersIndexRouteImport } from './routes/containers/index'
 import { Route as ContainersContainerIdRouteImport } from './routes/containers/$containerId'
+import { Route as GroupsIndexRouteImport } from './routes/groups/index'
+import { Route as GroupsIdRouteImport } from './routes/groups/$id'
+import { Route as HttpProxyOpsIndexRouteImport } from './routes/http-proxy-ops/index'
+import { Route as HttpProxyIndexRouteImport } from './routes/http-proxy/index'
+import { Route as ImagesIndexRouteImport } from './routes/images/index'
+import { Route as ImagesIdRouteImport } from './routes/images/$id'
+import { Route as NetworkIndexRouteImport } from './routes/network/index'
+import { Route as OpsIndexRouteImport } from './routes/ops/index'
+import { Route as QuotaIndexRouteImport } from './routes/quota/index'
+import { Route as ServersIndexRouteImport } from './routes/servers/index'
+import { Route as ServersIdRouteImport } from './routes/servers/$id'
+import { Route as ServersUsageRouteImport } from './routes/servers/usage'
+import { Route as SharedBackendsIndexRouteImport } from './routes/shared-backends/index'
+import { Route as SharedBackendsIdRouteImport } from './routes/shared-backends/$id'
+import { Route as SharedVolumesIndexRouteImport } from './routes/shared-volumes/index'
+import { Route as SshProxyIndexRouteImport } from './routes/ssh-proxy/index'
+import { Route as SystemSettingsIndexRouteImport } from './routes/system-settings/index'
+import { Route as UsageIndexRouteImport } from './routes/usage/index'
+import { Route as UsersIndexRouteImport } from './routes/users/index'
+import { Route as UsersIdRouteImport } from './routes/users/$id'
+import { Route as VolumesIndexRouteImport } from './routes/volumes/index'
+import { Route as ContainersContainerIdUsageRouteImport } from './routes/containers/$containerId_.usage'
 import { Route as ManageContainersIndexRouteImport } from './routes/manage/containers/index'
 import { Route as ManageContainersContainerIdRouteImport } from './routes/manage/containers/$containerId'
-import { Route as ContainersContainerIdUsageRouteImport } from './routes/containers/$containerId_.usage'
+import { Route as ManageVolumesIndexRouteImport } from './routes/manage/volumes/index'
 import { Route as ManageContainersContainerIdUsageRouteImport } from './routes/manage/containers/$containerId_.usage'
 
-const ProfileRoute = ProfileRouteImport.update({
-  id: '/profile',
-  path: '/profile',
+const IndexRoute = IndexRouteImport.update({
+  id: '/',
+  path: '/',
   getParentRoute: () => rootRouteImport,
 } as any)
 const LoginRoute = LoginRouteImport.update({
@@ -51,89 +52,9 @@ const LoginRoute = LoginRouteImport.update({
   path: '/login',
   getParentRoute: () => rootRouteImport,
 } as any)
-const IndexRoute = IndexRouteImport.update({
-  id: '/',
-  path: '/',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const VolumesIndexRoute = VolumesIndexRouteImport.update({
-  id: '/volumes/',
-  path: '/volumes/',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const UsersIndexRoute = UsersIndexRouteImport.update({
-  id: '/users/',
-  path: '/users/',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const UsageIndexRoute = UsageIndexRouteImport.update({
-  id: '/usage/',
-  path: '/usage/',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const SystemSettingsIndexRoute = SystemSettingsIndexRouteImport.update({
-  id: '/system-settings/',
-  path: '/system-settings/',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const SshProxyIndexRoute = SshProxyIndexRouteImport.update({
-  id: '/ssh-proxy/',
-  path: '/ssh-proxy/',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const SharedVolumesIndexRoute = SharedVolumesIndexRouteImport.update({
-  id: '/shared-volumes/',
-  path: '/shared-volumes/',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const SharedBackendsIndexRoute = SharedBackendsIndexRouteImport.update({
-  id: '/shared-backends/',
-  path: '/shared-backends/',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const ServersIndexRoute = ServersIndexRouteImport.update({
-  id: '/servers/',
-  path: '/servers/',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const QuotaIndexRoute = QuotaIndexRouteImport.update({
-  id: '/quota/',
-  path: '/quota/',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const OpsIndexRoute = OpsIndexRouteImport.update({
-  id: '/ops/',
-  path: '/ops/',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const NetworkIndexRoute = NetworkIndexRouteImport.update({
-  id: '/network/',
-  path: '/network/',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const ImagesIndexRoute = ImagesIndexRouteImport.update({
-  id: '/images/',
-  path: '/images/',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const HttpProxyIndexRoute = HttpProxyIndexRouteImport.update({
-  id: '/http-proxy/',
-  path: '/http-proxy/',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const HttpProxyOpsIndexRoute = HttpProxyOpsIndexRouteImport.update({
-  id: '/http-proxy-ops/',
-  path: '/http-proxy-ops/',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const GroupsIndexRoute = GroupsIndexRouteImport.update({
-  id: '/groups/',
-  path: '/groups/',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const ContainersIndexRoute = ContainersIndexRouteImport.update({
-  id: '/containers/',
-  path: '/containers/',
+const ProfileRoute = ProfileRouteImport.update({
+  id: '/profile',
+  path: '/profile',
   getParentRoute: () => rootRouteImport,
 } as any)
 const AuditIndexRoute = AuditIndexRouteImport.update({
@@ -141,34 +62,9 @@ const AuditIndexRoute = AuditIndexRouteImport.update({
   path: '/audit/',
   getParentRoute: () => rootRouteImport,
 } as any)
-const UsersIdRoute = UsersIdRouteImport.update({
-  id: '/users/$id',
-  path: '/users/$id',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const SharedBackendsIdRoute = SharedBackendsIdRouteImport.update({
-  id: '/shared-backends/$id',
-  path: '/shared-backends/$id',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const ServersUsageRoute = ServersUsageRouteImport.update({
-  id: '/servers/usage',
-  path: '/servers/usage',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const ServersIdRoute = ServersIdRouteImport.update({
-  id: '/servers/$id',
-  path: '/servers/$id',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const ImagesIdRoute = ImagesIdRouteImport.update({
-  id: '/images/$id',
-  path: '/images/$id',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const GroupsIdRoute = GroupsIdRouteImport.update({
-  id: '/groups/$id',
-  path: '/groups/$id',
+const ContainersIndexRoute = ContainersIndexRouteImport.update({
+  id: '/containers/',
+  path: '/containers/',
   getParentRoute: () => rootRouteImport,
 } as any)
 const ContainersContainerIdRoute = ContainersContainerIdRouteImport.update({
@@ -176,6 +72,117 @@ const ContainersContainerIdRoute = ContainersContainerIdRouteImport.update({
   path: '/containers/$containerId',
   getParentRoute: () => rootRouteImport,
 } as any)
+const GroupsIndexRoute = GroupsIndexRouteImport.update({
+  id: '/groups/',
+  path: '/groups/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const GroupsIdRoute = GroupsIdRouteImport.update({
+  id: '/groups/$id',
+  path: '/groups/$id',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const HttpProxyOpsIndexRoute = HttpProxyOpsIndexRouteImport.update({
+  id: '/http-proxy-ops/',
+  path: '/http-proxy-ops/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const HttpProxyIndexRoute = HttpProxyIndexRouteImport.update({
+  id: '/http-proxy/',
+  path: '/http-proxy/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ImagesIndexRoute = ImagesIndexRouteImport.update({
+  id: '/images/',
+  path: '/images/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ImagesIdRoute = ImagesIdRouteImport.update({
+  id: '/images/$id',
+  path: '/images/$id',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const NetworkIndexRoute = NetworkIndexRouteImport.update({
+  id: '/network/',
+  path: '/network/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const OpsIndexRoute = OpsIndexRouteImport.update({
+  id: '/ops/',
+  path: '/ops/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const QuotaIndexRoute = QuotaIndexRouteImport.update({
+  id: '/quota/',
+  path: '/quota/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ServersIndexRoute = ServersIndexRouteImport.update({
+  id: '/servers/',
+  path: '/servers/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ServersIdRoute = ServersIdRouteImport.update({
+  id: '/servers/$id',
+  path: '/servers/$id',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ServersUsageRoute = ServersUsageRouteImport.update({
+  id: '/servers/usage',
+  path: '/servers/usage',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const SharedBackendsIndexRoute = SharedBackendsIndexRouteImport.update({
+  id: '/shared-backends/',
+  path: '/shared-backends/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const SharedBackendsIdRoute = SharedBackendsIdRouteImport.update({
+  id: '/shared-backends/$id',
+  path: '/shared-backends/$id',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const SharedVolumesIndexRoute = SharedVolumesIndexRouteImport.update({
+  id: '/shared-volumes/',
+  path: '/shared-volumes/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const SshProxyIndexRoute = SshProxyIndexRouteImport.update({
+  id: '/ssh-proxy/',
+  path: '/ssh-proxy/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const SystemSettingsIndexRoute = SystemSettingsIndexRouteImport.update({
+  id: '/system-settings/',
+  path: '/system-settings/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const UsageIndexRoute = UsageIndexRouteImport.update({
+  id: '/usage/',
+  path: '/usage/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const UsersIndexRoute = UsersIndexRouteImport.update({
+  id: '/users/',
+  path: '/users/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const UsersIdRoute = UsersIdRouteImport.update({
+  id: '/users/$id',
+  path: '/users/$id',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const VolumesIndexRoute = VolumesIndexRouteImport.update({
+  id: '/volumes/',
+  path: '/volumes/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ContainersContainerIdUsageRoute =
+  ContainersContainerIdUsageRouteImport.update({
+    id: '/containers/$containerId_/usage',
+    path: '/containers/$containerId/usage',
+    getParentRoute: () => rootRouteImport,
+  } as any)
 const ManageContainersIndexRoute = ManageContainersIndexRouteImport.update({
   id: '/manage/containers/',
   path: '/manage/containers/',
@@ -187,12 +194,11 @@ const ManageContainersContainerIdRoute =
     path: '/manage/containers/$containerId',
     getParentRoute: () => rootRouteImport,
   } as any)
-const ContainersContainerIdUsageRoute =
-  ContainersContainerIdUsageRouteImport.update({
-    id: '/containers/$containerId_/usage',
-    path: '/containers/$containerId/usage',
-    getParentRoute: () => rootRouteImport,
-  } as any)
+const ManageVolumesIndexRoute = ManageVolumesIndexRouteImport.update({
+  id: '/manage/volumes/',
+  path: '/manage/volumes/',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const ManageContainersContainerIdUsageRoute =
   ManageContainersContainerIdUsageRouteImport.update({
     id: '/manage/containers/$containerId_/usage',
@@ -231,6 +237,7 @@ export interface FileRoutesByFullPath {
   '/containers/$containerId/usage': typeof ContainersContainerIdUsageRoute
   '/manage/containers/$containerId': typeof ManageContainersContainerIdRoute
   '/manage/containers/': typeof ManageContainersIndexRoute
+  '/manage/volumes/': typeof ManageVolumesIndexRoute
   '/manage/containers/$containerId/usage': typeof ManageContainersContainerIdUsageRoute
 }
 export interface FileRoutesByTo {
@@ -264,6 +271,7 @@ export interface FileRoutesByTo {
   '/containers/$containerId/usage': typeof ContainersContainerIdUsageRoute
   '/manage/containers/$containerId': typeof ManageContainersContainerIdRoute
   '/manage/containers': typeof ManageContainersIndexRoute
+  '/manage/volumes': typeof ManageVolumesIndexRoute
   '/manage/containers/$containerId/usage': typeof ManageContainersContainerIdUsageRoute
 }
 export interface FileRoutesById {
@@ -298,6 +306,7 @@ export interface FileRoutesById {
   '/containers/$containerId_/usage': typeof ContainersContainerIdUsageRoute
   '/manage/containers/$containerId': typeof ManageContainersContainerIdRoute
   '/manage/containers/': typeof ManageContainersIndexRoute
+  '/manage/volumes/': typeof ManageVolumesIndexRoute
   '/manage/containers/$containerId_/usage': typeof ManageContainersContainerIdUsageRoute
 }
 export interface FileRouteTypes {
@@ -333,6 +342,7 @@ export interface FileRouteTypes {
     | '/containers/$containerId/usage'
     | '/manage/containers/$containerId'
     | '/manage/containers/'
+    | '/manage/volumes/'
     | '/manage/containers/$containerId/usage'
   fileRoutesByTo: FileRoutesByTo
   to:
@@ -366,6 +376,7 @@ export interface FileRouteTypes {
     | '/containers/$containerId/usage'
     | '/manage/containers/$containerId'
     | '/manage/containers'
+    | '/manage/volumes'
     | '/manage/containers/$containerId/usage'
   id:
     | '__root__'
@@ -399,6 +410,7 @@ export interface FileRouteTypes {
     | '/containers/$containerId_/usage'
     | '/manage/containers/$containerId'
     | '/manage/containers/'
+    | '/manage/volumes/'
     | '/manage/containers/$containerId_/usage'
   fileRoutesById: FileRoutesById
 }
@@ -433,16 +445,17 @@ export interface RootRouteChildren {
   ContainersContainerIdUsageRoute: typeof ContainersContainerIdUsageRoute
   ManageContainersContainerIdRoute: typeof ManageContainersContainerIdRoute
   ManageContainersIndexRoute: typeof ManageContainersIndexRoute
+  ManageVolumesIndexRoute: typeof ManageVolumesIndexRoute
   ManageContainersContainerIdUsageRoute: typeof ManageContainersContainerIdUsageRoute
 }
 
 declare module '@tanstack/react-router' {
   interface FileRoutesByPath {
-    '/profile': {
-      id: '/profile'
-      path: '/profile'
-      fullPath: '/profile'
-      preLoaderRoute: typeof ProfileRouteImport
+    '/': {
+      id: '/'
+      path: '/'
+      fullPath: '/'
+      preLoaderRoute: typeof IndexRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/login': {
@@ -452,123 +465,11 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof LoginRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/': {
-      id: '/'
-      path: '/'
-      fullPath: '/'
-      preLoaderRoute: typeof IndexRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/volumes/': {
-      id: '/volumes/'
-      path: '/volumes'
-      fullPath: '/volumes/'
-      preLoaderRoute: typeof VolumesIndexRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/users/': {
-      id: '/users/'
-      path: '/users'
-      fullPath: '/users/'
-      preLoaderRoute: typeof UsersIndexRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/usage/': {
-      id: '/usage/'
-      path: '/usage'
-      fullPath: '/usage/'
-      preLoaderRoute: typeof UsageIndexRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/system-settings/': {
-      id: '/system-settings/'
-      path: '/system-settings'
-      fullPath: '/system-settings/'
-      preLoaderRoute: typeof SystemSettingsIndexRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/ssh-proxy/': {
-      id: '/ssh-proxy/'
-      path: '/ssh-proxy'
-      fullPath: '/ssh-proxy/'
-      preLoaderRoute: typeof SshProxyIndexRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/shared-volumes/': {
-      id: '/shared-volumes/'
-      path: '/shared-volumes'
-      fullPath: '/shared-volumes/'
-      preLoaderRoute: typeof SharedVolumesIndexRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/shared-backends/': {
-      id: '/shared-backends/'
-      path: '/shared-backends'
-      fullPath: '/shared-backends/'
-      preLoaderRoute: typeof SharedBackendsIndexRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/servers/': {
-      id: '/servers/'
-      path: '/servers'
-      fullPath: '/servers/'
-      preLoaderRoute: typeof ServersIndexRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/quota/': {
-      id: '/quota/'
-      path: '/quota'
-      fullPath: '/quota/'
-      preLoaderRoute: typeof QuotaIndexRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/ops/': {
-      id: '/ops/'
-      path: '/ops'
-      fullPath: '/ops/'
-      preLoaderRoute: typeof OpsIndexRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/network/': {
-      id: '/network/'
-      path: '/network'
-      fullPath: '/network/'
-      preLoaderRoute: typeof NetworkIndexRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/images/': {
-      id: '/images/'
-      path: '/images'
-      fullPath: '/images/'
-      preLoaderRoute: typeof ImagesIndexRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/http-proxy/': {
-      id: '/http-proxy/'
-      path: '/http-proxy'
-      fullPath: '/http-proxy/'
-      preLoaderRoute: typeof HttpProxyIndexRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/http-proxy-ops/': {
-      id: '/http-proxy-ops/'
-      path: '/http-proxy-ops'
-      fullPath: '/http-proxy-ops/'
-      preLoaderRoute: typeof HttpProxyOpsIndexRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/groups/': {
-      id: '/groups/'
-      path: '/groups'
-      fullPath: '/groups/'
-      preLoaderRoute: typeof GroupsIndexRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/containers/': {
-      id: '/containers/'
-      path: '/containers'
-      fullPath: '/containers/'
-      preLoaderRoute: typeof ContainersIndexRouteImport
+    '/profile': {
+      id: '/profile'
+      path: '/profile'
+      fullPath: '/profile'
+      preLoaderRoute: typeof ProfileRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/audit/': {
@@ -578,39 +479,25 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuditIndexRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/users/$id': {
-      id: '/users/$id'
-      path: '/users/$id'
-      fullPath: '/users/$id'
-      preLoaderRoute: typeof UsersIdRouteImport
+    '/containers/': {
+      id: '/containers/'
+      path: '/containers'
+      fullPath: '/containers/'
+      preLoaderRoute: typeof ContainersIndexRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/shared-backends/$id': {
-      id: '/shared-backends/$id'
-      path: '/shared-backends/$id'
-      fullPath: '/shared-backends/$id'
-      preLoaderRoute: typeof SharedBackendsIdRouteImport
+    '/containers/$containerId': {
+      id: '/containers/$containerId'
+      path: '/containers/$containerId'
+      fullPath: '/containers/$containerId'
+      preLoaderRoute: typeof ContainersContainerIdRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/servers/usage': {
-      id: '/servers/usage'
-      path: '/servers/usage'
-      fullPath: '/servers/usage'
-      preLoaderRoute: typeof ServersUsageRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/servers/$id': {
-      id: '/servers/$id'
-      path: '/servers/$id'
-      fullPath: '/servers/$id'
-      preLoaderRoute: typeof ServersIdRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/images/$id': {
-      id: '/images/$id'
-      path: '/images/$id'
-      fullPath: '/images/$id'
-      preLoaderRoute: typeof ImagesIdRouteImport
+    '/groups/': {
+      id: '/groups/'
+      path: '/groups'
+      fullPath: '/groups/'
+      preLoaderRoute: typeof GroupsIndexRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/groups/$id': {
@@ -620,11 +507,144 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof GroupsIdRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/containers/$containerId': {
-      id: '/containers/$containerId'
-      path: '/containers/$containerId'
-      fullPath: '/containers/$containerId'
-      preLoaderRoute: typeof ContainersContainerIdRouteImport
+    '/http-proxy-ops/': {
+      id: '/http-proxy-ops/'
+      path: '/http-proxy-ops'
+      fullPath: '/http-proxy-ops/'
+      preLoaderRoute: typeof HttpProxyOpsIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/http-proxy/': {
+      id: '/http-proxy/'
+      path: '/http-proxy'
+      fullPath: '/http-proxy/'
+      preLoaderRoute: typeof HttpProxyIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/images/': {
+      id: '/images/'
+      path: '/images'
+      fullPath: '/images/'
+      preLoaderRoute: typeof ImagesIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/images/$id': {
+      id: '/images/$id'
+      path: '/images/$id'
+      fullPath: '/images/$id'
+      preLoaderRoute: typeof ImagesIdRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/network/': {
+      id: '/network/'
+      path: '/network'
+      fullPath: '/network/'
+      preLoaderRoute: typeof NetworkIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/ops/': {
+      id: '/ops/'
+      path: '/ops'
+      fullPath: '/ops/'
+      preLoaderRoute: typeof OpsIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/quota/': {
+      id: '/quota/'
+      path: '/quota'
+      fullPath: '/quota/'
+      preLoaderRoute: typeof QuotaIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/servers/': {
+      id: '/servers/'
+      path: '/servers'
+      fullPath: '/servers/'
+      preLoaderRoute: typeof ServersIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/servers/$id': {
+      id: '/servers/$id'
+      path: '/servers/$id'
+      fullPath: '/servers/$id'
+      preLoaderRoute: typeof ServersIdRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/servers/usage': {
+      id: '/servers/usage'
+      path: '/servers/usage'
+      fullPath: '/servers/usage'
+      preLoaderRoute: typeof ServersUsageRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/shared-backends/': {
+      id: '/shared-backends/'
+      path: '/shared-backends'
+      fullPath: '/shared-backends/'
+      preLoaderRoute: typeof SharedBackendsIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/shared-backends/$id': {
+      id: '/shared-backends/$id'
+      path: '/shared-backends/$id'
+      fullPath: '/shared-backends/$id'
+      preLoaderRoute: typeof SharedBackendsIdRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/shared-volumes/': {
+      id: '/shared-volumes/'
+      path: '/shared-volumes'
+      fullPath: '/shared-volumes/'
+      preLoaderRoute: typeof SharedVolumesIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/ssh-proxy/': {
+      id: '/ssh-proxy/'
+      path: '/ssh-proxy'
+      fullPath: '/ssh-proxy/'
+      preLoaderRoute: typeof SshProxyIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/system-settings/': {
+      id: '/system-settings/'
+      path: '/system-settings'
+      fullPath: '/system-settings/'
+      preLoaderRoute: typeof SystemSettingsIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/usage/': {
+      id: '/usage/'
+      path: '/usage'
+      fullPath: '/usage/'
+      preLoaderRoute: typeof UsageIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/users/': {
+      id: '/users/'
+      path: '/users'
+      fullPath: '/users/'
+      preLoaderRoute: typeof UsersIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/users/$id': {
+      id: '/users/$id'
+      path: '/users/$id'
+      fullPath: '/users/$id'
+      preLoaderRoute: typeof UsersIdRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/volumes/': {
+      id: '/volumes/'
+      path: '/volumes'
+      fullPath: '/volumes/'
+      preLoaderRoute: typeof VolumesIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/containers/$containerId_/usage': {
+      id: '/containers/$containerId_/usage'
+      path: '/containers/$containerId/usage'
+      fullPath: '/containers/$containerId/usage'
+      preLoaderRoute: typeof ContainersContainerIdUsageRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/manage/containers/': {
@@ -641,11 +661,11 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ManageContainersContainerIdRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/containers/$containerId_/usage': {
-      id: '/containers/$containerId_/usage'
-      path: '/containers/$containerId/usage'
-      fullPath: '/containers/$containerId/usage'
-      preLoaderRoute: typeof ContainersContainerIdUsageRouteImport
+    '/manage/volumes/': {
+      id: '/manage/volumes/'
+      path: '/manage/volumes'
+      fullPath: '/manage/volumes/'
+      preLoaderRoute: typeof ManageVolumesIndexRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/manage/containers/$containerId_/usage': {
@@ -689,6 +709,7 @@ const rootRouteChildren: RootRouteChildren = {
   ContainersContainerIdUsageRoute: ContainersContainerIdUsageRoute,
   ManageContainersContainerIdRoute: ManageContainersContainerIdRoute,
   ManageContainersIndexRoute: ManageContainersIndexRoute,
+  ManageVolumesIndexRoute: ManageVolumesIndexRoute,
   ManageContainersContainerIdUsageRoute: ManageContainersContainerIdUsageRoute,
 }
 export const routeTree = rootRouteImport

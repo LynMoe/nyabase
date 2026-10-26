@@ -40,7 +40,7 @@ const containerId = 'container-1';
 const serverId = 'server-1';
 const actorId = 'user-1';
 const owner = testActor(actorId);
-const operator = testActor('operator-1', Role.Operator);
+const userAdmin = testActor('user-admin-1', Role.UserAdmin);
 const stranger = testActor('stranger-1');
 
 function makeHarness() {
@@ -309,13 +309,13 @@ describe('ContainerControlService intent boundary', () => {
     );
   });
 
-  it('still requires the operator role for an operator admin stop', async () => {
+  it('still requires the user admin role for an administrator stop', async () => {
     const harness = makeHarness();
-    await harness.service.action(operator, containerId, 'stop', 'all');
+    await harness.service.action(userAdmin, containerId, 'stop', 'all');
     expect(assertActorRoleMock).toHaveBeenCalledWith(
       harness.transaction,
-      'operator-1',
-      Role.Operator,
+      'user-admin-1',
+      Role.UserAdmin,
     );
     expect(resolveServerAccessMock).not.toHaveBeenCalled();
     // Read committed: the role re-check reads past the IAM lock wait, not a
@@ -570,9 +570,9 @@ describe('ContainerControlService actor authorization', () => {
     expect(assertActorRoleMock).not.toHaveBeenCalled();
   });
 
-  it('hides another user\'s container with a 404, even from an operator without scope=all', async () => {
+  it('hides another user\'s container with a 404, even from a user admin without scope=all', async () => {
     const harness = makeHarness();
-    for (const actor of [stranger, operator]) {
+    for (const actor of [stranger, userAdmin]) {
       await expect(harness.service.get(actor, containerId)).rejects.toBeInstanceOf(NotFoundException);
       await expect(harness.service.action(actor, containerId, 'stop'))
         .rejects.toBeInstanceOf(NotFoundException);
@@ -591,7 +591,7 @@ describe('ContainerControlService actor authorization', () => {
     expect(harness.intents.createPending).not.toHaveBeenCalled();
   });
 
-  it('refuses scope=all without the operator role (403), also on the caller\'s own container', async () => {
+  it('refuses scope=all without the user admin role (403), also on the caller\'s own container', async () => {
     const harness = makeHarness();
     await expect(harness.service.get(owner, containerId, 'all')).rejects.toBeInstanceOf(ForbiddenException);
     await expect(harness.service.action(owner, containerId, 'stop', 'all'))
@@ -603,34 +603,34 @@ describe('ContainerControlService actor authorization', () => {
     expect(harness.intents.createPending).not.toHaveBeenCalled();
   });
 
-  it('lets an operator act on someone else\'s container with scope=all and no grant check', async () => {
+  it('lets a user admin act on someone else\'s container with scope=all and no grant check', async () => {
     const harness = makeHarness();
-    await expect(harness.service.repairSsh(operator, containerId, 'all')).resolves.toEqual({ woken: true });
-    await harness.service.updateLimits(operator, containerId, { memBytes: 99_000_000_000 }, 'all');
+    await expect(harness.service.repairSsh(userAdmin, containerId, 'all')).resolves.toEqual({ woken: true });
+    await harness.service.updateLimits(userAdmin, containerId, { memBytes: 99_000_000_000 }, 'all');
     expect(resolveServerAccessMock).not.toHaveBeenCalled();
     expect(harness.repository.updateDesired).toHaveBeenCalled();
   });
 
-  it('gives an operator the owner rules on their own container unless scope=all', async () => {
+  it('gives a user admin the owner rules on their own container unless scope=all', async () => {
     const harness = makeHarness();
-    Object.assign(harness.row, { owner_id: operator.userId });
-    await harness.service.updateLimits(operator, containerId, { memBytes: 99_000_000_000 });
+    Object.assign(harness.row, { owner_id: userAdmin.userId });
+    await harness.service.updateLimits(userAdmin, containerId, { memBytes: 99_000_000_000 });
     expect(resolveServerAccessMock).toHaveBeenCalledWith(
       harness.transaction,
-      operator.userId,
+      userAdmin.userId,
       serverId,
     );
     expect(assertActorRoleMock).not.toHaveBeenCalled();
   });
 
-  it('rejects scope=all lists without the operator role and scopes mine to the caller', async () => {
+  it('rejects scope=all lists without the user admin role and scopes mine to the caller', async () => {
     const harness = makeHarness();
     await expect(harness.service.list(owner, { scope: 'all' })).rejects.toBeInstanceOf(ForbiddenException);
     const list = vi.fn().mockResolvedValue([]);
     Object.assign(harness.repository, { list });
     await harness.service.list(owner, {});
     expect(list).toHaveBeenLastCalledWith({ ownerId: actorId, serverId: undefined });
-    await harness.service.list(operator, { scope: 'all', serverId: 'server-9' });
+    await harness.service.list(userAdmin, { scope: 'all', serverId: 'server-9' });
     expect(list).toHaveBeenLastCalledWith({ ownerId: undefined, serverId: 'server-9' });
   });
 

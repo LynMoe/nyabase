@@ -18,10 +18,10 @@ const user = testActor('user-a');
 
 describe('assertListScope', () => {
   it('lets scope=mine through and requires the role for scope=all', () => {
-    expect(() => assertListScope(user, 'mine', Role.Operator)).not.toThrow();
-    expect(() => assertListScope(user, 'all', Role.Operator)).toThrow(ForbiddenException);
-    expect(() => assertListScope(testActor('b', Role.Operator), 'all', Role.Operator)).not.toThrow();
-    expect(() => assertListScope(testActor('b', Role.Operator), 'all', Role.Admin)).toThrow(ForbiddenException);
+    expect(() => assertListScope(user, 'mine', Role.UserAdmin)).not.toThrow();
+    expect(() => assertListScope(user, 'all', Role.UserAdmin)).toThrow(ForbiddenException);
+    expect(() => assertListScope(testActor('b', Role.UserAdmin), 'all', Role.UserAdmin)).not.toThrow();
+    expect(() => assertListScope(testActor('b', Role.UserAdmin), 'all', Role.Admin)).toThrow(ForbiddenException);
   });
 
   it('treats the system actor as privileged without a role', () => {
@@ -37,12 +37,20 @@ describe('scope=all needs the resource role', () => {
   const bare = <T>(Service: new (...args: never[]) => T, count: number): T =>
     new Service(...(Array.from({ length: count }, () => ({})) as never[]));
 
-  it('servers: list and get need the operator role', async () => {
+  it('servers: user admins list every server as user DTOs; the admin view is admin-only', async () => {
     const servers = bare(ServersService, 7);
+    const userAdmin = testActor('g', Role.UserAdmin);
     await expect(servers.list(user, 'all')).rejects.toBeInstanceOf(ForbiddenException);
     await expect(servers.get(user, 's1', 'all')).rejects.toBeInstanceOf(ForbiddenException);
+    const findUserDtoById = vi.spyOn(servers, 'findUserDtoById').mockResolvedValue({ id: 's1' } as never);
+    await expect(servers.get(userAdmin, 's1', 'all')).resolves.toEqual({ id: 's1' });
+    expect(findUserDtoById).toHaveBeenCalledWith('s1');
     const findAllDtos = vi.spyOn(servers, 'findAllDtos').mockResolvedValue([]);
-    await expect(servers.list(testActor('g', Role.Operator), 'all')).resolves.toEqual([]);
+    const findAll = vi.spyOn(servers, 'findAll').mockResolvedValue([]);
+    await expect(servers.list(userAdmin, 'all')).resolves.toEqual([]);
+    expect(findAll).toHaveBeenCalled();
+    expect(findAllDtos).not.toHaveBeenCalled();
+    await expect(servers.list(testActor('a', Role.Admin), 'all')).resolves.toEqual([]);
     expect(findAllDtos).toHaveBeenCalled();
   });
 
@@ -54,10 +62,12 @@ describe('scope=all needs the resource role', () => {
     await expect(servers.get(user, 's2', 'mine')).rejects.toBeInstanceOf(NotFoundException);
   });
 
-  it('images: list and get(scope=all) need the operator role', async () => {
+  it('images: list and get(scope=all) need the admin role', async () => {
     const images = bare(ImagesService, 8);
-    await expect(images.list(user, 'all')).rejects.toBeInstanceOf(ForbiddenException);
-    await expect(images.get(user, 'i1', 'all')).rejects.toBeInstanceOf(ForbiddenException);
+    for (const actor of [user, testActor('g', Role.UserAdmin)]) {
+      await expect(images.list(actor, 'all')).rejects.toBeInstanceOf(ForbiddenException);
+      await expect(images.get(actor, 'i1', 'all')).rejects.toBeInstanceOf(ForbiddenException);
+    }
   });
 
   it('images: scope=mine refuses an image the user may not use (403)', async () => {
@@ -92,16 +102,14 @@ describe('scope=all needs the resource role', () => {
     await expect(bindings.listBindings(user, 'all', true)).rejects.toBeInstanceOf(ForbiddenException);
     await expect(bindings.deleteBinding(user, 'b1', 'all')).rejects.toBeInstanceOf(ForbiddenException);
     await expect(pools.listPools(user, 'all')).rejects.toBeInstanceOf(ForbiddenException);
+    await expect(pools.listPools(testActor('g', Role.UserAdmin), 'all')).rejects.toBeInstanceOf(ForbiddenException);
   });
 
-  it('volumes: local and shared need the admin role, capacity needs the operator role', async () => {
+  it('volumes: local, shared and capacity need the user admin role', async () => {
     const volumes = bare(LocalVolumesService, 8);
     const shared = bare(SharedVolumesService, 8);
     await expect(volumes.list(user, { scope: 'all' })).rejects.toBeInstanceOf(ForbiddenException);
-    await expect(volumes.list(testActor('s', Role.Operator), { scope: 'all' }))
-      .rejects.toBeInstanceOf(ForbiddenException);
-    await expect(shared.list(testActor('v', Role.Operator), { scope: 'all' }))
-      .rejects.toBeInstanceOf(ForbiddenException);
+    await expect(shared.list(user, { scope: 'all' })).rejects.toBeInstanceOf(ForbiddenException);
     await expect(volumes.capacity(user, 's1', 'all')).rejects.toBeInstanceOf(ForbiddenException);
   });
 });

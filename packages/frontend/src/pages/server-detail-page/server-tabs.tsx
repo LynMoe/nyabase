@@ -43,7 +43,7 @@ export function ServerDetailTabs({
   onSelectTab: (tab: ServerDetailTab) => void;
 }) {
   const serverId = server.id;
-  const isOperator = useHasRole(Role.Operator);
+  const isAdmin = useHasRole(Role.Admin);
   return (
     <Tabs
       value={tab}
@@ -72,11 +72,11 @@ export function ServerDetailTabs({
         <PreflightCard server={server} />
       </TabsContent>
       <TabsContent value="metrics" className="space-y-6">
-        {isOperator ? <ServerMetricsPanel serverId={serverId} /> : null}
+        {isAdmin ? <ServerMetricsPanel serverId={serverId} /> : null}
         <NodeMetricsCard server={server} />
       </TabsContent>
       <TabsContent value="gpu">
-        {isOperator ? (
+        {isAdmin ? (
           <ServerGpuCard serverId={serverId} active={tab === 'gpu'} />
         ) : (
           <Card>
