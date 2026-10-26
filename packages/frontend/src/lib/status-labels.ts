@@ -63,7 +63,7 @@ const FAILURE_CODE_ZH: Partial<Record<string, string>> = {
   [FailureCode.RootUsageUnknown]: '系统盘已用量未知，无法缩容',
   [FailureCode.RootShrinkRequiresStop]: '缩容前需先停止容器',
   [FailureCode.RootQuotaPending]: '系统盘容量调整尚未生效',
-  [FailureCode.RootSizeBelowImageMinimum]: '小于镜像要求的最小系统盘',
+  [FailureCode.RootSizeBelowImageMinimum]: '小于最小系统盘容量（至少 5 GiB，镜像可能要求更多）',
   [FailureCode.GpuNotEnabled]: '服务器未启用 GPU',
   [FailureCode.GpuOccupied]: 'GPU 仍被容器占用',
   [FailureCode.GpuMutationRequiresStop]: '变更 GPU 前需先停止容器',

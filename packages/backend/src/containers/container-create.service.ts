@@ -29,6 +29,7 @@ import {
 import {
   assertMemoryGrant,
   createContainerIntent,
+  rootSizeMinimum,
   stringArray,
 } from './container-rules.js';
 import { requireUserId } from '../iam/actor.js';
@@ -277,13 +278,11 @@ export class ContainerCreateService {
         details: { poolId: rootPoolId },
       });
     }
-    const minimum = image.min_root_size_bytes === null
-      ? 0
-      : numberValue(image.min_root_size_bytes);
+    const minimum = rootSizeMinimum(image.min_root_size_bytes);
     if (request.rootSizeBytes < minimum) {
       throw new ConflictException({
         code: FailureCode.RootSizeBelowImageMinimum,
-        message: 'Root size is below the image minimum',
+        message: 'Root size is below the minimum',
         details: {
           imageId: request.imageId,
           requestedBytes: request.rootSizeBytes,

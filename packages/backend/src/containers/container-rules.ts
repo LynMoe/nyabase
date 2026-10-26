@@ -5,6 +5,7 @@ import {
   ContainerStatus,
   FailureCode,
   IntentKind,
+  MIN_CONTAINER_ROOT_SIZE_BYTES,
   StoragePoolResizeFamily,
   type ActionAvailability,
   type ContainerAction,
@@ -36,6 +37,11 @@ export function rootShrinkReservation(
     reservedBytes: nullableNumber(row.root_shrink_reserved_bytes),
     requestedBytes,
   });
+}
+
+/** The platform root floor, raised by the image's `min_root_size_bytes` when that is larger. */
+export function rootSizeMinimum(imageMinimum: string | number | null | undefined): number {
+  return Math.max(MIN_CONTAINER_ROOT_SIZE_BYTES, nullableNumber(imageMinimum) ?? 0);
 }
 
 export interface RootResizeCheckInput {

@@ -8,6 +8,7 @@ import {
   FailureCode,
   IntentKind,
   IntentResourceType,
+  MIN_CONTAINER_ROOT_SIZE_BYTES,
   StoragePoolResizeFamily,
   Role,
 } from '@nyabase/common';
@@ -392,8 +393,8 @@ describe('ContainerControlService intent boundary', () => {
   it('rejects quota-online root shrink below observed usage without writing desired state', async () => {
     const harness = makeHarness();
     Object.assign(harness.row, {
-      root_size_bytes: '2147483648',
-      root_used_bytes: '400000000',
+      root_size_bytes: '17179869184',
+      root_used_bytes: '10737418240',
     });
     const selectFrom = vi.fn((table: string) => {
       const query = {
@@ -422,7 +423,7 @@ describe('ContainerControlService intent boundary', () => {
     Object.assign(harness.transaction, { selectFrom });
 
     await expect(harness.service.resizeRoot(owner, containerId, {
-      sizeBytes: 67_108_864,
+      sizeBytes: 8_589_934_592,
     })).rejects.toMatchObject({
       response: { code: FailureCode.RootShrinkBelowUsage },
     });
@@ -432,7 +433,7 @@ describe('ContainerControlService intent boundary', () => {
 
   it('rejects quota-online root shrink when usage has not been observed', async () => {
     const harness = makeHarness();
-    Object.assign(harness.row, { root_size_bytes: '2147483648', root_used_bytes: null });
+    Object.assign(harness.row, { root_size_bytes: '17179869184', root_used_bytes: null });
     const selectFrom = vi.fn((table: string) => {
       const query = {
         select: vi.fn(),
@@ -460,7 +461,7 @@ describe('ContainerControlService intent boundary', () => {
     Object.assign(harness.transaction, { selectFrom });
 
     await expect(harness.service.resizeRoot(owner, containerId, {
-      sizeBytes: 67_108_864,
+      sizeBytes: 8_589_934_592,
     })).rejects.toMatchObject({
       response: { code: FailureCode.RootUsageUnknown },
     });
@@ -494,18 +495,18 @@ describe('ContainerControlService intent boundary', () => {
 
   it('keeps the old root size reserved while an accepted shrink is unapplied', async () => {
     const harness = makeHarness();
-    Object.assign(harness.row, { root_size_bytes: '2147483648', root_used_bytes: '100000000' });
+    Object.assign(harness.row, { root_size_bytes: '17179869184', root_used_bytes: '100000000' });
     quotaOnlinePool(harness);
 
-    await harness.service.resizeRoot(owner, containerId, { sizeBytes: 1_073_741_824 });
+    await harness.service.resizeRoot(owner, containerId, { sizeBytes: 8_589_934_592 });
 
     expect(harness.repository.updateDesired).toHaveBeenCalledWith(
       containerId,
       1,
       {
-        root_size_bytes: 1_073_741_824,
+        root_size_bytes: 8_589_934_592,
         root_size_pending_bytes: null,
-        root_shrink_reserved_bytes: 2_147_483_648,
+        root_shrink_reserved_bytes: 17_179_869_184,
       },
       harness.transaction,
     );
@@ -514,23 +515,39 @@ describe('ContainerControlService intent boundary', () => {
   it('grows back within an unapplied shrink reservation without a capacity check', async () => {
     const harness = makeHarness();
     Object.assign(harness.row, {
-      root_size_bytes: '1073741824',
-      root_shrink_reserved_bytes: '2147483648',
+      root_size_bytes: '8589934592',
+      root_shrink_reserved_bytes: '17179869184',
     });
     quotaOnlinePool(harness);
 
     // No capacity query is mocked: admitting any growth here would throw.
-    await harness.service.resizeRoot(owner, containerId, { sizeBytes: 1_610_612_736 });
+    await harness.service.resizeRoot(owner, containerId, { sizeBytes: 12_884_901_888 });
 
     expect(harness.repository.updateDesired).toHaveBeenCalledWith(
       containerId,
       1,
       expect.objectContaining({
-        root_size_bytes: 1_610_612_736,
-        root_shrink_reserved_bytes: 2_147_483_648,
+        root_size_bytes: 12_884_901_888,
+        root_shrink_reserved_bytes: 17_179_869_184,
       }),
       harness.transaction,
     );
+  });
+
+  it('rejects a root resize below the 5 GiB platform floor even when the image allows less', async () => {
+    const harness = makeHarness();
+    Object.assign(harness.row, { root_size_bytes: '17179869184', root_used_bytes: '100000000' });
+    quotaOnlinePool(harness);
+
+    await expect(harness.service.resizeRoot(owner, containerId, {
+      sizeBytes: MIN_CONTAINER_ROOT_SIZE_BYTES - 1,
+    })).rejects.toMatchObject({
+      response: {
+        code: FailureCode.RootSizeBelowImageMinimum,
+        details: { minimumBytes: MIN_CONTAINER_ROOT_SIZE_BYTES },
+      },
+    });
+    expect(harness.repository.updateDesired).not.toHaveBeenCalled();
   });
 
   it('authorizes exec through the current server grant and never audits the command', async () => {

@@ -33,6 +33,8 @@ export const MAX_HTTP_PROXY_SNAPSHOT_BYTES = 8 * 1024 * 1024;
 /** Highest logical CPU id the platform accepts (reserved CPUs, topology, pinning). */
 export const MAX_SERVER_LOGICAL_CPU_ID = 4095;
 export const MAX_RESOURCE_BYTES = Number.MAX_SAFE_INTEGER;
+/** Smallest container root disk (create and resize); an image's `minRootSizeBytes` can only raise it. */
+export const MIN_CONTAINER_ROOT_SIZE_BYTES = 5 * 1024 ** 3;
 export const MAX_STORAGE_OVERCOMMIT_RATIO = 100;
 export const GRANT_EXPIRY_GRACE_DAYS = 14;
 

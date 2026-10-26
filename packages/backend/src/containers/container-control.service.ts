@@ -56,6 +56,7 @@ import {
   containerStatus,
   createContainerIntent,
   rootShrinkReservation,
+  rootSizeMinimum,
   type ContainerAccess,
 } from './container-rules.js';
 import { assertActorRole } from '../iam/administration.js';
@@ -650,13 +651,11 @@ export class ContainerControlService {
       .where('id', '=', locked.image_id)
       .forUpdate()
       .executeTakeFirst();
-    const minimum = image?.min_root_size_bytes === null || image?.min_root_size_bytes === undefined
-      ? 0
-      : numberValue(image.min_root_size_bytes);
+    const minimum = rootSizeMinimum(image?.min_root_size_bytes);
     if (size < minimum) {
       throw new ConflictException({
         code: FailureCode.RootSizeBelowImageMinimum,
-        message: 'Root size is below the image minimum',
+        message: 'Root size is below the minimum',
         details: {
           imageId: locked.image_id,
           requestedBytes: size,
