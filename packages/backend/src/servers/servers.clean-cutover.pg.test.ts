@@ -99,6 +99,7 @@ describePg('server agent onboarding and removal', () => {
         agents as never,
         new AgentEnrollmentService(database, transactions, audit as never, agents as never),
         wake as never,
+        { agentStatuses: vi.fn(async () => new Map()) } as never,
       );
       const operatorId = await seedUser(database, undefined, UserStatus.Active, Role.Operator);
       const created = await service.create(operatorId, {
