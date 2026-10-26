@@ -210,7 +210,7 @@ HTTP 代理按路由撤销：每个 hostname 有一个 incarnation，只在连�
 同步状态只在内存（`GET /admin/firewall-rules/status`：`offline | synced | pending | failed`，服务器 DTO `agent.firewall`），不轮询。
 `firewall/` 只依赖 platform / iam / incus，servers → firewall 单向（`FirewallSyncService.agentStatuses`）。预检不再检查「容器可达宿主」与出站网络。
 
-GPU 是平台内置功能（`gpu/` 模块、`common/src/gpu/`、agent 的 `gpu-collector`），不存在扩展框架。
+GPU 是平台内置功能（`gpu/` 模块、`common/src/gpu/`、agent 的 `gpu-collector`），不存在扩展框架。卡与 CPU 一样共享：同一张卡可同时绑定到多个容器，只按授权准入，`control.container_gpu_claims` 不按（服务器, 卡）唯一（迁移 000006）。
 
 ## Schema 规则（上线冻结）
 

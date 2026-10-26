@@ -55,8 +55,6 @@ import {
   checkRootResize,
   containerStatus,
   createContainerIntent,
-  gpuDeviceClaimed,
-  isUniqueViolation,
   rootShrinkReservation,
   type ContainerAccess,
 } from './container-rules.js';
@@ -238,24 +236,18 @@ export class ContainerControlService {
         const grant = await this.requireLiveGrant(transaction, actor, current);
         grantPciAddresses = grant.gpuPciAddresses;
       }
-      let mutated;
-      try {
-        mutated = await mutateGpuContainer({
-          serverId: current.server_id,
-          actor: { userId: requireUserId(actor), admin: access !== 'owner' },
-          grantPciAddresses,
-          claims: this.gpuClaims.forContainer(current.server_id, containerId, transaction),
-          health: this.gpuClaims.health(current.server_id, transaction),
-          containerId,
-          observedStatus: observedStatus === 'creating' ? 'unknown' : observedStatus,
-          currentState: current.gpu_state,
-          payload,
-          enabled,
-        });
-      } catch (error) {
-        if (isUniqueViolation(error, 'container_gpu_claims')) throw gpuDeviceClaimed();
-        throw error;
-      }
+      const mutated = await mutateGpuContainer({
+        serverId: current.server_id,
+        actor: { userId: requireUserId(actor), admin: access !== 'owner' },
+        grantPciAddresses,
+        claims: this.gpuClaims.forContainer(current.server_id, containerId, transaction),
+        health: this.gpuClaims.health(current.server_id, transaction),
+        containerId,
+        observedStatus: observedStatus === 'creating' ? 'unknown' : observedStatus,
+        currentState: current.gpu_state,
+        payload,
+        enabled,
+      });
       const updated = await this.repository.updateDesired(
         containerId,
         current.revision,

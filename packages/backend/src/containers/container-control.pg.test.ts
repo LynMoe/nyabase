@@ -351,7 +351,7 @@ const GPU_B = '0000:42:00.0';
 const GPU_B_CANONICAL = '00000000:42:00.0';
 
 describePg('PostgreSQL GPU claims', () => {
-  it('inserts the container before claims and maps UNIQUE collisions', async () => {
+  it('inserts the container before claims and lets containers share a card', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const fixture = await seedFixture(database, { poolTotalBytes: 10_000 });
       const harness = gpuHarness(database, { diskBytes: 10_000, gpuPciAddresses: [GPU_A, GPU_B] });
@@ -378,13 +378,19 @@ describePg('PostgreSQL GPU claims', () => {
         pciAddresses: [GPU_A_CANONICAL],
       });
 
-      await expectCode(
-        harness.service.create(
-          testActor(fixture.userId),
-          request(fixture, 'claim-collision', { gpuPciAddresses: [GPU_A] }),
-        ),
-        FailureCode.GpuDeviceClaimed,
+      const second = await harness.service.create(
+        testActor(fixture.userId),
+        request(fixture, 'claim-shared', { gpuPciAddresses: [GPU_A] }),
       );
+      const shared = await database.selectFrom('control.container_gpu_claims')
+        .select(['container_id', 'pci_address'])
+        .where('server_id', '=', fixture.serverId)
+        .where('container_id', '=', second.resourceId)
+        .execute();
+      expect(shared).toEqual([{
+        container_id: second.resourceId,
+        pci_address: GPU_A_CANONICAL,
+      }]);
     });
   });
 

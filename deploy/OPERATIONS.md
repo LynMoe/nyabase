@@ -1899,6 +1899,8 @@ GPU 是平台内置功能，不是插件。管理员在服务器详情的 GPU �
 （`GPU_OCCUPIED`）。卡清单来自 `GET /api/servers/:serverId/gpus`（默认 `scope=mine`，按服务器授权过滤）与
 `GET /api/servers/:serverId/gpus?scope=all`（管理员，全部卡）；容器通过创建请求的
 `gpuPciAddresses` 或 `PATCH /api/containers/:id/gpus` 绑定，改动 GPU 需先停止容器。
+GPU 与 CPU 一样是共享的：同一张卡可以同时绑定到任意多个容器（授权是唯一的边界，不按卡排他）；
+占用数按卡去重计数。
 授权用服务器授权的 `gpuPciAddresses`（空数组表示无 GPU 权限）。
 
 ## Workload images

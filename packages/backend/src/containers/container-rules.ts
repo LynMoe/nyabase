@@ -1,4 +1,4 @@
-import { BadRequestException, ConflictException, ForbiddenException, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, NotFoundException } from '@nestjs/common';
 import {
   ContainerPhase,
   ContainerPowerIntent,
@@ -111,29 +111,6 @@ export function assertContainerName(name: string): void {
       message: 'Container name must be 1-63 characters and use letters, numbers, or hyphen',
     });
   }
-}
-
-export function isUniqueViolation(error: unknown, constraint?: string): boolean {
-  let current: unknown = error;
-  const visited = new Set<unknown>();
-  while (current && typeof current === 'object' && !visited.has(current)) {
-    visited.add(current);
-    const record = current as { code?: unknown; constraint?: unknown; cause?: unknown };
-    if (record.code === '23505') {
-      if (!constraint) return true;
-      return String(record.constraint ?? '').includes(constraint);
-    }
-    current = record.cause;
-  }
-  return false;
-}
-
-export function gpuDeviceClaimed(pciAddress?: string): ConflictException {
-  return new ConflictException({
-    code: FailureCode.GpuDeviceClaimed,
-    message: 'A requested GPU is already claimed',
-    details: pciAddress ? { pciAddress } : {},
-  });
 }
 
 export function assertCreateNumbers(request: CreateContainerRequest): void {

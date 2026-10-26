@@ -24,6 +24,7 @@ describe('GPU', { skip }, () => {
   let pci: string;
   let user: TestUser;
   let container: ContainerDto;
+  let second: ContainerDto;
   const gpu = () => h.api.get<ServerGpuDto>(`/servers/${server.id}/gpu`);
 
   before(async () => {
@@ -61,32 +62,35 @@ describe('GPU', { skip }, () => {
     assert.ok(status === 403 || status === 409, `create without a GPU grant gave ${status}`);
   });
 
-  it('runs a container with the card, claims it exclusively and blocks disabling', async () => {
+  it('shares the card between running containers and blocks disabling', async () => {
     container = await h.createContainer(user, server, { gpuPciAddresses: [pci] });
     assert.deepEqual(container.gpu, { nvidiaRuntime: true, pciAddresses: [pci] });
     assert.equal((await gpu()).occupiedDeviceCount, 1);
     assert.match(await h.ssh(user, container, 'nvidia-smi -L'), /GPU/);
 
-    await assert.rejects(
-      user.session.api.post('/containers', {
-        serverId: server.id, imageId: h.state.image.id, name: h.name('second'),
-        rootSizeBytes: h.state.rootSizeBytes, memBytes: 1024 ** 3,
-        gpuPciAddresses: [pci], powerIntent: 'stopped',
-      }),
-      (error: unknown) => error instanceof ApiError && error.status === 409,
-    );
+    second = await h.createContainer(user, server, { name: h.name('second'), gpuPciAddresses: [pci] });
+    assert.deepEqual(second.gpu, { nvidiaRuntime: true, pciAddresses: [pci] });
+    assert.equal((await gpu()).occupiedDeviceCount, 1, 'a shared card counts once');
+    assert.match(await h.ssh(user, second, 'nvidia-smi -L'), /GPU/);
+    assert.match(await h.ssh(user, container, 'nvidia-smi -L'), /GPU/);
+
     await assert.rejects(
       h.api.patch(`/servers/${server.id}/gpu`, { enabled: false }),
       (error: unknown) => error instanceof ApiError && error.status === 409 && error.code === 'GPU_OCCUPIED',
     );
   });
 
-  it('releases the card after a stop and a GPU detach', async () => {
+  it('releases the card once every container has stopped and detached it', async () => {
     const api = user.session.api;
-    await h.power(api, container.id, 'stop');
-    await waitIntent(api, await api.patch<IntentAcceptedDto>(`/containers/${container.id}/gpus`, { pciAddresses: [] }));
-    const released = await api.get<ContainerDto>(`/containers/${container.id}`);
-    assert.deepEqual(released.gpu?.pciAddresses ?? [], []);
+    const detach = async (id: string) => {
+      await h.power(api, id, 'stop');
+      await waitIntent(api, await api.patch<IntentAcceptedDto>(`/containers/${id}/gpus`, { pciAddresses: [] }));
+      const released = await api.get<ContainerDto>(`/containers/${id}`);
+      assert.deepEqual(released.gpu?.pciAddresses ?? [], []);
+    };
+    await detach(container.id);
+    assert.equal((await gpu()).occupiedDeviceCount, 1, 'the other container still holds the card');
+    await detach(second.id);
     assert.equal((await gpu()).occupiedDeviceCount, 0);
   });
 });

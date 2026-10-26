@@ -23,7 +23,7 @@ export type GpuExecutor = Kysely<NyabaseDatabase> | Transaction<NyabaseDatabase>
 export class GpuClaimsRepository {
   constructor(@Inject(PG_DATABASE) private readonly database: Kysely<NyabaseDatabase>) {}
 
-  /** Claims held by one container; `listOccupied` sees the rest of the server. */
+  /** Claims held by one container. */
   forContainer(
     serverId: string,
     containerId: string,
@@ -44,17 +44,6 @@ export class GpuClaimsRepository {
             pci_address: pciAddress,
           })))
           .execute();
-      },
-      listOccupied: async (excludeContainerId = containerId) => {
-        let query = executor
-          .selectFrom('control.container_gpu_claims')
-          .select('pci_address')
-          .where('server_id', '=', serverId);
-        if (excludeContainerId) {
-          query = query.where('container_id', '!=', excludeContainerId);
-        }
-        const rows = await query.execute();
-        return rows.map((row) => row.pci_address);
       },
       count: async () => this.countForServer(serverId, executor),
     };
@@ -80,13 +69,14 @@ export class GpuClaimsRepository {
     };
   }
 
+  /** Distinct cards claimed on the server (a shared card counts once). */
   async countForServer(
     serverId: string,
     executor: GpuExecutor = this.database,
   ): Promise<number> {
     const row = await executor
       .selectFrom('control.container_gpu_claims')
-      .select((eb) => eb.fn.countAll<number>().as('count'))
+      .select((eb) => eb.fn.count<number>('pci_address').distinct().as('count'))
       .where('server_id', '=', serverId)
       .executeTakeFirst();
     return Number(row?.count ?? 0);

@@ -16,7 +16,6 @@ function createClaims(count = 0): GpuClaimsPort {
     replace: async (pciAddresses) => {
       keys = [...pciAddresses];
     },
-    listOccupied: async () => [...keys],
     count: async () => keys.length,
   };
 }

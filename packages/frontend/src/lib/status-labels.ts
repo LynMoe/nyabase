@@ -66,7 +66,6 @@ const FAILURE_CODE_ZH: Partial<Record<string, string>> = {
   [FailureCode.RootSizeBelowImageMinimum]: '小于镜像要求的最小系统盘',
   [FailureCode.GpuNotEnabled]: '服务器未启用 GPU',
   [FailureCode.GpuOccupied]: 'GPU 仍被容器占用',
-  [FailureCode.GpuDeviceClaimed]: 'GPU 已被占用',
   [FailureCode.GpuMutationRequiresStop]: '变更 GPU 前需先停止容器',
   [FailureCode.GpuGrantNotApplicable]: 'GPU 授权不适用于此服务器',
   [FailureCode.GpuRuntimeUnavailable]: 'GPU 运行时不可用',

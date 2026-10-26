@@ -9,14 +9,13 @@ import {
   type GpuHealthPort,
 } from './admit.js';
 
-function createClaims(occupied: string[] = []): GpuClaimsPort & { keys: string[] } {
-  const keys = [...occupied];
+function createClaims(held: string[] = []): GpuClaimsPort & { keys: string[] } {
+  const keys = [...held];
   return {
     keys,
     replace: async (deviceKeys) => {
       keys.splice(0, keys.length, ...deviceKeys);
     },
-    listOccupied: async () => [...keys],
     count: async () => keys.length,
   };
 }
@@ -194,19 +193,6 @@ describe('mutateGpuContainer', () => {
       expect.unreachable();
     } catch (error) {
       expect(gpuErrorBody(error)?.code).toBe(FailureCode.GpuMutationRequiresStop);
-    }
-  });
-
-  it('rejects admin claims that collide with occupancy', async () => {
-    try {
-      await mutateGpuContainer(mutateCtx({
-        actor: { userId: '11111111-1111-4111-8111-111111111111', admin: true },
-        claims: createClaims(['00000000:41:00.0']),
-        payload: { pciAddresses: ['0000:41:00.0'] },
-      }));
-      expect.unreachable();
-    } catch (error) {
-      expect(gpuErrorBody(error)?.code).toBe(FailureCode.GpuDeviceClaimed);
     }
   });
 

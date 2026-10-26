@@ -161,7 +161,6 @@ export enum FailureCode {
   RootUsageUnknown = 'ROOT_USAGE_UNKNOWN',
   GpuNotEnabled = 'GPU_NOT_ENABLED',
   GpuOccupied = 'GPU_OCCUPIED',
-  GpuDeviceClaimed = 'GPU_DEVICE_CLAIMED',
   GpuMutationRequiresStop = 'GPU_MUTATION_REQUIRES_STOP',
   GpuGrantNotApplicable = 'GPU_GRANT_NOT_APPLICABLE',
   GpuRuntimeUnavailable = 'GPU_RUNTIME_UNAVAILABLE',

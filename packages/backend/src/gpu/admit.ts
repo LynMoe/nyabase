@@ -16,10 +16,11 @@ import {
 import { isRecord } from '../platform/domain-utils.js';
 
 export interface GpuClaimsPort {
-  /** Replace this container's claimed PCI addresses (container-scoped ports only). */
+  /**
+   * Replace this container's claimed PCI addresses (container-scoped ports only).
+   * Cards are shared like CPU: other containers may claim the same address.
+   */
   replace(pciAddresses: readonly string[]): Promise<void>;
-  /** PCI addresses claimed on the server by other containers. */
-  listOccupied(excludeContainerId?: string): Promise<string[]>;
   count(): Promise<number>;
 }
 
@@ -205,22 +206,6 @@ export function assertGpuGrant(
   }
 }
 
-async function assertUnoccupied(
-  ctx: { claims: GpuContext['claims']; containerId?: string },
-  addresses: readonly string[],
-): Promise<void> {
-  if (addresses.length === 0) return;
-  const occupied = new Set(await ctx.claims.listOccupied(ctx.containerId));
-  const collision = addresses.find((address) => occupied.has(address));
-  if (collision) {
-    throw gpuConflict(
-      FailureCode.GpuDeviceClaimed,
-      'A requested GPU is already claimed',
-      { pciAddress: collision },
-    );
-  }
-}
-
 function assertRuntimeAvailable(
   ready: boolean | null,
   pciAddresses: readonly string[],
@@ -261,7 +246,6 @@ export async function admitGpuCreate(
   if (pciAddresses.length > 0 && !ctx.actor.admin) {
     assertGpuGrant(ctx.grantPciAddresses, pciAddresses);
   }
-  await assertUnoccupied(ctx, pciAddresses);
   await ctx.claims.replace(pciAddresses);
 
   if (pciAddresses.length > 0) {
@@ -314,7 +298,6 @@ export async function mutateGpuContainer(
   if (pciAddresses.length > 0 && !ctx.actor.admin) {
     assertGpuGrant(ctx.grantPciAddresses, pciAddresses);
   }
-  await assertUnoccupied(ctx, pciAddresses);
   await ctx.claims.replace(pciAddresses);
 
   return {

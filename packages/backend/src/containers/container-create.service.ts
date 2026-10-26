@@ -29,8 +29,6 @@ import {
 import {
   assertMemoryGrant,
   createContainerIntent,
-  gpuDeviceClaimed,
-  isUniqueViolation,
   stringArray,
 } from './container-rules.js';
 import { requireUserId } from '../iam/actor.js';
@@ -401,22 +399,17 @@ export class ContainerCreateService {
       address,
     }, transaction);
     const gpuEnabled = await this.gpuClaims.isEnabled(request.serverId, transaction);
-    try {
-      const { state } = await admitGpuCreate({
-        serverId: request.serverId,
-        actor: { userId, admin: false },
-        grantPciAddresses: access.grant.gpuPciAddresses ?? [],
-        claims: this.gpuClaims.forContainer(request.serverId, id, transaction),
-        health: this.gpuClaims.health(request.serverId, transaction),
-        containerId: id,
-        requestedPciAddresses: request.gpuPciAddresses,
-        enabled: gpuEnabled,
-      });
-      if (state) row = await this.repository.setGpuState(row.id, state, transaction);
-    } catch (error) {
-      if (isUniqueViolation(error, 'container_gpu_claims')) throw gpuDeviceClaimed();
-      throw error;
-    }
+    const { state } = await admitGpuCreate({
+      serverId: request.serverId,
+      actor: { userId, admin: false },
+      grantPciAddresses: access.grant.gpuPciAddresses ?? [],
+      claims: this.gpuClaims.forContainer(request.serverId, id, transaction),
+      health: this.gpuClaims.health(request.serverId, transaction),
+      containerId: id,
+      requestedPciAddresses: request.gpuPciAddresses,
+      enabled: gpuEnabled,
+    });
+    if (state) row = await this.repository.setGpuState(row.id, state, transaction);
     if (request.volumes && request.volumes.length > 0) {
       await this.volumes.bindCreateTimeVolumes(
         transaction,
