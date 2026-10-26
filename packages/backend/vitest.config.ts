@@ -7,6 +7,7 @@ export default defineConfig({
     exclude: ['dist/**'],
     // Nest decorators and emitted constructor metadata require this before imports.
     setupFiles: ['reflect-metadata'],
+    globalSetup: ['src/platform/persistence-pg/postgres-test-global-setup.ts'],
   },
   resolve: {
     alias: {
