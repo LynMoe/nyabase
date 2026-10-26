@@ -33,7 +33,6 @@ mod login_bounds {
     use crate::runtime::ConnectionState;
     use crate::snapshot::{parse_authorized_key, SnapshotStore};
     use crate::test_support::*;
-    use russh::server::Handler;
     use std::sync::Arc;
     use tokio::sync::mpsc;
 
@@ -65,9 +64,9 @@ mod login_bounds {
         let key = parse_authorized_key(ALICE_KEY).unwrap();
         for login in ["a".repeat(250 * 1024), "alicé.solo".to_string()] {
             let (mut session, mut telemetry) = authoritative_session();
-            let offered = session.auth_publickey_offered(&login, &key).await.unwrap();
+            let offered = session.auth_offered_key(&login, &key).await.unwrap();
             assert!(matches!(offered, Auth::Reject { .. }));
-            let accepted = session.auth_publickey(&login, &key).await.unwrap();
+            let accepted = session.auth_verified_key(&login, &key).await.unwrap();
             assert!(matches!(accepted, Auth::Reject { .. }));
             assert!(lock(&session.connection.login).is_none());
             assert!(lock(&session.connection.authenticated_user_id).is_none());
@@ -80,7 +79,7 @@ mod login_bounds {
         }
 
         let (mut session, _telemetry) = authoritative_session();
-        let accepted = session.auth_publickey("alice.solo", &key).await.unwrap();
+        let accepted = session.auth_verified_key("alice.solo", &key).await.unwrap();
         assert!(matches!(accepted, Auth::Accept));
         assert_eq!(
             lock(&session.connection.login).as_deref(),

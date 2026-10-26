@@ -11,7 +11,6 @@ use pretty_assertions::assert_eq;
 use proxy_common::clock::now_ms;
 use proxy_common::env::MAX_STATUS_INTERVAL_MS;
 use russh::server::Auth;
-use russh::server::Handler;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -436,12 +435,9 @@ async fn paused_new_connection_is_rejected_without_stale_auth() {
     let key = parse_authorized_key(ALICE_KEY).unwrap();
     assert!(session.latest_snapshot().is_none());
     assert!(session.held_snapshot().is_some());
-    let offered = session
-        .auth_publickey_offered("alice.solo", &key)
-        .await
-        .unwrap();
+    let offered = session.auth_offered_key("alice.solo", &key).await.unwrap();
     assert!(matches!(offered, Auth::Accept));
-    let accepted = session.auth_publickey("alice.solo", &key).await.unwrap();
+    let accepted = session.auth_verified_key("alice.solo", &key).await.unwrap();
     assert!(matches!(accepted, Auth::Accept));
     assert!(lock(&connection.login).is_none());
     assert_eq!(connection.authenticated_at.load(Ordering::Relaxed), 0);

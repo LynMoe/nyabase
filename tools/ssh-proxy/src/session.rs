@@ -7,8 +7,10 @@ use crate::snapshot::{RejectReason, RouteResolution, RoutingSnapshot, SnapshotSt
 use anyhow::{Context, Result};
 use proxy_common::clock::now_ms;
 use russh::keys::PublicKey;
-use russh::server::{Auth, Msg as ServerMsg, Session};
-use russh::{Channel, ChannelId, Disconnect, Pty};
+use russh::server::{
+    Auth, ChannelOpenHandle, Msg as ServerMsg, PublicKeyOffer, Session, VerifiedPublicKey,
+};
+use russh::{Channel, ChannelId, ChannelOpenFailure, Disconnect, Pty};
 use std::net::SocketAddr;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -217,42 +219,13 @@ impl ProxySshSession {
     }
 }
 
-impl russh::server::Handler for ProxySshSession {
-    type Error = anyhow::Error;
-
-    async fn auth_succeeded(&mut self, session: &mut Session) -> Result<(), Self::Error> {
-        if self.pause_rejecting() {
-            self.connection.note_auth_failure("paused");
-            session.disconnect(
-                Disconnect::ServiceNotAvailable,
-                SSH_PROXY_PAUSE_REJECT_DESCRIPTION,
-                "en",
-            )?;
-            return Ok(());
-        }
-        let current = self.held_snapshot();
-        if !self.connection.authorization_matches(current.as_deref()) {
-            self.connection.set_close_reason("revoked");
-            anyhow::bail!("SSH proxy authorization changed during authentication");
-        }
-        self.connection.note_client_version(session.remote_sshid());
-        self.connection.report_opened();
-        Ok(())
-    }
-
-    async fn auth_none(&mut self, _user: &str) -> Result<Auth, Self::Error> {
-        Ok(Auth::reject())
-    }
-
-    async fn auth_password(&mut self, _user: &str, _password: &str) -> Result<Auth, Self::Error> {
-        Ok(Auth::reject())
-    }
-
-    async fn auth_publickey_offered(
+impl ProxySshSession {
+    /// The key a client offers before proving it holds it (`auth_publickey_offered`).
+    pub(crate) async fn auth_offered_key(
         &mut self,
         user: &str,
         public_key: &PublicKey,
-    ) -> Result<Auth, Self::Error> {
+    ) -> Result<Auth, anyhow::Error> {
         if !acceptable_login(user) {
             self.connection.note_auth_failure("invalid_login");
             return Ok(Auth::reject());
@@ -272,11 +245,12 @@ impl russh::server::Handler for ProxySshSession {
         }
     }
 
-    async fn auth_publickey(
+    /// A key the client proved it holds (`auth_publickey`).
+    pub(crate) async fn auth_verified_key(
         &mut self,
         user: &str,
         public_key: &PublicKey,
-    ) -> Result<Auth, Self::Error> {
+    ) -> Result<Auth, anyhow::Error> {
         if !acceptable_login(user) {
             warn!(
                 peer = %self.peer,
@@ -353,14 +327,66 @@ impl russh::server::Handler for ProxySshSession {
         self.authenticated_public_key = Some(public_key.clone());
         Ok(Auth::Accept)
     }
+}
+
+impl russh::server::Handler for ProxySshSession {
+    type Error = anyhow::Error;
+
+    async fn auth_succeeded(&mut self, session: &mut Session) -> Result<(), Self::Error> {
+        if self.pause_rejecting() {
+            self.connection.note_auth_failure("paused");
+            session.disconnect(
+                Disconnect::ServiceNotAvailable,
+                SSH_PROXY_PAUSE_REJECT_DESCRIPTION,
+                "en",
+            )?;
+            return Ok(());
+        }
+        let current = self.held_snapshot();
+        if !self.connection.authorization_matches(current.as_deref()) {
+            self.connection.set_close_reason("revoked");
+            anyhow::bail!("SSH proxy authorization changed during authentication");
+        }
+        self.connection.note_client_version(session.remote_sshid());
+        self.connection.report_opened();
+        Ok(())
+    }
+
+    async fn auth_none(&mut self, _user: &str) -> Result<Auth, Self::Error> {
+        Ok(Auth::reject())
+    }
+
+    async fn auth_password(&mut self, _user: &str, _password: &str) -> Result<Auth, Self::Error> {
+        Ok(Auth::reject())
+    }
+
+    async fn auth_publickey_offered(
+        &mut self,
+        user: &str,
+        offer: PublicKeyOffer<'_>,
+    ) -> Result<Auth, Self::Error> {
+        self.auth_offered_key(user, offer.public_key).await
+    }
+
+    async fn auth_publickey(
+        &mut self,
+        user: &str,
+        key: VerifiedPublicKey<'_>,
+    ) -> Result<Auth, Self::Error> {
+        self.auth_verified_key(user, key.public_key).await
+    }
 
     async fn channel_open_session(
         &mut self,
         _channel: Channel<ServerMsg>,
+        reply: ChannelOpenHandle,
         _session: &mut Session,
-    ) -> Result<bool, Self::Error> {
+    ) -> Result<(), Self::Error> {
         if self.pause_rejecting() {
-            return Ok(false);
+            reply
+                .reject(ChannelOpenFailure::AdministrativelyProhibited)
+                .await;
+            return Ok(());
         }
         self.refuse_request("session");
         emit_metric(
@@ -372,7 +398,10 @@ impl russh::server::Handler for ProxySshSession {
             ],
             1.0,
         );
-        Ok(false)
+        reply
+            .reject(ChannelOpenFailure::AdministrativelyProhibited)
+            .await;
+        Ok(())
     }
 
     async fn pty_request(
@@ -493,14 +522,18 @@ impl russh::server::Handler for ProxySshSession {
         port_to_connect: u32,
         originator_address: &str,
         originator_port: u32,
+        reply: ChannelOpenHandle,
         _session: &mut Session,
-    ) -> Result<bool, Self::Error> {
+    ) -> Result<(), Self::Error> {
         let peer = self.peer;
         let target = (host_to_connect, port_to_connect);
         let originator = format!("{originator_address}:{originator_port}");
         if self.pause_rejecting() {
             self.refuse_channel("rejected_paused", target, &originator, None);
-            return Ok(false);
+            reply
+                .reject(ChannelOpenFailure::AdministrativelyProhibited)
+                .await;
+            return Ok(());
         }
         if port_to_connect != 22 {
             warn!(
@@ -509,8 +542,10 @@ impl russh::server::Handler for ProxySshSession {
                 "direct-tcpip target outside PermitOpen"
             );
             self.refuse_channel("rejected_permit", target, &originator, None);
-            let _ = channel.close().await;
-            return Ok(false);
+            reply
+                .reject(ChannelOpenFailure::AdministrativelyProhibited)
+                .await;
+            return Ok(());
         }
 
         let route = match self.authorized_route_for_target(host_to_connect) {
@@ -518,22 +553,24 @@ impl russh::server::Handler for ProxySshSession {
             Err(error) => {
                 warn!(%peer, %error, target = %host_to_connect, "direct-tcpip rejected: unauthorized");
                 self.refuse_channel("rejected_unauthorized", target, &originator, None);
-                let _ = channel.close().await;
-                return Ok(false);
+                reply
+                    .reject(ChannelOpenFailure::AdministrativelyProhibited)
+                    .await;
+                return Ok(());
             }
         };
         if self.connection.channels.load(Ordering::Relaxed) >= MAX_CHANNELS_PER_CONNECTION {
             warn!(%peer, "SSH direct-tcpip channel limit reached");
             self.refuse_channel("rejected_limit", target, &originator, Some(&route));
-            let _ = channel.close().await;
-            return Ok(false);
+            reply.reject(ChannelOpenFailure::ResourceShortage).await;
+            return Ok(());
         }
 
         let Some(bridge_permit) = self.connection.try_reserve_child_task() else {
             warn!(%peer, "SSH direct-tcpip child task limit reached");
             self.refuse_channel("rejected_child_limit", target, &originator, Some(&route));
-            let _ = channel.close().await;
-            return Ok(false);
+            reply.reject(ChannelOpenFailure::ResourceShortage).await;
+            return Ok(());
         };
 
         let address = format!("{}:22", route.routed_ip);
@@ -547,14 +584,14 @@ impl russh::server::Handler for ProxySshSession {
             Ok(Err(error)) => {
                 warn!(%peer, target = %address, %originator, %error, "direct-tcpip TCP connect failed");
                 self.refuse_channel("connect_failed", target, &originator, Some(&route));
-                let _ = channel.close().await;
-                return Ok(false);
+                reply.reject(ChannelOpenFailure::ConnectFailed).await;
+                return Ok(());
             }
             Err(_) => {
                 warn!(%peer, target = %address, %originator, "direct-tcpip TCP connect timed out");
                 self.refuse_channel("connect_timeout", target, &originator, Some(&route));
-                let _ = channel.close().await;
-                return Ok(false);
+                reply.reject(ChannelOpenFailure::ConnectFailed).await;
+                return Ok(());
             }
         };
 
@@ -573,8 +610,10 @@ impl russh::server::Handler for ProxySshSession {
                 "direct-tcpip rejected: route authorization changed during connect"
             );
             self.refuse_channel("rejected_revoked", target, &originator, Some(&route));
-            let _ = channel.close().await;
-            return Ok(false);
+            reply
+                .reject(ChannelOpenFailure::AdministrativelyProhibited)
+                .await;
+            return Ok(());
         }
 
         emit_metric(
@@ -600,6 +639,8 @@ impl russh::server::Handler for ProxySshSession {
             &originator,
             ConnectionRouteInfo::from(&route),
         );
+        // Confirm before the bridge can write: the reply goes out ahead of channel data.
+        reply.accept().await;
         spawn_tcp_bridge(
             bridge_permit,
             peer,
@@ -608,7 +649,7 @@ impl russh::server::Handler for ProxySshSession {
             self.connection.clone(),
             history,
         );
-        Ok(true)
+        Ok(())
     }
 
     async fn tcpip_forward(
@@ -664,10 +705,14 @@ impl russh::server::Handler for ProxySshSession {
         &mut self,
         _channel: Channel<ServerMsg>,
         _socket_path: &str,
+        reply: ChannelOpenHandle,
         _session: &mut Session,
-    ) -> Result<bool, Self::Error> {
+    ) -> Result<(), Self::Error> {
         self.refuse_request("direct_streamlocal");
-        Ok(false)
+        reply
+            .reject(ChannelOpenFailure::AdministrativelyProhibited)
+            .await;
+        Ok(())
     }
 
     async fn streamlocal_forward(
