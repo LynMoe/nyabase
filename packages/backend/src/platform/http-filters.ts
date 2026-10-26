@@ -123,9 +123,15 @@ export class SpaFallbackFilter implements ExceptionFilter {
   }
 }
 
+/** Under the global prefix; case-insensitive like Express routing (`/API/health` reaches the API). */
+function isApiPath(path: string): boolean {
+  const lower = path.toLowerCase();
+  return lower === '/api' || lower.startsWith('/api/');
+}
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function answerNotFound(path: string, method: string, response: any, indexPath: string, message: string): void {
-  if (path === '/api' || path.startsWith('/api/')) {
+  if (isApiPath(path)) {
     response.status(404).json({
       statusCode: 404,
       message,
@@ -152,7 +158,7 @@ export function serveBundledFrontend(app: NestExpressApplication, publicDir: str
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   app.use((request: any, response: any, next: () => void) => {
     const path = String(request.originalUrl ?? request.url).split('?')[0]!;
-    if (path === '/api' || path.startsWith('/api/')) {
+    if (isApiPath(path)) {
       next();
       return;
     }
@@ -162,14 +168,18 @@ export function serveBundledFrontend(app: NestExpressApplication, publicDir: str
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+/** Image fingerprints (`/images/:id/versions/:fingerprint`): lowercase sha256 hex. */
+const FINGERPRINT = /^[0-9a-f]{64}$/;
 
 /**
- * Every route path parameter names a resource by UUID. A malformed one cannot
- * name anything, so it is a 404 here instead of a PostgreSQL cast error (500).
+ * Every route path parameter names a resource by UUID, except `:fingerprint`,
+ * which names an image version by its sha256. A malformed one cannot name
+ * anything, so it is a 404 here instead of a PostgreSQL cast error (500).
  */
 export class RouteIdPipe implements PipeTransform {
   transform(value: unknown, metadata: ArgumentMetadata): unknown {
     if (metadata.type !== 'param' || typeof value !== 'string' || UUID.test(value)) return value;
+    if (metadata.data === 'fingerprint' && FINGERPRINT.test(value)) return value;
     throw new NotFoundException(`No resource has the id ${JSON.stringify(value.slice(0, 64))}`);
   }
 }

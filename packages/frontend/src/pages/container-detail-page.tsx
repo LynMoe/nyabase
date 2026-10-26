@@ -246,7 +246,7 @@ function InstanceNameHint({ instanceName }: { instanceName: string | null }) {
     >
       <button
         type="button"
-        className="inline-flex rounded-xs text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+        className="inline-flex rounded-sm text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
         aria-label={text}
         data-testid="container-instance-name"
       >

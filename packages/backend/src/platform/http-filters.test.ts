@@ -32,6 +32,14 @@ describe('RouteIdPipe', () => {
     expect(() => pipe.transform('undefined', { type: 'param', data: 'containerId' }))
       .toThrow(NotFoundException);
   });
+
+  it('passes an image fingerprint only as :fingerprint', () => {
+    const fingerprint = 'e442f8ad6872c208823a5903a6327c885856e01ed5ee73aa3ab42956670d9d8b';
+    expect(pipe.transform(fingerprint, { type: 'param', data: 'fingerprint' })).toBe(fingerprint);
+    expect(() => pipe.transform(fingerprint, { type: 'param', data: 'id' })).toThrow(NotFoundException);
+    expect(() => pipe.transform(fingerprint.toUpperCase(), { type: 'param', data: 'fingerprint' }))
+      .toThrow(NotFoundException);
+  });
 });
 
 describe('isStaticFilePath', () => {
@@ -117,6 +125,9 @@ describe('serveBundledFrontend', () => {
     expect(api.status).toBe(404);
     expect(await api.json()).toMatchObject({ statusCode: 404, error: 'Not Found' });
     expect((await fetch(`${baseUrl}/api/ping`)).status).toBe(200);
+    // Express routing ignores case, so the SPA fallback must not take /API/... over.
+    expect((await fetch(`${baseUrl}/API/ping`)).status).toBe(200);
+    expect((await fetch(`${baseUrl}/API/missing`)).headers.get('content-type')).toMatch(/json/);
 
     const post = await fetch(`${baseUrl}/containers`, { method: 'POST' });
     expect(post.status).toBe(404);

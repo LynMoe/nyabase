@@ -232,9 +232,10 @@ export const zAgentRequest = z.discriminatedUnion('method', [
      * A FirewallDocument (protocol/firewall.ts), deliberately unchecked here:
      * the agent validates it in the handler and answers `bad_request`, so a
      * document it refuses fails that request instead of the control connection.
-     * The frame size limit bounds it.
+     * The frame size limit bounds it. Optional: zod 4 rejects a missing
+     * z.unknown() key, which zod 3 (and so older peers) accepted.
      */
-    params: z.unknown(),
+    params: z.unknown().optional(),
   }).strict(),
 ]);
 
@@ -266,7 +267,8 @@ export const zAgentResponse = z.discriminatedUnion('ok', [
     type: z.literal('response'),
     id: zRequestId,
     ok: z.literal(true),
-    result: z.unknown(),
+    // A handler resolving to undefined sends no `result` (JSON.stringify drops it).
+    result: z.unknown().optional(),
   }).strict(),
   z.object({
     type: z.literal('response'),

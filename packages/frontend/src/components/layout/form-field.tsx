@@ -20,7 +20,7 @@ export function FormField({
 }) {
   if (orientation === 'inline') {
     return (
-      <div className="space-y-1">
+      <div className="flex flex-col gap-1">
         <div className="flex items-center gap-2">
           {children}
           <Label htmlFor={id} className="text-sm font-normal">{label}</Label>
@@ -29,8 +29,10 @@ export function FormField({
       </div>
     );
   }
+  // gap, not space-y: Tailwind 4's space-y spaces after each child, and a Radix
+  // Select / Checkbox ends with a hidden native input.
   return (
-    <div className="space-y-1.5">
+    <div className="flex flex-col gap-1.5">
       <Label htmlFor={id}>{label}</Label>
       {children}
       {hint && !error && <p className="text-xs text-muted-foreground">{hint}</p>}

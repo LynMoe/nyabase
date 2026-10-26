@@ -58,8 +58,7 @@ export const zSshProxyConnectionRecord = z.object({
   bytesToClient: zSafeCounter,
   channelsOpened: zCount32,
   channelsRejected: zCount32,
-  // Only the codes that occurred are sent (a zod 4 record over an enum would demand every key).
-  rejectedRequests: z.partialRecord(zSshHistoryCode, zCount32).refine(
+  rejectedRequests: z.record(zSshHistoryCode, zCount32).refine(
     (value) => Object.keys(value).length <= MAX_SSH_REJECTED_REQUEST_KINDS,
     'too many rejected request kinds',
   ),

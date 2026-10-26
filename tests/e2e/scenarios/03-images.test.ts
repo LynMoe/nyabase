@@ -84,7 +84,8 @@ describe('image assignment and visibility', () => {
       h.api.delete(`/images/${image.id}/versions/${current.fingerprint}`),
       (error: unknown) => error instanceof ApiError && error.status === 409 && error.code === 'IMAGE_VERSION_CURRENT',
     );
-    assert.equal(await h.api.status('DELETE', `/images/${image.id}/versions/not-a-fingerprint`), 400);
+    // A malformed path id names nothing: 404, like every other route param.
+    assert.equal(await h.api.status('DELETE', `/images/${image.id}/versions/not-a-fingerprint`), 404);
   });
 
   it('stops offering the image once its assignment is removed, and restores it', async (t) => {
