@@ -30,9 +30,7 @@ import {
   IncusClient,
   subscribeIncusEvents,
 } from './incus/index.js';
-import type { NyabaseConfigService } from './platform/config/nyabase-config.service.js';
 import type { IntentRecord } from './reconcile/intent-model.js';
-import { IncusPreflightChecksAdapter } from './servers/preflight-checks.adapter.js';
 import { runProbe, type ProbeRun, type ReportChecks } from './servers/server-preflight-probe.js';
 import { normalized, type ServerRow } from './servers/server-preflight.store.js';
 import {
@@ -279,12 +277,6 @@ describe('the agent policy accepts what the Backend sends', () => {
       gpu_enabled: false,
       revision: 1,
     };
-    const config = {
-      get: (key: string) => ({
-        'incus.preflightEgressUrl': 'https://example.com/',
-        'incus.operationWaitTimeoutMs': 30_000,
-      } as Record<string, unknown>)[key],
-    } as unknown as NyabaseConfigService;
     const gauge = (name: string, labels: Record<string, string> = {}) => ({ name, labels, value: 1 });
     const checks = {} as ReportChecks;
     for (const probeOptions of [
@@ -299,9 +291,7 @@ describe('the agent policy accepts what the Backend sends', () => {
         options: { ...probeOptions, probePoolName: 'default', probeAddress: '10.20.0.250' },
         parentInterface: 'vmbr0',
         poolNetwork: { gateway: '10.20.0.1', cidr: '10.20.0.0/24', prefixLength: 24 },
-        hostIpv4: '10.20.0.2',
         checks,
-        adapter: new IncusPreflightChecksAdapter(undefined as never, config),
         secondMetricsPull: async () => ({
           report: {
             samples: [
@@ -316,7 +306,7 @@ describe('the agent policy accepts what the Backend sends', () => {
       await expect(runProbe(run)).resolves.toBeUndefined();
     }
     expect(tunnel.refusals).toEqual([]);
-    expect(checks).toMatchObject({ guestCanReachHost: 'pass', egress: 'pass' });
+    expect(checks).toMatchObject({ nftables: 'pass', ipv4Filtering: 'pass', guestAddress: 'pass' });
     expect(tunnel.host.instances.size).toBe(0);
   });
 });

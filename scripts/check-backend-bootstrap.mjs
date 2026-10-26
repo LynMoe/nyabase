@@ -72,7 +72,6 @@ try {
     '  adminInitPassword: "bootstrap-password"',
     'incus:',
     '  preflightImageAlias: bootstrap-image',
-    '  preflightEgressUrl: https://example.invalid/health',
     '  requestTimeoutMs: 10000',
     '  operationWaitTimeoutMs: 120000',
     'database:',

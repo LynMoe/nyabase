@@ -43,6 +43,7 @@ describe('HTTP API route uniqueness', () => {
     expect([...adminResources].sort()).toEqual([
       'agent-rejections',
       'catalog',
+      'firewall-rules',
       'groups',
       'ip-pools',
       'metrics',

@@ -10,8 +10,13 @@ const HELLO: AgentHello = {
   agentVersion: '0.1.0',
   hostname: 'worker',
   incus: { serverVersion: '7.4', apiExtensions: [] },
-  status: { ipv6Guard: { present: true, error: null } },
+  status: {
+    ipv6Guard: { present: true, error: null },
+    // A new connection has no confirmed firewall until the Backend pushes one.
+    firewall: { present: false, digest: null, error: null },
+  },
 };
+const FIREWALL = { present: true, digest: 'a'.repeat(64), error: null };
 
 function harness() {
   const updates: Array<{ values: Record<string, unknown>; where: unknown[][] }> = [];
@@ -104,12 +109,30 @@ describe('AgentPresenceService', () => {
     expect(h.updates).toHaveLength(1);
   });
 
-  it('wakes the server once its agent reports the IPv6 guard back', async () => {
+  it('wakes the server once its agent reports both guest guards in place', async () => {
     const h = harness();
-    await h.listener().status?.(SERVER_ID, { ipv6Guard: { present: false, error: 'flushed' } });
+    h.setConnected(true);
+    await h.listener().connected(SERVER_ID, HELLO);
+    h.wake.wake.mockClear();
+    await h.listener().status?.(SERVER_ID, { ipv6Guard: { present: false, error: 'flushed' }, firewall: FIREWALL });
     expect(h.wake.wake).not.toHaveBeenCalled();
-    await h.listener().status?.(SERVER_ID, { ipv6Guard: { present: true, error: null } });
+    await h.listener().status?.(SERVER_ID, { ipv6Guard: { present: true, error: null }, firewall: FIREWALL });
     expect(h.wake.wake).toHaveBeenCalledWith({ serverId: SERVER_ID, reason: 'reconnect' });
-    expect(h.updates).toEqual([]);
+    expect(h.wake.wake).toHaveBeenCalledTimes(1);
+    // A digest-only change while both stay in place is not a recovery.
+    await h.listener().status?.(SERVER_ID, {
+      ipv6Guard: { present: true, error: null },
+      firewall: { ...FIREWALL, digest: 'b'.repeat(64) },
+    });
+    expect(h.wake.wake).toHaveBeenCalledTimes(1);
+  });
+
+  it('wakes the server once the firewall is confirmed on a new connection', async () => {
+    const h = harness();
+    h.setConnected(true);
+    await h.listener().connected(SERVER_ID, HELLO);
+    h.wake.wake.mockClear();
+    await h.listener().status?.(SERVER_ID, { ipv6Guard: { present: true, error: null }, firewall: FIREWALL });
+    expect(h.wake.wake).toHaveBeenCalledWith({ serverId: SERVER_ID, reason: 'reconnect' });
   });
 });

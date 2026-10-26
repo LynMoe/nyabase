@@ -168,8 +168,6 @@ function reconciler(db: ReturnType<typeof database>) {
     } as never,
     {
       checkNetworkPrerequisites: vi.fn(),
-      checkEgress: vi.fn(),
-      checkGuestCanReachHost: vi.fn(),
     } as never,
     {
       get: vi.fn(
@@ -283,8 +281,6 @@ describe('ServerPreflightReconciler', () => {
       connect: ReturnType<typeof vi.fn>;
       checks: {
         checkNetworkPrerequisites: ReturnType<typeof vi.fn>;
-        checkEgress: ReturnType<typeof vi.fn>;
-        checkGuestCanReachHost: ReturnType<typeof vi.fn>;
       };
       nodeMetrics: {
         pull: ReturnType<typeof vi.fn>;
@@ -296,8 +292,6 @@ describe('ServerPreflightReconciler', () => {
       },
     });
     internals.checks.checkNetworkPrerequisites.mockResolvedValue(passingLanNetwork());
-    internals.checks.checkEgress.mockResolvedValue({ status: 'pass' });
-    internals.checks.checkGuestCanReachHost.mockResolvedValue({ status: 'pass' });
     internals.nodeMetrics.pull.mockResolvedValue({
       status: 'online',
       report: { samples: lanSamples() },
@@ -453,7 +447,6 @@ describe('ServerPreflightReconciler', () => {
             'ipv4.address': '169.254.255.254',
             'security.ipv4_filtering': 'true',
             'security.mac_filtering': 'true',
-            'security.port_isolation': 'true',
           },
         },
         start: false,
@@ -477,13 +470,6 @@ describe('ServerPreflightReconciler', () => {
     expect(deleteInstance).toHaveBeenCalledWith(probeName, { signal: expect.any(AbortSignal) });
     expect(getInstanceFull).toHaveBeenCalledTimes(4);
     expect(internals.nodeMetrics.pull).toHaveBeenCalledTimes(2);
-    expect(internals.checks.checkGuestCanReachHost).toHaveBeenCalledWith(
-      serverId,
-      expect.anything(),
-      probeName,
-      '192.0.2.1',
-      expect.any(AbortSignal),
-    );
   });
 
   it('records a retryable preflight failure as running', async () => {

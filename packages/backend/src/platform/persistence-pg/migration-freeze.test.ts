@@ -13,6 +13,7 @@ const RELEASED_MIGRATION_CHECKSUMS: Readonly<Record<string, string>> = {
   '000001_initial': 'c6a62ecdfd510dfddd2471228a15a4feaa175b18ba1c59d20901454d9a0c8b2b',
   '000002_http-proxy-binding-counters': 'a795b512b553392498b6fd5b2a946f3f9ebc518bacc3e711f99c28276eb73af9',
   '000003_ssh-proxy-history': '322ea62c933704f96f7bc8fee0803e6a1b54721ec78fd39f77262fcaf780e493',
+  '000004_firewall': '63ac5049602cb0c64bbe742a61ba21a8dc628b325acfbbae964b58f8aef77649',
 };
 
 describe('released SQL migrations', () => {

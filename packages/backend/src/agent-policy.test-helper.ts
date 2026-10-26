@@ -19,7 +19,7 @@ import { IncusError } from './incus/index.js';
 
 /** The verdict shape of the agent's checkIncusHttp. */
 type PolicyVerdict =
-  | { readonly allowed: true; readonly body?: Buffer; readonly needsIpv6Guard?: boolean }
+  | { readonly allowed: true; readonly body?: Buffer; readonly bringsUpGuestNic?: boolean }
   | { readonly allowed: false; readonly reason: string; readonly notFound?: boolean };
 
 interface OperationLedger {

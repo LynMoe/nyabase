@@ -77,6 +77,26 @@ export interface InfrastructureIpPoolServerTable {
   created_at: InfrastructureGeneratedTimestamp;
 }
 
+export interface InfrastructureFirewallRuleTable {
+  id: string;
+  name: string;
+  description: ColumnType<string, string | undefined, string>;
+  priority: number;
+  action: 'accept' | 'drop' | 'reject';
+  protocol: 'all' | 'tcp' | 'udp';
+  ports: InfrastructureJson<Array<{ from: number; to: number }>>;
+  cidrs: InfrastructureJson<string[]>;
+  revision: InfrastructureBigInt;
+  created_at: InfrastructureGeneratedTimestamp;
+  updated_at: InfrastructureGeneratedTimestamp;
+}
+
+export interface InfrastructureFirewallRuleServerTable {
+  rule_id: string;
+  server_id: string;
+  created_at: InfrastructureGeneratedTimestamp;
+}
+
 export interface InfrastructureStoragePoolTable {
   id: string;
   server_id: string;
@@ -150,6 +170,8 @@ export interface InfrastructureDatabase {
   'infra.servers': InfrastructureServerTable;
   'infra.ip_pools': InfrastructureIpPoolTable;
   'infra.ip_pool_servers': InfrastructureIpPoolServerTable;
+  'infra.firewall_rules': InfrastructureFirewallRuleTable;
+  'infra.firewall_rule_servers': InfrastructureFirewallRuleServerTable;
   'infra.storage_pools': InfrastructureStoragePoolTable;
   'infra.shared_backends': InfrastructureSharedBackendTable;
   'infra.images': InfrastructureImageTable;

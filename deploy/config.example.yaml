@@ -7,8 +7,6 @@ incus:
   # Required in production: combined squashfs fingerprint of the baked image.
   # Empty fingerprint is not allowed before opening container create.
   preflightImageFingerprint: ""
-  # Fixed HTTPS URL checked from the preflight instance.
-  preflightEgressUrl: ""
   preflightSourceServer: https://nyabase-images.nyabase-lxc-images.workers.dev
   # Dedicated simplestreams source for managed image assignment. Empty uses preflightSourceServer.
   imageSourceServer: https://nyabase-images.nyabase-lxc-images.workers.dev

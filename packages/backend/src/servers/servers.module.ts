@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { FirewallModule } from '../firewall/firewall.module.js';
 import { GpuModule } from '../gpu/gpu.module.js';
 import { IncusModule } from '../incus/incus.module.js';
 import { MetricsModule } from '../metrics/metrics.module.js';
@@ -33,6 +34,7 @@ import { ServersService } from './servers.service.js';
     VolumesModule,
     GpuModule,
     MetricsModule,
+    FirewallModule,
   ],
   providers: [
     ServersService,

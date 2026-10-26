@@ -34,6 +34,7 @@ describePg('server agent onboarding and removal', () => {
         agents as never,
         enrollment,
         { wake: vi.fn() } as never,
+        { agentStatuses: vi.fn(async () => new Map()) } as never,
       );
       const operatorId = await seedUser(database, undefined, UserStatus.Active, Role.Operator);
       const created = await service.create(operatorId, {
@@ -176,6 +177,7 @@ describePg('server agent onboarding and removal', () => {
         { disconnect: vi.fn(), isConnected: vi.fn(() => false), current: vi.fn(() => undefined) } as never,
         {} as never,
         { wake: vi.fn() } as never,
+        { agentStatuses: vi.fn(async () => new Map()) } as never,
       );
 
       await expect(service.delete(actor, serverId, 2)).rejects.toMatchObject({
@@ -538,6 +540,7 @@ describePg('server agent onboarding and removal', () => {
         { disconnect: vi.fn(), isConnected: vi.fn(() => false), current: vi.fn(() => undefined) } as never,
         {} as never,
         { wake: vi.fn() } as never,
+        { agentStatuses: vi.fn(async () => new Map()) } as never,
       );
 
       // Its instances would keep running with addresses handed out again: refused unless forced.
@@ -726,6 +729,7 @@ describePg('server agent onboarding and removal', () => {
         { disconnect: vi.fn(), isConnected: vi.fn(() => false), current: vi.fn(() => undefined) } as never,
         {} as never,
         { wake: vi.fn() } as never,
+        { agentStatuses: vi.fn(async () => new Map()) } as never,
       );
 
       await expect(service.delete(actor, unrelated, 1)).resolves.toBeUndefined();

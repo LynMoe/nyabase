@@ -152,6 +152,27 @@ describePg('System settings PostgreSQL authority', () => {
     });
   });
 
+  it('ignores a stored key that is no longer a setting', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const actorId = await seedActor(database);
+      const authority = makeAuthority(database, makeConfig(), databaseAudit());
+      const initial = await authority.initialize();
+      // incus.preflightEgressUrl was removed with the preflight egress check.
+      await database
+        .updateTable('system.settings')
+        .set({ values: { ...initial.values, 'incus.preflightEgressUrl': 'https://example.com/' } })
+        .execute();
+
+      const restarted = makeAuthority(database, makeConfig(), databaseAudit());
+      const loaded = await restarted.initialize();
+      expect(loaded.revision).toBe(initial.revision);
+      const next = await database.transaction().execute((transaction) =>
+        restarted.update(transaction, actorId, { 'audit.retentionDays': 45 }, loaded.revision));
+      await restarted.committed(next);
+      expect(next.revision).toBe(initial.revision + 1);
+    });
+  });
+
   it('rejects a stale revision with the committed value so the client can resolve it', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const actorId = await seedActor(database);

@@ -75,7 +75,6 @@ chmod 0600 "$smoke_env"
   echo '  nodeEnv: production'
   echo 'incus:'
   echo '  preflightImageAlias: smoke-image'
-  echo '  preflightEgressUrl: https://example.invalid/health'
   echo '  requestTimeoutMs: 10000'
   echo '  operationWaitTimeoutMs: 120000'
   echo 'server:'

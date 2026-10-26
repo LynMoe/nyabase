@@ -226,7 +226,8 @@ export function deriveGuestHwaddr(ipv4Address: string): string {
 /**
  * The one guest NIC of every nyabase instance (containers and the preflight
  * probe): bridged onto the server's LAN bridge, IPv4 / MAC filtered to its
- * address, port-isolated from the other guests and named for the IPv6 guard.
+ * address and named `nyh*` for the IPv6 guard and the egress firewall. Guests
+ * on one host reach each other; what they may reach is the firewall's job.
  * The agent policy refuses any eth0 without these.
  */
 export function buildGuestNicDevice(input: {
@@ -246,7 +247,6 @@ export function buildGuestNicDevice(input: {
     'ipv4.address': input.ipv4Address,
     'security.ipv4_filtering': 'true',
     'security.mac_filtering': 'true',
-    'security.port_isolation': 'true',
   };
 }
 

@@ -122,7 +122,6 @@ describe('buildDesiredInstanceSpec', () => {
           'ipv4.address': '192.0.2.20',
           'security.ipv4_filtering': 'true',
           'security.mac_filtering': 'true',
-          'security.port_isolation': 'true',
           'limits.ingress': '1000Mbit',
           'limits.egress': '500Mbit',
         },

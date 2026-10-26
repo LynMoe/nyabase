@@ -11,12 +11,14 @@ import {
   type CreatedServerDto,
   type ListScope,
   type PatchServerRequest,
+  type ServerAgentDto,
   type ServerDto,
   type UserServerDto,
   Role,
 } from '@nyabase/common';
 import { allocatableCpus } from '../cpu/cpu-allocation.js';
 import { AgentRegistry } from '../incus/agent-registry.service.js';
+import { FirewallSyncService } from '../firewall/firewall-sync.service.js';
 import { afterCommit } from '../platform/post-commit.js';
 import { ReconcileWakeService } from '../reconcile/reconcile-wake.service.js';
 import { AgentEnrollmentService } from './agent-enrollment.service.js';
@@ -47,6 +49,7 @@ export class ServersService {
     private readonly agents: AgentRegistry,
     private readonly enrollment: AgentEnrollmentService,
     private readonly wake: ReconcileWakeService,
+    private readonly firewall: FirewallSyncService,
   ) {}
 
   async create(actorId: string, input: CreateServerRequest): Promise<CreatedServerDto> {
@@ -276,15 +279,18 @@ export class ServersService {
         names.set(pool.id, poolLabel(pool.display_name, pool.incus_name));
       }
     }
+    const firewall = await this.firewall.agentStatuses(rows.map((row) => row.id));
     return rows.map((row) => this.toDto(
       row,
       row.system_pool_id ? names.get(row.system_pool_id) ?? null : null,
+      firewall.get(row.id) ?? null,
     ));
   }
 
   private toDto(
     row: ServerRow,
-    systemPoolName: string | null = null,
+    systemPoolName: string | null,
+    firewall: ServerAgentDto['firewall'],
   ): ServerDto {
     return {
       id: row.id,
@@ -314,6 +320,7 @@ export class ServersService {
         connectedAt: isoDate(row.agent_connected_at),
         enrollmentExpiresAt: isoDate(row.agent_enrollment_expires_at),
         ipv6Guard: this.agents.current(row.id)?.status.ipv6Guard ?? null,
+        firewall,
       },
       metricsHealth: {
         status: row.node_metrics_status as NodeMetricsStatus,

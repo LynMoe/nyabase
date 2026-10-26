@@ -9,6 +9,7 @@ export const INFRASTRUCTURE_ADVISORY_NAMESPACE = 1_856_214_885;
 const SERVER_ONBOARDING_ADVISORY_KEY = 5;
 const IMAGE_CAPACITY_ADVISORY_KEY = 6;
 const IP_POOL_TOPOLOGY_ADVISORY_KEY = 7;
+const FIREWALL_POLICY_ADVISORY_KEY = 8;
 
 /** Transaction-scoped lock serializing server admission and removal. */
 export async function lockServerOnboarding(executor: AdvisoryLockExecutor): Promise<void> {
@@ -35,6 +36,18 @@ export async function lockIpPoolTopology(executor: AdvisoryLockExecutor): Promis
   await sql`select pg_advisory_xact_lock(
     ${INFRASTRUCTURE_ADVISORY_NAMESPACE},
     ${IP_POOL_TOPOLOGY_ADVISORY_KEY}
+  )`.execute(executor);
+}
+
+/**
+ * Transaction-scoped lock serializing firewall rule writes: the per-server
+ * limits sum over every rule associated with a server, so two writes adding
+ * rules to the same server could each pass the check without it.
+ */
+export async function lockFirewallPolicy(executor: AdvisoryLockExecutor): Promise<void> {
+  await sql`select pg_advisory_xact_lock(
+    ${INFRASTRUCTURE_ADVISORY_NAMESPACE},
+    ${FIREWALL_POLICY_ADVISORY_KEY}
   )`.execute(executor);
 }
 

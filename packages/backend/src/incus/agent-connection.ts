@@ -4,6 +4,7 @@ import {
   AGENT_STREAM_CONNECT_TIMEOUT_MS,
   MAX_AGENT_STATUS_FRAME_BYTES,
   MAX_AGENT_STATUS_FRAMES_PER_MINUTE,
+  zAgentFirewallApplyResult,
   zAgentIncusHttpResult,
   zAgentMetricsResult,
   zAgentResponse,
@@ -12,6 +13,7 @@ import {
   type AgentHello,
   type AgentHostStatus,
   type AgentRequest,
+  type FirewallDocument,
 } from '@nyabase/common';
 import { isRecord } from '../platform/domain-utils.js';
 import { IncusError } from './incus-errors.js';
@@ -53,6 +55,9 @@ interface PendingStream {
  */
 export const AGENT_STREAM_REPLY_TIMEOUT_MS = AGENT_STREAM_CONNECT_TIMEOUT_MS * 2;
 export const AGENT_STREAM_WAIT_TIMEOUT_MS = AGENT_STREAM_REPLY_TIMEOUT_MS + 5_000;
+
+/** `firewall.apply` persists, checks and loads an nft table; bounded generously. */
+export const AGENT_FIREWALL_APPLY_TIMEOUT_MS = 30_000;
 
 /**
  * Requests given up on (timeout, abort) whose reply may still arrive. A
@@ -137,6 +142,9 @@ function agentFailure(code: AgentErrorCode, message: string): IncusError {
     case 'ipv6_guard_missing':
       // The host heals the guard itself (and reports it); the start waits for it.
       return new IncusError('AGENT_IPV6_GUARD_MISSING', 'retry', { message });
+    case 'firewall_missing':
+      // Same for the egress firewall: the Backend pushes the rules, the agent reports them in place.
+      return new IncusError('AGENT_FIREWALL_MISSING', 'retry', { message });
     case 'internal':
       // A busy or failing agent request is retried; it says nothing about the server being down.
       return new IncusError('AGENT_REQUEST_FAILED', 'retry', { message });
@@ -208,6 +216,18 @@ export class AgentConnection implements StreamOwner {
 
   async collectMetrics(timeoutMs: number, signal?: AbortSignal): Promise<string> {
     return parseAgentResult(zAgentMetricsResult, 'metrics.collect', await this.call('metrics.collect', {}, timeoutMs, signal)).text;
+  }
+
+  /**
+   * Replace the agent's egress firewall document; resolves with the digest the
+   * agent applied. A document it refuses rejects with INCUS_BAD_REQUEST.
+   */
+  async applyFirewall(document: FirewallDocument, signal?: AbortSignal): Promise<string> {
+    return parseAgentResult(
+      zAgentFirewallApplyResult,
+      'firewall.apply',
+      await this.call('firewall.apply', document, AGENT_FIREWALL_APPLY_TIMEOUT_MS, signal),
+    ).digest;
   }
 
   /**

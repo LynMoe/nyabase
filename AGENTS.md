@@ -27,7 +27,7 @@ Vite 通过 alias 将 `@nyabase/common` 指向 `src/index.ts`，但 `index.ts` �
 ## API 表面：每个资源只有一套路由
 
 - 同一资源不再有 `/x` 与 `/admin/x` 两套 controller。`/admin/` 前缀只留给没有用户版本的运维资源
-  （groups、ip-pools、catalog、metrics、ssh-proxy、system-settings、agent-rejections）；
+  （groups、ip-pools、firewall-rules、catalog、metrics、ssh-proxy、system-settings、agent-rejections）；
   `http-api-duplicate-routes.contract.test.ts` 断言不存在同名资源同时挂在两处。
 - 鉴权在 service 里：`@CurrentActor()`（`iam/actor.ts`）给出 `{ userId, role, authKind, authVersion }`，
   `RolesGuard` 用 `JwtAuthGuard` 已加载的用户行（带 `role`）构造，不再额外查询。
@@ -141,14 +141,16 @@ Vite 通过 alias 将 `@nyabase/common` 指向 `src/index.ts`，但 `index.ts` �
    不要按客户端地址计失败或封禁：同一 NAT / 未配 `trustedProxies` 时所有 agent 共用一个地址，一台凭据过期的 agent 或一次 PG 故障
    不能把健康 agent 的控制 / stream 连接挡在外面。被拒的凭据只记进给运维看的 `AgentCredentialRejections`，不限流。
    agent 端 `policy.ts` 是安全边界（只许 `nyc-*`/`nyv-*`、配置白名单、禁 raw/特权/宿主路径/profiles、
-   必须 idmap.isolated、网卡 `nyh*` + IPv4/MAC 过滤 + `security.port_isolation`，volatile 改回当前值；更新时与 Incus 当前值相同的配置键原样放行，白名单只管新增 / 改值的键，例如池 `volume.*` 默认值复制进卷的 `zfs.*`）；
+   必须 idmap.isolated、网卡 `nyh*` + IPv4/MAC 过滤，volatile 改回当前值；更新时与 Incus 当前值相同的配置键原样放行，白名单只管新增 / 改值的键，例如池 `volume.*` 默认值复制进卷的 `zfs.*`）；
    backend 生成的规格必须过得了它：`backend/src/agent-policy.contract.test.ts` 用真实的规格构建与 Incus 操作
    （容器、卷、镜像、预检 probe、控制台）经真实 `IncusClient` 送进 agent 的 `policy.ts`（按路径加载 agent 源码，
-   backend 不依赖 agent 包）；新增发往 Incus 的请求时把它的流程加进去。客户网卡统一用 `buildGuestNicDevice`；MAC 由 IPv4 地址派生（`deriveGuestHwaddr`，`02:6e` + 四个地址字节），所以回收重用的地址仍是同一个 MAC（对端的邻居 / ARP 缓存远长于地址回收的 drain）。
-   IPv6 拦截表 `bridge nyabase_guard` 是 agent 自己执行的不变量：policy 把会接通客户网卡的请求（start / restart /
-   unfreeze、`start: true` 创建、给未停止实例新增或改网卡）标为 `needsIpv6Guard`，agent 转发前现场校验（必要时补回），
-   不在位返回可重试的 `ipv6_guard_missing`（`AGENT_IPV6_GUARD_MISSING`）；状态经 hello / status 帧上报，
-   只在内存里（`AgentConnection.status` → 服务器 DTO `agent.ipv6Guard`），恢复时唤醒该服务器，backend 不轮询它。
+   backend 不依赖 agent 包）；新增发往 Incus 的请求时把它的流程加进去。客户网卡统一用 `buildGuestNicDevice`（不带 `security.port_isolation`：同机容器默认互通，能去哪由出站防火墙决定；policy 仍允许该键为 true/false，漂移纠正会去掉旧值）；MAC 由 IPv4 地址派生（`deriveGuestHwaddr`，`02:6e` + 四个地址字节），所以回收重用的地址仍是同一个 MAC（对端的邻居 / ARP 缓存远长于地址回收的 drain）。
+   IPv6 拦截表 `bridge nyabase_guard` 与出站防火墙表 `bridge nyabase_firewall` 是 agent 自己执行的不变量：policy 把会接通客户网卡的请求（start / restart /
+   unfreeze、`start: true` 创建、给未停止实例新增或改网卡）标为 `bringsUpGuestNic`，agent 转发前现场校验两张表（必要时补回），
+   不在位返回可重试的 `ipv6_guard_missing` / `firewall_missing`（`AGENT_IPV6_GUARD_MISSING` / `AGENT_FIREWALL_MISSING`，intent 退避重试不失败）；状态经 hello / status 帧上报，
+   只在内存里（`AgentConnection.status` → 服务器 DTO `agent.ipv6Guard` / `agent.firewall`），两者都在位时唤醒该服务器（`agent-presence.service.ts`），backend 不轮询它。
+   开机无窗口：unit 的 `ExecStartPre` 是 `guest-guards`（别名 `ipv6-guard`），在 Incus 启动前补回 IPv6 guard，并按 `<stateDir>/firewall.json`
+   恢复 `bridge nyabase_firewall`（没有文档 / 文档损坏时用 fail-closed 表，容器出站全断，直到 Backend 下发）。
    Incus operation 只能 GET / wait 经 policy 的请求创建的那些（agent 内存里的 `OperationLedger`，按 202 响应记），
    其余回 404；不能列出或取消。事件流 agent 自己开 `/1.0/events?type=lifecycle` 并只转发 nyabase 资源的 action/source，
    backend 只把事件当唤醒信号，不要依赖事件内容。
@@ -195,6 +197,18 @@ SSH 连接历史（`tools/ssh-proxy/src/history.rs`、`backend/src/ssh/ssh-histo
 HTTP 代理按路由撤销：每个 hostname 有一个 incarnation，只在连续快照里权限元组不变时延续，交换只在自己的路由被删 / 改权限或租约到期时中断，
 绝不因其他站点的变化而全局重置。域名池必须互不嵌套（`http-domain-overlap.ts`），绑定主机名不得是任何池域名或其父域。
 控制链路两端都有存活检测（代理 `proxy_common::control_link`，Backend `ProxyControlHeartbeat`）；待握手 / 未认证槽位按来源公平分配并在满时驱逐最重来源（`conn_limit.rs`）。
+
+出站防火墙（`firewall/`、`common/src/protocol/firewall.ts`、agent 的 `firewall*`）：只管容器出站（`nyh*` 进桥的帧）、无状态，
+规则（名称、全局唯一优先级、`accept | drop | reject`、`all | tcp | udp` + 端口、IPv4 网段、0..n 台关联服务器）在每台服务器上按优先级第一条命中生效，
+都不命中放行，不自动放行任何地址。规则只有 admin 能改（`/admin/firewall-rules`，`expectedRevision` CAS，写操作持 `lockFirewallPolicy`，
+关联服务器行 `FOR KEY SHARE` 防止与删除服务器竞态；名称 / 优先级冲突 409 `FIREWALL_RULE_CONFLICT`，每台服务器 ≤ 256 条规则、网段合计 ≤ 4096，
+超出 400 `FIREWALL_TOO_LARGE`）；网段 / 端口在 common 规范化后存储。`firewall-sync.service.ts` 按服务器生成文档（按优先级排序，摘要 =
+`sha256(firewallDigestInput(rules))`，只在 Backend 计算；没有规则也有空文档，用来解除 agent 的 fail-closed 表），经 `firewall.apply` 下发：
+规则变更在 `afterCommit` 后同步改前 ∪ 改后的服务器；agent 每次 `connected` **无条件**下发一次（agent 的防火墙只在当前连接上被确认过才算在位，
+离线期间新增的拒绝规则不会被旧文档放过）；status 帧的摘要与期望不同且无在途同步时再下发。每台服务器单飞 + 脏位；传输 / agent 内部错误按 5 s 起翻倍、
+封顶 5 分钟重试，`bad_request`（agent 拒收文档）记为 `failed` 不自动重试（等规则变化或重连）；断开即丢弃该服务器的在途 / 重试状态。
+同步状态只在内存（`GET /admin/firewall-rules/status`：`offline | synced | pending | failed`，服务器 DTO `agent.firewall`），不轮询。
+`firewall/` 只依赖 platform / iam / incus，servers → firewall 单向（`FirewallSyncService.agentStatuses`）。预检不再检查「容器可达宿主」与出站网络。
 
 GPU 是平台内置功能（`gpu/` 模块、`common/src/gpu/`、agent 的 `gpu-collector`），不存在扩展框架。
 

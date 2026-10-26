@@ -82,12 +82,10 @@ function failureReport(
       parentInterface: 'fail',
       nftables: 'fail',
       ipv4Filtering: 'fail',
-      guestCanReachHost: 'fail',
       networkPrerequisites: 'fail',
       storagePool: 'fail',
       simplestreamsImage: 'fail',
       guestAddress: 'fail',
-      egress: 'fail',
       nodeMetrics: 'fail',
     },
     failureCode,
@@ -313,7 +311,7 @@ export class ServerPreflightReconciler implements ManagedReconciler, OnModuleIni
     network: Record<string, unknown>,
     samples: ReturnType<typeof metricSamplesFrom>,
     signal: AbortSignal,
-  ): Promise<{ parentInterface: string; poolNetworks: IpPoolNetwork[]; hostIpv4: string }> {
+  ): Promise<{ parentInterface: string; poolNetworks: IpPoolNetwork[] }> {
     const poolNetworks = await this.store.listIpPoolNetworks(server.id);
     const parentInterface = server.parent_interface?.trim() || '';
     const parentLookup = parentInterface
@@ -339,7 +337,7 @@ export class ServerPreflightReconciler implements ManagedReconciler, OnModuleIni
         network: JSON.stringify(network).slice(0, 2048),
       });
     }
-    return { parentInterface, poolNetworks, hostIpv4: lan.hostIpv4! };
+    return { parentInterface, poolNetworks };
   }
 
   /** The probe cannot run without an image and a pool; both may default from the system pool. */
@@ -415,12 +413,10 @@ export class ServerPreflightReconciler implements ManagedReconciler, OnModuleIni
       parentInterface: 'pass',
       nftables: 'pass',
       ipv4Filtering: 'fail',
-      guestCanReachHost: 'fail',
       networkPrerequisites: 'pass',
       storagePool: 'pass',
       simplestreamsImage: 'fail',
       guestAddress: 'fail',
-      egress: 'fail',
       nodeMetrics: metrics.failure ? 'warn' : metrics.pull.status === 'online' ? 'pass' : 'fail',
     };
     const run: ProbeRun = {
@@ -431,9 +427,7 @@ export class ServerPreflightReconciler implements ManagedReconciler, OnModuleIni
       options: this.probeOptions(options, systemPool.incus_name),
       parentInterface: lan.parentInterface,
       poolNetwork: lan.poolNetworks[0]!,
-      hostIpv4: lan.hostIpv4,
       checks,
-      adapter: this.checks,
       secondMetricsPull: () => this.pullNodeMetricsAfterProbe(server, signal),
       created: false,
     };

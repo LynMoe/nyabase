@@ -18,7 +18,10 @@ const HELLO: AgentHello = {
   agentVersion: '0.1.0',
   hostname: 'worker-1',
   incus: { serverVersion: '7.4', apiExtensions: [] },
-  status: { ipv6Guard: { present: true, error: null } },
+  status: {
+    ipv6Guard: { present: true, error: null },
+    firewall: { present: true, digest: 'a'.repeat(64), error: null },
+  },
 };
 
 class FakeSocket extends EventEmitter {
@@ -153,7 +156,7 @@ describe('agent connection RPC', () => {
 
   it('closes on a flood of status frames', () => {
     const { agent } = connection();
-    const status = { type: 'status', status: { ipv6Guard: { present: true, error: null } } };
+    const status = { type: 'status', status: HELLO.status };
     for (let index = 0; index < 30; index += 1) expect(agent.handleFrame(status)).toBe(true);
     expect(agent.handleFrame(status)).toBe(false);
   });
@@ -321,6 +324,42 @@ describe('agent connection RPC', () => {
     await expect(pending).rejects.toMatchObject({ code: 'AGENT_IPV6_GUARD_MISSING', disposition: 'retry' });
   });
 
+  it('retries a start the agent held back for its egress firewall', async () => {
+    const { socket, agent } = connection();
+    const pending = agent.request({ method: 'PUT', path: '/1.0/instances/nyc-0/state', headers: {}, timeoutMs: 1_000 });
+    agent.handleFrame({
+      type: 'response',
+      id: socket.lastRequest().id,
+      ok: false,
+      error: { code: 'firewall_missing', message: 'the egress firewall is not in place' },
+    });
+    await expect(pending).rejects.toMatchObject({ code: 'AGENT_FIREWALL_MISSING', disposition: 'retry' });
+  });
+
+  it('sends a firewall document and returns the digest the agent applied', async () => {
+    const { socket, agent } = connection();
+    const document = { digest: 'b'.repeat(64), rules: [] };
+    const applied = agent.applyFirewall(document);
+    const request = socket.lastRequest();
+    expect(request.method).toBe('firewall.apply');
+    expect(request.params).toEqual(document);
+    agent.handleFrame({ type: 'response', id: request.id, ok: true, result: { digest: document.digest } });
+    await expect(applied).resolves.toBe(document.digest);
+
+    const refused = agent.applyFirewall(document);
+    agent.handleFrame({
+      type: 'response',
+      id: socket.lastRequest().id,
+      ok: false,
+      error: { code: 'bad_request', message: 'invalid document' },
+    });
+    await expect(refused).rejects.toMatchObject({ code: 'INCUS_BAD_REQUEST', disposition: 'managed_failure' });
+
+    const malformed = agent.applyFirewall(document);
+    agent.handleFrame({ type: 'response', id: socket.lastRequest().id, ok: true, result: { digest: 'nope' } });
+    await expect(malformed).rejects.toMatchObject({ code: 'INCUS_INVALID_RESPONSE' });
+  });
+
   it('tracks the host status the agent reports after hello', () => {
     const onStatus = vi.fn();
     const agent = new AgentConnection(
@@ -331,7 +370,10 @@ describe('agent connection RPC', () => {
       onStatus,
     );
     expect(agent.status.ipv6Guard.present).toBe(true);
-    const lost = { ipv6Guard: { present: false, error: 'nft: table vanished' } };
+    const lost = {
+      ipv6Guard: { present: false, error: 'nft: table vanished' },
+      firewall: { present: false, digest: null, error: null },
+    };
     expect(agent.handleFrame({ type: 'status', status: lost })).toBe(true);
     expect(agent.status).toEqual(lost);
     expect(onStatus).toHaveBeenCalledWith(agent);

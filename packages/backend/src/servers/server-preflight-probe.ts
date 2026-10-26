@@ -14,7 +14,6 @@ import {
   labeledGauge,
   metricSamplesFrom,
   unlabeledGauge,
-  type IncusPreflightChecksAdapter,
 } from './preflight-checks.adapter.js';
 import { normalized, type IpPoolNetwork, type ServerRow } from './server-preflight.store.js';
 
@@ -31,18 +30,16 @@ export interface ReportChecks {
   parentInterface: 'pass' | 'fail';
   nftables: 'pass' | 'fail';
   ipv4Filtering: 'pass' | 'fail';
-  guestCanReachHost: 'pass' | 'fail';
   networkPrerequisites: 'pass' | 'fail';
   storagePool: 'pass' | 'fail';
   simplestreamsImage: 'pass' | 'fail';
   guestAddress: 'pass' | 'fail';
-  egress: 'pass' | 'fail';
   nodeMetrics: 'pass' | 'warn' | 'fail';
 }
 
 const MANAGED_PROBE_KEY = 'user.nyabase.preflight';
 const PROBE_SERVER_KEY = 'user.nyabase.server_id';
-/** Headroom for Debian probe boot + wget TLS; rc 137 was SIGKILL under pressure. */
+/** Headroom for the Debian probe boot; rc 137 was SIGKILL under pressure. */
 const PREFLIGHT_PROBE_MEMORY = '256MiB';
 
 function probeHardwareId(serverId: string): string {
@@ -64,9 +61,7 @@ export interface ProbeRun {
   readonly options: PreflightOptions;
   readonly parentInterface: string;
   readonly poolNetwork: IpPoolNetwork;
-  readonly hostIpv4: string;
   readonly checks: ReportChecks;
-  readonly adapter: IncusPreflightChecksAdapter;
   readonly secondMetricsPull: () => Promise<Metrics>;
   created: boolean;
 }
@@ -172,7 +167,7 @@ async function confirmProbeIdentity(run: ProbeRun): Promise<InstanceFull> {
 async function confirmProbeRunning(run: ProbeRun): Promise<InstanceFull> {
   const probe = await confirmProbeIdentity(run);
   // create then start is async: identity can appear while status is still Stopped.
-  // Confirm Running before egress/cleanup or cleanup skips stop and DELETE 400s.
+  // Confirm Running before the checks/cleanup or cleanup skips stop and DELETE 400s.
   const liveStatus = (probe.state?.status ?? probe.status ?? '').toLowerCase();
   if (liveStatus !== 'running') {
     throw new Error(`preflight probe not running yet (${liveStatus || 'unknown'})`);
@@ -203,7 +198,7 @@ function createProbe(run: ProbeRun) {
           config: {
             [MANAGED_PROBE_KEY]: 'true',
             [PROBE_SERVER_KEY]: normalized(run.server.id),
-            // Debian+wget TLS can SIGKILL (rc 137) under tight/default pressure.
+            // The probe can SIGKILL (rc 137) under tight/default memory pressure.
             'limits.memory': PREFLIGHT_PROBE_MEMORY,
             'security.privileged': 'false',
             'security.idmap.isolated': 'true',
@@ -317,16 +312,6 @@ async function verifyProbe(run: ProbeRun, probe: InstanceFull): Promise<void> {
     });
   }
   checks.ipv4Filtering = 'pass';
-  const reach = await run.adapter.checkGuestCanReachHost(
-    server.id,
-    client,
-    run.probeName,
-    run.hostIpv4,
-    signal,
-  );
-  if (reach.status === 'pass') checks.guestCanReachHost = 'pass';
-  const egress = await run.adapter.checkEgress(server.id, client, run.probeName, signal);
-  if (egress.status === 'pass') checks.egress = 'pass';
 }
 
 /**

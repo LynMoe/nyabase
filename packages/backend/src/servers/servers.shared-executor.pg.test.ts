@@ -25,6 +25,7 @@ function serversService(database: Kysely<NyabaseDatabase>, append = vi.fn()) {
     { disconnect: vi.fn(), isConnected: vi.fn(() => false), current: vi.fn(() => undefined) } as never,
     {} as never,
     { wake: vi.fn() } as never,
+    { agentStatuses: vi.fn(async () => new Map()) } as never,
   );
 }
 

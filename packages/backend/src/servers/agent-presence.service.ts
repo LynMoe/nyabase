@@ -18,6 +18,10 @@ import { ServerHealthService } from './server-health.service.js';
 
 const INVENTORY_TIMEOUT_MS = 60_000;
 
+function guestGuardsReady(status: AgentHostStatus): boolean {
+  return status.ipv6Guard.present && status.firewall.present;
+}
+
 /**
  * Projects agent connections onto `infra.servers`: a connected agent makes the
  * server online and refreshes its inventory (CPU topology, GPUs, pools); a
@@ -29,6 +33,8 @@ export class AgentPresenceService implements OnModuleInit, OnApplicationBootstra
   private unsubscribe?: () => void;
   /** Per-server chain so connect/disconnect projections land in the order they happened. */
   private readonly chains = new Map<string, Promise<void>>();
+  /** Whether each connected agent last reported both guest guards in place. */
+  private readonly guardsReady = new Map<string, boolean>();
 
   constructor(
     @Inject(PG_DATABASE) private readonly database: Kysely<NyabaseDatabase>,
@@ -77,6 +83,7 @@ export class AgentPresenceService implements OnModuleInit, OnApplicationBootstra
   }
 
   private async connected(serverId: string, hello: AgentHello): Promise<void> {
+    this.guardsReady.set(serverId, guestGuardsReady(hello.status));
     // The agent may already be gone again; the disconnect projection queued after us wins.
     if (!this.agents.isConnected(serverId)) return;
     await this.database
@@ -107,16 +114,26 @@ export class AgentPresenceService implements OnModuleInit, OnApplicationBootstra
   }
 
   /**
-   * The agent enforces its IPv6 guard itself (it refuses to bring guest NICs
-   * up without it, and the server page shows the live status). Once it is
-   * back, whatever was waiting to start on that server is retried now.
+   * The agent enforces its IPv6 guard and egress firewall itself (it refuses
+   * to bring guest NICs up without both, and the server page shows the live
+   * status). Once both are in place again, whatever was waiting to start on
+   * that server is retried now. A new connection starts without a confirmed
+   * firewall, so this is also how starts resume after every reconnect.
    */
   private statusChanged(serverId: string, status: AgentHostStatus): void {
-    if (!status.ipv6Guard.present) {
-      this.logger.warn(`Server ${serverId} lost its IPv6 guard: ${status.ipv6Guard.error ?? 'unknown'}`);
+    const wasReady = this.guardsReady.get(serverId) ?? false;
+    const ready = guestGuardsReady(status);
+    this.guardsReady.set(serverId, ready);
+    if (ready === wasReady) return;
+    if (!ready) {
+      const missing = [
+        ...(status.ipv6Guard.present ? [] : [`IPv6 guard (${status.ipv6Guard.error ?? 'unknown'})`]),
+        ...(status.firewall.present ? [] : [`egress firewall (${status.firewall.error ?? 'not confirmed'})`]),
+      ];
+      this.logger.warn(`Server ${serverId} cannot bring guest NICs up without its ${missing.join(' and ')}`);
       return;
     }
-    this.logger.log(`Server ${serverId} has its IPv6 guard back`);
+    this.logger.log(`Server ${serverId} has its IPv6 guard and egress firewall in place`);
     this.wake.wake({ serverId, reason: 'reconnect' });
   }
 
@@ -132,6 +149,7 @@ export class AgentPresenceService implements OnModuleInit, OnApplicationBootstra
 
   private async disconnected(serverId: string): Promise<void> {
     if (this.agents.isConnected(serverId)) return;
+    this.guardsReady.delete(serverId);
     await this.database
       .updateTable('infra.servers')
       .set({ status: 'unreachable', last_error: 'The server agent is not connected' })

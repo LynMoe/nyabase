@@ -1,13 +1,11 @@
 import { isIP } from 'node:net';
 import { Inject, Injectable } from '@nestjs/common';
-import { MAX_NODE_METRICS_BODY_BYTES, isUsableHostInCidr, type NodeMetricSample } from '@nyabase/common';
+import { isUsableHostInCidr, type NodeMetricSample } from '@nyabase/common';
 import type { Kysely } from 'kysely';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
-import { NyabaseConfigService } from '../platform/config/nyabase-config.service.js';
 import {
   IncusError,
-  requestAndWait,
   type IncusClientPort,
   type IncusSchema,
 } from '../incus/index.js';
@@ -25,7 +23,6 @@ const NETWORK_METRICS = {
 export class IncusPreflightChecksAdapter {
   constructor(
     @Inject(PG_DATABASE) private readonly database: Kysely<NyabaseDatabase>,
-    private readonly config: NyabaseConfigService,
   ) {}
 
   async checkNetworkPrerequisites(
@@ -85,152 +82,6 @@ export class IncusPreflightChecksAdapter {
       networkPrerequisites,
     };
   }
-
-  async checkEgress(
-    serverId: string,
-    client: IncusClientPort,
-    probeName: string,
-    signal?: AbortSignal,
-  ): Promise<Record<string, unknown>> {
-    const target = this.config.get<string>('incus.preflightEgressUrl');
-    if (!target) {
-      throw new IncusError('PREFLIGHT_FAILED', 'managed_failure', {
-        reason: 'preflight_egress_target_unconfigured',
-        serverId,
-      });
-    }
-    const url = parseEgressTarget(target);
-    const result = await requestAndWait(
-      client,
-      (options) => client.execInstance(
-        probeName,
-        {
-          command: [
-            '/bin/sh',
-            '-c',
-            'if command -v wget >/dev/null 2>&1; then wget -q -T 10 -O /dev/null "$1"; else curl -fsS -m 10 -o /dev/null "$1"; fi',
-            'preflight-egress',
-            url.toString(),
-          ],
-          'record-output': true,
-        },
-        options,
-      ),
-      {
-        signal,
-        timeoutMs: this.config.get<number>('incus.operationWaitTimeoutMs'),
-      },
-    );
-    if (result.kind !== 'completed') {
-      throw new IncusError('PREFLIGHT_FAILED', 'managed_failure', {
-        reason: 'preflight_egress_operation_not_async',
-        serverId,
-      });
-    }
-    const returnCode = operationReturnCode(result.metadata);
-    if (typeof returnCode !== 'number' || returnCode !== 0) {
-      throw new IncusError('PREFLIGHT_FAILED', 'managed_failure', {
-        reason: 'preflight_egress_failed',
-        serverId,
-        returnCode: typeof returnCode === 'number' ? returnCode : null,
-      });
-    }
-    return {
-      serverId,
-      status: 'pass',
-      target: `${url.protocol}//${url.host}${url.pathname || '/'}`,
-      responseBytesLimit: MAX_NODE_METRICS_BODY_BYTES,
-    };
-  }
-
-  async checkGuestCanReachHost(
-    serverId: string,
-    client: IncusClientPort,
-    probeName: string,
-    hostAddress: string,
-    signal?: AbortSignal,
-  ): Promise<Record<string, unknown>> {
-    const result = await requestAndWait(
-      client,
-      (options) => client.execInstance(
-        probeName,
-        {
-          command: ['ping', '-c', '1', '-W', '3', hostAddress],
-          'record-output': true,
-        },
-        options,
-      ),
-      {
-        signal,
-        timeoutMs: this.config.get<number>('incus.operationWaitTimeoutMs'),
-      },
-    );
-    if (result.kind !== 'completed') {
-      throw new IncusError('PREFLIGHT_FAILED', 'managed_failure', {
-        reason: 'preflight_guest_cannot_reach_host',
-        serverId,
-      });
-    }
-    const returnCode = operationReturnCode(result.metadata);
-    const output = operationOutputText(result.metadata);
-    if (returnCode === 127 || /ping: not found|command not found/i.test(output)) {
-      throw new IncusError('PREFLIGHT_FAILED', 'managed_failure', {
-        reason: 'preflight_probe_ping_missing',
-        serverId,
-        returnCode: returnCode ?? null,
-      });
-    }
-    if (typeof returnCode !== 'number' || returnCode !== 0) {
-      throw new IncusError('PREFLIGHT_FAILED', 'managed_failure', {
-        reason: 'preflight_guest_cannot_reach_host',
-        serverId,
-        returnCode: typeof returnCode === 'number' ? returnCode : null,
-      });
-    }
-    return {
-      serverId,
-      status: 'pass',
-      hostAddress,
-    };
-  }
-}
-
-function operationReturnCode(value: unknown): number | undefined {
-  if (!isRecord(value)) return undefined;
-  if (typeof value.return === 'number' && Number.isSafeInteger(value.return)) {
-    return value.return;
-  }
-  return operationReturnCode(value.metadata);
-}
-
-function operationOutputText(value: unknown): string {
-  if (!isRecord(value)) return '';
-  const parts: string[] = [];
-  for (const key of ['output', 'stdout', 'stderr', 'err', 'error']) {
-    const child = value[key];
-    if (typeof child === 'string') parts.push(child);
-  }
-  if (isRecord(value.metadata)) {
-    parts.push(operationOutputText(value.metadata));
-  }
-  return parts.join('\n');
-}
-
-function parseEgressTarget(value: string): URL {
-  let url: URL;
-  try {
-    url = new URL(value);
-  } catch {
-    throw new IncusError('PREFLIGHT_FAILED', 'managed_failure', {
-      reason: 'preflight_egress_target_invalid',
-    });
-  }
-  if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash) {
-    throw new IncusError('PREFLIGHT_FAILED', 'managed_failure', {
-      reason: 'preflight_egress_target_must_be_fixed_https',
-    });
-  }
-  return url;
 }
 
 export interface ParentNetworkLookup {
