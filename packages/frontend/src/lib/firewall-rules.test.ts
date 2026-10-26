@@ -92,7 +92,8 @@ describe('firewall rule labels', () => {
 
   it('polls only while some server is pending', () => {
     expect(hasPendingFirewallSync(undefined)).toBe(false);
-    expect(hasPendingFirewallSync([status('synced'), status('failed'), status('offline')])).toBe(false);
+    expect(hasPendingFirewallSync([status('synced'), status('offline')])).toBe(false);
+    expect(hasPendingFirewallSync([status('synced'), status('failed')])).toBe(true);
     expect(hasPendingFirewallSync([status('synced'), status('pending')])).toBe(true);
   });
 });

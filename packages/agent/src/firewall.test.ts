@@ -1,5 +1,11 @@
 import { describe, expect, it, vi } from 'vitest';
-import { AGENT_FIREWALL_TABLE, AGENT_IPV6_GUARD_TABLE, NODE_METRIC_CATALOG, type FirewallDocument } from '@nyabase/common';
+import {
+  AGENT_FIREWALL_TABLE,
+  AGENT_IPV6_GUARD_TABLE,
+  NODE_METRIC_CATALOG,
+  zAgentHostStatus,
+  type FirewallDocument,
+} from '@nyabase/common';
 import {
   FAIL_CLOSED_KEY,
   firewallComment,
@@ -73,7 +79,12 @@ describe('firewall rendering', () => {
     expect(renderFirewallRule({ action: 'reject', protocol: 'udp', cidrs: ['8.8.8.8/32'], ports: [] }))
       .toEqual(['ip daddr { 8.8.8.8 } meta l4proto udp reject with icmp type port-unreachable']);
     expect(renderFirewallRule({ action: 'accept', protocol: 'tcp', cidrs: ['8.8.8.0/24', '8.8.9.0/24'], ports: [{ from: 443, to: 443 }] }))
-      .toEqual(['ip daddr { 8.8.8.0-8.8.9.255 } meta l4proto tcp tcp dport { 443 } accept']);
+      .toEqual([
+        'ip daddr { 8.8.8.0-8.8.9.255 } meta l4proto tcp tcp dport { 443 } accept',
+        'ip daddr { 8.8.8.0-8.8.9.255 } ip frag-off & 0x1fff != 0 meta l4proto tcp accept',
+      ]);
+    expect(renderFirewallRule({ action: 'drop', protocol: 'udp', cidrs: ['8.8.8.8/32'], ports: [{ from: 53, to: 53 }] }))
+      .toEqual(['ip daddr { 8.8.8.8 } meta l4proto udp udp dport { 53 } drop']);
   });
 
   it('keeps an empty document open but fails closed without one', () => {
@@ -157,6 +168,11 @@ describe('guest firewall', () => {
     expect(nft.tables.get(AGENT_FIREWALL_TABLE)).toContain('digest=fail-closed');
     expect(firewall.status()).toMatchObject({ present: false, digest: SAMPLE.digest });
     expect(firewall.status().error).toContain('Could not process rule');
+    // nft echoes refused rules at length: the error still fits the status frame the Backend parses.
+    nft.failApply = (ruleset) => (ruleset.includes('digest=fail-closed') ? undefined : new Error('x'.repeat(4096)));
+    await firewall.restore();
+    expect(zAgentHostStatus.safeParse({ ipv6Guard: { present: true, error: null }, firewall: firewall.status() }).success)
+      .toBe(true);
     // Later checks keep trying the stored document.
     nft.failApply = undefined;
     await firewall.apply(SAMPLE);

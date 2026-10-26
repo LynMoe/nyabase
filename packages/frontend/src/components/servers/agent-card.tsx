@@ -101,7 +101,7 @@ export function AgentCard({ server }: { server: ServerDto }) {
         {agent.firewall?.state === 'failed' && (
           <p className="break-all text-xs text-destructive" data-testid="server-agent-firewall-error">
             出站防火墙规则同步失败{agent.firewall.error ? `（${agent.firewall.error}）` : ''}：
-            同步完成前 Agent 拒绝启动容器或给运行中的容器接入网卡，控制面会自动重试。
+            同步完成前 Agent 拒绝启动容器或给运行中的容器接入网卡。下发出错时控制面按退避自动重试；Agent 拒收的规则要等规则变更或 Agent 重连后才会再次下发。
           </p>
         )}
         <div className="grid gap-3 sm:grid-cols-2">

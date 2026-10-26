@@ -1753,7 +1753,11 @@ Backend **不直连** Incus，也不主动连接任何主机。每台 Incus 主�
     多个 `firewall.apply` 按到达顺序逐个处理。
   - 校验：agent 记住当前文档最近一次成功应用后的 `nft list table` 输出，之后逐字比较，不一致或缺失就
     重新应用。时机与 `nyabase_guard` 相同（启动、每 10 秒、`nft monitor` 报告变化后；两张表共用一个
-    monitor 进程，但各自去抖、各自退避，一张补不回来不会拖慢另一张）。
+    monitor 进程，但各自去抖、各自退避，一张补不回来不会拖慢另一张）。宿主上 `nft flush ruleset`
+    （例如 Debian 默认 `/etc/nftables.conf` 的 `systemctl reload nftables`）会同时删掉两张表，补回前
+    （通常约 200 ms）容器出站不受防火墙约束：不要在有客户的主机上随意重载宿主防火墙。
+  - 分片：带端口的规则只能匹配首片（后续分片没有端口）。放行规则因此额外放行该协议发往同一目标的
+    后续分片，否则超过 MTU 的数据报会被后面更宽的拒绝规则截掉尾部；没有首片的分片无法重组，不构成绕过。
   - 开机：`ExecStartPre=… guest-guards` 在 Incus 启动前按 `firewall.json` 恢复表（只读状态目录，
     不连 Backend）；agent 主进程启动时同样先恢复再连 Backend。没有文件、文件损坏、文件属于另一个
     server id（重新接入过）或文档无法应用时，装 **fail-closed** 表：丢弃容器发出的一切帧（含 ARP），

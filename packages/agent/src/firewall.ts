@@ -278,7 +278,8 @@ export class GuestFirewall {
   private settle(verified: boolean, error: string | null): void {
     const before = this.verified;
     this.verified = verified;
-    this.lastError = error;
+    // The status schema caps it: a longer error would make hello / status frames unparsable.
+    this.lastError = error === null ? null : error.slice(0, 512);
     this.publish();
     if (verified && !before) for (const listener of [...this.verifiedListeners]) listener();
   }

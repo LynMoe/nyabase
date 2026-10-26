@@ -74,6 +74,7 @@ describe.skipIf(!isolatedNftWorks())('firewall rulesets in real nft', () => {
       digest: 'a'.repeat(64),
       rules: [
         { action: 'accept', protocol: 'all', cidrs: ['10.0.0.0/9', '10.128.0.0/9', '192.168.1.5/32'], ports: [] },
+        { action: 'accept', protocol: 'udp', cidrs: ['10.9.0.0/16'], ports: [{ from: 9999, to: 9999 }] },
         { action: 'reject', protocol: 'tcp', cidrs: ['10.0.0.0/8'], ports: [{ from: 22, to: 22 }, { from: 8000, to: 9000 }] },
         { action: 'reject', protocol: 'udp', cidrs: ['0.0.0.0/0'], ports: [{ from: 53, to: 53 }] },
         { action: 'reject', protocol: 'udp', cidrs: ['8.8.8.8/32'], ports: [] },
@@ -95,6 +96,7 @@ describe.skipIf(!isolatedNftWorks())('firewall rulesets in real nft', () => {
     expect(first).toContain('hook prerouting');
     expect(first).toContain('reject with tcp reset');
     expect(first).toContain('reject with icmp admin-prohibited');
+    expect(first).toMatch(/frag-off & 0x1fff != 0x0 meta l4proto udp accept/);
     expect(empty).toContain('ether type != { ip, arp } drop');
     expect(parseFirewallComment(closed!)).toEqual({ owner: 'unknown', key: 'fail-closed' });
     expect(closed).toContain('iifname "nyh*" drop');

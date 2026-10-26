@@ -83,9 +83,9 @@ export function agentFirewallBadge(firewall: ServerAgentDto['firewall']) {
   return { ...firewallSyncBadge(state), label: AGENT_FIREWALL_LABEL[state] };
 }
 
-/** Poll the status endpoint only while some server has not caught up yet. */
+/** Poll the status endpoint only while some server has not caught up yet (a failed one may recover on a retry). */
 export function hasPendingFirewallSync(statuses: readonly FirewallServerStatusDto[] | undefined): boolean {
-  return (statuses ?? []).some((status) => status.state === 'pending');
+  return (statuses ?? []).some((status) => status.state === 'pending' || status.state === 'failed');
 }
 
 /** New rules go after the last one: max + 10, or 100 when there are none. */

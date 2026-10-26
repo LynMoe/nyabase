@@ -54,7 +54,7 @@ function addressSet(cidrs: readonly string[]): string {
   return `{ ${elements.join(', ')} }`;
 }
 
-/** The nft rules for one spec, in order: one, or two for reject on every protocol. */
+/** The nft rules for one spec, in order: one, or two for reject on every protocol and for accept with ports. */
 export function renderFirewallRule(rule: FirewallRuleSpec): string[] {
   const match = `ip daddr ${addressSet(rule.cidrs)}`;
   if (rule.protocol === FirewallProtocol.All) {
@@ -74,7 +74,16 @@ export function renderFirewallRule(rule: FirewallRuleSpec): string[] {
     : protocol === FirewallProtocol.Tcp
       ? 'reject with tcp reset'
       : 'reject with icmp type port-unreachable';
-  return [`${match} meta l4proto ${protocol}${ports} ${verdict}`];
+  const rendered = [`${match} meta l4proto ${protocol}${ports} ${verdict}`];
+  // Non-first fragments carry no ports, so `dport` never matches them and they
+  // would fall through to later rules: an accepted datagram larger than the
+  // MTU would lose its tail to a broader drop below. Accepting every non-first
+  // fragment of the protocol is safe: without its first fragment (which the
+  // port match decides) a datagram is never reassembled.
+  if (ports && rule.action === FirewallAction.Accept) {
+    rendered.push(`${match} ip frag-off & 0x1fff != 0 meta l4proto ${protocol} accept`);
+  }
+  return rendered;
 }
 
 /**
