@@ -9,8 +9,7 @@ import {
 } from '@nestjs/common';
 import type { Kysely } from 'kysely';
 import { sql } from 'kysely';
-import { createHash } from 'crypto';
-import { v4 as uuidv4 } from 'uuid';
+import { createHash, randomUUID } from 'crypto';
 import {
   AuditAction,
   MAX_SSH_PUBLIC_KEYS_PER_USER,
@@ -132,7 +131,7 @@ export class UserSshKeysService {
         });
       }
       const row = await transaction.insertInto('iam.ssh_public_keys').values({
-        id: uuidv4(),
+        id: randomUUID(),
         user_id: userId,
         name: normalizedName,
         key_text: normalizedKeyText,

@@ -9,7 +9,9 @@
  * stays out of the first-paint chunk.
  */
 @import 'tailwindcss';
-/* Tailwind 4 reads the theme, the class-based dark mode and the animate plugin from the v3-style config. */
+/* Enter/exit animation utilities (`animate-in`, `fade-in-0`, `zoom-in-95`, ...). */
+@import 'tw-animate-css';
+/* Tailwind 4 reads the theme and the class-based dark mode from the v3-style config. */
 @config '../tailwind.config.js';
 
 @custom-variant dark (&:where(.dark, .dark *));

@@ -1,7 +1,6 @@
 import { Global, Module } from '@nestjs/common';
 import { APP_GUARD } from '@nestjs/core';
 import { JwtModule, type JwtSignOptions } from '@nestjs/jwt';
-import { PassportModule } from '@nestjs/passport';
 import { NyabaseConfigService } from '../platform/config/nyabase-config.service.js';
 import { AccessChangeNotifier, AccessResolverService } from './access-resolver.service.js';
 import { AuditRepository } from './audit.repository.js';
@@ -9,7 +8,7 @@ import { AuditService } from './audit.service.js';
 import { AuditSnapshotResolver } from './audit-snapshot.resolver.js';
 import { AuthController } from './auth.controller.js';
 import { AuthService } from './auth.service.js';
-import { RolesGuard, JwtAuthGuard, JwtStrategy } from './guards.js';
+import { RolesGuard, JwtAuthGuard } from './guards.js';
 import { IamAuthRepository } from './iam-auth.repository.js';
 import { SessionRevocationService } from './session-revocation.service.js';
 
@@ -20,7 +19,6 @@ import { SessionRevocationService } from './session-revocation.service.js';
 @Global()
 @Module({
   imports: [
-    PassportModule,
     JwtModule.registerAsync({
       inject: [NyabaseConfigService],
       useFactory: (config: NyabaseConfigService) => ({
@@ -35,7 +33,6 @@ import { SessionRevocationService } from './session-revocation.service.js';
   providers: [
     IamAuthRepository,
     AuthService,
-    JwtStrategy,
     AccessChangeNotifier,
     AccessResolverService,
     AuditRepository,

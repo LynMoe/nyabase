@@ -7802,6 +7802,7 @@ export interface components {
              * @example 0
              */
             numa_node?: number;
+            nvidia?: components["schemas"]["ResourcesGPUCardNvidia"];
             /**
              * @description PCI address
              * @example 0000:00:02.0
@@ -7906,6 +7907,53 @@ export interface components {
              * @example i915-GVTg_V5_8
              */
             name?: string;
+        };
+        /** @description ResourcesGPUCardNvidia represents additional information for NVIDIA GPUs */
+        ResourcesGPUCardNvidia: {
+            /**
+             * @description Architecture (generation)
+             * @example 3.5
+             */
+            architecture?: string;
+            /**
+             * @description Brand name
+             * @example GeForce
+             */
+            brand?: string;
+            /**
+             * @description Card device number
+             *
+             *     API extension: resources_v2
+             * @example 195:0
+             */
+            card_device?: string;
+            /**
+             * @description Card device name
+             *
+             *     API extension: resources_v2
+             * @example nvidia0
+             */
+            card_name?: string;
+            /**
+             * @description Version of the CUDA API
+             * @example 11.0
+             */
+            cuda_version?: string;
+            /**
+             * @description Model name
+             * @example GeForce GT 730
+             */
+            model?: string;
+            /**
+             * @description Version of the NVRM (usually driver version)
+             * @example 450.102.04
+             */
+            nvrm_version?: string;
+            /**
+             * @description GPU UUID
+             * @example GPU-6ddadebd-dafe-2db9-f10f-125719770fd3
+             */
+            uuid?: string;
         };
         /** @description ResourcesGPUCardSRIOV represents the SRIOV configuration of the GPU */
         ResourcesGPUCardSRIOV: {
@@ -10059,7 +10107,7 @@ export interface components {
                 [name: string]: unknown;
             };
             content: {
-                "*/*": {
+                "application/json": {
                     /** @example bad request */
                     error?: string;
                     /**
@@ -10078,7 +10126,7 @@ export interface components {
                 [name: string]: unknown;
             };
             content: {
-                "*/*": {
+                "application/json": {
                     /** @example Success */
                     status?: string;
                     /**
@@ -10097,7 +10145,7 @@ export interface components {
                 [name: string]: unknown;
             };
             content: {
-                "*/*": {
+                "application/json": {
                     /** @example not authorized */
                     error?: string;
                     /**
@@ -10116,7 +10164,7 @@ export interface components {
                 [name: string]: unknown;
             };
             content: {
-                "*/*": {
+                "application/json": {
                     /** @example internal server error */
                     error?: string;
                     /**
@@ -10135,7 +10183,7 @@ export interface components {
                 [name: string]: unknown;
             };
             content: {
-                "*/*": {
+                "application/json": {
                     /** @example not found */
                     error?: string;
                     /**
@@ -10154,7 +10202,7 @@ export interface components {
                 [name: string]: unknown;
             };
             content: {
-                "*/*": {
+                "application/json": {
                     metadata?: components["schemas"]["Operation"];
                     /** @example /1.0/operations/66e83638-9dd7-4a26-aef2-5462814869a1 */
                     operation?: string;
@@ -10176,7 +10224,7 @@ export interface components {
                 [name: string]: unknown;
             };
             content: {
-                "*/*": {
+                "application/json": {
                     /** @example precondition failed */
                     error?: string;
                     /**
@@ -10191,176 +10239,7 @@ export interface components {
         };
     };
     parameters: never;
-    requestBodies: {
-        /** @description Certificate configuration */
-        CertificatePut: {
-            content: {
-                "application/json": components["schemas"]["CertificatePut"];
-            };
-        };
-        /** @description Server configuration */
-        ServerPut: {
-            content: {
-                "application/json": components["schemas"]["ServerPut"];
-            };
-        };
-        /** @description Storage volume */
-        StorageVolumesPost: {
-            content: {
-                "application/json": components["schemas"]["StorageVolumesPost"];
-            };
-        };
-        /** @description Storage volume snapshot configuration */
-        StorageVolumeSnapshotPut: {
-            content: {
-                "application/json": components["schemas"]["StorageVolumeSnapshotPut"];
-            };
-        };
-        /** @description zone configuration */
-        NetworkZonePut: {
-            content: {
-                "application/json": components["schemas"]["NetworkZonePut"];
-            };
-        };
-        /** @description Image configuration */
-        ImagePut: {
-            content: {
-                "application/json": components["schemas"]["ImagePut"];
-            };
-        };
-        /** @description Network configuration */
-        NetworkPut: {
-            content: {
-                "application/json": components["schemas"]["NetworkPut"];
-            };
-        };
-        /** @description zone record configuration */
-        NetworkZoneRecordPut: {
-            content: {
-                "application/json": components["schemas"]["NetworkZoneRecordPut"];
-            };
-        };
-        /** @description Storage pool configuration */
-        StoragePoolPut: {
-            content: {
-                "application/json": components["schemas"]["StoragePoolPut"];
-            };
-        };
-        /** @description Address load balancer configuration */
-        NetworkLoadBalancerPut: {
-            content: {
-                "application/json": components["schemas"]["NetworkLoadBalancerPut"];
-            };
-        };
-        /** @description Image alias configuration */
-        ImageAliasesEntryPut: {
-            content: {
-                "application/json": components["schemas"]["ImageAliasesEntryPut"];
-            };
-        };
-        /** @description cluster group configuration */
-        ClusterGroupPut: {
-            content: {
-                "application/json": components["schemas"]["ClusterGroupPut"];
-            };
-        };
-        /** @description Certificate */
-        CertificatesPost: {
-            content: {
-                "application/json": components["schemas"]["CertificatesPost"];
-            };
-        };
-        /** @description Cluster member configuration */
-        ClusterMemberPut: {
-            content: {
-                "application/json": components["schemas"]["ClusterMemberPut"];
-            };
-        };
-        /** @description Update request */
-        InstancePut: {
-            content: {
-                "application/json": components["schemas"]["InstancePut"];
-            };
-        };
-        /** @description Raw file content */
-        instance_files_postRawFile: {
-            content: {
-                "application/octet-stream": unknown;
-            };
-        };
-        /** @description Image metadata */
-        ImageMetadata: {
-            content: {
-                "application/json": components["schemas"]["ImageMetadata"];
-            };
-        };
-        /** @description Snapshot update */
-        InstanceSnapshotPut: {
-            content: {
-                "application/json": components["schemas"]["InstanceSnapshotPut"];
-            };
-        };
-        /** @description ACL configuration */
-        NetworkACLPut: {
-            content: {
-                "application/json": components["schemas"]["NetworkACLPut"];
-            };
-        };
-        /** @description Address set configuration */
-        NetworkAddressSetPut: {
-            content: {
-                "application/json": components["schemas"]["NetworkAddressSetPut"];
-            };
-        };
-        /** @description integration configuration */
-        NetworkIntegrationPut: {
-            content: {
-                "application/json": components["schemas"]["NetworkIntegrationPut"];
-            };
-        };
-        /** @description Address forward configuration */
-        NetworkForwardPut: {
-            content: {
-                "application/json": components["schemas"]["NetworkForwardPut"];
-            };
-        };
-        /** @description Peer configuration */
-        NetworkPeerPut: {
-            content: {
-                "application/json": components["schemas"]["NetworkPeerPut"];
-            };
-        };
-        /** @description Profile configuration */
-        ProfilePut: {
-            content: {
-                "application/json": components["schemas"]["ProfilePut"];
-            };
-        };
-        /** @description Project configuration */
-        ProjectPut: {
-            content: {
-                "application/json": components["schemas"]["ProjectPut"];
-            };
-        };
-        /** @description Storage bucket configuration */
-        StorageBucketPut: {
-            content: {
-                "application/json": components["schemas"]["StorageBucketPut"];
-            };
-        };
-        /** @description Storage volume configuration */
-        StorageVolumePut: {
-            content: {
-                "application/json": components["schemas"]["StorageVolumePut"];
-            };
-        };
-        /** @description Warning status */
-        WarningPut: {
-            content: {
-                "application/json": components["schemas"]["WarningPut"];
-            };
-        };
-    };
+    requestBodies: never;
     headers: never;
     pathItems: never;
 }
@@ -10471,7 +10350,12 @@ export interface operations {
             path?: never;
             cookie?: never;
         };
-        requestBody: components["requestBodies"]["ServerPut"];
+        /** @description Server configuration */
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ServerPut"];
+            };
+        };
         responses: {
             200: components["responses"]["EmptySyncResponse"];
             400: components["responses"]["BadRequest"];
@@ -10493,7 +10377,12 @@ export interface operations {
             path?: never;
             cookie?: never;
         };
-        requestBody: components["requestBodies"]["ServerPut"];
+        /** @description Server configuration */
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ServerPut"];
+            };
+        };
         responses: {
             200: components["responses"]["EmptySyncResponse"];
             400: components["responses"]["BadRequest"];
@@ -10561,7 +10450,12 @@ export interface operations {
             path?: never;
             cookie?: never;
         };
-        requestBody: components["requestBodies"]["CertificatesPost"];
+        /** @description Certificate */
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CertificatesPost"];
+            };
+        };
         responses: {
             200: components["responses"]["EmptySyncResponse"];
             400: components["responses"]["BadRequest"];
@@ -10621,7 +10515,12 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody: components["requestBodies"]["CertificatePut"];
+        /** @description Certificate configuration */
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CertificatePut"];
+            };
+        };
         responses: {
             200: components["responses"]["EmptySyncResponse"];
             400: components["responses"]["BadRequest"];
@@ -10658,7 +10557,12 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody: components["requestBodies"]["CertificatePut"];
+        /** @description Certificate configuration */
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CertificatePut"];
+            };
+        };
         responses: {
             200: components["responses"]["EmptySyncResponse"];
             400: components["responses"]["BadRequest"];
@@ -10674,7 +10578,12 @@ export interface operations {
             path?: never;
             cookie?: never;
         };
-        requestBody: components["requestBodies"]["CertificatesPost"];
+        /** @description Certificate */
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CertificatesPost"];
+            };
+        };
         responses: {
             200: components["responses"]["EmptySyncResponse"];
             400: components["responses"]["BadRequest"];
@@ -10926,7 +10835,12 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody: components["requestBodies"]["ClusterGroupPut"];
+        /** @description cluster group configuration */
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ClusterGroupPut"];
+            };
+        };
         responses: {
             200: components["responses"]["EmptySyncResponse"];
             400: components["responses"]["BadRequest"];
@@ -10986,7 +10900,12 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody: components["requestBodies"]["ClusterGroupPut"];
+        /** @description cluster group configuration */
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ClusterGroupPut"];
+            };
+        };
         responses: {
             200: components["responses"]["EmptySyncResponse"];
             400: components["responses"]["BadRequest"];
@@ -11159,7 +11078,12 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody: components["requestBodies"]["ClusterMemberPut"];
+        /** @description Cluster member configuration */
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ClusterMemberPut"];
+            };
+        };
         responses: {
             200: components["responses"]["EmptySyncResponse"];
             400: components["responses"]["BadRequest"];
@@ -11219,7 +11143,12 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody: components["requestBodies"]["ClusterMemberPut"];
+        /** @description Cluster member configuration */
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ClusterMemberPut"];
+            };
+        };
         responses: {
             200: components["responses"]["EmptySyncResponse"];
             400: components["responses"]["BadRequest"];
@@ -11451,15 +11380,17 @@ export interface operations {
                 /** @description Expected fingerprint when pushing a raw image */
                 "X-Incus-fingerprint"?: string;
                 /** @description List of aliases to assign */
-                "X-Incus-aliases"?: string;
+                "X-Incus-aliases"?: string[];
                 /** @description Descriptive properties */
-                "X-Incus-properties"?: string;
+                "X-Incus-properties"?: {
+                    [key: string]: string;
+                };
                 /** @description Whether the image is available to unauthenticated users */
-                "X-Incus-public"?: string;
+                "X-Incus-public"?: boolean;
                 /** @description Original filename of the image */
                 "X-Incus-filename"?: string;
                 /** @description List of profiles to use */
-                "X-Incus-profiles"?: string;
+                "X-Incus-profiles"?: string[];
             };
             path?: never;
             cookie?: never;
@@ -11541,7 +11472,12 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody: components["requestBodies"]["ImagePut"];
+        /** @description Image configuration */
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ImagePut"];
+            };
+        };
         responses: {
             200: components["responses"]["EmptySyncResponse"];
             400: components["responses"]["BadRequest"];
@@ -11590,7 +11526,12 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody: components["requestBodies"]["ImagePut"];
+        /** @description Image configuration */
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ImagePut"];
+            };
+        };
         responses: {
             200: components["responses"]["EmptySyncResponse"];
             400: components["responses"]["BadRequest"];
@@ -11931,7 +11872,12 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody: components["requestBodies"]["ImageAliasesEntryPut"];
+        /** @description Image alias configuration */
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ImageAliasesEntryPut"];
+            };
+        };
         responses: {
             200: components["responses"]["EmptySyncResponse"];
             400: components["responses"]["BadRequest"];
@@ -12009,7 +11955,12 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody: components["requestBodies"]["ImageAliasesEntryPut"];
+        /** @description Image alias configuration */
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ImageAliasesEntryPut"];
+            };
+        };
         responses: {
             200: components["responses"]["EmptySyncResponse"];
             400: components["responses"]["BadRequest"];
@@ -12486,7 +12437,12 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody?: components["requestBodies"]["InstancePut"];
+        /** @description Update request */
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["InstancePut"];
+            };
+        };
         responses: {
             202: components["responses"]["Operation"];
             400: components["responses"]["BadRequest"];
@@ -12563,7 +12519,12 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody?: components["requestBodies"]["InstancePut"];
+        /** @description Update request */
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["InstancePut"];
+            };
+        };
         responses: {
             200: components["responses"]["EmptySyncResponse"];
             400: components["responses"]["BadRequest"];
@@ -13131,16 +13092,16 @@ export interface operations {
             /** @description Raw file or directory listing */
             200: {
                 headers: {
-                    /** @description File owner GID */
-                    "X-Incus-gid"?: unknown;
-                    /** @description Mode mask */
-                    "X-Incus-mode"?: unknown;
-                    /** @description Last modified date */
-                    "X-Incus-modified"?: unknown;
-                    /** @description Type of file (file, symlink or directory) */
-                    "X-Incus-type"?: unknown;
                     /** @description File owner UID */
                     "X-Incus-uid"?: unknown;
+                    /** @description Type of file (file, symlink or directory) */
+                    "X-Incus-type"?: unknown;
+                    /** @description Last modified date */
+                    "X-Incus-modified"?: unknown;
+                    /** @description Mode mask */
+                    "X-Incus-mode"?: unknown;
+                    /** @description File owner GID */
+                    "X-Incus-gid"?: unknown;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -13170,17 +13131,17 @@ export interface operations {
                  * @description File owner UID
                  * @example 1000
                  */
-                "X-Incus-uid"?: string;
+                "X-Incus-uid"?: number;
                 /**
                  * @description File owner GID
                  * @example 1000
                  */
-                "X-Incus-gid"?: string;
+                "X-Incus-gid"?: number;
                 /**
                  * @description File mode
                  * @example 420
                  */
-                "X-Incus-mode"?: string;
+                "X-Incus-mode"?: number;
                 /**
                  * @description Type of file (file, symlink or directory)
                  * @example file
@@ -13198,7 +13159,12 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody?: components["requestBodies"]["instance_files_postRawFile"];
+        /** @description Raw file content */
+        requestBody?: {
+            content: {
+                "application/octet-stream": unknown;
+            };
+        };
         responses: {
             200: components["responses"]["EmptySyncResponse"];
             400: components["responses"]["BadRequest"];
@@ -13226,7 +13192,7 @@ export interface operations {
                  * @description Perform recursive deletion
                  * @example true
                  */
-                "X-Incus-force"?: string;
+                "X-Incus-force"?: boolean;
             };
             path: {
                 /** @description Instance name */
@@ -13269,16 +13235,16 @@ export interface operations {
             /** @description Raw file or directory listing */
             200: {
                 headers: {
-                    /** @description File owner GID */
-                    "X-Incus-gid"?: unknown;
-                    /** @description Mode mask */
-                    "X-Incus-mode"?: unknown;
-                    /** @description Last modified date */
-                    "X-Incus-modified"?: unknown;
-                    /** @description Type of file (file, symlink or directory) */
-                    "X-Incus-type"?: unknown;
                     /** @description File owner UID */
                     "X-Incus-uid"?: unknown;
+                    /** @description Type of file (file, symlink or directory) */
+                    "X-Incus-type"?: unknown;
+                    /** @description Last modified date */
+                    "X-Incus-modified"?: unknown;
+                    /** @description Mode mask */
+                    "X-Incus-mode"?: unknown;
+                    /** @description File owner GID */
+                    "X-Incus-gid"?: unknown;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -13584,7 +13550,12 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody: components["requestBodies"]["ImageMetadata"];
+        /** @description Image metadata */
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ImageMetadata"];
+            };
+        };
         responses: {
             200: components["responses"]["EmptySyncResponse"];
             400: components["responses"]["BadRequest"];
@@ -13609,7 +13580,12 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody: components["requestBodies"]["ImageMetadata"];
+        /** @description Image metadata */
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ImageMetadata"];
+            };
+        };
         responses: {
             200: components["responses"]["EmptySyncResponse"];
             400: components["responses"]["BadRequest"];
@@ -13675,7 +13651,12 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody?: components["requestBodies"]["instance_files_postRawFile"];
+        /** @description Raw file content */
+        requestBody?: {
+            content: {
+                "application/octet-stream": unknown;
+            };
+        };
         responses: {
             200: components["responses"]["EmptySyncResponse"];
             400: components["responses"]["BadRequest"];
@@ -13994,7 +13975,12 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody?: components["requestBodies"]["InstanceSnapshotPut"];
+        /** @description Snapshot update */
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["InstanceSnapshotPut"];
+            };
+        };
         responses: {
             202: components["responses"]["Operation"];
             400: components["responses"]["BadRequest"];
@@ -14077,7 +14063,12 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody?: components["requestBodies"]["InstanceSnapshotPut"];
+        /** @description Snapshot update */
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["InstanceSnapshotPut"];
+            };
+        };
         responses: {
             202: components["responses"]["Operation"];
             400: components["responses"]["BadRequest"];
@@ -14588,7 +14579,12 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody: components["requestBodies"]["NetworkACLPut"];
+        /** @description ACL configuration */
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["NetworkACLPut"];
+            };
+        };
         responses: {
             200: components["responses"]["EmptySyncResponse"];
             400: components["responses"]["BadRequest"];
@@ -14666,7 +14662,12 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody: components["requestBodies"]["NetworkACLPut"];
+        /** @description ACL configuration */
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["NetworkACLPut"];
+            };
+        };
         responses: {
             200: components["responses"]["EmptySyncResponse"];
             400: components["responses"]["BadRequest"];
@@ -14912,7 +14913,12 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody: components["requestBodies"]["NetworkAddressSetPut"];
+        /** @description Address set configuration */
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["NetworkAddressSetPut"];
+            };
+        };
         responses: {
             200: components["responses"]["EmptySyncResponse"];
             400: components["responses"]["BadRequest"];
@@ -14990,7 +14996,12 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody: components["requestBodies"]["NetworkAddressSetPut"];
+        /** @description Address set configuration */
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["NetworkAddressSetPut"];
+            };
+        };
         responses: {
             200: components["responses"]["EmptySyncResponse"];
             400: components["responses"]["BadRequest"];
@@ -15227,7 +15238,12 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody: components["requestBodies"]["NetworkIntegrationPut"];
+        /** @description integration configuration */
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["NetworkIntegrationPut"];
+            };
+        };
         responses: {
             200: components["responses"]["EmptySyncResponse"];
             400: components["responses"]["BadRequest"];
@@ -15287,7 +15303,12 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody: components["requestBodies"]["NetworkIntegrationPut"];
+        /** @description integration configuration */
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["NetworkIntegrationPut"];
+            };
+        };
         responses: {
             200: components["responses"]["EmptySyncResponse"];
             400: components["responses"]["BadRequest"];
@@ -15494,7 +15515,12 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody: components["requestBodies"]["NetworkZonePut"];
+        /** @description zone configuration */
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["NetworkZonePut"];
+            };
+        };
         responses: {
             200: components["responses"]["EmptySyncResponse"];
             400: components["responses"]["BadRequest"];
@@ -15543,7 +15569,12 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody: components["requestBodies"]["NetworkZonePut"];
+        /** @description zone configuration */
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["NetworkZonePut"];
+            };
+        };
         responses: {
             200: components["responses"]["EmptySyncResponse"];
             400: components["responses"]["BadRequest"];
@@ -15709,7 +15740,12 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody: components["requestBodies"]["NetworkZoneRecordPut"];
+        /** @description zone record configuration */
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["NetworkZoneRecordPut"];
+            };
+        };
         responses: {
             200: components["responses"]["EmptySyncResponse"];
             400: components["responses"]["BadRequest"];
@@ -15762,7 +15798,12 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody: components["requestBodies"]["NetworkZoneRecordPut"];
+        /** @description zone record configuration */
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["NetworkZoneRecordPut"];
+            };
+        };
         responses: {
             200: components["responses"]["EmptySyncResponse"];
             400: components["responses"]["BadRequest"];
@@ -16048,7 +16089,12 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody: components["requestBodies"]["NetworkPut"];
+        /** @description Network configuration */
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["NetworkPut"];
+            };
+        };
         responses: {
             200: components["responses"]["EmptySyncResponse"];
             400: components["responses"]["BadRequest"];
@@ -16131,7 +16177,12 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody: components["requestBodies"]["NetworkPut"];
+        /** @description Network configuration */
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["NetworkPut"];
+            };
+        };
         responses: {
             200: components["responses"]["EmptySyncResponse"];
             400: components["responses"]["BadRequest"];
@@ -16404,7 +16455,12 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody: components["requestBodies"]["NetworkForwardPut"];
+        /** @description Address forward configuration */
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["NetworkForwardPut"];
+            };
+        };
         responses: {
             200: components["responses"]["EmptySyncResponse"];
             400: components["responses"]["BadRequest"];
@@ -16457,7 +16513,12 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody: components["requestBodies"]["NetworkForwardPut"];
+        /** @description Address forward configuration */
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["NetworkForwardPut"];
+            };
+        };
         responses: {
             200: components["responses"]["EmptySyncResponse"];
             400: components["responses"]["BadRequest"];
@@ -16677,7 +16738,12 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody: components["requestBodies"]["NetworkLoadBalancerPut"];
+        /** @description Address load balancer configuration */
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["NetworkLoadBalancerPut"];
+            };
+        };
         responses: {
             200: components["responses"]["EmptySyncResponse"];
             400: components["responses"]["BadRequest"];
@@ -16730,7 +16796,12 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody: components["requestBodies"]["NetworkLoadBalancerPut"];
+        /** @description Address load balancer configuration */
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["NetworkLoadBalancerPut"];
+            };
+        };
         responses: {
             200: components["responses"]["EmptySyncResponse"];
             400: components["responses"]["BadRequest"];
@@ -17001,7 +17072,12 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody: components["requestBodies"]["NetworkPeerPut"];
+        /** @description Peer configuration */
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["NetworkPeerPut"];
+            };
+        };
         responses: {
             200: components["responses"]["EmptySyncResponse"];
             400: components["responses"]["BadRequest"];
@@ -17054,7 +17130,12 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody: components["requestBodies"]["NetworkPeerPut"];
+        /** @description Peer configuration */
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["NetworkPeerPut"];
+            };
+        };
         responses: {
             200: components["responses"]["EmptySyncResponse"];
             400: components["responses"]["BadRequest"];
@@ -17649,7 +17730,12 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody: components["requestBodies"]["ProfilePut"];
+        /** @description Profile configuration */
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ProfilePut"];
+            };
+        };
         responses: {
             200: components["responses"]["EmptySyncResponse"];
             400: components["responses"]["BadRequest"];
@@ -17727,7 +17813,12 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody: components["requestBodies"]["ProfilePut"];
+        /** @description Profile configuration */
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ProfilePut"];
+            };
+        };
         responses: {
             200: components["responses"]["EmptySyncResponse"];
             400: components["responses"]["BadRequest"];
@@ -17916,7 +18007,12 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody: components["requestBodies"]["ProjectPut"];
+        /** @description Project configuration */
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ProjectPut"];
+            };
+        };
         responses: {
             200: components["responses"]["EmptySyncResponse"];
             400: components["responses"]["BadRequest"];
@@ -17979,7 +18075,12 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody: components["requestBodies"]["ProjectPut"];
+        /** @description Project configuration */
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ProjectPut"];
+            };
+        };
         responses: {
             200: components["responses"]["EmptySyncResponse"];
             400: components["responses"]["BadRequest"];
@@ -18275,7 +18376,12 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody: components["requestBodies"]["StorageBucketPut"];
+        /** @description Storage bucket configuration */
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["StorageBucketPut"];
+            };
+        };
         responses: {
             200: components["responses"]["EmptySyncResponse"];
             400: components["responses"]["BadRequest"];
@@ -18338,7 +18444,12 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody: components["requestBodies"]["StorageBucketPut"];
+        /** @description Storage bucket configuration */
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["StorageBucketPut"];
+            };
+        };
         responses: {
             200: components["responses"]["EmptySyncResponse"];
             400: components["responses"]["BadRequest"];
@@ -18541,7 +18652,12 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody: components["requestBodies"]["StoragePoolPut"];
+        /** @description Storage pool configuration */
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["StoragePoolPut"];
+            };
+        };
         responses: {
             200: components["responses"]["EmptySyncResponse"];
             400: components["responses"]["BadRequest"];
@@ -18595,7 +18711,12 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody: components["requestBodies"]["StoragePoolPut"];
+        /** @description Storage pool configuration */
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["StoragePoolPut"];
+            };
+        };
         responses: {
             200: components["responses"]["EmptySyncResponse"];
             400: components["responses"]["BadRequest"];
@@ -19515,7 +19636,12 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody: components["requestBodies"]["StorageVolumesPost"];
+        /** @description Storage volume */
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["StorageVolumesPost"];
+            };
+        };
         responses: {
             200: components["responses"]["EmptySyncResponse"];
             202: components["responses"]["Operation"];
@@ -19609,7 +19735,12 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody: components["requestBodies"]["StorageVolumesPost"];
+        /** @description Storage volume */
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["StorageVolumesPost"];
+            };
+        };
         responses: {
             200: components["responses"]["EmptySyncResponse"];
             202: components["responses"]["Operation"];
@@ -19700,7 +19831,12 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody: components["requestBodies"]["StorageVolumePut"];
+        /** @description Storage volume configuration */
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["StorageVolumePut"];
+            };
+        };
         responses: {
             200: components["responses"]["EmptySyncResponse"];
             400: components["responses"]["BadRequest"];
@@ -19805,7 +19941,12 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody: components["requestBodies"]["StorageVolumePut"];
+        /** @description Storage volume configuration */
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["StorageVolumePut"];
+            };
+        };
         responses: {
             200: components["responses"]["EmptySyncResponse"];
             400: components["responses"]["BadRequest"];
@@ -20432,16 +20573,16 @@ export interface operations {
             /** @description Raw file or directory listing */
             200: {
                 headers: {
-                    /** @description File owner GID */
-                    "X-Incus-gid"?: unknown;
-                    /** @description Mode mask */
-                    "X-Incus-mode"?: unknown;
-                    /** @description Last modified date */
-                    "X-Incus-modified"?: unknown;
-                    /** @description Type of file (file, symlink or directory) */
-                    "X-Incus-type"?: unknown;
                     /** @description File owner UID */
                     "X-Incus-uid"?: unknown;
+                    /** @description Type of file (file, symlink or directory) */
+                    "X-Incus-type"?: unknown;
+                    /** @description Last modified date */
+                    "X-Incus-modified"?: unknown;
+                    /** @description Mode mask */
+                    "X-Incus-mode"?: unknown;
+                    /** @description File owner GID */
+                    "X-Incus-gid"?: unknown;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -20471,17 +20612,17 @@ export interface operations {
                  * @description File owner UID
                  * @example 1000
                  */
-                "X-Incus-uid"?: string;
+                "X-Incus-uid"?: number;
                 /**
                  * @description File owner GID
                  * @example 1000
                  */
-                "X-Incus-gid"?: string;
+                "X-Incus-gid"?: number;
                 /**
                  * @description File mode
                  * @example 420
                  */
-                "X-Incus-mode"?: string;
+                "X-Incus-mode"?: number;
                 /**
                  * @description Type of file (file, symlink or directory)
                  * @example file
@@ -20503,7 +20644,12 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody?: components["requestBodies"]["instance_files_postRawFile"];
+        /** @description Raw file content */
+        requestBody?: {
+            content: {
+                "application/octet-stream": unknown;
+            };
+        };
         responses: {
             200: components["responses"]["EmptySyncResponse"];
             400: components["responses"]["BadRequest"];
@@ -20531,7 +20677,7 @@ export interface operations {
                  * @description Perform recursive deletion
                  * @example true
                  */
-                "X-Incus-force"?: string;
+                "X-Incus-force"?: boolean;
             };
             path: {
                 /** @description Storage pool name */
@@ -20582,16 +20728,16 @@ export interface operations {
             /** @description Raw file or directory listing */
             200: {
                 headers: {
-                    /** @description File owner GID */
-                    "X-Incus-gid"?: unknown;
-                    /** @description Mode mask */
-                    "X-Incus-mode"?: unknown;
-                    /** @description Last modified date */
-                    "X-Incus-modified"?: unknown;
-                    /** @description Type of file (file, symlink or directory) */
-                    "X-Incus-type"?: unknown;
                     /** @description File owner UID */
                     "X-Incus-uid"?: unknown;
+                    /** @description Type of file (file, symlink or directory) */
+                    "X-Incus-type"?: unknown;
+                    /** @description Last modified date */
+                    "X-Incus-modified"?: unknown;
+                    /** @description Mode mask */
+                    "X-Incus-mode"?: unknown;
+                    /** @description File owner GID */
+                    "X-Incus-gid"?: unknown;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -20898,7 +21044,12 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody: components["requestBodies"]["StorageVolumeSnapshotPut"];
+        /** @description Storage volume snapshot configuration */
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["StorageVolumeSnapshotPut"];
+            };
+        };
         responses: {
             200: components["responses"]["EmptySyncResponse"];
             400: components["responses"]["BadRequest"];
@@ -21009,7 +21160,12 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody: components["requestBodies"]["StorageVolumeSnapshotPut"];
+        /** @description Storage volume snapshot configuration */
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["StorageVolumeSnapshotPut"];
+            };
+        };
         responses: {
             200: components["responses"]["EmptySyncResponse"];
             400: components["responses"]["BadRequest"];
@@ -21515,7 +21671,12 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody: components["requestBodies"]["WarningPut"];
+        /** @description Warning status */
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WarningPut"];
+            };
+        };
         responses: {
             200: components["responses"]["EmptySyncResponse"];
             400: components["responses"]["BadRequest"];
@@ -21549,7 +21710,12 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody: components["requestBodies"]["WarningPut"];
+        /** @description Warning status */
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WarningPut"];
+            };
+        };
         responses: {
             200: components["responses"]["EmptySyncResponse"];
             400: components["responses"]["BadRequest"];

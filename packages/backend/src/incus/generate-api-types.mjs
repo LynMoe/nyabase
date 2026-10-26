@@ -1,8 +1,10 @@
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { upgrade } from '@scalar/openapi-upgrader';
+import { parse } from 'yaml';
 
 const INCUS_API_COMMIT = 'a1212093';
 const schemaUrl = `https://raw.githubusercontent.com/lxc/incus/${INCUS_API_COMMIT}/doc/rest-api.yaml`;
@@ -12,22 +14,10 @@ const temporaryDirectory = mkdtempSync(join(tmpdir(), 'nyabase-incus-'));
 const convertedSchemaPath = join(temporaryDirectory, 'rest-api.openapi.json');
 
 try {
-  execFileSync(
-    'pnpm',
-    [
-      'exec',
-      'swagger2openapi',
-      '--warnOnly',
-      '--patch',
-      '--fatal',
-      '--resolve',
-      '--outfile',
-      convertedSchemaPath,
-      schemaUrl,
-    ],
-    { cwd: workspaceRoot, stdio: 'inherit' },
-  );
-  const convertedSchema = JSON.parse(readFileSync(convertedSchemaPath, 'utf8'));
+  const response = await fetch(schemaUrl);
+  if (!response.ok) throw new Error(`GET ${schemaUrl}: ${response.status}`);
+  // Incus publishes Swagger 2.0; openapi-typescript reads OpenAPI 3.
+  const convertedSchema = upgrade(parse(await response.text()), '3.0');
   const schemas = convertedSchema.components?.schemas;
   if (!schemas?.ConfigMap || !schemas?.DevicesMap) {
     throw new Error('Pinned Incus schema is missing ConfigMap or DevicesMap');

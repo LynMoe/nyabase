@@ -1,2 +1,14 @@
 packages:
   - "packages/*"
+
+allowBuilds:
+  argon2: true
+  esbuild: true
+
+minimumReleaseAgeExclude:
+  - "@tanstack/query-core@5.105.0"
+  - "@tanstack/react-query@5.105.0"
+
+overrides:
+  # @nestjs/platform-express pins multer 2.4.0 (GHSA-q7qp-rjg7-q26m).
+  multer: "2.5.0"

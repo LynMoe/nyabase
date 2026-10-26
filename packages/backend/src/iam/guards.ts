@@ -1,19 +1,23 @@
-import { Injectable, CanActivate, ExecutionContext, ForbiddenException } from '@nestjs/common';
+import {
+  Injectable,
+  CanActivate,
+  ExecutionContext,
+  ForbiddenException,
+  UnauthorizedException,
+} from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
-import { AuthGuard, PassportStrategy } from '@nestjs/passport';
-import { ExtractJwt, Strategy } from 'passport-jwt';
-import { NyabaseConfigService } from '../platform/config/nyabase-config.service.js';
 import { roleAtLeast, type Role } from '@nyabase/common';
 import type { Actor } from './actor.js';
 import type { UserRecord } from './auth-persistence.js';
 import { IS_PUBLIC_KEY, ROLE_KEY } from './decorators.js';
-import { AuthService, type JwtPayload } from './auth.service.js';
+import { AuthService } from './auth.service.js';
 
 @Injectable()
-export class JwtAuthGuard extends AuthGuard('jwt') {
-  constructor(private readonly reflector: Reflector) {
-    super();
-  }
+export class JwtAuthGuard implements CanActivate {
+  constructor(
+    private readonly reflector: Reflector,
+    private readonly authService: AuthService,
+  ) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
     if (this.reflector.getAllAndOverride<boolean | undefined>(IS_PUBLIC_KEY, [
@@ -24,12 +28,20 @@ export class JwtAuthGuard extends AuthGuard('jwt') {
     }
     // The only credential is the browser session's short-lived access JWT.
     const request = context.switchToHttp().getRequest();
-    const allowed = await (super.canActivate(context) as Promise<boolean>);
-    if (allowed) {
-      request.authContext = { authVersion: request.user.authVersion };
-    }
-    return allowed;
+    const token = bearerToken(request.headers?.authorization);
+    if (!token) throw new UnauthorizedException();
+    const { user } = await this.authService.validateAccessToken(token);
+    request.user = user;
+    request.authContext = { authVersion: user.authVersion };
+    return true;
   }
+}
+
+/** `Authorization: Bearer <token>`; the scheme is case-insensitive (RFC 9110). */
+function bearerToken(header: unknown): string | null {
+  if (typeof header !== 'string') return null;
+  const match = /^bearer\s+(\S+)\s*$/i.exec(header);
+  return match ? match[1] : null;
 }
 
 export interface RequestAuthContext {
@@ -82,22 +94,4 @@ function isAdminNamespace(request: { originalUrl?: string; url?: string }): bool
   const path = (request.originalUrl ?? request.url ?? '').split('?')[0].toLowerCase();
   return path === '/admin' || path.startsWith('/admin/')
     || path === '/api/admin' || path.startsWith('/api/admin/');
-}
-
-@Injectable()
-export class JwtStrategy extends PassportStrategy(Strategy) {
-  constructor(
-    private authService: AuthService,
-    config: NyabaseConfigService,
-  ) {
-    super({
-      jwtFromRequest: ExtractJwt.fromAuthHeaderAsBearerToken(),
-      ignoreExpiration: false,
-      secretOrKey: config.get<string>('auth.jwtSecret'),
-    });
-  }
-
-  async validate(payload: JwtPayload) {
-    return this.authService.validateJwtPayload(payload);
-  }
 }

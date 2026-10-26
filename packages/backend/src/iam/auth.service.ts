@@ -9,8 +9,7 @@ import {
 } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import * as argon2 from 'argon2';
-import { v4 as uuidv4 } from 'uuid';
-import { createHash, createHmac, randomBytes } from 'crypto';
+import { createHash, createHmac, randomBytes, randomUUID } from 'crypto';
 import {
   AuditAction,
   FailureCode,
@@ -362,7 +361,7 @@ export class AuthService {
     return user;
   }
 
-  /** For connections that authenticate outside the HTTP guard (the console). */
+  /** The access JWT check shared by the HTTP guard and the console socket. */
   async validateAccessToken(token: string): Promise<AccessCredential> {
     if (!/^[A-Za-z0-9._-]{20,4096}$/.test(token)) {
       throw new UnauthorizedException('Invalid access token');
@@ -447,7 +446,7 @@ export class AuthService {
     },
   ): Promise<{ user: AuthUser; refreshToken: string; sessionId: string } | null> {
     const rawRefresh = randomBytes(48).toString('hex');
-    const sessionId = uuidv4();
+    const sessionId = randomUUID();
     const user = await this.persistence.issueRefreshSession(userId, {
       id: sessionId,
       hash: this.tokenHash(rawRefresh),

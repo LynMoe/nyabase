@@ -1,54 +1,84 @@
 import { describe, expect, it, vi } from 'vitest';
+import { UnauthorizedException } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import { IS_PUBLIC_KEY } from './decorators.js';
 import { JwtAuthGuard } from './guards.js';
+import type { AuthService } from './auth.service.js';
 
-describe('JwtAuthGuard query token handling', () => {
+describe('JwtAuthGuard', () => {
   it('lets @Public() routes through without authenticating', async () => {
-    const baseCanActivate = vi
-      .spyOn(Object.getPrototypeOf(JwtAuthGuard.prototype), 'canActivate')
-      .mockReturnValue(false);
+    const authService = fakeAuthService();
     const reflector = { getAllAndOverride: vi.fn((key: string) => key === IS_PUBLIC_KEY) };
-    const guard = new JwtAuthGuard(reflector as never);
+    const guard = new JwtAuthGuard(reflector as never, authService as never);
 
     await expect(guard.canActivate(makeContext(makeRequest({})))).resolves.toBe(true);
 
-    expect(baseCanActivate).not.toHaveBeenCalled();
-    baseCanActivate.mockRestore();
+    expect(authService.validateAccessToken).not.toHaveBeenCalled();
   });
 
-  it('does not map query tokens into Authorization headers', async () => {
-    const baseCanActivate = vi
-      .spyOn(Object.getPrototypeOf(JwtAuthGuard.prototype), 'canActivate')
-      .mockReturnValue(true);
+  it('does not read query tokens or map them into Authorization headers', async () => {
+    const authService = fakeAuthService();
     const request = makeRequest({ queryToken: 'jwt-token' });
-    request.user = { id: 'user-a', authVersion: 7 };
-    const guard = makeGuard();
 
-    await expect(guard.canActivate(makeContext(request))).resolves.toBe(true);
+    await expect(makeGuard(authService).canActivate(makeContext(request))).rejects.toBeInstanceOf(
+      UnauthorizedException,
+    );
 
     expect(request.headers.authorization).toBeUndefined();
-    expect(request.authContext).toEqual({ authVersion: 7 });
-    expect(baseCanActivate).toHaveBeenCalled();
-    baseCanActivate.mockRestore();
+    expect(authService.validateAccessToken).not.toHaveBeenCalled();
   });
 
-  it('hands every bearer token to the JWT strategy; there are no API tokens', async () => {
-    const baseCanActivate = vi
-      .spyOn(Object.getPrototypeOf(JwtAuthGuard.prototype), 'canActivate')
-      .mockResolvedValue(false);
+  it('validates the bearer access token and records the user and its auth version', async () => {
+    const authService = fakeAuthService();
+    const token = 'a'.repeat(64);
+    const request = makeRequest({ authHeader: `bearer  ${token}` });
+
+    await expect(makeGuard(authService).canActivate(makeContext(request))).resolves.toBe(true);
+
+    expect(authService.validateAccessToken).toHaveBeenCalledWith(token);
+    expect(request.user).toEqual({ id: 'user-a', authVersion: 7 });
+    expect(request.authContext).toEqual({ authVersion: 7 });
+  });
+
+  it.each(['Basic abc', 'Bearer', 'Bearer a b', `Token ${'a'.repeat(64)}`])(
+    'rejects the Authorization header %j without validating it',
+    async (header) => {
+      const authService = fakeAuthService();
+      const request = makeRequest({ authHeader: header });
+
+      await expect(makeGuard(authService).canActivate(makeContext(request))).rejects.toBeInstanceOf(
+        UnauthorizedException,
+      );
+
+      expect(authService.validateAccessToken).not.toHaveBeenCalled();
+    },
+  );
+
+  it('propagates a rejected token; there are no API tokens', async () => {
+    const authService = fakeAuthService();
+    authService.validateAccessToken.mockRejectedValue(new UnauthorizedException('Invalid access token'));
     const request = makeRequest({ authHeader: `Bearer ${'a'.repeat(64)}` });
 
-    await expect(makeGuard().canActivate(makeContext(request))).resolves.toBe(false);
+    await expect(makeGuard(authService).canActivate(makeContext(request))).rejects.toBeInstanceOf(
+      UnauthorizedException,
+    );
 
-    expect(baseCanActivate).toHaveBeenCalled();
     expect(request.user).toBeUndefined();
-    baseCanActivate.mockRestore();
   });
 });
 
-function makeGuard(): JwtAuthGuard {
-  return new JwtAuthGuard(new Reflector());
+function fakeAuthService() {
+  return {
+    validateAccessToken: vi.fn<AuthService['validateAccessToken']>().mockResolvedValue({
+      user: { id: 'user-a', authVersion: 7 } as never,
+      sessionId: 'session-a',
+      expiresAt: new Date(),
+    }),
+  };
+}
+
+function makeGuard(authService: ReturnType<typeof fakeAuthService>): JwtAuthGuard {
+  return new JwtAuthGuard(new Reflector(), authService as never);
 }
 
 function makeRequest(input: {

@@ -1,10 +1,10 @@
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
-import { TanStackRouterVite } from '@tanstack/router-vite-plugin';
+import { tanstackRouter } from '@tanstack/router-plugin/vite';
 import path from 'path';
 
 export default defineConfig({
-  plugins: [TanStackRouterVite(), react()],
+  plugins: [tanstackRouter({ target: 'react' }), react()],
   resolve: {
     alias: {
       '@nyabase/common': path.resolve(import.meta.dirname, '../common/src/index.ts'),

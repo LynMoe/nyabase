@@ -9,7 +9,7 @@ import {
 } from '@nestjs/common';
 import type { Kysely } from 'kysely';
 import { sql } from 'kysely';
-import { v4 as uuidv4 } from 'uuid';
+import { randomUUID } from 'node:crypto';
 import {
   AuditAction,
   MAX_PLATFORM_ACTIVE_USERS,
@@ -116,7 +116,7 @@ export class UsersService {
       throw new BadRequestException('Password must contain 8-256 characters');
     }
     const passwordHash = await this.authService.hashPassword(dto.password);
-    const userId = uuidv4();
+    const userId = randomUUID();
 
     const user = await this.transactions.run(async (transaction) => {
       // One durable row serializes capacity and numeric identity allocation

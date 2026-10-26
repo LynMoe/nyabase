@@ -1,0 +1,4 @@
+# The live e2e suite is its own pnpm workspace root: a separate lockfile, not
+# one of the root workspace's packages/*.
+allowBuilds:
+  esbuild: true

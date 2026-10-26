@@ -1,12 +1,7 @@
 {
   "name": "nyabase",
   "private": true,
-  "packageManager": "pnpm@9.15.0",
-  "pnpm": {
-    "overrides": {
-      "multer": "2.5.0"
-    }
-  },
+  "packageManager": "pnpm@12.15.0",
   "scripts": {
     "build": "pnpm --filter @nyabase/agent build && pnpm --filter @nyabase/frontend build && pnpm --filter @nyabase/backend build",
     "build:agent": "pnpm --filter @nyabase/agent build",
@@ -22,7 +17,7 @@
     "check": "bash scripts/check.sh",
     "check:backend-bootstrap": "pnpm --filter @nyabase/backend build && node scripts/check-backend-bootstrap.mjs",
     "check:rust-proxies": "bash scripts/check-rust-proxies.sh",
-    "e2e:check": "pnpm --filter @nyabase/common build && pnpm --dir tests/e2e install --frozen-lockfile --ignore-workspace && pnpm --dir tests/e2e typecheck && for f in tests/e2e/e2e.sh tests/e2e/lib/*.sh; do bash -n \"$f\" || exit 1; done && pnpm --dir tests/e2e load",
+    "e2e:check": "pnpm --filter @nyabase/common build && pnpm --dir tests/e2e install --frozen-lockfile && pnpm --dir tests/e2e typecheck && for f in tests/e2e/e2e.sh tests/e2e/lib/*.sh; do bash -n \"$f\" || exit 1; done && pnpm --dir tests/e2e load",
     "e2e:up": "bash tests/e2e/e2e.sh up",
     "e2e:run": "bash tests/e2e/e2e.sh run",
     "e2e:down": "bash tests/e2e/e2e.sh down"
@@ -31,7 +26,6 @@
     "@typescript-eslint/eslint-plugin": "^8.72.0",
     "@typescript-eslint/parser": "^8.72.0",
     "eslint": "^10.13.0",
-    "prettier": "^3.9.10",
     "typescript": "^6.0.3",
     "vitest": "^5.0.5"
   }

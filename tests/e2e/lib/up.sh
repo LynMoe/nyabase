@@ -132,7 +132,7 @@ cmd_up() {
     (cd "$REPO_ROOT" && pnpm --filter @nyabase/backend build \
       && pnpm --filter @nyabase/agent build \
       && cargo build --release --locked --manifest-path tools/Cargo.toml)
-    (cd "$E2E_DIR" && pnpm install --frozen-lockfile --ignore-workspace >/dev/null)
+    (cd "$E2E_DIR" && pnpm install --frozen-lockfile >/dev/null)
   fi
   local ssh_proxy="$REPO_ROOT/tools/target/release/nyabase-ssh-proxy"
   local http_proxy="$REPO_ROOT/tools/target/release/nyabase-http-proxy"

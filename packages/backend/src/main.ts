@@ -1,6 +1,6 @@
 import 'reflect-metadata';
 import { NestFactory } from '@nestjs/core';
-import { ValidationPipe, Logger, type LogLevel } from '@nestjs/common';
+import { Logger, type LogLevel } from '@nestjs/common';
 import type { NestExpressApplication } from '@nestjs/platform-express';
 import { existsSync } from 'fs';
 import { join } from 'path';
@@ -46,18 +46,8 @@ async function bootstrap() {
   app.use(warnOnUntrustedForwarding(trustedProxies, (message) => logger.warn(message)));
   app.use(securityHeaders());
   app.useGlobalFilters(new ZodExceptionFilter(), new PgTransactionConflictFilter(app.getHttpAdapter()));
-  // forbidNonWhitelisted: throw 400 on extra properties so clients learn
-  // about typos / dropped fields instead of silently having them ignored.
-  // Note: most request DTOs are validated via zod (see Body() handlers); the
-  // ValidationPipe is the safety net for class-validator-decorated DTOs.
-  app.useGlobalPipes(
-    new RouteIdPipe(),
-    new ValidationPipe({
-      whitelist: true,
-      transform: true,
-      forbidNonWhitelisted: true,
-    }),
-  );
+  // Request bodies and queries are parsed with zod schemas in the handlers.
+  app.useGlobalPipes(new RouteIdPipe());
 
   const corsOrigin = config.get<string>('server.corsOrigin');
   if (!corsOrigin && config.get<string>('runtime.nodeEnv') === 'production') {

@@ -1,5 +1,3 @@
-import animate from 'tailwindcss-animate';
-
 /** @type {import('tailwindcss').Config} */
 // Dark mode: class-based. The runtime class on <html> is owned by
 // `ThemeApplier` (src/components/theme-applier.tsx) which reads the
@@ -83,5 +81,4 @@ export default {
       },
     },
   },
-  plugins: [animate],
 };
