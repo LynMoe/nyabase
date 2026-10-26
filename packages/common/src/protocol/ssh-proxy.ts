@@ -113,8 +113,23 @@ export const zSshProxyAuditEvent = z.object({
   ts: z.number().finite(),
 }).strict();
 
+/** One live `direct-tcpip` bridge of a connection. */
+export const zSshProxyBridgeInfo = z.object({
+  channelSeq: z.number().int().min(0).max(0xffff_ffff),
+  serverId: zId,
+  serverSlug: zAscii(64),
+  containerId: zId,
+  containerName: zAscii(64),
+  routedIp: z.string().max(15).regex(/^[\x20-\x7e]*$/),
+  openedAt: zProxyTimestampMs,
+  bytesFromClient: zSafeCounter,
+  bytesToClient: zSafeCounter,
+}).strict();
+
 export const zSshProxyConnectionInfo = z.object({
   id: zAscii(64),
+  /** The connection's sequence number in this proxy instance's history. */
+  seq: zSafeCounter.optional(),
   peer: zAscii(128),
   username: zAscii(64).nullable(),
   login: zAscii(256).nullable(),
@@ -129,10 +144,18 @@ export const zSshProxyConnectionInfo = z.object({
   bytesFromClient: zSafeCounter,
   bytesToClient: zSafeCounter,
   channels: z.number().int().min(0).max(16),
+  /** Each live bridge: one connection can reach several containers. */
+  bridges: z.array(zSshProxyBridgeInfo).max(16).optional(),
 }).strict();
 
 export const zSshProxyStatusReport = z.object({
   proxyId: zAscii(128),
+  /** Random per proxy process; older proxies omit it (and send no history). */
+  instanceId: zAscii(64).optional(),
+  /** History records the Backend has not acknowledged yet. */
+  historyBacklog: z.number().int().min(0).max(1_000_000).optional(),
+  /** History records the proxy dropped because its backlog was full. */
+  historyDropped: zSafeCounter.optional(),
   hostname: zAscii(253).nullable(),
   listen: zAscii(128),
   uptimeMs: zSafeCounter,
@@ -186,7 +209,8 @@ export type SshProxyBackendMessage =
   | { kind: 'snapshot'; payload: SshProxySnapshot }
   | { kind: 'update'; payload: SshProxySnapshot }
   | { kind: 'disconnectAll'; payload: SshProxyDisconnectAllCommand }
-  | { kind: 'pauseAdmit'; payload: SshProxyPauseAdmitCommand };
+  | { kind: 'pauseAdmit'; payload: SshProxyPauseAdmitCommand }
+  | { kind: 'historyAck'; payload: { seq: number } };
 
 // --- client configuration (ProxyJump) -------------------------------------------
 

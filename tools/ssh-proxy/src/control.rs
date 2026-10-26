@@ -4,7 +4,7 @@ use crate::config::{
 };
 use crate::protocol::{
     BackendEnvelope, ClientEnvelope, ProxyEvent, ProxySnapshot, SshProxyAck,
-    SshProxyDisconnectAllCommand, SshProxyDisconnectAllResult, SshProxyMetrics,
+    SshProxyDisconnectAllCommand, SshProxyDisconnectAllResult, SshProxyHistoryAck, SshProxyMetrics,
     SshProxyPauseAdmitCommand,
 };
 use crate::runtime::{lock, ProxyRuntime};
@@ -24,6 +24,10 @@ use tokio_tungstenite::Connector;
 use tracing::{debug, info, warn};
 
 pub(crate) const BACKEND_CONTROL_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Sent history unacknowledged for this long is sent again (the Backend
+/// stores records idempotently), e.g. after it failed to write a batch.
+pub(crate) const HISTORY_RESEND_AFTER: Duration = Duration::from_secs(30);
 
 /// The Backend's `maxPayload` for this WebSocket; a larger frame closes the
 /// link with 1009, so such a frame is never sent.
@@ -53,6 +57,40 @@ pub(crate) fn encode_status_frame(runtime: &ProxyRuntime) -> Result<String> {
         kind: "status",
         payload: &payload,
     })?)
+}
+
+/// One `history` frame: the records are already encoded JSON objects.
+pub(crate) fn encode_history_frame(runtime: &ProxyRuntime, records: &[String]) -> String {
+    format!(
+        r#"{{"ts":{},"kind":"history","payload":{{"proxyId":{},"instanceId":{},"records":[{}]}}}}"#,
+        now_ms(),
+        serde_json::Value::from(runtime.proxy_id.as_str()),
+        serde_json::Value::from(runtime.instance_id.as_str()),
+        records.join(","),
+    )
+}
+
+/// Sends what this link has not sent yet, frame by frame, until the
+/// in-flight bound or the end of the outbox; returns the last sent seq.
+pub(crate) async fn send_history<S>(
+    write: &mut S,
+    runtime: &ProxyRuntime,
+    mut sent: u64,
+) -> Result<u64>
+where
+    S: Sink<Message> + Unpin,
+    S::Error: std::error::Error + Send + Sync + 'static,
+{
+    while let Some((last, records)) = runtime.history.next_batch(sent) {
+        send_control_frame(
+            write,
+            Message::Text(encode_history_frame(runtime, &records).into()),
+            BACKEND_CONTROL_WRITE_TIMEOUT,
+        )
+        .await?;
+        sent = last;
+    }
+    Ok(sent)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -313,8 +351,19 @@ pub(crate) async fn run_backend_once(
     let mut telemetry_closed = false;
     let mut ping = liveness.ping_timer();
     let mut last_frame = tokio::time::Instant::now();
+    // Everything unacknowledged is sent again on a new link.
+    let mut history_sent = send_history(&mut write, runtime, 0).await?;
+    let mut history_progress = tokio::time::Instant::now();
     loop {
         tokio::select! {
+            _ = runtime.history.changed() => {
+                // The ack timeout starts when sending resumes from idle.
+                let idle = runtime.history.oldest_pending().is_none_or(|oldest| oldest > history_sent);
+                history_sent = send_history(&mut write, runtime, history_sent).await?;
+                if idle {
+                    history_progress = tokio::time::Instant::now();
+                }
+            }
             _ = ping.tick() => {
                 send_control_frame(
                     &mut write,
@@ -323,6 +372,17 @@ pub(crate) async fn run_backend_once(
                 ).await?;
             }
             _ = status_tick.tick() => {
+                runtime.history.flush_refusals();
+                let stalled = runtime
+                    .history
+                    .oldest_pending()
+                    .is_some_and(|oldest| oldest <= history_sent)
+                    && history_progress.elapsed() >= HISTORY_RESEND_AFTER;
+                if stalled {
+                    debug!("SSH proxy history unacknowledged; sending it again");
+                    history_progress = tokio::time::Instant::now();
+                    history_sent = send_history(&mut write, runtime, 0).await?;
+                }
                 send_control_frame(
                     &mut write,
                     Message::Text(encode_status_frame(runtime)?.into()),
@@ -391,6 +451,12 @@ pub(crate) async fn run_backend_once(
                             Message::Text(serde_json::to_string(&envelope)?.into()),
                             BACKEND_CONTROL_WRITE_TIMEOUT,
                         ).await?;
+                    }
+                    "historyAck" => {
+                        let ack: SshProxyHistoryAck = serde_json::from_value(envelope.payload)?;
+                        runtime.history.acknowledge(ack.seq);
+                        history_progress = tokio::time::Instant::now();
+                        history_sent = send_history(&mut write, runtime, history_sent.max(ack.seq)).await?;
                     }
                     other => debug!(kind = other, "ignored backend SSH proxy websocket message"),
                 }

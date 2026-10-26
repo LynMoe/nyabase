@@ -599,3 +599,43 @@ async fn a_backend_that_stops_answering_is_dropped_by_the_read_deadline() {
     let (_ws, pings) = backend.await.unwrap();
     assert!(pings >= 3, "only {pings} pings while the Backend answered");
 }
+
+#[tokio::test]
+async fn history_is_sent_in_frames_that_identify_the_proxy_instance() {
+    let runtime = ProxyRuntime::new(&test_config());
+    let (connection, _registration) =
+        runtime.register_connection("192.0.2.4:4000".parse().unwrap());
+    for _ in 0..3 {
+        connection.reject_channel("rejected_permit", "work", 80, "127.0.0.1:0", None);
+    }
+    let written = Arc::new(std::sync::Mutex::new(Vec::<Message>::new()));
+    let sink_frames = written.clone();
+    let mut sink = Box::pin(futures_util::sink::unfold(
+        (),
+        move |(), message: Message| {
+            sink_frames.lock().unwrap().push(message);
+            async { Ok::<_, std::io::Error>(()) }
+        },
+    ));
+    let sent = send_history(&mut sink, &runtime, 0).await.unwrap();
+    assert_eq!(sent, 3);
+    let frames = std::mem::take(&mut *written.lock().unwrap());
+    assert_eq!(frames.len(), 1);
+    let frame: serde_json::Value = serde_json::from_str(frames[0].to_text().unwrap()).unwrap();
+    assert_eq!(frame["kind"], "history");
+    assert_eq!(frame["payload"]["proxyId"], runtime.proxy_id.as_str());
+    assert_eq!(frame["payload"]["instanceId"], runtime.instance_id.as_str());
+    let seqs = frame["payload"]["records"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|record| record["seq"].as_u64().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(seqs, vec![1, 2, 3]);
+    // Nothing new to send on this link until something is recorded.
+    assert_eq!(send_history(&mut sink, &runtime, sent).await.unwrap(), 3);
+    assert!(written.lock().unwrap().is_empty());
+    // After the ack the outbox is empty; a new link sends nothing.
+    runtime.history.acknowledge(3);
+    assert_eq!(send_history(&mut sink, &runtime, 0).await.unwrap(), 0);
+}

@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
 import { KeyRound, Plus, RefreshCw, ShieldCheck, Trash2, UserCircle } from 'lucide-react';
 import { type SshPublicKeyDto, zAddSshKeyRequest, zUpdateUserRequest } from '@nyabase/common';
+import { SshSessionList } from '../components/ssh-sessions/ssh-session-list.js';
 import { api } from '../lib/api.js';
 import { ApiError } from '../lib/api-error.js';
 import { queryKeys } from '../lib/query-keys.js';
@@ -51,6 +52,14 @@ export default function ProfilePage() {
         <PasswordPanel userId={user.id} />
         <SshKeysPanel userId={user.id} />
       </div>
+
+      <SshSessionList
+        scope="mine"
+        title="SSH 登录记录"
+        description="你经 SSH 代理建立的连接：来源地址、客户端、使用的公钥和连到的容器。看到不认识的来源时，请删除对应的公钥。"
+        showPeerFilter
+        defaultPageSize={20}
+      />
     </Page>
   );
 }

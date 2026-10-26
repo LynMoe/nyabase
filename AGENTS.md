@@ -183,6 +183,13 @@ SSH 代理按公钥认证、按名路由：direct-tcpip 目标是容器 IP 或 `
 （`ssh-host-ca/`，只依赖 platform；`SshKeyCryptoService` 在 `platform/`），reconciler 在 sshd 就绪后签发确定性的主机证书并写 sshd drop-in，
 尽力而为、不让 intent 失败；guest 的 `authorized_keys` 只改标记块内的内容。
 
+SSH 连接历史（`tools/ssh-proxy/src/history.rs`、`backend/src/ssh/ssh-history*`、`ssh-sessions*`）：代理是纯跳板，只能看到外层连接与 `direct-tcpip` 通道，
+看不到内层会话里的命令和 -A / -L / -R（不要为此做中间人）。认证通过的每条连接、它打开或被拒的每个通道，在打开和关闭时各上报一次**完整记录**，
+按（代理实例 `proxyId:instanceId`，序号）幂等 upsert：计数只增、关闭一经记录就保留、真实关闭覆盖 `lost`，所以记录乱序、重复都无妨。
+记录在代理的有界发件箱里等 `historyAck`，后端提交后才确认（累计确认，所以存储失败后丢弃后续帧直到代理重发）；字节数由 status 帧每 30 s 落库。
+未认证连接只按（窗口、地址、原因）计数。代理消失 10 分钟后其未关闭连接记为 `lost`；超过 `ssh.proxyHistoryRetentionDays` 的明细折叠进
+`ssh_proxy_daily_usage` 后删除，统计同时读明细与汇总。`GET /ssh-sessions` 遵循 scope 规则（mine = 自己发起的连接，all = operator）。
+
 代理快照（`tools/`、`http-proxy/`、`ssh/`、`proxy-snapshots/`）：租约（`validUntil`）是撤销的上限，构建失败时什么都不发，
 代理在租约到期后 fail closed；**不得**用新租约重发旧路由（会让撤销活过租约），失败只在 error 日志里写明何时 fail closed。
 HTTP 代理按路由撤销：每个 hostname 有一个 incarnation，只在连续快照里权限元组不变时延续，交换只在自己的路由被删 / 改权限或租约到期时中断，

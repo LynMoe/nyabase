@@ -80,3 +80,5 @@ ssh:
   # Containers are reached as <name>.<suffix> (e.g. `ssh root@work.nya`).
   proxyHostSuffix: nya
   proxySnapshotStaleMs: 300000
+  # Days of SSH connection history kept in detail (older is folded per day).
+  proxyHistoryRetentionDays: 90

@@ -321,6 +321,10 @@ const FIELD_LABELS: Record<string, { label: string; description: string }> = {
     label: 'SSH 代理快照过期时间',
     description: 'SSH 代理状态快照被判定为过期前的毫秒数（120000–300000）。',
   },
+  'ssh.proxyHistoryRetentionDays': {
+    label: 'SSH 连接历史保留天数',
+    description: 'SSH 代理的连接、通道和未认证连接明细保留的天数。更早的明细会汇总成按天用量后删除，汇总一直保留。',
+  },
 };
 
 export function fieldLabel(field: SystemSettingFieldDto): string {

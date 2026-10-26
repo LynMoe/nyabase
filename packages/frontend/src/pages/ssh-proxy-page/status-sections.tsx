@@ -65,12 +65,13 @@ export function SshStatusSections({ status }: { status: SshProxyAdminStatus }) {
                 <TableHead>带宽</TableHead>
                 <TableHead>流量</TableHead>
                 <TableHead>快照</TableHead>
+                <TableHead>历史待发</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
               {proxies.length === 0 ? (
                 <TableRow>
-                  <TableCell className="py-8 text-center text-muted-foreground" colSpan={6}>暂无在线 SSH 代理</TableCell>
+                  <TableCell className="py-8 text-center text-muted-foreground" colSpan={7}>暂无在线 SSH 代理</TableCell>
                 </TableRow>
               ) : proxies.map((proxy) => (
                 <TableRow key={proxy.proxyId}>
@@ -88,6 +89,12 @@ export function SshStatusSections({ status }: { status: SshProxyAdminStatus }) {
                     {proxy.lastSnapshotGeneration ?? '-'}
                     {latest !== null && proxy.lastSnapshotGeneration !== null && proxy.lastSnapshotGeneration < latest ? (
                       <Badge variant="outline" className="ml-2">落后于 {latest}</Badge>
+                    ) : null}
+                  </TableCell>
+                  <TableCell>
+                    {proxy.historyBacklog ?? '-'}
+                    {proxy.historyDropped ? (
+                      <Badge variant="warning" className="ml-2">已丢弃 {proxy.historyDropped}</Badge>
                     ) : null}
                   </TableCell>
                 </TableRow>
@@ -124,7 +131,18 @@ export function SshStatusSections({ status }: { status: SshProxyAdminStatus }) {
                       ) : null}
                     </TableCell>
                     <TableCell>
-                      {connection.serverSlug && connection.containerName ? (
+                      {connection.bridges && connection.bridges.length > 0 ? (
+                        <div className="space-y-1">
+                          {connection.bridges.map((bridge) => (
+                            <div key={bridge.channelSeq} className="text-sm">
+                              {`${bridge.serverSlug}.${bridge.containerName}`}
+                              <span className="ml-2 text-xs text-muted-foreground tabular-nums">
+                                {formatBytes(bridge.bytesFromClient)} / {formatBytes(bridge.bytesToClient)}
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      ) : connection.serverSlug && connection.containerName ? (
                         <>
                           <div>{`${connection.serverSlug}.${connection.containerName}`}</div>
                           {targetId ? (

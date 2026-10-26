@@ -32,6 +32,7 @@ const OPERATOR_ROUTES = [
   'GET admin/groups/:param/storage-pool-grants',
   'GET admin/metrics/runtime',
   'GET admin/ssh-proxy/host-key',
+  'GET admin/ssh-proxy/refusals',
   'GET admin/ssh-proxy/status',
   'GET admin/system-settings',
   'GET audit',
@@ -133,6 +134,7 @@ describe('HTTP API role contract', () => {
       'GET servers', 'GET servers/:param', 'GET images', 'GET images/:param',
       'GET shared-backends', 'GET shared-backends/:param', 'GET performance/usage',
       'GET intents', 'GET intents/:param', 'POST intents/:param/retry',
+      'GET ssh-sessions', 'GET ssh-sessions/stats', 'GET ssh-sessions/:param',
       'GET users/:param', 'PATCH users/:param',
     ]) {
       const route = routes.find((candidate) => candidate.key === key);

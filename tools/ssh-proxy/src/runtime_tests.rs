@@ -315,7 +315,7 @@ async fn every_bridged_route_is_revalidated_and_closed_on_its_own() {
         connection.set_display_route(&route);
         let flag = Arc::new(AtomicBool::new(false));
         let guard = DropFlag(flag.clone());
-        let open_channel = crate::bridge::OpenChannel::new(connection.clone());
+        let open_channel = crate::bridge::OpenChannel::untracked(connection.clone());
         permit.spawn(async move {
             let _guard = guard;
             let _open_channel = open_channel;

@@ -1,3 +1,4 @@
+use crate::history::ChannelState;
 use crate::protocol::{ProxyEvent, SshProxyAuditEvent, SshProxyMetric, TelemetrySender};
 use crate::runtime::{ChildTaskPermit, ConnectionState};
 use anyhow::Result;
@@ -8,6 +9,7 @@ use russh::Channel;
 use std::future::Future;
 use std::net::SocketAddr;
 use std::pin::Pin;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::task::{Context as PollContext, Poll};
 use tokio::io::{self, AsyncRead, AsyncWrite, ReadBuf};
@@ -55,14 +57,34 @@ where
 /// When wrapping the SSH channel side of a direct-tcpip bridge:
 /// - reads  = client → target (`bytes_from_client`)
 /// - writes = target → client (`bytes_to_client`)
+///
+/// Bytes count towards the connection and, when given, the channel.
 pub(crate) struct MeteredChannelStream<S> {
     pub(crate) inner: S,
     pub(crate) connection: Arc<ConnectionState>,
+    pub(crate) channel: Option<Arc<ChannelState>>,
 }
 
 impl<S> MeteredChannelStream<S> {
+    #[cfg(test)]
     pub(crate) fn new(inner: S, connection: Arc<ConnectionState>) -> Self {
-        Self { inner, connection }
+        Self {
+            inner,
+            connection,
+            channel: None,
+        }
+    }
+
+    pub(crate) fn for_channel(
+        inner: S,
+        connection: Arc<ConnectionState>,
+        channel: Arc<ChannelState>,
+    ) -> Self {
+        Self {
+            inner,
+            connection,
+            channel: Some(channel),
+        }
     }
 }
 
@@ -78,6 +100,11 @@ impl<S: AsyncRead + Unpin> AsyncRead for MeteredChannelStream<S> {
             let n = buf.filled().len().saturating_sub(before);
             if n > 0 {
                 self.connection.record_from_client(n);
+                if let Some(channel) = &self.channel {
+                    channel
+                        .bytes_from_client
+                        .fetch_add(n as u64, Ordering::Relaxed);
+                }
             }
         }
         result
@@ -94,6 +121,11 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for MeteredChannelStream<S> {
             Poll::Ready(Ok(n)) => {
                 if n > 0 {
                     self.connection.record_to_client(n);
+                    if let Some(channel) = &self.channel {
+                        channel
+                            .bytes_to_client
+                            .fetch_add(n as u64, Ordering::Relaxed);
+                    }
                 }
                 Poll::Ready(Ok(n))
             }
@@ -122,32 +154,58 @@ pub(crate) fn spawn_tcp_bridge(
     channel: Channel<ServerMsg>,
     stream: TcpStream,
     connection: Arc<ConnectionState>,
+    history: Arc<ChannelState>,
 ) {
-    // The guard lives in the future, so the channel count is released even
-    // when the bridge is aborted (route revoked) before or while it runs.
-    let open_channel = OpenChannel::new(connection.clone());
+    // The guard lives in the future, so the channel count is released and
+    // the channel's close is recorded even when the bridge is aborted
+    // (route revoked, connection closed) before or while it runs.
+    permit.bind_channel(history.clone());
+    let open_channel = OpenChannel::new(connection.clone(), history.clone());
     permit.spawn(async move {
         let _open_channel = open_channel;
-        let mut channel_stream = MeteredChannelStream::new(channel.into_stream(), connection);
+        let mut channel_stream =
+            MeteredChannelStream::for_channel(channel.into_stream(), connection, history.clone());
         let mut tcp_stream = stream;
-        if let Err(error) = io::copy_bidirectional(&mut channel_stream, &mut tcp_stream).await {
-            debug!(%peer, %error, "SSH direct-tcpip bridge ended with error");
+        match io::copy_bidirectional(&mut channel_stream, &mut tcp_stream).await {
+            Ok(_) => history.set_close_reason("closed"),
+            Err(error) => {
+                debug!(%peer, %error, "SSH direct-tcpip bridge ended with error");
+                history.set_close_reason("error");
+            }
         }
     });
 }
 
-pub(crate) struct OpenChannel(Arc<ConnectionState>);
+pub(crate) struct OpenChannel {
+    connection: Arc<ConnectionState>,
+    history: Option<Arc<ChannelState>>,
+}
 
 impl OpenChannel {
-    pub(crate) fn new(connection: Arc<ConnectionState>) -> Self {
+    pub(crate) fn new(connection: Arc<ConnectionState>, history: Arc<ChannelState>) -> Self {
         connection.channel_opened();
-        Self(connection)
+        Self {
+            connection,
+            history: Some(history),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn untracked(connection: Arc<ConnectionState>) -> Self {
+        connection.channel_opened();
+        Self {
+            connection,
+            history: None,
+        }
     }
 }
 
 impl Drop for OpenChannel {
     fn drop(&mut self) {
-        self.0.channel_closed();
+        self.connection.channel_closed();
+        if let Some(history) = &self.history {
+            self.connection.close_channel(history);
+        }
     }
 }
 

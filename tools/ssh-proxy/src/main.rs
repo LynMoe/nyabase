@@ -7,6 +7,7 @@ use tokio::task::JoinSet;
 mod bridge;
 mod config;
 mod control;
+mod history;
 mod listener;
 mod protocol;
 mod runtime;

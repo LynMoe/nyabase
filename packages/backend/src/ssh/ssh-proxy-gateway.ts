@@ -25,6 +25,7 @@ import {
   type SshProxyStatusReport,
 } from '@nyabase/common';
 import { SshProxySnapshotService } from './ssh-proxy-snapshot.service.js';
+import { SshHistoryService } from './ssh-history.service.js';
 import { NyabaseConfigService } from '../platform/config/nyabase-config.service.js';
 import { ProxySnapshotNotifierService } from '../proxy-snapshots/proxy-snapshot-notifier.service.js';
 import { snapshotBuildFailureMessage } from '../proxy-snapshots/snapshot-build-failure.js';
@@ -49,12 +50,12 @@ export const SSH_PROXY_REFUSED_LOGIN_SUMMARY_MS = 60_000;
 const MAX_REFUSED_LOGIN_REASONS = 16;
 
 function isSshProxyEnvelope(value: unknown): value is {
-  kind: 'ack' | 'metrics' | 'status' | 'disconnectAllResult' | 'audit';
+  kind: 'ack' | 'metrics' | 'status' | 'disconnectAllResult' | 'audit' | 'history';
   payload: unknown;
 } {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const candidate = value as Record<string, unknown>;
-  return ['ack', 'metrics', 'status', 'disconnectAllResult', 'audit']
+  return ['ack', 'metrics', 'status', 'disconnectAllResult', 'audit', 'history']
     .includes(String(candidate.kind))
     && 'payload' in candidate;
 }
@@ -113,6 +114,7 @@ export class SshProxyGateway implements OnModuleInit, OnModuleDestroy {
     private snapshots: SshProxySnapshotService,
     private config: NyabaseConfigService,
     private proxySnapshots: ProxySnapshotNotifierService,
+    private history: SshHistoryService,
   ) {
     this.expectedTokenDigest = configuredProxyTokenDigest(
       config.get<string>('ssh.proxyToken'),
@@ -458,7 +460,10 @@ export class SshProxyGateway implements OnModuleInit, OnModuleDestroy {
     }
     if (envelope.kind === 'status') {
       const status = zSshProxyStatusReport.safeParse(envelope.payload);
-      if (status.success) this.latestStatus.set(ws, status.data);
+      if (status.success) {
+        this.latestStatus.set(ws, status.data);
+        this.history.checkpoint(ws, status.data);
+      }
       return;
     }
     if (envelope.kind === 'disconnectAllResult') {
@@ -469,6 +474,14 @@ export class SshProxyGateway implements OnModuleInit, OnModuleDestroy {
     if (envelope.kind === 'audit') {
       const audit = zSshProxyAuditEvent.safeParse(envelope.payload);
       if (audit.success) this.recordAudit(audit.data);
+      return;
+    }
+    if (envelope.kind === 'history') {
+      void this.history.ingest(ws, envelope.payload).then((seq) => {
+        if (seq === null) return;
+        const message: SshProxyBackendMessage = { kind: 'historyAck', payload: { seq } };
+        this.sendOrTerminate(ws, JSON.stringify({ ts: Date.now(), ...message }), 'history ack');
+      });
     }
   }
 
@@ -619,6 +632,7 @@ export class SshProxyGateway implements OnModuleInit, OnModuleDestroy {
   private removeAdmittedClient(client: WebSocket): void {
     this.clients.delete(client);
     this.latestStatus.delete(client);
+    this.history.forget(client);
     this.sentLeaseEnds.delete(client);
     this.resolveClosedProxy(client);
   }

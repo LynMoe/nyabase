@@ -1465,6 +1465,16 @@ instance id; the Backend stores them per instance
 double counts, and folds instances silent for a day into one `archived` row
 per binding.
 
+The same holds for the SSH proxy and its connection history (migration
+`000003`): a Backend accepts an older SSH proxy (it just records no history),
+while an older Backend drops a newer SSH proxy's status reports and ignores
+its `history` frames. Those records stay in the proxy's bounded outbox
+(8192 records, oldest dropped first) until a Backend acknowledges them, so
+upgrading the Backend soon after loses nothing; a proxy restart loses what
+was still unacknowledged (the Backend closes such connections as `lost`).
+History detail older than `ssh.proxyHistoryRetentionDays` (default 90) is
+folded into `interaction.ssh_proxy_daily_usage` and deleted.
+
 ### Rotating secrets
 
 Every value below is read at start-up, so a rotation is: change the value in

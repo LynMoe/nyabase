@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { getRouteApi, useNavigate } from '@tanstack/react-router';
-import { Gauge, History, Info, Terminal, TriangleAlert } from 'lucide-react';
+import { Gauge, History, Info, KeyRound, Terminal, TriangleAlert } from 'lucide-react';
 import {
   ContainerStatus,
   IntentResourceType,
@@ -25,6 +25,8 @@ import { ContainerConsole } from '../components/containers/container-console.js'
 import { IntentsPanel } from '../components/containers/intents-panel.js';
 import { OverviewPanel } from '../components/containers/overview-panel.js';
 import { StoragePanel } from '../components/containers/storage-panel.js';
+import { SshSessionList } from '../components/ssh-sessions/ssh-session-list.js';
+import { SshSessionStats } from '../components/ssh-sessions/ssh-session-stats.js';
 import { useActionMutation } from '../hooks/use-action-mutation.js';
 import { api } from '../lib/api.js';
 import { useInvalidateContainer } from '../lib/container-queries.js';
@@ -44,8 +46,8 @@ import {
   lifecyclePhaseLabel,
 } from '../lib/status-labels.js';
 
-export type DetailTab = 'overview' | 'console';
-const DETAIL_TABS: DetailTab[] = ['overview', 'console'];
+export type DetailTab = 'overview' | 'console' | 'ssh';
+const DETAIL_TABS: DetailTab[] = ['overview', 'console', 'ssh'];
 
 export function parseDetailTab(value: unknown): DetailTab {
   return DETAIL_TABS.includes(value as DetailTab) ? (value as DetailTab) : 'overview';
@@ -57,6 +59,7 @@ const adminRouteApi = getRouteApi('/manage/containers/$containerId');
 const DETAIL_TAB_ITEMS = [
   ['overview', '概况', Gauge],
   ['console', '控制台', Terminal],
+  ['ssh', 'SSH 连接', KeyRound],
 ] as const;
 
 export default function ContainerDetailPage() {
@@ -127,6 +130,19 @@ function ContainerDetailContent({
               </TabsContent>
               <TabsContent value="console">
                 <ContainerConsole container={container} scope={scope} />
+              </TabsContent>
+              <TabsContent value="ssh" className="space-y-3">
+                {tab === 'ssh' ? (
+                  <>
+                    <SshSessionList
+                      scope={scope}
+                      containerId={container.id}
+                      title="SSH 连接"
+                      description="经 SSH 代理连到这个容器的连接（含登录名直接指定它的）。"
+                    />
+                    <SshSessionStats scope={scope} containerId={container.id} />
+                  </>
+                ) : null}
               </TabsContent>
             </Tabs>
           </>

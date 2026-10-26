@@ -720,6 +720,20 @@ export const controlPlaneConfigDefinitions = [
     label: 'SSH proxy snapshot staleness',
     description: 'Milliseconds before an SSH proxy snapshot is considered stale (120000-300000).',
   }),
+  field({
+    key: 'ssh.proxyHistoryRetentionDays',
+    yamlPath: 'ssh.proxyHistoryRetentionDays',
+    env: 'SSH_PROXY_HISTORY_RETENTION_DAYS',
+    defaultValue: 90,
+    schema: positiveDays.max(3650),
+    valueKind: 'number',
+    secret: false,
+    editable: true,
+    restartRequired: false,
+    public: false,
+    label: 'SSH connection history retention days',
+    description: 'Days SSH proxy connections, channels and refused connections are kept in detail. Older detail is folded into per-day usage, which is kept.',
+  }),
 ] as const satisfies readonly ConfigFieldDefinition[];
 
 export type ControlPlaneConfigDefinition = (typeof controlPlaneConfigDefinitions)[number];

@@ -23,6 +23,13 @@ pub(crate) struct SshProxyAck {
     pub(crate) generation: u64,
 }
 
+/// The Backend stored every history record up to and including `seq`.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SshProxyHistoryAck {
+    pub(crate) seq: u64,
+}
+
 #[derive(Debug, Serialize)]
 pub(crate) struct SshProxyMetrics {
     pub(crate) metrics: Vec<SshProxyMetric>,

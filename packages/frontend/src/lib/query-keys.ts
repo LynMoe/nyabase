@@ -20,6 +20,14 @@ export const queryKeys = {
   sshProxy: {
     status: ['ssh-proxy-status'] as const,
     hostKey: ['ssh-proxy-host-key'] as const,
+    refusals: (hours: number) => ['ssh-proxy-refusals', hours] as const,
+  },
+  sshSessions: {
+    list: (scope: Scope, filters: object, limit: number, cursor: string | undefined) =>
+      ['ssh-sessions', scope, filters, limit, cursor ?? null] as const,
+    detail: (scope: Scope, id: string) => ['ssh-session', scope, id] as const,
+    stats: (scope: Scope, days: number, containerId: string | undefined) =>
+      ['ssh-session-stats', scope, days, containerId ?? null] as const,
   },
   servers: {
     admin: ['servers', 'admin'] as const,

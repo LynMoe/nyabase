@@ -3,13 +3,15 @@ import {
   Get,
   HttpCode,
   Post,
+  Query,
 } from '@nestjs/common';
 import { randomBytes } from 'node:crypto';
-import { AuditAction, Role } from '@nyabase/common';
+import { AuditAction, Role, zSshProxyRefusalsQuery, type SshProxyRefusalsDto } from '@nyabase/common';
 import { RequireRole, CurrentUser } from '../iam/decorators.js';
 import { postCommitBestEffort } from '../platform/post-commit.js';
 import { SshIdentityService } from './ssh-identity.service.js';
 import { SshProxyGateway } from './ssh-proxy-gateway.js';
+import { SshSessionsService } from './ssh-sessions.service.js';
 import type { UserRecord } from '../iam/auth-persistence.js';
 import { AuditService } from '../iam/audit.service.js';
 import { assertActorRole } from '../iam/administration.js';
@@ -33,12 +35,20 @@ export class AdminSshProxyController {
     private accessResolver: AccessResolverService,
     private hostCa: SshHostCaService,
     private containerSsh: ContainerSshConvergenceService,
+    private sessions: SshSessionsService,
   ) {}
 
   @Get('status')
   @RequireRole(Role.Operator)
   status() {
     return this.sshProxyGateway.getStatus();
+  }
+
+  /** Unauthenticated connections (refused keys, scanners, limits) summed per address and reason. */
+  @Get('refusals')
+  @RequireRole(Role.Operator)
+  refusals(@Query() query: Record<string, unknown>): Promise<SshProxyRefusalsDto> {
+    return this.sessions.refusals(zSshProxyRefusalsQuery.parse(query).hours);
   }
 
   @Post('disconnect-all')

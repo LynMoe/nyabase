@@ -2,7 +2,7 @@ use crate::bridge::{emit_audit, emit_metric, spawn_tcp_bridge};
 use crate::config::ProxyConfig;
 use crate::control::ControlPlane;
 use crate::protocol::{SshProxyAuditEvent, TelemetrySender};
-use crate::runtime::{lock, ConnectionState, MAX_CHANNELS_PER_CONNECTION};
+use crate::runtime::{lock, ConnectionRouteInfo, ConnectionState, MAX_CHANNELS_PER_CONNECTION};
 use crate::snapshot::{RejectReason, RouteResolution, RoutingSnapshot, SnapshotStore};
 use anyhow::{Context, Result};
 use proxy_common::clock::now_ms;
@@ -184,6 +184,37 @@ impl ProxySshSession {
             },
         );
     }
+
+    /// Counts and records one refused `direct-tcpip` channel.
+    pub(crate) fn refuse_channel(
+        &self,
+        result: &'static str,
+        target: (&str, u32),
+        originator: &str,
+        route: Option<&OwnedResolvedRoute>,
+    ) {
+        emit_metric(
+            &self.telemetry,
+            "ssh_proxy_channels_total",
+            vec![
+                ("kind", "direct_tcpip".to_string()),
+                ("result", result.to_string()),
+            ],
+            1.0,
+        );
+        self.connection.reject_channel(
+            result,
+            target.0,
+            target.1,
+            originator,
+            route.map(ConnectionRouteInfo::from).as_ref(),
+        );
+    }
+
+    /// Counts a refused request that is not a `direct-tcpip` channel.
+    pub(crate) fn refuse_request(&self, kind: &'static str) {
+        self.connection.count_rejected_request(kind);
+    }
 }
 
 impl russh::server::Handler for ProxySshSession {
@@ -191,6 +222,7 @@ impl russh::server::Handler for ProxySshSession {
 
     async fn auth_succeeded(&mut self, session: &mut Session) -> Result<(), Self::Error> {
         if self.pause_rejecting() {
+            self.connection.note_auth_failure("paused");
             session.disconnect(
                 Disconnect::ServiceNotAvailable,
                 SSH_PROXY_PAUSE_REJECT_DESCRIPTION,
@@ -200,8 +232,11 @@ impl russh::server::Handler for ProxySshSession {
         }
         let current = self.held_snapshot();
         if !self.connection.authorization_matches(current.as_deref()) {
+            self.connection.set_close_reason("revoked");
             anyhow::bail!("SSH proxy authorization changed during authentication");
         }
+        self.connection.note_client_version(session.remote_sshid());
+        self.connection.report_opened();
         Ok(())
     }
 
@@ -219,17 +254,20 @@ impl russh::server::Handler for ProxySshSession {
         public_key: &PublicKey,
     ) -> Result<Auth, Self::Error> {
         if !acceptable_login(user) {
+            self.connection.note_auth_failure("invalid_login");
             return Ok(Auth::reject());
         }
         if self.pause_rejecting() {
             return Ok(Auth::Accept);
         }
-        if self
-            .latest_snapshot()
-            .is_some_and(|snapshot| snapshot.public_key_allowed(user, public_key))
-        {
+        let Some(snapshot) = self.latest_snapshot() else {
+            self.connection.note_auth_failure("snapshot_unavailable");
+            return Ok(Auth::reject());
+        };
+        if snapshot.public_key_allowed(user, public_key) {
             Ok(Auth::Accept)
         } else {
+            self.connection.note_auth_failure("public_key_rejected");
             Ok(Auth::reject())
         }
     }
@@ -246,6 +284,7 @@ impl russh::server::Handler for ProxySshSession {
                 "SSH proxy login rejected: not 1..=256 printable ASCII bytes"
             );
             self.emit_login_audit(None, None, None, false, Some("invalid_login"));
+            self.connection.note_auth_failure("invalid_login");
             return Ok(Auth::reject());
         }
         if self.pause_rejecting() {
@@ -253,6 +292,7 @@ impl russh::server::Handler for ProxySshSession {
         }
         let Some(snapshot) = self.latest_snapshot() else {
             self.emit_login_audit(Some(user), None, None, false, Some("snapshot_unavailable"));
+            self.connection.note_auth_failure("snapshot_unavailable");
             return Ok(Auth::reject());
         };
         let user_row = match snapshot.find_active_user_by_public_key(public_key) {
@@ -260,6 +300,7 @@ impl russh::server::Handler for ProxySshSession {
             Err(reason) => {
                 warn!(peer = %self.peer, login = user, %reason, "SSH proxy public key rejected");
                 self.emit_login_audit(Some(user), None, None, false, Some(reason.code()));
+                self.connection.note_auth_failure(reason.code());
                 return Ok(Auth::reject());
             }
         };
@@ -321,6 +362,7 @@ impl russh::server::Handler for ProxySshSession {
         if self.pause_rejecting() {
             return Ok(false);
         }
+        self.refuse_request("session");
         emit_metric(
             &self.telemetry,
             "ssh_proxy_channels_total",
@@ -453,25 +495,20 @@ impl russh::server::Handler for ProxySshSession {
         originator_port: u32,
         _session: &mut Session,
     ) -> Result<bool, Self::Error> {
+        let peer = self.peer;
+        let target = (host_to_connect, port_to_connect);
+        let originator = format!("{originator_address}:{originator_port}");
         if self.pause_rejecting() {
+            self.refuse_channel("rejected_paused", target, &originator, None);
             return Ok(false);
         }
-        let peer = self.peer;
         if port_to_connect != 22 {
             warn!(
                 %peer,
                 target = %format!("{host_to_connect}:{port_to_connect}"),
                 "direct-tcpip target outside PermitOpen"
             );
-            emit_metric(
-                &self.telemetry,
-                "ssh_proxy_channels_total",
-                vec![
-                    ("kind", "direct_tcpip".to_string()),
-                    ("result", "rejected_permit".to_string()),
-                ],
-                1.0,
-            );
+            self.refuse_channel("rejected_permit", target, &originator, None);
             let _ = channel.close().await;
             return Ok(false);
         }
@@ -480,45 +517,21 @@ impl russh::server::Handler for ProxySshSession {
             Ok(route) => route,
             Err(error) => {
                 warn!(%peer, %error, target = %host_to_connect, "direct-tcpip rejected: unauthorized");
-                emit_metric(
-                    &self.telemetry,
-                    "ssh_proxy_channels_total",
-                    vec![
-                        ("kind", "direct_tcpip".to_string()),
-                        ("result", "rejected_unauthorized".to_string()),
-                    ],
-                    1.0,
-                );
+                self.refuse_channel("rejected_unauthorized", target, &originator, None);
                 let _ = channel.close().await;
                 return Ok(false);
             }
         };
         if self.connection.channels.load(Ordering::Relaxed) >= MAX_CHANNELS_PER_CONNECTION {
             warn!(%peer, "SSH direct-tcpip channel limit reached");
-            emit_metric(
-                &self.telemetry,
-                "ssh_proxy_channels_total",
-                vec![
-                    ("kind", "direct_tcpip".to_string()),
-                    ("result", "rejected_limit".to_string()),
-                ],
-                1.0,
-            );
+            self.refuse_channel("rejected_limit", target, &originator, Some(&route));
             let _ = channel.close().await;
             return Ok(false);
         }
 
         let Some(bridge_permit) = self.connection.try_reserve_child_task() else {
             warn!(%peer, "SSH direct-tcpip child task limit reached");
-            emit_metric(
-                &self.telemetry,
-                "ssh_proxy_channels_total",
-                vec![
-                    ("kind", "direct_tcpip".to_string()),
-                    ("result", "rejected_child_limit".to_string()),
-                ],
-                1.0,
-            );
+            self.refuse_channel("rejected_child_limit", target, &originator, Some(&route));
             let _ = channel.close().await;
             return Ok(false);
         };
@@ -532,41 +545,14 @@ impl russh::server::Handler for ProxySshSession {
         {
             Ok(Ok(stream)) => stream,
             Ok(Err(error)) => {
-                warn!(
-                    %peer,
-                    target = %address,
-                    originator = %format!("{originator_address}:{originator_port}"),
-                    %error,
-                    "direct-tcpip TCP connect failed"
-                );
-                emit_metric(
-                    &self.telemetry,
-                    "ssh_proxy_channels_total",
-                    vec![
-                        ("kind", "direct_tcpip".to_string()),
-                        ("result", "connect_failed".to_string()),
-                    ],
-                    1.0,
-                );
+                warn!(%peer, target = %address, %originator, %error, "direct-tcpip TCP connect failed");
+                self.refuse_channel("connect_failed", target, &originator, Some(&route));
                 let _ = channel.close().await;
                 return Ok(false);
             }
             Err(_) => {
-                warn!(
-                    %peer,
-                    target = %address,
-                    originator = %format!("{originator_address}:{originator_port}"),
-                    "direct-tcpip TCP connect timed out"
-                );
-                emit_metric(
-                    &self.telemetry,
-                    "ssh_proxy_channels_total",
-                    vec![
-                        ("kind", "direct_tcpip".to_string()),
-                        ("result", "connect_timeout".to_string()),
-                    ],
-                    1.0,
-                );
+                warn!(%peer, target = %address, %originator, "direct-tcpip TCP connect timed out");
+                self.refuse_channel("connect_timeout", target, &originator, Some(&route));
                 let _ = channel.close().await;
                 return Ok(false);
             }
@@ -586,15 +572,7 @@ impl russh::server::Handler for ProxySshSession {
                 target = %address,
                 "direct-tcpip rejected: route authorization changed during connect"
             );
-            emit_metric(
-                &self.telemetry,
-                "ssh_proxy_channels_total",
-                vec![
-                    ("kind", "direct_tcpip".to_string()),
-                    ("result", "rejected_revoked".to_string()),
-                ],
-                1.0,
-            );
+            self.refuse_channel("rejected_revoked", target, &originator, Some(&route));
             let _ = channel.close().await;
             return Ok(false);
         }
@@ -612,9 +590,15 @@ impl russh::server::Handler for ProxySshSession {
         debug!(
             %peer,
             target = %address,
-            originator = %format!("{originator_address}:{originator_port}"),
+            %originator,
             container_id = %route.container_id,
             "opened direct-tcpip TCP bridge"
+        );
+        let history = self.connection.open_channel(
+            host_to_connect,
+            port_to_connect,
+            &originator,
+            ConnectionRouteInfo::from(&route),
         );
         spawn_tcp_bridge(
             bridge_permit,
@@ -622,6 +606,7 @@ impl russh::server::Handler for ProxySshSession {
             channel,
             stream,
             self.connection.clone(),
+            history,
         );
         Ok(true)
     }
@@ -637,6 +622,7 @@ impl russh::server::Handler for ProxySshSession {
             %address,
             "SSH remote tcpip forward rejected in jump-host mode"
         );
+        self.refuse_request("remote_forward");
         emit_metric(
             &self.telemetry,
             "ssh_proxy_forwards_total",
@@ -661,6 +647,7 @@ impl russh::server::Handler for ProxySshSession {
             port,
             "SSH cancel tcpip forward rejected in jump-host mode"
         );
+        self.refuse_request("cancel_remote_forward");
         emit_metric(
             &self.telemetry,
             "ssh_proxy_forwards_total",
@@ -670,6 +657,25 @@ impl russh::server::Handler for ProxySshSession {
             ],
             1.0,
         );
+        Ok(false)
+    }
+
+    async fn channel_open_direct_streamlocal(
+        &mut self,
+        _channel: Channel<ServerMsg>,
+        _socket_path: &str,
+        _session: &mut Session,
+    ) -> Result<bool, Self::Error> {
+        self.refuse_request("direct_streamlocal");
+        Ok(false)
+    }
+
+    async fn streamlocal_forward(
+        &mut self,
+        _socket_path: &str,
+        _session: &mut Session,
+    ) -> Result<bool, Self::Error> {
+        self.refuse_request("remote_streamlocal_forward");
         Ok(false)
     }
 }

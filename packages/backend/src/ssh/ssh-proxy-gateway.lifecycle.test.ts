@@ -38,11 +38,18 @@ class FakeSocket {
   }
 }
 
-function makeGateway(): SshProxyGateway {
+const noHistory = {
+  ingest: async () => null,
+  checkpoint: () => undefined,
+  forget: () => undefined,
+};
+
+function makeGateway(history: object = noHistory): SshProxyGateway {
   return new SshProxyGateway(
     {} as never,
     { get: () => 'a'.repeat(32) } as never,
     { register: () => () => undefined } as never,
+    history as never,
   );
 }
 
@@ -110,6 +117,7 @@ describe('SshProxyGateway snapshot build failure', () => {
         get: (key: string) => (key === 'ssh.proxySnapshotStaleMs' ? 120_000 : 'a'.repeat(32)),
       } as never,
       { register: () => () => undefined } as never,
+      noHistory as never,
     );
     const internals = gateway as unknown as {
       sentLeaseEnds: Map<FakeSocket, number>;
@@ -166,5 +174,42 @@ describe('SshProxyGateway login audit logging', () => {
     await vi.advanceTimersByTimeAsync(SSH_PROXY_REFUSED_LOGIN_SUMMARY_MS);
     expect(logged).toHaveBeenCalledTimes(2);
     vi.useRealTimers();
+  });
+});
+
+describe('SshProxyGateway history', () => {
+  function handle(gateway: SshProxyGateway, client: FakeSocket, message: unknown): void {
+    (gateway as unknown as { handleMessage: (ws: FakeSocket, raw: string) => void })
+      .handleMessage(client, JSON.stringify(message));
+  }
+
+  it('acknowledges a history frame only once it was stored', async () => {
+    let store: (seq: number | null) => void = () => undefined;
+    const payloads: unknown[] = [];
+    const gateway = makeGateway({
+      ...noHistory,
+      ingest: (_ws: unknown, payload: unknown) => {
+        payloads.push(payload);
+        return new Promise<number | null>((resolve) => { store = resolve; });
+      },
+    });
+    const client = new FakeSocket();
+    const payload = { proxyId: 'p', instanceId: 'i', records: [{ seq: 7 }] };
+    handle(gateway, client, { kind: 'history', payload });
+    expect(payloads).toEqual([payload]);
+    await Promise.resolve();
+    expect(client.sent).toHaveLength(0);
+
+    store(7);
+    await vi.waitFor(() => expect(client.sent).toHaveLength(1));
+    expect(JSON.parse(client.sent[0]!)).toMatchObject({ kind: 'historyAck', payload: { seq: 7 } });
+  });
+
+  it('sends no acknowledgement when nothing was stored', async () => {
+    const gateway = makeGateway();
+    const client = new FakeSocket();
+    handle(gateway, client, { kind: 'history', payload: {} });
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(client.sent).toHaveLength(0);
   });
 });

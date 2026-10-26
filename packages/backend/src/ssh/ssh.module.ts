@@ -7,6 +7,10 @@ import { SshIdentityService } from './ssh-identity.service.js';
 import { SshKeygenService } from './ssh-keygen.service.js';
 import { SshProxyGateway } from './ssh-proxy-gateway.js';
 import { SshProxySnapshotService } from './ssh-proxy-snapshot.service.js';
+import { SshHistoryRepository } from './ssh-history.repository.js';
+import { SshHistoryService } from './ssh-history.service.js';
+import { SshSessionsService } from './ssh-sessions.service.js';
+import { SshSessionsController } from './ssh-sessions.controller.js';
 
 @Module({
   imports: [ContainersModule, ProxySnapshotNotifierModule, SshHostCaModule],
@@ -15,8 +19,11 @@ import { SshProxySnapshotService } from './ssh-proxy-snapshot.service.js';
     SshKeygenService,
     SshProxyGateway,
     SshProxySnapshotService,
+    SshHistoryRepository,
+    SshHistoryService,
+    SshSessionsService,
   ],
-  controllers: [AdminSshProxyController],
+  controllers: [AdminSshProxyController, SshSessionsController],
   exports: [
     SshIdentityService,
     SshProxyGateway,

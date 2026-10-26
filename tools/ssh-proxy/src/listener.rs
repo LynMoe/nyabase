@@ -63,6 +63,7 @@ pub(crate) async fn serve_public(
                     LimitRejection::PerSite => "rejected_site_limit",
                     LimitRejection::Pending => "rejected_preauth_limit",
                 };
+                runtime.history.refuse(peer.ip(), result);
                 emit_metric(
                     &telemetry,
                     "ssh_proxy_connections_total",
@@ -75,6 +76,7 @@ pub(crate) async fn serve_public(
         if !control.admit() && store.load().is_none() {
             warn!(%peer, "SSH proxy rejected paused connection without host key");
             runtime.record_rejected_connection();
+            runtime.history.refuse(peer.ip(), "rejected_paused");
             emit_metric(
                 &telemetry,
                 "ssh_proxy_connections_total",
@@ -156,6 +158,11 @@ async fn serve_connection(
             Ok(Err(error)) => {
                 debug!(%peer, %error, "SSH connection closed");
                 let evicted = eviction.as_ref().is_some_and(PendingEviction::is_evicted);
+                connection.set_close_reason(if evicted {
+                    "preauth_evicted"
+                } else {
+                    close_reason(&error)
+                });
                 let result = if evicted {
                     "closed_preauth_evicted"
                 } else {
@@ -168,8 +175,11 @@ async fn serve_connection(
                     1.0,
                 );
             }
-            Err(_) => debug!(%peer, "SSH connection was revoked and aborted"),
-            Ok(Ok(())) => {}
+            Err(_) => {
+                debug!(%peer, "SSH connection was revoked and aborted");
+                connection.set_close_reason("aborted");
+            }
+            Ok(Ok(())) => connection.set_close_reason("client_closed"),
         }
         return;
     }
@@ -208,6 +218,7 @@ async fn serve_connection(
         Ok(Err(error)) => debug!(%peer, %error, "paused SSH reject path closed"),
         Err(_) => debug!(%peer, "paused SSH reject path hit the authentication deadline"),
     }
+    runtime.history.refuse(peer.ip(), "rejected_paused");
     emit_metric(
         &telemetry,
         "ssh_proxy_connections_total",
@@ -215,6 +226,28 @@ async fn serve_connection(
         1.0,
     );
 }
+
+/// Why a session that ended with `error` closed, as recorded in its history.
+pub(crate) fn close_reason(error: &anyhow::Error) -> &'static str {
+    if error.to_string() == AUTH_DEADLINE_EXCEEDED {
+        return "auth_timeout";
+    }
+    if let Some(error) = error.downcast_ref::<russh::Error>() {
+        return match error {
+            russh::Error::KeepaliveTimeout => "keepalive_timeout",
+            russh::Error::InactivityTimeout => "idle_timeout",
+            russh::Error::Disconnect | russh::Error::HUP => "client_closed",
+            russh::Error::IO(_) => "network_error",
+            _ => "protocol_error",
+        };
+    }
+    if error.downcast_ref::<std::io::Error>().is_some() {
+        return "network_error";
+    }
+    "error"
+}
+
+const AUTH_DEADLINE_EXCEEDED: &str = "SSH authentication deadline exceeded";
 
 /// Closes the session if public-key authentication has not succeeded within
 /// `deadline` of accept, or if its pre-auth slot is evicted for a lighter
@@ -234,7 +267,7 @@ where
     tokio::select! {
         result = session => result,
         _ = auth_deadline_elapsed(connection, deadline) => {
-            Err(anyhow!("SSH authentication deadline exceeded"))
+            Err(anyhow!(AUTH_DEADLINE_EXCEEDED))
         }
         _ = wait_evicted(eviction.as_ref()) => {
             Err(anyhow!("SSH pre-auth connection evicted to admit a lighter client"))

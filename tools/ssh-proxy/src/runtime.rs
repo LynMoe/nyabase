@@ -1,4 +1,5 @@
 use crate::config::ProxyConfig;
+use crate::history::{ChannelState, ConnectionHistory, HistoryLog};
 use crate::session::OwnedResolvedRoute;
 use crate::snapshot::RoutingSnapshot;
 use futures_util::future::{AbortHandle, AbortRegistration, Abortable};
@@ -28,6 +29,9 @@ pub(crate) const MAX_STATUS_CONNECTION_DETAILS: usize = 1024;
 
 pub(crate) struct ProxyRuntime {
     pub(crate) proxy_id: String,
+    /// Random per process, so the Backend tells a restarted proxy apart.
+    pub(crate) instance_id: String,
+    pub(crate) history: Arc<HistoryLog>,
     pub(crate) hostname: Option<String>,
     pub(crate) listen: String,
     pub(crate) started_at: Instant,
@@ -53,6 +57,12 @@ pub(crate) struct BandwidthState {
 
 pub(crate) struct ConnectionState {
     pub(crate) id: String,
+    pub(crate) sequence: u64,
+    /// `None` for connections that are never reported (paused reject path, tests).
+    pub(crate) history: Option<Arc<HistoryLog>>,
+    pub(crate) history_state: Mutex<ConnectionHistory>,
+    /// History state of every live bridge, keyed like `bridge_routes`.
+    pub(crate) bridge_channels: Mutex<HashMap<u64, Arc<ChannelState>>>,
     pub(crate) peer: String,
     pub(crate) connected_at: u64,
     pub(crate) authenticated_at: AtomicU64,
@@ -102,6 +112,13 @@ impl ChildTaskPermit {
     pub(crate) fn bind_route(&self, route: &OwnedResolvedRoute) {
         if let Some(id) = self.id {
             lock(&self.connection.bridge_routes).insert(id, ConnectionRouteInfo::from(route));
+        }
+    }
+
+    /// Records the channel this child bridges, for status and close reasons.
+    pub(crate) fn bind_channel(&self, channel: Arc<ChannelState>) {
+        if let Some(id) = self.id {
+            lock(&self.connection.bridge_channels).insert(id, channel);
         }
     }
 
@@ -180,6 +197,11 @@ impl ConnectionRouteInfo {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct SshProxyStatusReport {
     pub(crate) proxy_id: String,
+    pub(crate) instance_id: String,
+    /// History records not yet acknowledged by the Backend.
+    pub(crate) history_backlog: usize,
+    /// History records dropped because the backlog was full.
+    pub(crate) history_dropped: u64,
     pub(crate) hostname: Option<String>,
     pub(crate) listen: String,
     pub(crate) uptime_ms: u64,
@@ -204,6 +226,7 @@ pub(crate) struct SshProxyStatusReport {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct SshProxyConnectionInfo {
     pub(crate) id: String,
+    pub(crate) seq: u64,
     pub(crate) peer: String,
     pub(crate) username: Option<String>,
     pub(crate) login: Option<String>,
@@ -218,6 +241,21 @@ pub(crate) struct SshProxyConnectionInfo {
     pub(crate) bytes_from_client: u64,
     pub(crate) bytes_to_client: u64,
     pub(crate) channels: usize,
+    pub(crate) bridges: Vec<SshProxyBridgeInfo>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SshProxyBridgeInfo {
+    pub(crate) channel_seq: u32,
+    pub(crate) server_id: String,
+    pub(crate) server_slug: String,
+    pub(crate) container_id: String,
+    pub(crate) container_name: String,
+    pub(crate) routed_ip: String,
+    pub(crate) opened_at: u64,
+    pub(crate) bytes_from_client: u64,
+    pub(crate) bytes_to_client: u64,
 }
 
 impl ProxyRuntime {
@@ -239,6 +277,8 @@ impl ProxyRuntime {
         let now = now_ms();
         Self {
             proxy_id,
+            instance_id: proxy_common::instance::new_instance_id(),
+            history: Arc::new(HistoryLog::default()),
             hostname,
             listen: config.listen.clone(),
             started_at: Instant::now(),
@@ -286,7 +326,8 @@ impl ProxyRuntime {
         peer: SocketAddr,
     ) -> (Arc<ConnectionState>, AbortRegistration) {
         let sequence = self.total_connections.fetch_add(1, Ordering::Relaxed) + 1;
-        let (connection, abort_registration) = ConnectionState::new(sequence, peer);
+        let (mut connection, abort_registration) = ConnectionState::new(sequence, peer);
+        connection.history = Some(self.history.clone());
         let connection = Arc::new(connection);
         lock(&self.connections).insert(connection.id.clone(), connection.clone());
         (connection, abort_registration)
@@ -297,6 +338,7 @@ impl ProxyRuntime {
             // Natural session completion is also the ownership boundary for
             // every relay and forward spawned by that session.
             connection.abort();
+            connection.report_closed();
             self.total_bytes_from_client.fetch_add(
                 connection.bytes_from_client.load(Ordering::Relaxed),
                 Ordering::Relaxed,
@@ -317,7 +359,7 @@ impl ProxyRuntime {
         };
         let disconnected = connections
             .into_iter()
-            .filter(|connection| connection.abort())
+            .filter(|connection| connection.abort_because("disconnect_all"))
             .count();
         debug!(disconnected, %reason, "aborted SSH proxy connections");
         disconnected
@@ -334,7 +376,7 @@ impl ProxyRuntime {
         };
         let aborted = connections
             .into_iter()
-            .filter(|connection| connection.abort())
+            .filter(|connection| connection.abort_because("control_paused"))
             .count();
         debug!(aborted, %reason, "aborted unauthenticated SSH proxy connections");
         aborted
@@ -353,9 +395,14 @@ impl ProxyRuntime {
                 .cloned()
                 .collect::<Vec<_>>()
         };
+        let close_reason = if snapshot.is_some() {
+            "revoked"
+        } else {
+            "proxy_unavailable"
+        };
         let disconnected = connections
             .into_iter()
-            .filter(|connection| connection.abort())
+            .filter(|connection| connection.abort_because(close_reason))
             .count();
         let closed_bridges = match snapshot {
             Some(snapshot) => {
@@ -401,6 +448,9 @@ impl ProxyRuntime {
         let last_snapshot_at = nonzero(self.last_snapshot_at.load(Ordering::Relaxed));
         SshProxyStatusReport {
             proxy_id: self.proxy_id.clone(),
+            instance_id: self.instance_id.clone(),
+            history_backlog: self.history.backlog(),
+            history_dropped: self.history.dropped(),
             hostname: self.hostname.clone(),
             listen: self.listen.clone(),
             uptime_ms: self.started_at.elapsed().as_millis() as u64,
@@ -481,6 +531,10 @@ impl ConnectionState {
         (
             Self {
                 id: format!("conn-{sequence}"),
+                sequence,
+                history: None,
+                history_state: Mutex::new(ConnectionHistory::default()),
+                bridge_channels: Mutex::new(HashMap::new()),
                 peer: peer.to_string(),
                 connected_at: now_ms(),
                 authenticated_at: AtomicU64::new(0),
@@ -502,6 +556,14 @@ impl ConnectionState {
             },
             abort_registration,
         )
+    }
+
+    pub(crate) fn abort_because(&self, reason: &'static str) -> bool {
+        if self.revoked.load(Ordering::Acquire) {
+            return false;
+        }
+        self.set_close_reason(reason);
+        self.abort()
     }
 
     pub(crate) fn abort(&self) -> bool {
@@ -555,6 +617,7 @@ impl ConnectionState {
     pub(crate) fn unregister_child_abort(&self, id: u64) {
         lock(&self.child_abort_handles).remove(&id);
         lock(&self.bridge_routes).remove(&id);
+        lock(&self.bridge_channels).remove(&id);
     }
 
     /// Holds the listener's pre-authentication slot until authentication.
@@ -572,6 +635,9 @@ impl ConnectionState {
             .collect::<Vec<_>>();
         for id in &revoked {
             lock(&self.bridge_routes).remove(id);
+            if let Some(channel) = lock(&self.bridge_channels).get(id) {
+                channel.set_close_reason("revoked");
+            }
             if let Some(handle) = lock(&self.child_abort_handles).remove(id) {
                 handle.abort();
             }
@@ -591,6 +657,7 @@ impl ConnectionState {
         *lock(&self.authenticated_public_key) = Some(public_key.clone());
         *lock(&self.authenticated_user_id) = Some(user_id.to_string());
         *lock(&self.authenticated_username) = Some(username.to_string());
+        self.note_public_key(public_key);
         let route = route.map(ConnectionRouteInfo::from);
         *lock(&self.pinned_route) = route.clone();
         *lock(&self.route) = route;
@@ -657,8 +724,24 @@ impl ConnectionState {
     pub(crate) fn snapshot(&self) -> SshProxyConnectionInfo {
         let route = lock(&self.route).clone();
         let authenticated_at = nonzero(self.authenticated_at.load(Ordering::Relaxed));
+        let mut bridges = lock(&self.bridge_channels)
+            .values()
+            .map(|channel| SshProxyBridgeInfo {
+                channel_seq: channel.seq,
+                server_id: channel.route.server_id.clone(),
+                server_slug: channel.route.server_slug.clone(),
+                container_id: channel.route.container_id.clone(),
+                container_name: channel.route.container_name.clone(),
+                routed_ip: channel.route.routed_ip.clone(),
+                opened_at: channel.opened_at,
+                bytes_from_client: channel.bytes_from_client.load(Ordering::Relaxed),
+                bytes_to_client: channel.bytes_to_client.load(Ordering::Relaxed),
+            })
+            .collect::<Vec<_>>();
+        bridges.sort_by_key(|bridge| bridge.channel_seq);
         SshProxyConnectionInfo {
             id: self.id.clone(),
+            seq: self.sequence,
             peer: self.peer.clone(),
             username: route
                 .as_ref()
@@ -676,6 +759,7 @@ impl ConnectionState {
             bytes_from_client: self.bytes_from_client.load(Ordering::Relaxed),
             bytes_to_client: self.bytes_to_client.load(Ordering::Relaxed),
             channels: self.channels.load(Ordering::Relaxed),
+            bridges,
         }
     }
 }

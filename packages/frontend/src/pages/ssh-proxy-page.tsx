@@ -1,9 +1,13 @@
 import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
+import { getRouteApi, useNavigate } from '@tanstack/react-router';
 import { RefreshCw, Unplug } from 'lucide-react';
 import type { SshProxyHostKeySummaryDto } from '@nyabase/common';
 import { api } from '../lib/api.js';
 import { Button } from '../components/ui/button.js';
+import { Tabs, TabsContent } from '../components/ui/tabs.js';
+import { SshSessionList } from '../components/ssh-sessions/ssh-session-list.js';
+import { SshSessionStats } from '../components/ssh-sessions/ssh-session-stats.js';
 import { ConfirmDialog } from '../components/layout/confirm-dialog.js';
 import { Page, PageHeader } from '../components/layout/page-header.js';
 import { QueryView } from '../components/layout/query-view.js';
@@ -12,6 +16,8 @@ import { useHasRole } from '../lib/use-role.js';
 import { queryPollInterval } from '../lib/query-lifecycle.js';
 import { queryKeys } from '../lib/query-keys.js';
 import { useSshProxyMutations } from './ssh-proxy-page/use-ssh-proxy-mutations.js';
+import { RefusalsSection } from './ssh-proxy-page/refusals-section.js';
+import { parseSshProxyTab, SshProxyTabsList } from './ssh-proxy-page/tabs.js';
 import {
   emptyStatus,
   formatTime,
@@ -20,7 +26,11 @@ import {
   SshStatusSections,
 } from './ssh-proxy-page/status-sections.js';
 
+const routeApi = getRouteApi('/ssh-proxy/');
+
 export default function SshProxyPage() {
+  const { tab } = routeApi.useSearch();
+  const navigate = useNavigate({ from: '/ssh-proxy/' });
   const canViewStatus = useHasRole(ACCESS.sshProxy);
   const canManageSettings = canViewStatus;
   const [disconnectOpen, setDisconnectOpen] = useState(false);
@@ -83,23 +93,46 @@ export default function SshProxyPage() {
         }
       />
 
-      {canViewStatus && (
-        <QueryView query={statusQuery} resourceName="SSH 代理状态" loadingLabel="加载 SSH 代理状态...">
-          {(loaded) => <SshStatusSections status={loaded} />}
-        </QueryView>
-      )}
-
-      {canManageSettings && (
-        <HostKeySection
-          query={hostKeyQuery}
-          fetching={hostKeyFetching}
-          rotating={rotateHostKey.isPending}
-          onRefresh={() => refetchHostKey()}
-          onRotate={() => setRotateOpen(true)}
-          resettingAuthorities={resetHostAuthorities.isPending}
-          onResetAuthorities={() => setResetOpen(true)}
-        />
-      )}
+      <Tabs
+        value={tab}
+        onValueChange={(value) => {
+          void navigate({ search: { tab: parseSshProxyTab(value) }, replace: true });
+        }}
+      >
+        <SshProxyTabsList />
+        <TabsContent value="live" className="space-y-6">
+          {canViewStatus && (
+            <QueryView query={statusQuery} resourceName="SSH 代理状态" loadingLabel="加载 SSH 代理状态...">
+              {(loaded) => <SshStatusSections status={loaded} />}
+            </QueryView>
+          )}
+          {canManageSettings && (
+            <HostKeySection
+              query={hostKeyQuery}
+              fetching={hostKeyFetching}
+              rotating={rotateHostKey.isPending}
+              onRefresh={() => refetchHostKey()}
+              onRotate={() => setRotateOpen(true)}
+              resettingAuthorities={resetHostAuthorities.isPending}
+              onResetAuthorities={() => setResetOpen(true)}
+            />
+          )}
+        </TabsContent>
+        <TabsContent value="history" className="space-y-3">
+          {tab === 'history' ? (
+            <SshSessionList
+              scope="all"
+              description="经 SSH 代理的每一条认证通过的连接，以及它打开（或被拒绝）的每个通道。点一行查看通道明细。"
+            />
+          ) : null}
+        </TabsContent>
+        <TabsContent value="stats">
+          {tab === 'stats' ? <SshSessionStats scope="all" /> : null}
+        </TabsContent>
+        <TabsContent value="refusals">
+          {tab === 'refusals' ? <RefusalsSection /> : null}
+        </TabsContent>
+      </Tabs>
 
       {canManageSettings && (
         <ConfirmDialog

@@ -238,21 +238,7 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for Metered<S> {
     }
 }
 
-/// A random id for this process, so the Backend can tell a restarted proxy
-/// (whose counters started again from zero) from the one it replaced.
-pub(crate) fn new_instance_id() -> String {
-    let mut bytes = [0_u8; 16];
-    if rustls::crypto::ring::default_provider()
-        .secure_random
-        .fill(&mut bytes)
-        .is_err()
-    {
-        // Uniqueness, not secrecy, is what matters here.
-        let seed = proxy_common::clock::now_ms() as u128 ^ (std::process::id() as u128) << 64;
-        bytes = seed.to_le_bytes();
-    }
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
-}
+pub(crate) use proxy_common::instance::new_instance_id;
 
 #[cfg(test)]
 #[path = "stats_tests.rs"]
