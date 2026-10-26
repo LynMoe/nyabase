@@ -15,7 +15,7 @@ import { z } from 'zod';
  * other version (AGENT_CLOSE_PROTOCOL_UNSUPPORTED) and records why on the
  * server. packages/agent/src/protocol-freeze.test.ts pins the sources.
  */
-export const AGENT_PROTOCOL_VERSION = 2;
+export const AGENT_PROTOCOL_VERSION = 3;
 export const AGENT_CONTROL_PATH = '/ws/agent';
 export const AGENT_STREAM_PATH = '/ws/agent/stream';
 export const AGENT_ENROLL_PATH = '/api/agent/enroll';
@@ -54,6 +54,10 @@ export const MANAGED_VOLUME_NAME_PATTERN = /^nyv-[0-9a-f]{32}$/;
 export const MANAGED_ATTACHMENT_DEVICE_PATTERN = /^nyd-[0-9a-f]{32}$/;
 /** The nft table the agent keeps on every host to drop guest IPv6. */
 export const AGENT_IPV6_GUARD_TABLE = 'nyabase_guard';
+/** The nft table the agent keeps on every host for the guest egress firewall (protocol/firewall.ts). */
+export const AGENT_FIREWALL_TABLE = 'nyabase_firewall';
+/** Shortest gap between two unsolicited status frames; changes in between are coalesced into the next one. */
+export const AGENT_STATUS_MIN_INTERVAL_MS = 3_000;
 /** Instance sysctls the platform sets to disable guest IPv6. */
 export const GUEST_IPV6_DISABLE_SYSCTLS = [
   'linux.sysctl.net.ipv6.conf.all.disable_ipv6',
@@ -132,6 +136,18 @@ export const zAgentHostStatus = z.object({
     present: z.boolean(),
     error: z.string().max(512).nullable(),
   }).strict(),
+  /**
+   * The `bridge nyabase_firewall` table. `present`: the agent holds a firewall
+   * document confirmed by the Backend on this connection, and its rendering is
+   * applied and verifies; guest NICs are not brought up otherwise. `digest`: the
+   * document it holds (persisted across restarts), null when it has none and
+   * keeps guest egress closed instead.
+   */
+  firewall: z.object({
+    present: z.boolean(),
+    digest: z.string().regex(/^[0-9a-f]{64}$/).nullable(),
+    error: z.string().max(512).nullable(),
+  }).strict(),
 }).strict();
 
 export const zAgentHello = z.object({
@@ -185,6 +201,10 @@ export const zAgentMetricsResult = z.object({
   text: z.string().max(MAX_AGENT_METRICS_TEXT_BYTES),
 }).strict();
 
+export const zAgentFirewallApplyResult = z.object({
+  digest: z.string().regex(/^[0-9a-f]{64}$/),
+}).strict();
+
 export const zAgentRequest = z.discriminatedUnion('method', [
   z.object({
     type: z.literal('request'),
@@ -203,6 +223,18 @@ export const zAgentRequest = z.discriminatedUnion('method', [
     id: zRequestId,
     method: z.literal('metrics.collect'),
     params: z.object({}).strict(),
+  }).strict(),
+  z.object({
+    type: z.literal('request'),
+    id: zRequestId,
+    method: z.literal('firewall.apply'),
+    /**
+     * A FirewallDocument (protocol/firewall.ts), deliberately unchecked here:
+     * the agent validates it in the handler and answers `bad_request`, so a
+     * document it refuses fails that request instead of the control connection.
+     * The frame size limit bounds it.
+     */
+    params: z.unknown(),
   }).strict(),
 ]);
 
@@ -223,6 +255,8 @@ export const AGENT_ERROR_CODES = [
   'too_large',
   /** The request would bring a guest NIC up while the IPv6 guard is not verified; retry later. */
   'ipv6_guard_missing',
+  /** Same, for the egress firewall (AgentHostStatus.firewall); retry later. */
+  'firewall_missing',
   'internal',
 ] as const;
 export type AgentErrorCode = typeof AGENT_ERROR_CODES[number];
@@ -263,3 +297,4 @@ export type AgentIncusHttpParams = z.infer<typeof zAgentIncusHttpParams>;
 export type AgentIncusHttpResult = z.infer<typeof zAgentIncusHttpResult>;
 export type AgentIncusWebSocketParams = z.infer<typeof zAgentIncusWebSocketParams>;
 export type AgentMetricsResult = z.infer<typeof zAgentMetricsResult>;
+export type AgentFirewallApplyResult = z.infer<typeof zAgentFirewallApplyResult>;

@@ -14,6 +14,7 @@ export * from './protocol/ssh-proxy.js';
 export * from './protocol/ssh-proxy-history.js';
 export * from './protocol/http-proxy.js';
 export * from './protocol/agent.js';
+export * from './protocol/firewall.js';
 export * from './protocol/agent-rejections.js';
 export * from './gpu/index.js';
 export * from './node-metric-catalog.js';

@@ -347,23 +347,6 @@ export const controlPlaneConfigDefinitions = [
     description: 'Optional immutable image fingerprint used when an alias is not selected.',
   }),
   field({
-    key: 'incus.preflightEgressUrl',
-    yamlPath: 'incus.preflightEgressUrl',
-    env: 'INCUS_PREFLIGHT_EGRESS_URL',
-    defaultValue: '',
-    schema: optionalString.max(2_048).refine(
-      (value) => value === '' || /^https:\/\//.test(value),
-      'Expected an empty value or an HTTPS egress URL',
-    ),
-    valueKind: 'string',
-    secret: false,
-    editable: true,
-    restartRequired: false,
-    public: false,
-    label: 'Incus preflight egress URL',
-    description: 'Fixed HTTPS URL checked from the preflight container.',
-  }),
-  field({
     key: 'incus.preflightSourceServer',
     yamlPath: 'incus.preflightSourceServer',
     env: 'INCUS_PREFLIGHT_SOURCE_SERVER',
