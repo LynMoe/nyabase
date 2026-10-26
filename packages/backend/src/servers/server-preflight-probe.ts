@@ -41,6 +41,8 @@ const MANAGED_PROBE_KEY = 'user.nyabase.preflight';
 const PROBE_SERVER_KEY = 'user.nyabase.server_id';
 /** Headroom for the Debian probe boot; rc 137 was SIGKILL under pressure. */
 const PREFLIGHT_PROBE_MEMORY = '256MiB';
+/** Root disk of the probe: block pools (LVM, ZFS volumes) need room for the unpacked image, ~1.3 GiB from workload v5. */
+const PREFLIGHT_PROBE_ROOT_BYTES = String(2 * 1024 ** 3);
 
 function probeHardwareId(serverId: string): string {
   return createHash('sha256')
@@ -209,7 +211,7 @@ function createProbe(run: ProbeRun) {
               type: 'disk',
               path: '/',
               pool: options.probePoolName,
-              size: '1073741824',
+              size: PREFLIGHT_PROBE_ROOT_BYTES,
             },
             eth0: buildGuestNicDevice({
               parentInterface: run.parentInterface,

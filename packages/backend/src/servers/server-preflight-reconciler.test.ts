@@ -435,7 +435,7 @@ describe('ServerPreflightReconciler', () => {
             type: 'disk',
             path: '/',
             pool: 'default',
-            size: '1073741824',
+            size: '2147483648',
           },
           eth0: {
             type: 'nic',
