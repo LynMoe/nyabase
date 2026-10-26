@@ -25,6 +25,13 @@ describe('audit labels', () => {
     expect(auditActionLabel(AuditAction.DisconnectSshProxySessions)).toBe('断开 SSH 代理会话');
   });
 
+  it('maps firewall rule actions and resource type', () => {
+    expect(auditActionLabel(AuditAction.CreateFirewallRule)).toBe('创建防火墙规则');
+    expect(auditActionLabel(AuditAction.UpdateFirewallRule)).toBe('更新防火墙规则');
+    expect(auditActionLabel(AuditAction.DeleteFirewallRule)).toBe('删除防火墙规则');
+    expect(auditResourceTypeLabel('firewall_rule')).toBe('防火墙规则');
+  });
+
   it('maps host agent enrollment and container drift correction', () => {
     expect(auditActionLabel(AuditAction.IssueAgentEnrollment)).toBe('签发 Agent 接入令牌');
     expect(auditActionLabel(AuditAction.EnrollAgent)).toBe('Agent 接入');

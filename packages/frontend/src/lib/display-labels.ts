@@ -49,21 +49,30 @@ export function preflightStatusLabel(status: string): string {
   }
 }
 
+const PREFLIGHT_CHECK_LABELS: Record<string, string> = {
+  api: 'API 连通',
+  parentInterface: 'LAN 网桥 (vmbr)',
+  nftables: 'nftables',
+  ipv4Filtering: 'IPv4 防伪',
+  networkPrerequisites: '网络前置条件',
+  storagePool: '存储池',
+  simplestreamsImage: '镜像源',
+  guestAddress: '容器 IP',
+  nodeMetrics: '节点指标',
+};
+
 export function preflightCheckLabel(name: string): string {
-  const labels: Record<string, string> = {
-    api: 'API 连通',
-    parentInterface: 'LAN 网桥 (vmbr)',
-    nftables: 'nftables',
-    ipv4Filtering: 'IPv4 防伪',
-    guestCanReachHost: '容器可达宿主',
-    networkPrerequisites: '网络前置条件',
-    storagePool: '存储池',
-    simplestreamsImage: '镜像源',
-    guestAddress: '容器 IP',
-    egress: '出站网络',
-    nodeMetrics: '节点指标',
-  };
-  return labels[name] ?? name;
+  return PREFLIGHT_CHECK_LABELS[name] ?? name;
+}
+
+/**
+ * The checks this build knows, in display order. Reports stored by an older
+ * Backend may still carry retired checks; those are not shown.
+ */
+export function knownPreflightChecks(checks: Record<string, unknown>): Array<[string, unknown]> {
+  return Object.keys(PREFLIGHT_CHECK_LABELS)
+    .filter((name) => Object.hasOwn(checks, name))
+    .map((name) => [name, checks[name]]);
 }
 
 export function preflightResultLabel(result: string): string {

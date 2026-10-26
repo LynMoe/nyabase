@@ -11,7 +11,7 @@ export type AccessRule = Role;
 
 export const ACCESS = {
   servers: Role.Operator,
-  ipPools: Role.Admin,
+  network: Role.Admin,
   sharedBackends: Role.Admin,
   images: Role.Operator,
   manageContainers: Role.Operator,

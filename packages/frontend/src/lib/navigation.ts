@@ -58,7 +58,7 @@ export const NAV_SECTIONS: NavSection[] = [
     label: '基础设施',
     items: [
       { to: '/servers', icon: Server, label: '服务器', access: ACCESS.servers },
-      { to: '/ip-pools', icon: Network, label: 'IP 池', access: ACCESS.ipPools },
+      { to: '/network', icon: Network, label: '网络', access: ACCESS.network },
       { to: '/shared-backends', icon: Database, label: '共享存储', access: ACCESS.sharedBackends },
       { to: '/images', icon: ImageIcon, label: '镜像', access: ACCESS.images },
     ],

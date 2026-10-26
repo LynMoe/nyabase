@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { storageOvercommitLabel } from './display-labels.js';
+import { knownPreflightChecks, preflightCheckLabel, storageOvercommitLabel } from './display-labels.js';
 
 describe('storageOvercommitLabel', () => {
   it('says plainly when there is no overcommit', () => {
@@ -12,5 +12,18 @@ describe('storageOvercommitLabel', () => {
 
   it('passes through values it cannot read', () => {
     expect(storageOvercommitLabel('abc')).toBe('abc');
+  });
+});
+
+describe('knownPreflightChecks', () => {
+  it('lists known checks in display order and drops retired ones from old reports', () => {
+    const shown = knownPreflightChecks({
+      nodeMetrics: 'warn',
+      guestCanReachHost: 'fail',
+      api: 'pass',
+      egress: 'fail',
+    });
+    expect(shown).toEqual([['api', 'pass'], ['nodeMetrics', 'warn']]);
+    expect(preflightCheckLabel('guestAddress')).toBe('容器 IP');
   });
 });

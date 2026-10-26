@@ -22,7 +22,7 @@ import { Route as SharedBackendsIndexRouteImport } from './routes/shared-backend
 import { Route as ServersIndexRouteImport } from './routes/servers/index'
 import { Route as QuotaIndexRouteImport } from './routes/quota/index'
 import { Route as OpsIndexRouteImport } from './routes/ops/index'
-import { Route as IpPoolsIndexRouteImport } from './routes/ip-pools/index'
+import { Route as NetworkIndexRouteImport } from './routes/network/index'
 import { Route as ImagesIndexRouteImport } from './routes/images/index'
 import { Route as HttpProxyIndexRouteImport } from './routes/http-proxy/index'
 import { Route as HttpProxyOpsIndexRouteImport } from './routes/http-proxy-ops/index'
@@ -106,9 +106,9 @@ const OpsIndexRoute = OpsIndexRouteImport.update({
   path: '/ops/',
   getParentRoute: () => rootRouteImport,
 } as any)
-const IpPoolsIndexRoute = IpPoolsIndexRouteImport.update({
-  id: '/ip-pools/',
-  path: '/ip-pools/',
+const NetworkIndexRoute = NetworkIndexRouteImport.update({
+  id: '/network/',
+  path: '/network/',
   getParentRoute: () => rootRouteImport,
 } as any)
 const ImagesIndexRoute = ImagesIndexRouteImport.update({
@@ -217,7 +217,7 @@ export interface FileRoutesByFullPath {
   '/http-proxy-ops/': typeof HttpProxyOpsIndexRoute
   '/http-proxy/': typeof HttpProxyIndexRoute
   '/images/': typeof ImagesIndexRoute
-  '/ip-pools/': typeof IpPoolsIndexRoute
+  '/network/': typeof NetworkIndexRoute
   '/ops/': typeof OpsIndexRoute
   '/quota/': typeof QuotaIndexRoute
   '/servers/': typeof ServersIndexRoute
@@ -250,7 +250,7 @@ export interface FileRoutesByTo {
   '/http-proxy-ops': typeof HttpProxyOpsIndexRoute
   '/http-proxy': typeof HttpProxyIndexRoute
   '/images': typeof ImagesIndexRoute
-  '/ip-pools': typeof IpPoolsIndexRoute
+  '/network': typeof NetworkIndexRoute
   '/ops': typeof OpsIndexRoute
   '/quota': typeof QuotaIndexRoute
   '/servers': typeof ServersIndexRoute
@@ -284,7 +284,7 @@ export interface FileRoutesById {
   '/http-proxy-ops/': typeof HttpProxyOpsIndexRoute
   '/http-proxy/': typeof HttpProxyIndexRoute
   '/images/': typeof ImagesIndexRoute
-  '/ip-pools/': typeof IpPoolsIndexRoute
+  '/network/': typeof NetworkIndexRoute
   '/ops/': typeof OpsIndexRoute
   '/quota/': typeof QuotaIndexRoute
   '/servers/': typeof ServersIndexRoute
@@ -319,7 +319,7 @@ export interface FileRouteTypes {
     | '/http-proxy-ops/'
     | '/http-proxy/'
     | '/images/'
-    | '/ip-pools/'
+    | '/network/'
     | '/ops/'
     | '/quota/'
     | '/servers/'
@@ -352,7 +352,7 @@ export interface FileRouteTypes {
     | '/http-proxy-ops'
     | '/http-proxy'
     | '/images'
-    | '/ip-pools'
+    | '/network'
     | '/ops'
     | '/quota'
     | '/servers'
@@ -385,7 +385,7 @@ export interface FileRouteTypes {
     | '/http-proxy-ops/'
     | '/http-proxy/'
     | '/images/'
-    | '/ip-pools/'
+    | '/network/'
     | '/ops/'
     | '/quota/'
     | '/servers/'
@@ -419,7 +419,7 @@ export interface RootRouteChildren {
   HttpProxyOpsIndexRoute: typeof HttpProxyOpsIndexRoute
   HttpProxyIndexRoute: typeof HttpProxyIndexRoute
   ImagesIndexRoute: typeof ImagesIndexRoute
-  IpPoolsIndexRoute: typeof IpPoolsIndexRoute
+  NetworkIndexRoute: typeof NetworkIndexRoute
   OpsIndexRoute: typeof OpsIndexRoute
   QuotaIndexRoute: typeof QuotaIndexRoute
   ServersIndexRoute: typeof ServersIndexRoute
@@ -529,11 +529,11 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof OpsIndexRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/ip-pools/': {
-      id: '/ip-pools/'
-      path: '/ip-pools'
-      fullPath: '/ip-pools/'
-      preLoaderRoute: typeof IpPoolsIndexRouteImport
+    '/network/': {
+      id: '/network/'
+      path: '/network'
+      fullPath: '/network/'
+      preLoaderRoute: typeof NetworkIndexRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/images/': {
@@ -675,7 +675,7 @@ const rootRouteChildren: RootRouteChildren = {
   HttpProxyOpsIndexRoute: HttpProxyOpsIndexRoute,
   HttpProxyIndexRoute: HttpProxyIndexRoute,
   ImagesIndexRoute: ImagesIndexRoute,
-  IpPoolsIndexRoute: IpPoolsIndexRoute,
+  NetworkIndexRoute: NetworkIndexRoute,
   OpsIndexRoute: OpsIndexRoute,
   QuotaIndexRoute: QuotaIndexRoute,
   ServersIndexRoute: ServersIndexRoute,

@@ -88,6 +88,11 @@ export const queryKeys = {
     detail: (backendId: string) => ['shared-backends', 'admin', backendId] as const,
   },
   ipPools: { admin: ['ip-pools', 'admin'] as const },
+  firewall: {
+    all: ['firewall'] as const,
+    rules: ['firewall', 'rules'] as const,
+    status: ['firewall', 'status'] as const,
+  },
   httpProxy: {
     bindings: ['http-proxy', 'bindings', 'user'] as const,
     domainPools: ['http-proxy', 'domain-pools', 'user'] as const,

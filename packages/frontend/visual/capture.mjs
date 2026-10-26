@@ -264,6 +264,24 @@ const ipPool = {
   allocatedCount: 3, usableCount: 10, revision: 1, createdAt: ISO, updatedAt: ISO,
 };
 
+const firewallRules = [
+  {
+    id: 'fw-1', name: 'allow-dns', description: '内网 DNS', priority: 100, action: 'accept',
+    protocol: 'udp', ports: [{ from: 53, to: 53 }], cidrs: ['10.20.0.1/32'], serverIds: ['srv-1'],
+    revision: 1, createdAt: ISO, updatedAt: ISO,
+  },
+  {
+    id: 'fw-2', name: 'block-lan', description: '', priority: 110, action: 'drop',
+    protocol: 'all', ports: [], cidrs: ['10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16', '100.64.0.0/10'],
+    serverIds: ['srv-1'], revision: 1, createdAt: ISO, updatedAt: ISO,
+  },
+];
+
+const firewallStatus = [{
+  serverId: 'srv-1', serverName: 'lab-node-a', desiredDigest: 'a'.repeat(64), agentConnected: true,
+  appliedDigest: 'a'.repeat(64), ruleCount: 2, state: 'synced', error: null,
+}];
+
 const binding = {
   id: 'bind-1', mine: true, ownerId: 'user-admin', ownerUsername: 'admin',
   hostname: 'app.lab.test', domainPoolId: 'dp-1', domainPool: '*.lab.test',
@@ -433,6 +451,8 @@ function mockApi(urlString, method) {
   if (p === '/shared-backends') return json([backend]);
   if (p === '/shared-backends/be-1') return json(backend);
   if (p === '/admin/ip-pools') return json([ipPool]);
+  if (p === '/admin/firewall-rules') return json(firewallRules);
+  if (p === '/admin/firewall-rules/status') return json(firewallStatus);
   if (p === '/http-proxy/bindings') return json([binding]);
   if (p === '/http-proxy/domain-pools') return json([domainPool]);
 
@@ -650,7 +670,8 @@ const PAGES = [
   { name: 'server-detail-storage', path: '/servers/srv-1?tab=storage' },
   { name: 'server-detail-preflight', path: '/servers/srv-1?tab=preflight' },
   { name: 'server-detail-metrics', path: '/servers/srv-1?tab=metrics' },
-  { name: 'ip-pools', path: '/ip-pools' },
+  { name: 'ip-pools', path: '/network?tab=ip-pools' },
+  { name: 'firewall', path: '/network?tab=firewall' },
   { name: 'shared-backends', path: '/shared-backends' },
   { name: 'images', path: '/images' },
   { name: 'manage-containers', path: '/manage/containers' },
@@ -692,7 +713,8 @@ const DIALOGS = [
   { name: 'dialog-delete-volume', path: '/volumes', open: (p) => clickByText(p, '删除') },
   { name: 'dialog-server-onboarding', path: '/servers', open: (p) => clickByText(p, '添加服务器') },
   { name: 'dialog-add-catalog-image', path: '/images', open: (p) => clickByText(p, '添加镜像') },
-  { name: 'dialog-ip-pool', path: '/ip-pools', open: (p) => clickByText(p, '创建 IP 池') },
+  { name: 'dialog-ip-pool', path: '/network?tab=ip-pools', open: (p) => clickByText(p, '创建 IP 池') },
+  { name: 'dialog-firewall-rule', path: '/network?tab=firewall', open: (p) => clickByText(p, '创建规则') },
   { name: 'dialog-http-binding', path: '/http-proxy', open: (p) => clickByText(p, '新建发布') },
   { name: 'dialog-domain-pool', path: '/http-proxy-ops', open: (p) => clickByText(p, '新建域名池') },
   { name: 'dialog-ssh-disconnect', path: '/ssh-proxy', open: (p) => clickByText(p, '断开全部') },

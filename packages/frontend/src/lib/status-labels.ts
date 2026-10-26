@@ -46,6 +46,8 @@ const FAILURE_CODE_ZH: Partial<Record<string, string>> = {
   [FailureCode.StoragePoolExhausted]: '存储池容量不足',
   [FailureCode.StoragePoolQuotaIneffective]: '存储池配额无效',
   [FailureCode.StoragePoolInUse]: '存储池仍在使用中',
+  [FailureCode.FirewallRuleConflict]: '防火墙规则名称或优先级重复',
+  [FailureCode.FirewallTooLarge]: '超出单台服务器的防火墙规则上限',
   [FailureCode.SharedBackendQuotaExceeded]: '共享后端配额不足',
   [FailureCode.SharedBackendInUse]: '共享后端仍在使用中',
   [FailureCode.SharedBackendIdentityConflict]: '共享后端 FSID 冲突',

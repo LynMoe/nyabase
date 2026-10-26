@@ -13,6 +13,8 @@ import { api } from '../../lib/api.js';
 import { errorMessage } from '../../lib/api-error.js';
 import { useInvalidateServer } from '../../lib/server-queries.js';
 import { relativeTime } from '../../lib/utils.js';
+import { agentFirewallBadge } from '../../lib/firewall-rules.js';
+import { StatusBadge } from '../layout/status-badge.js';
 import { toast } from '../../hooks/use-toast.js';
 import { EnrollmentInstructions } from './agent-enrollment.js';
 
@@ -29,6 +31,19 @@ export function AgentStateBadge({ agent }: { agent: ServerDto['agent'] }) {
     <Badge variant={agent.connected ? 'success' : agent.enrolled ? 'destructive' : 'secondary'}>
       <Icon className="h-3 w-3" />{agentStateLabel(agent)}
     </Badge>
+  );
+}
+
+/** 防火墙 sync as the connected agent reports it; null (disconnected) reads as 离线. */
+function AgentFirewallBadge({ firewall }: { firewall: ServerDto['agent']['firewall'] }) {
+  const badge = agentFirewallBadge(firewall);
+  return (
+    <StatusBadge
+      label={badge.label}
+      raw={firewall?.error ?? undefined}
+      pending={badge.pending}
+      variant={badge.tone}
+    />
   );
 }
 
@@ -75,11 +90,18 @@ export function AgentCard({ server }: { server: ServerDto }) {
               {agent.ipv6Guard.present ? 'IPv6 拦截已就绪' : 'IPv6 拦截缺失'}
             </Badge>
           )}
+          {agent.enrolled && <AgentFirewallBadge firewall={agent.firewall} />}
         </div>
         {agent.ipv6Guard && !agent.ipv6Guard.present && (
           <p className="break-all text-xs text-destructive">
             主机上的 nft 表 nyabase_guard 不在位{agent.ipv6Guard.error ? `（${agent.ipv6Guard.error}）` : ''}：
             Agent 在它恢复前拒绝启动容器或给运行中的容器接入网卡，恢复后自动重试。
+          </p>
+        )}
+        {agent.firewall?.state === 'failed' && (
+          <p className="break-all text-xs text-destructive" data-testid="server-agent-firewall-error">
+            出站防火墙规则同步失败{agent.firewall.error ? `（${agent.firewall.error}）` : ''}：
+            同步完成前 Agent 拒绝启动容器或给运行中的容器接入网卡，控制面会自动重试。
           </p>
         )}
         <div className="grid gap-3 sm:grid-cols-2">

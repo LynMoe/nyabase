@@ -17,6 +17,7 @@ import { StatusBadge } from '../layout/status-badge.js';
 import { Input } from '../ui/input.js';
 import { FormField, SelectField } from '../layout/form-field.js';
 import {
+  knownPreflightChecks,
   preflightCheckLabel,
   preflightResultLabel,
   preflightStatusLabel,
@@ -152,7 +153,7 @@ function PreflightReportView({ status, report }: { status: PreflightStatus; repo
         </Badge>
       </div>
       <div className="grid gap-1 sm:grid-cols-2">
-        {Object.entries(report.checks).map(([name, result]) => {
+        {knownPreflightChecks(report.checks).map(([name, result]) => {
           const value = typeof result === 'string' ? result : 'fail';
           return (
             <div key={name} className="flex items-center justify-between gap-2 text-xs">

@@ -2,21 +2,21 @@ import { useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Pencil, Plus, RefreshCw, Trash2 } from 'lucide-react';
 import type { IpPoolDto, ServerDto } from '@nyabase/common';
-import { api } from '../lib/api.js';
-import { errorMessage } from '../lib/api-error.js';
-import { Button } from '../components/ui/button.js';
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../components/ui/table.js';
-import { ConfirmDialog } from '../components/layout/confirm-dialog.js';
-import { SectionCard } from '../components/layout/section-card.js';
-import { EmptyState } from '../components/layout/empty-state.js';
-import { Page, PageHeader } from '../components/layout/page-header.js';
-import { QueryView } from '../components/layout/query-view.js';
-import { TechnicalId } from '../components/refs/technical-id.js';
-import { toast } from '../hooks/use-toast.js';
-import { queryKeys } from '../lib/query-keys.js';
-import { IpPoolEditorDialog } from './ip-pools-page/ip-pool-editor-dialog.js';
+import { api } from '../../lib/api.js';
+import { errorMessage } from '../../lib/api-error.js';
+import { Button } from '../../components/ui/button.js';
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../../components/ui/table.js';
+import { ConfirmDialog } from '../../components/layout/confirm-dialog.js';
+import { SectionCard } from '../../components/layout/section-card.js';
+import { EmptyState } from '../../components/layout/empty-state.js';
+import { QueryView } from '../../components/layout/query-view.js';
+import { TechnicalId } from '../../components/refs/technical-id.js';
+import { toast } from '../../hooks/use-toast.js';
+import { queryKeys } from '../../lib/query-keys.js';
+import { IpPoolEditorDialog } from './ip-pool-editor-dialog.js';
 
-export default function IpPoolsPage() {
+/** The 网络 page's IP 池 tab. */
+export function IpPoolsTab() {
   const queryClient = useQueryClient();
   const [createOpen, setCreateOpen] = useState(false);
   const [editTarget, setEditTarget] = useState<IpPoolDto | null>(null);
@@ -47,18 +47,16 @@ export default function IpPoolsPage() {
   }, [serversQuery.data]);
 
   return (
-    <Page testId="ip-pools">
-      <PageHeader
-        title="IP 池"
-        actions={
-          <>
-            <Button variant="outline" size="icon" onClick={() => { void poolsQuery.refetch(); }} aria-label="刷新 IP 池">
-              <RefreshCw className="h-4 w-4" />
-            </Button>
-            <Button onClick={() => setCreateOpen(true)}><Plus className="h-4 w-4" />创建 IP 池</Button>
-          </>
-        }
-      />
+    <div className="space-y-4" data-testid="ip-pools">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <p className="text-sm text-muted-foreground">勾选服务器后，这些服务器上的容器从同一地址段分配 IP。</p>
+        <div className="flex items-center gap-2">
+          <Button variant="outline" size="icon" onClick={() => { void poolsQuery.refetch(); }} aria-label="刷新 IP 池">
+            <RefreshCw className="h-4 w-4" />
+          </Button>
+          <Button onClick={() => setCreateOpen(true)}><Plus className="h-4 w-4" />创建 IP 池</Button>
+        </div>
+      </div>
       <QueryView
         query={poolsQuery}
         resourceName="IP 池"
@@ -154,6 +152,6 @@ export default function IpPoolsPage() {
         onConfirm={() => { if (deleteTarget) deletePool.mutate(deleteTarget.id); }}
         onOpenChange={(open) => { if (!open) setDeleteTarget(null); }}
       />
-    </Page>
+    </div>
   );
 }

@@ -29,13 +29,13 @@ describe('sidebar navigation', () => {
     expect(items).toContain('/servers');
     expect(items).toContain('/servers/usage');
     expect(items).toContain('/users');
-    expect(items).not.toContain('/ip-pools');
+    expect(items).not.toContain('/network');
     expect(items).not.toContain('/shared-backends');
   });
 
   it('offers admins every page', () => {
     const items = visibleNavSections(Role.Admin).flatMap((section) => section.items).map((item) => item.to);
-    expect(items).toContain('/ip-pools');
+    expect(items).toContain('/network');
     expect(items).toContain('/shared-backends');
     expect(items).toContain('/groups');
   });

@@ -23,9 +23,9 @@ describe('role-based route access', () => {
   });
 
   it('keeps platform-wide resources admin-only and operations operator-level', () => {
-    expect(canAccess(Role.Operator, ACCESS.ipPools)).toBe(false);
+    expect(canAccess(Role.Operator, ACCESS.network)).toBe(false);
     expect(canAccess(Role.Operator, ACCESS.sharedBackends)).toBe(false);
-    expect(canAccess(Role.Admin, ACCESS.ipPools)).toBe(true);
+    expect(canAccess(Role.Admin, ACCESS.network)).toBe(true);
     for (const rule of [ACCESS.servers, ACCESS.images, ACCESS.manageContainers, ACCESS.audit,
       ACCESS.systemSettings, ACCESS.users, ACCESS.groups, ACCESS.ops, ACCESS.adminUsage]) {
       expect(canAccess(Role.Operator, rule)).toBe(true);
