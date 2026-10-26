@@ -1,15 +1,12 @@
-import { execFile as execFileCallback, spawn } from 'node:child_process';
-import { promisify } from 'node:util';
 import {
   AGENT_IPV6_GUARD_TABLE,
   MANAGED_NIC_HOST_NAME_PREFIX,
   type AgentHostStatus,
   type NodeMetricSample,
 } from '@nyabase/common';
+import { NftMonitorHub, recheckOnChanges, SystemNftRunner, type NftRunner, type RulesetChangeFeed } from './nft.js';
 
-const execFile = promisify(execFileCallback);
-const NFT_TIMEOUT_MS = 5_000;
-const NFT_BINARIES = ['/usr/sbin/nft', '/sbin/nft', 'nft'] as const;
+export type Ipv6GuardStatus = AgentHostStatus['ipv6Guard'];
 
 /*
  * Guest IPv6 is disabled by dropping every IPv6 (and VLAN-tagged) frame on the
@@ -40,90 +37,6 @@ export function renderIpv6GuardRuleset(): string {
   ].join('\n');
 }
 
-export interface NftMonitor {
-  stop(): void;
-}
-
-export interface NftRunner {
-  apply(ruleset: string): Promise<void>;
-  listTable(): Promise<string | undefined>;
-  /**
-   * Follow ruleset changes (`nft monitor`): `onChange` for every burst of
-   * events, `onExit` once if the monitor ends by itself.
-   */
-  monitor?(onChange: () => void, onExit: () => void): Promise<NftMonitor>;
-}
-
-export class SystemNftRunner implements NftRunner {
-  private binary: string | undefined;
-
-  async apply(ruleset: string): Promise<void> {
-    const binary = await this.resolve();
-    await new Promise<void>((resolve, reject) => {
-      const child = spawn(binary, ['-f', '-'], { stdio: ['pipe', 'ignore', 'pipe'] });
-      let stderr = '';
-      const timer = setTimeout(() => child.kill('SIGKILL'), NFT_TIMEOUT_MS);
-      child.stderr.on('data', (chunk: Buffer) => {
-        if (stderr.length < 4096) stderr += chunk.toString('utf8');
-      });
-      child.on('error', reject);
-      child.on('close', (code) => {
-        clearTimeout(timer);
-        if (code === 0) resolve();
-        else reject(new Error(`nft exited with ${code}: ${stderr.trim()}`));
-      });
-      child.stdin.end(ruleset);
-    });
-  }
-
-  async listTable(): Promise<string | undefined> {
-    const binary = await this.resolve();
-    try {
-      const result = await execFile(binary, ['list', 'table', 'bridge', AGENT_IPV6_GUARD_TABLE], {
-        timeout: NFT_TIMEOUT_MS,
-        maxBuffer: 256 * 1024,
-      });
-      return result.stdout;
-    } catch {
-      return undefined;
-    }
-  }
-
-  async monitor(onChange: () => void, onExit: () => void): Promise<NftMonitor> {
-    const binary = await this.resolve();
-    const child = spawn(binary, ['monitor'], { stdio: ['ignore', 'pipe', 'ignore'] });
-    let ended = false;
-    const exited = (): void => {
-      if (ended) return;
-      ended = true;
-      onExit();
-    };
-    child.stdout.on('data', () => onChange());
-    child.on('error', exited);
-    child.on('close', exited);
-    return {
-      stop: () => {
-        ended = true;
-        child.kill('SIGTERM');
-      },
-    };
-  }
-
-  private async resolve(): Promise<string> {
-    if (this.binary) return this.binary;
-    for (const candidate of NFT_BINARIES) {
-      try {
-        await execFile(candidate, ['--version'], { timeout: NFT_TIMEOUT_MS });
-        this.binary = candidate;
-        return candidate;
-      } catch {
-        // try the next location
-      }
-    }
-    throw new Error('nft is not installed');
-  }
-}
-
 /** Does a listed table still drop guest IPv6 on every hook? */
 export function guardTableIsComplete(listing: string): boolean {
   const drops = listing
@@ -133,17 +46,6 @@ export function guardTableIsComplete(listing: string): boolean {
   return ['hook forward', 'hook input', 'hook output'].every((hook) => listing.includes(hook))
     && drops.length >= 4;
 }
-
-/** Coalesce a burst of ruleset events (a firewall reload is many) into one check. */
-const MONITOR_DEBOUNCE_MS = 200;
-/**
- * Ceiling of the back-off between monitor-driven checks while they keep
- * failing. A failed check re-applies the table, which is itself a ruleset
- * change the monitor reports: without the back-off a table that applies but
- * never verifies would be re-applied every 200 ms forever.
- */
-const MONITOR_MAX_BACKOFF_MS = 60_000;
-const MONITOR_RESTART_MS = 5_000;
 
 /**
  * The agent's guest-IPv6 guarantee. `ensure` verifies the table and puts it
@@ -156,7 +58,7 @@ export class Ipv6Guard {
   private lastError: string | null = 'not verified yet';
   private running: Promise<boolean> | undefined;
   private queued: Promise<boolean> | undefined;
-  private readonly listeners = new Set<(status: AgentHostStatus) => void>();
+  private readonly listeners = new Set<(status: Ipv6GuardStatus) => void>();
 
   constructor(private readonly nft: NftRunner = new SystemNftRunner()) {}
 
@@ -181,79 +83,18 @@ export class Ipv6Guard {
   }
 
   /**
-   * Re-check after every ruleset change until the returned function is called.
-   * Changes reported while a monitor-driven check runs (its own apply among
-   * them) lead to one more check after it; while those checks keep failing,
-   * each waits twice as long as the last, up to MONITOR_MAX_BACKOFF_MS. Any
-   * check that verifies the table (the timer's, a NIC's) ends the back-off,
-   * and a backed-off check still waiting is rescheduled at the normal delay.
+   * Re-check after every ruleset change `feed` reports (with its own debounce
+   * and back-off, see recheckOnChanges) until the returned function is called.
    */
-  watch(): () => void {
-    const monitor = this.nft.monitor?.bind(this.nft);
-    if (!monitor) return () => undefined;
-    let stopped = false;
-    let active: NftMonitor | undefined;
-    let debounce: NodeJS.Timeout | undefined;
-    let restart: NodeJS.Timeout | undefined;
-    let checking = false;
-    let changedDuringCheck = false;
-    let failures = 0;
-    const changed = (): void => {
-      if (stopped || debounce) return;
-      if (checking) {
-        changedDuringCheck = true;
-        return;
-      }
-      const delay = Math.min(MONITOR_DEBOUNCE_MS * 2 ** failures, MONITOR_MAX_BACKOFF_MS);
-      debounce = setTimeout(() => {
-        debounce = undefined;
-        checking = true;
-        void this.ensure().then((present) => {
-          checking = false;
-          failures = present ? 0 : Math.min(failures + 1, 16);
-          if (changedDuringCheck) {
-            changedDuringCheck = false;
-            changed();
-          }
-        });
-      }, delay);
-    };
-    const start = (): void => {
-      monitor(changed, () => {
-        active = undefined;
-        if (stopped) return;
-        // Whatever happened while nobody watched is checked now.
-        changed();
-        restart = setTimeout(start, MONITOR_RESTART_MS);
-      }).then((started) => {
-        if (stopped) started.stop();
-        else active = started;
-      }, () => {
-        if (!stopped) restart = setTimeout(start, MONITOR_RESTART_MS);
-      });
-    };
-    const stopListening = this.onChange(({ ipv6Guard }) => {
-      // Failures only ever leave the guard absent, so verifying again is always this transition.
-      if (!ipv6Guard.present || failures === 0) return;
-      failures = 0;
-      if (debounce) {
-        clearTimeout(debounce);
-        debounce = undefined;
-        changed();
-      }
-    });
-    start();
-    return () => {
-      stopped = true;
-      stopListening();
-      if (debounce) clearTimeout(debounce);
-      if (restart) clearTimeout(restart);
-      active?.stop();
-    };
+  watch(feed: RulesetChangeFeed = new NftMonitorHub(this.nft)): () => void {
+    // Failures only ever leave the guard absent, so verifying again is always this transition.
+    return recheckOnChanges(feed, () => this.ensure(), (verified) => this.onChange((status) => {
+      if (status.present) verified();
+    }));
   }
 
   /** Called with the new status whenever presence or the error changes. */
-  onChange(listener: (status: AgentHostStatus) => void): () => void {
+  onChange(listener: (status: Ipv6GuardStatus) => void): () => void {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
   }
@@ -262,8 +103,8 @@ export class Ipv6Guard {
     return this.lastError;
   }
 
-  status(): AgentHostStatus {
-    return { ipv6Guard: { present: this.present, error: this.lastError } };
+  status(): Ipv6GuardStatus {
+    return { present: this.present, error: this.lastError };
   }
 
   samples(): NodeMetricSample[] {
@@ -274,11 +115,11 @@ export class Ipv6Guard {
     let present = false;
     let error: string | null = null;
     try {
-      const listing = await this.nft.listTable();
+      const listing = await this.nft.listTable(AGENT_IPV6_GUARD_TABLE);
       if (!listing || !guardTableIsComplete(listing)) {
         await this.nft.apply(renderIpv6GuardRuleset());
       }
-      const verified = await this.nft.listTable();
+      const verified = await this.nft.listTable(AGENT_IPV6_GUARD_TABLE);
       present = Boolean(verified && guardTableIsComplete(verified));
       if (!present) error = 'guard table did not verify after apply';
     } catch (cause) {

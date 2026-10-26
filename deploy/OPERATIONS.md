@@ -1714,7 +1714,8 @@ Backend **不直连** Incus，也不主动连接任何主机。每台 Incus 主�
 - agent 是安全边界：每个请求先过 `packages/agent/src/policy.ts`。只允许操作
   `nyc-*` 实例与 `nyv-*` 卷；配置白名单；禁止 `raw.*`、特权容器、宿主路径设备、
   profiles、证书/服务器配置/网络/存储池写入；`security.idmap.isolated` 必须为
-  true；网卡必须开 IPv4/MAC 过滤与 `security.port_isolation`、`host_name` 为 `nyh*`；
+  true；网卡必须开 IPv4/MAC 过滤、`host_name` 为 `nyh*`（不再要求 `security.port_isolation`：
+  同机容器默认互通，容器出站由下面的 `nyabase_firewall` 约束）；
   `volatile.*` 一律改回 Incus 当前值。白名单约束的是 Backend 能**改**什么：更新实例 / 卷时，
   与 Incus 当前值相同的配置键原样放行（例如存储池 `volume.zfs.*` / `volume.snapshots.*`
   默认值被 Incus 复制进每个新卷的 `zfs.*` / `snapshots.*`，Backend 读改写时会带回），
@@ -1728,7 +1729,7 @@ Backend **不直连** Incus，也不主动连接任何主机。每台 Incus 主�
   IPv6 与 802.1Q/802.1ad 帧（不依赖 `br_netfilter`，与 Docker 的 iptables 规则不
   冲突），并以 `nyabase_node_ipv6_guard_present` 上报；预检要求它为 1。
   这是安全不变量，由 agent 自己执行：
-  - 校验（缺失或不完整就补回）发生在：unit 的 `ExecStartPre=… ipv6-guard`（unit 排在
+  - 校验（缺失或不完整就补回）发生在：unit 的 `ExecStartPre=… guest-guards`（unit 排在
     `incus.service` 之前，开机时 Incus 恢复运行的容器之前表已在位）、agent 启动、每 10 秒、
     以及 `nft monitor` 报告任何规则集变化（防火墙重载、`nft flush ruleset`）之后约 200 ms
     （补回本身也是一次变化；若补回后仍校验不过，监视触发的校验逐次加倍间隔、最长 60 秒，不会空转）。
@@ -1739,6 +1740,37 @@ Backend **不直连** Incus，也不主动连接任何主机。每台 Incus 主�
     「IPv6 拦截已就绪 / 缺失」与原因；恢复时 Backend 立即唤醒该服务器的 reconcile。
   - 已在运行的容器在表被删到补回之间没有这层保护（有 `nft monitor` 时约 200 ms，
     否则最长 10 秒）；持续补不回来（例如 nft 不可用）时卡片会一直显示缺失，需要人工处理。
+- agent 还常驻维护 nft 表 `bridge nyabase_firewall`：容器出站防火墙（规则在前端「网络 → 防火墙」
+  按服务器关联）。表挂在 bridge 族的 prerouting（优先级 -190，bridge 族只有这里能 `reject`），只匹配
+  从 `nyh*` veth 进来的帧，即容器发出的包，不论去往宿主本机、同机容器还是局域网 / 外网；入站不限制。
+  规则无状态（被禁网段主动连入时，容器的回包同样被拦），按优先级第一条命中生效，都不命中放行；
+  不自动放行任何地址（DNS、网关、宿主本机都不例外）。IPv4 与 ARP 以外的帧（VLAN / QinQ、PPPoE、
+  MPLS、IPv6 等）一律丢弃，不依赖 `nyabase_guard`。`reject` 对 TCP 回 RST，UDP 回端口不可达，
+  协议为全部时其余回 ICMP admin-prohibited。同样由 agent 自己执行：
+  - 下发：Backend 经控制连接的 `firewall.apply` 发来该服务器的规则文档（带摘要）。agent 校验格式后
+    先 `nft -c` 预检，通过才原子写入 `/var/lib/nyabase-agent/firewall.json`（0600，同时记 server id），
+    再在一个 nft 事务里整表替换；格式错误或预检不过回 `bad_request`，旧表与旧文档保持不变。
+    多个 `firewall.apply` 按到达顺序逐个处理。
+  - 校验：agent 记住当前文档最近一次成功应用后的 `nft list table` 输出，之后逐字比较，不一致或缺失就
+    重新应用。时机与 `nyabase_guard` 相同（启动、每 10 秒、`nft monitor` 报告变化后；两张表共用一个
+    monitor 进程，但各自去抖、各自退避，一张补不回来不会拖慢另一张）。
+  - 开机：`ExecStartPre=… guest-guards` 在 Incus 启动前按 `firewall.json` 恢复表（只读状态目录，
+    不连 Backend）；agent 主进程启动时同样先恢复再连 Backend。没有文件、文件损坏、文件属于另一个
+    server id（重新接入过）或文档无法应用时，装 **fail-closed** 表：丢弃容器发出的一切帧（含 ARP），
+    直到 Backend 下发文档（没有关联规则的服务器收到的是空文档，同样解除 fail-closed）。
+    `ExecStartPre` 失败（例如 nft 不可用；`-` 前缀，尽力而为）时 Incus 仍会启动并自己恢复容器，
+    这些容器不经过 agent，没有这层保护——此时卡片显示防火墙缺失，需要人工处理。
+  - 门禁：与 IPv6 拦截相同的那些接通网卡的请求，转发前还要求防火墙在位：有文档、表校验一致，且
+    Backend 在**当前这条控制连接**上下发过它（每次连上 Backend 都会立刻重发一次；摘要相同只校验、
+    不重写 nft）。否则拒绝（`AGENT_FIREWALL_MISSING`，可重试）。所以 agent 离线期间新增的规则不会被
+    它保存的旧文档放过；重连后数秒内恢复。
+  - 状态：hello 与 status 帧上报 `firewall {present, digest, error}`（status 帧最少间隔 3 秒，期间的
+    变化合并为一帧最新状态），并以 `nyabase_node_firewall_present` 上报；服务器详情「主机 Agent」卡片
+    与防火墙页显示同步状态与原因。
+  - **一台主机只能运行一个 agent**：表注释记着写入者的 server id 与内容
+    （`nyabase egress server=<id> digest=<摘要|fail-closed>`）。定时 / monitor 校验发现表属于另一个
+    server id 时不重写，只报错 `nyabase_firewall is owned by server <id>`（两个 agent 不会互相覆盖空转）；
+    Backend 下发与启动恢复总是接管。
 
 ### 接入（enrollment）
 
@@ -1793,7 +1825,7 @@ sudo systemctl enable --now nyabase-agent
 `NYABASE_BACKEND_CA_FILE` 时也必须是 `https://`。
 
 unit 以 `nyabase-agent` 用户运行，附加 `incus-admin` 组（访问 Incus socket），
-只保留 `CAP_NET_ADMIN`（维护 `nyabase_guard`、读取 `bridge incus`）。需要 Node.js 20+。
+只保留 `CAP_NET_ADMIN`（维护 `nyabase_guard` 与 `nyabase_firewall`、读取 `bridge incus`）。需要 Node.js 20+。
 `nvidia-smi` 需要 `video`/`render` 组时自行追加 `SupplementaryGroups`。
 
 ### 升级与版本匹配
@@ -1805,8 +1837,11 @@ Backend 与 agent 只在 **agent 协议号**（`AGENT_PROTOCOL_VERSION`，`@nyab
 `lastError` 写明双方的协议号与 agent 版本；agent 日志打印同样的原因，每分钟重试一次。
 
 - **协议号不变的升级**：Backend 与 agent 可以按任意顺序、逐台升级。
-- **协议 2（本版本）**：升级 agent 时重新安装 unit 文件（`ExecStartPre … ipv6-guard`，
-  排在 `incus.service` 之前）后 `systemctl daemon-reload`。
+- **协议 3（本版本，容器出站防火墙）**：**先升级 Backend**，再逐台升级 agent，每台都重新安装
+  unit 文件（`ExecStartPre … guest-guards`，排在 `incus.service` 之前；旧的 `ipv6-guard` 仍是它的
+  别名）后 `systemctl daemon-reload`。新 agent 首次启动时还没有 `firewall.json`，装的是 fail-closed 表：
+  **该主机所有容器的出站（含 ARP）中断**，直到它连上 Backend 并收到第一份文档（通常数秒内）。
+  所以只在 Backend 已升级、可达时升级 agent，一台确认卡片显示防火墙已同步后再升级下一台。
 - **协议号变化的升级**（发布说明会写明）：在同一个维护窗口里升级 Backend 和全部 agent。
   先升级 Backend 时，未升级的服务器显示上面的协议错误；先升级 agent 时，旧 Backend 只会以
   1008 关闭新 agent 的连接（agent 日志 `control connection closed (1008 expected hello)`）。
@@ -1815,14 +1850,16 @@ Backend 与 agent 只在 **agent 协议号**（`AGENT_PROTOCOL_VERSION`，`@nyab
 
 **重启 / 升级 agent 会发生什么**：控制连接断开，服务器标为 `unreachable`，进行中的 Incus
 请求以 `SERVER_UNREACHABLE` 失败并稍后重试；经这台 agent 转发的 exec / 控制台会话随之关闭；
-容器、卷与 nft 表 `nyabase_guard` 都不受影响（agent 退出时不删除该表，启动时会重新校验）。
+容器、卷与 nft 表 `nyabase_guard` / `nyabase_firewall` 都不受影响（agent 退出时不删除它们，启动时
+按本地状态重新校验）。重连前后的数秒里接通网卡的请求以 `AGENT_FIREWALL_MISSING` 拒绝并重试，
+直到 Backend 在新连接上重新下发防火墙文档。
 agent 重连后服务器恢复 `online`，刷新清点并触发全量扫描。替换 `/opt/nyabase/agent` 时先解压到
 新目录再整体替换，然后 `systemctl restart nyabase-agent`；凭据在 `/var/lib/nyabase-agent`，不受影响。
 
 ### 指标
 
 Backend 的 `NodeMetricsScrapeService` 每 15 秒经控制连接请求一次
-`metrics.collect`（主机、cgroup、GPU、nft 与 IPv6 拦截状态），写入 VictoriaMetrics
+`metrics.collect`（主机、cgroup、GPU、nft、IPv6 拦截与出站防火墙状态），写入 VictoriaMetrics
 并更新服务器的 `metricsHealth`。agent 断开时服务器标记为 `unreachable`，重连后
 自动恢复并刷新 CPU 拓扑、GPU 与存储池清点。agent 一直连着、但 reconcile 因 Incus 超时等把服务器标成
 `unreachable` 时，Backend 经 agent 按退避（15 秒起、翻倍、最长 5 分钟）探测 Incus，成功即恢复 `online`
@@ -1842,7 +1879,8 @@ Backend 的 `NodeMetricsScrapeService` 每 15 秒经控制连接请求一次
   CephFS 无块设备，限不了）。
 - **隔离**：`security.idmap.isolated=true`（每个容器独立 uid 段，需要 `/etc/subuid`
   给 root 足够的范围），自定义卷 `security.shifted=true`，同一用户的容器共享卷时
-  属主一致；`security.port_isolation=true`；IPv6 由 `nyabase_guard` 禁用。
+  属主一致；网卡不开 `security.port_isolation`（同机容器互通）；出站由 `nyabase_firewall` 约束；
+  IPv6 由 `nyabase_guard` 禁用。
 - **漂移**：全量扫描比较实例的全部配置（只放过 `volatile.*`、`image.*`）与全部设备，
   设备键双向比较，`profiles` 必须为空；有差异就整份写回并记审计
   `container.drift_corrected`。
@@ -1887,7 +1925,8 @@ catalog DTO 的 version 字符串是 bake serial（`v20260921_nb01`），不是�
 `tests/e2e/` holds the live scenario tests (not run in CI; CI runs
 `pnpm e2e:check`). They start their own control plane, never the production one:
 
-- `pnpm e2e:up` builds the Backend and both proxies, creates a fresh database
+- `pnpm e2e:up` refuses to start while another nyabase agent unit is active on a lab
+  host (one agent per host owns `bridge nyabase_firewall`), then builds the Backend and both proxies, creates a fresh database
   `nyabase_e2e_<run id>` on the PostgreSQL given in `tests/e2e/lab.env`, generates
   the four boot secrets and starts a single-process Backend (clean environment,
   `NYABASE_CONFIG_FILE` pointing at a missing file) plus the two Rust proxies on the
@@ -1898,7 +1937,8 @@ catalog DTO 的 version 字符串是 bake serial（`v20260921_nb01`），不是�
   name contains one of the words).
 - `pnpm e2e:down` stops the processes and, on each lab host, deletes only instances
   labelled with the run's server ids, volumes the run's database recorded, the run's
-  agent unit and the agent's nft guard table; then drops the database and
+  agent unit and the agent's nft tables (`nyabase_guard`, `nyabase_firewall`, once no
+  other agent runs there); then drops the database and
   removes the run directory. It is safe to repeat after a partial `up`.
 
 Inputs are documented in `tests/e2e/lab.env.example`; the full description is in

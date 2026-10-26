@@ -18,7 +18,9 @@ guest LAN (the proxies dial guests). Only one run exists at a time (fixed ports)
 
 ## What `up` does
 
-1. Creates `$E2E_RUN_ROOT/<run id>/` (mode 700) and points `$E2E_RUN_ROOT/current` at it.
+1. Refuses to start when another nyabase agent unit is active (or activating) on a lab
+   host: the agent owns the host-wide `bridge nyabase_firewall` table, one agent per host.
+   Then creates `$E2E_RUN_ROOT/<run id>/` (mode 700) and points `$E2E_RUN_ROOT/current` at it.
 2. Builds `@nyabase/backend` and `@nyabase/agent` (`tsc -b`, including `@nyabase/common`) and the Rust
    proxies (`cargo build --release --locked`), then installs this package's deps.
 3. Creates the database `nyabase_e2e_<run id>` on `E2E_PG_URL`.
@@ -58,8 +60,9 @@ Idempotent; safe after a failed or partial `up`, and safe to repeat.
    instances (`nyc-*`, `nyabase-preflight-*`) whose Incus config
    `user.nyabase.server_id` is one of this run's server ids; custom volumes named
    exactly as the run's database recorded (`nyv-<32 hex>`); the run's agent unit and
-   directory; and the agent's `bridge nyabase_guard` nft table once no other nyabase
-   agent runs on the host. Cached images and everything unlabelled stay.
+   directory; and the agent's `bridge nyabase_guard` and `bridge nyabase_firewall`
+   nft tables once no other nyabase agent runs on the host. Cached images and
+   everything unlabelled stay.
 4. Only if every host was swept: drops the database and removes the run directory.
    Otherwise it exits non-zero and keeps both so you can re-run `down`.
 

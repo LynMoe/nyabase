@@ -6,7 +6,10 @@ import {
   MAX_AGENT_METRICS_TEXT_BYTES,
   NODE_METRIC_CATALOG,
   renderOpenMetrics,
+  zFirewallDocument,
+  type AgentFirewallApplyResult,
   type AgentHello,
+  type AgentHostStatus,
   type AgentIncusHttpParams,
   type AgentIncusHttpResult,
   type AgentIncusWebSocketParams,
@@ -14,6 +17,7 @@ import {
 } from '@nyabase/common';
 import { AgentRequestError, type AgentHandlers } from './backend-connection.js';
 import { streamUrl, type AgentConfig } from './config.js';
+import { FirewallDocumentRefusedError, type GuestFirewall } from './firewall.js';
 import { LocalIncus, LocalIncusError } from './incus-local.js';
 import type { Ipv6Guard } from './ipv6-guard.js';
 import type { OperationLedger } from './operation-ledger.js';
@@ -28,6 +32,7 @@ export interface AgentDependencies {
   readonly config: AgentConfig;
   readonly incus: LocalIncus;
   readonly guard: Ipv6Guard;
+  readonly firewall: GuestFirewall;
   /** Operations started through the policy; the only ones the Backend can reach. */
   readonly operations: OperationLedger;
   readonly metrics: MetricsSource;
@@ -43,10 +48,18 @@ export function createAgentHandlers(deps: AgentDependencies): AgentHandlers {
     incusHttp: (params, signal) => incusHttp(deps, params, signal),
     incusWebSocket: (params, signal, session) => incusWebSocket(deps, params, signal, session),
     collectMetrics: () => collectMetrics(deps),
+    applyFirewall: (params) => applyFirewall(deps, params),
   };
 }
 
+/** What hello and status frames report about the host. */
+export function hostStatus(deps: Pick<AgentDependencies, 'guard' | 'firewall'>): AgentHostStatus {
+  return { ipv6Guard: deps.guard.status(), firewall: deps.firewall.status() };
+}
+
 async function hello(deps: AgentDependencies): Promise<AgentHello> {
+  // A new control connection: the firewall document needs this Backend's word again.
+  deps.firewall.resetConfirmation();
   const server = await deps.incus.requestJson<{
     environment?: { server_version?: string };
     api_extensions?: string[];
@@ -60,7 +73,7 @@ async function hello(deps: AgentDependencies): Promise<AgentHello> {
       serverVersion: server.environment?.server_version || 'unknown',
       apiExtensions: (server.api_extensions ?? []).slice(0, 2048),
     },
-    status: deps.guard.status(),
+    status: hostStatus(deps),
   };
 }
 
@@ -85,15 +98,9 @@ async function incusHttp(
     deps.log(`refused ${params.method} ${params.path.split('?')[0]}: ${verdict.reason}`);
     throw new AgentRequestError('policy_denied', verdict.reason);
   }
-  // Checked (and re-applied if a firewall reload dropped it) right before the
-  // NIC comes up, not trusted from the last periodic check.
-  if (verdict.needsIpv6Guard && !await deps.guard.ensure()) {
-    deps.log(`refused ${params.method} ${params.path.split('?')[0]}: IPv6 guard is not in place`);
-    throw new AgentRequestError(
-      'ipv6_guard_missing',
-      `the IPv6 guard (nft table bridge nyabase_guard) is not in place: ${deps.guard.error ?? 'unknown error'}`,
-    );
-  }
+  // Checked (and re-applied if a firewall reload dropped them) right before
+  // the NIC comes up, not trusted from the last periodic check.
+  if (verdict.bringsUpGuestNic) await requireGuestGuards(deps, `${params.method} ${params.path.split('?')[0]}`);
   try {
     const response = await deps.incus.request({
       method: params.method,
@@ -109,6 +116,42 @@ async function incusHttp(
   } catch (error) {
     throw asRequestError(error);
   }
+}
+
+async function requireGuestGuards(deps: AgentDependencies, what: string): Promise<void> {
+  if (!await deps.guard.ensure()) {
+    deps.log(`refused ${what}: IPv6 guard is not in place`);
+    throw new AgentRequestError(
+      'ipv6_guard_missing',
+      `the IPv6 guard (nft table bridge nyabase_guard) is not in place: ${deps.guard.error ?? 'unknown error'}`,
+    );
+  }
+  if (!await deps.firewall.ensure()) {
+    deps.log(`refused ${what}: egress firewall is not in place`);
+    throw new AgentRequestError(
+      'firewall_missing',
+      `the egress firewall (nft table bridge nyabase_firewall) is not in place: ${deps.firewall.refusal ?? 'unknown error'}`,
+    );
+  }
+}
+
+/** `firewall.apply`: params are unchecked on the frame, so a bad document fails only this request. */
+async function applyFirewall(deps: AgentDependencies, params: unknown): Promise<AgentFirewallApplyResult> {
+  const parsed = zFirewallDocument.safeParse(params);
+  if (!parsed.success) {
+    const issue = parsed.error.issues[0];
+    const where = issue?.path.length ? ` at ${issue.path.join('.')}` : '';
+    throw new AgentRequestError('bad_request', `invalid firewall document${where}: ${issue?.message ?? 'unknown problem'}`);
+  }
+  try {
+    await deps.firewall.apply(parsed.data);
+  } catch (error) {
+    const text = error instanceof Error ? error.message : String(error);
+    deps.log(`firewall document ${parsed.data.digest.slice(0, 12)} failed: ${text}`);
+    throw new AgentRequestError(error instanceof FirewallDocumentRefusedError ? 'bad_request' : 'internal', text);
+  }
+  deps.log(`firewall document ${parsed.data.digest.slice(0, 12)} applied (${parsed.data.rules.length} rules)`);
+  return { digest: parsed.data.digest };
 }
 
 async function incusWebSocket(
@@ -151,7 +194,7 @@ async function incusWebSocket(
 }
 
 async function collectMetrics(deps: AgentDependencies): Promise<AgentMetricsResult> {
-  const samples = [...await deps.metrics.collect(), ...deps.guard.samples()];
+  const samples = [...await deps.metrics.collect(), ...deps.guard.samples(), ...deps.firewall.samples()];
   const text = renderOpenMetrics(samples, NODE_METRIC_CATALOG);
   if (Buffer.byteLength(text, 'utf8') > MAX_AGENT_METRICS_TEXT_BYTES) {
     throw new AgentRequestError('too_large', 'metrics exceed the transfer limit');

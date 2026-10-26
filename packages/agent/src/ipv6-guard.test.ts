@@ -3,9 +3,8 @@ import {
   guardTableIsComplete,
   Ipv6Guard,
   renderIpv6GuardRuleset,
-  type NftMonitor,
-  type NftRunner,
 } from './ipv6-guard.js';
+import type { NftMonitor, NftRunner } from './nft.js';
 
 const LISTING = `table bridge nyabase_guard {
 	chain forward {
@@ -37,6 +36,10 @@ class FakeNft implements NftRunner {
     if (this.failApply) throw new Error('Operation not permitted');
     this.applied.push(ruleset);
     this.table = LISTING;
+  }
+
+  async check(): Promise<void> {
+    // dry runs are not part of the guard
   }
 
   async listTable(): Promise<string | undefined> {
@@ -90,14 +93,14 @@ describe('IPv6 guard', () => {
     const guard = new Ipv6Guard(nft);
     const changes = vi.fn();
     guard.onChange(changes);
-    expect(guard.status()).toEqual({ ipv6Guard: { present: false, error: 'not verified yet' } });
+    expect(guard.status()).toEqual({ present: false, error: 'not verified yet' });
     await guard.ensure();
     await guard.ensure();
-    expect(changes.mock.calls).toEqual([[{ ipv6Guard: { present: true, error: null } }]]);
+    expect(changes.mock.calls).toEqual([[{ present: true, error: null }]]);
     nft.table = undefined;
     nft.failApply = true;
     await guard.ensure();
-    expect(changes).toHaveBeenLastCalledWith({ ipv6Guard: { present: false, error: 'Operation not permitted' } });
+    expect(changes).toHaveBeenLastCalledWith({ present: false, error: 'Operation not permitted' });
   });
 
   it('answers a call made during a check with a check that starts after it', async () => {
@@ -131,7 +134,7 @@ describe('IPv6 guard', () => {
       nft.monitors[0]!.changed();
       await vi.advanceTimersByTimeAsync(250);
       expect(nft.applied).toHaveLength(2);
-      expect(guard.status().ipv6Guard.present).toBe(true);
+      expect(guard.status().present).toBe(true);
       nft.monitors[0]!.exit();
       await vi.advanceTimersByTimeAsync(5_000);
       expect(nft.monitors).toHaveLength(2);
@@ -161,14 +164,14 @@ describe('IPv6 guard', () => {
       // 200 ms, 400 ms, 800 ms, ... apart: about eight attempts in a minute, not three hundred.
       expect(nft.applied.length).toBeGreaterThan(3);
       expect(nft.applied.length).toBeLessThan(12);
-      expect(guard.status().ipv6Guard).toEqual({ present: false, error: 'guard table did not verify after apply' });
+      expect(guard.status()).toEqual({ present: false, error: 'guard table did not verify after apply' });
       // Once it verifies again, the next change is checked promptly.
       nft.apply = async (ruleset) => {
         nft.applied.push(ruleset);
         nft.table = LISTING;
       };
       await vi.advanceTimersByTimeAsync(60_000);
-      expect(guard.status().ipv6Guard.present).toBe(true);
+      expect(guard.status().present).toBe(true);
       const applied = nft.applied.length;
       nft.table = undefined;
       nft.monitors[0]!.changed();
@@ -195,7 +198,7 @@ describe('IPv6 guard', () => {
       nft.monitors[0]!.changed();
       // A failure streak: the next monitor-driven check is now tens of seconds away.
       await vi.advanceTimersByTimeAsync(60_000);
-      expect(guard.status().ipv6Guard.present).toBe(false);
+      expect(guard.status().present).toBe(false);
       // The operator fixes nft; the backstop timer's check verifies the table.
       nft.apply = async (ruleset) => {
         nft.applied.push(ruleset);
@@ -209,7 +212,7 @@ describe('IPv6 guard', () => {
       nft.monitors[0]!.changed();
       await vi.advanceTimersByTimeAsync(250);
       expect(nft.applied).toHaveLength(applied + 1);
-      expect(guard.status().ipv6Guard.present).toBe(true);
+      expect(guard.status().present).toBe(true);
       stop();
     } finally {
       vi.useRealTimers();

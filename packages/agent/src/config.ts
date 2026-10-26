@@ -12,6 +12,13 @@ export interface AgentConfig {
   readonly incusSocket: string;
 }
 
+/** Where the agent keeps its credential and firewall document unless NYABASE_AGENT_STATE_DIR says otherwise. */
+export const DEFAULT_AGENT_STATE_DIR = '/var/lib/nyabase-agent';
+
+export function agentStateDir(environment: NodeJS.ProcessEnv = process.env): string {
+  return environment.NYABASE_AGENT_STATE_DIR?.trim() || DEFAULT_AGENT_STATE_DIR;
+}
+
 export async function loadAgentConfig(
   environment: NodeJS.ProcessEnv = process.env,
 ): Promise<AgentConfig> {
@@ -24,7 +31,7 @@ export async function loadAgentConfig(
   return {
     backendUrl,
     backendCa: caFile ? await readFile(caFile) : undefined,
-    stateDir: environment.NYABASE_AGENT_STATE_DIR?.trim() || '/var/lib/nyabase-agent',
+    stateDir: agentStateDir(environment),
     enrollmentToken,
     incusSocket: environment.INCUS_SOCKET?.trim() || '/var/lib/incus/unix.socket',
   };

@@ -52,9 +52,9 @@ export type PolicyVerdict =
     /**
      * The request brings a guest NIC up (a start, or a NIC added or changed on
      * an instance that is not stopped): the agent forwards it only while the
-     * IPv6 guard is verified in place.
+     * IPv6 guard and the egress firewall are verified in place.
      */
-    readonly needsIpv6Guard?: boolean;
+    readonly bringsUpGuestNic?: boolean;
   }
   | {
     readonly allowed: false;
@@ -81,9 +81,9 @@ export interface PolicyContext {
 
 const ALLOW: PolicyVerdict = { allowed: true };
 const deny = (reason: string): PolicyVerdict => ({ allowed: false, reason });
-const forward = (body: Record<string, unknown>, needsIpv6Guard = false): PolicyVerdict => (
-  needsIpv6Guard
-    ? { allowed: true, body: serialize(body), needsIpv6Guard }
+const forward = (body: Record<string, unknown>, bringsUpGuestNic = false): PolicyVerdict => (
+  bringsUpGuestNic
+    ? { allowed: true, body: serialize(body), bringsUpGuestNic }
     : { allowed: true, body: serialize(body) }
 );
 
@@ -356,16 +356,16 @@ function unchanged(current: Readonly<Record<string, string>> | undefined, key: s
 function withCurrentVolatile(
   body: Record<string, unknown>,
   current: Readonly<Record<string, string>>,
-  needsIpv6Guard = false,
+  bringsUpGuestNic = false,
 ): PolicyVerdict {
-  if (!isRecord(body.config)) return forward(body, needsIpv6Guard);
+  if (!isRecord(body.config)) return forward(body, bringsUpGuestNic);
   const config = Object.fromEntries(
     Object.entries(body.config).flatMap(([key, value]): [string, unknown][] => {
       if (!key.startsWith('volatile.')) return [[key, value]];
       return Object.hasOwn(current, key) ? [[key, current[key]]] : [];
     }),
   );
-  return forward({ ...body, config }, needsIpv6Guard);
+  return forward({ ...body, config }, bringsUpGuestNic);
 }
 
 export function checkInstanceDocument(

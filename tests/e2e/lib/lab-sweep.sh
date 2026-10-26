@@ -7,8 +7,8 @@
 #     every nyc-* / nyabase-preflight-* instance currently on the host;
 #   * custom volumes named exactly as the run's DB recorded them;
 #   * the run's agent unit and its /var/tmp directory (state, credential);
-#   * the agent's `bridge nyabase_guard` nft table, once no other nyabase agent
-#     runs on the host.
+#   * the agent's `bridge nyabase_guard` and `bridge nyabase_firewall` nft
+#     tables, once no other nyabase agent runs on the host.
 # Anything else on the host is left alone.
 # Args: <server ids, comma separated> <instances, comma separated or ->
 #       <pool/volume pairs, comma separated or -> <agent unit name>
@@ -59,11 +59,14 @@ if [[ "$volumes_csv" != "-" ]]; then
   done
 fi
 
-# The guard only drops IPv6 on nyabase veths; keep it while any other agent runs here.
-others="$(systemctl list-units --type=service --state=active --no-legend --plain 'nyabase-*agent*' 2>/dev/null \
+# Both tables only act on nyabase veths; while another agent runs here they are its tables.
+others="$(systemctl list-units --type=service --state=active,activating --no-legend --plain 'nyabase-*agent*' 2>/dev/null \
   | awk '{ print $1 }' | grep -v "^$agent_unit\.service$" || true)"
-if [[ -z "$others" ]] && nft list table bridge nyabase_guard >/dev/null 2>&1; then
-  echo "remove nft table bridge nyabase_guard"
-  nft delete table bridge nyabase_guard || rc=1
+if [[ -z "$others" ]]; then
+  for table in nyabase_guard nyabase_firewall; do
+    nft list table bridge "$table" >/dev/null 2>&1 || continue
+    echo "remove nft table bridge $table"
+    nft delete table bridge "$table" || rc=1
+  done
 fi
 exit "$rc"

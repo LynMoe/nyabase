@@ -3,9 +3,11 @@ import {
   AGENT_CLOSE_PROTOCOL_UNSUPPORTED,
   AGENT_HEARTBEAT_INTERVAL_MS,
   AGENT_PROTOCOL_VERSION,
+  AGENT_STATUS_MIN_INTERVAL_MS,
   MAX_AGENT_BACKEND_FRAME_BYTES,
   zAgentBackendFrame,
   type AgentErrorCode,
+  type AgentFirewallApplyResult,
   type AgentHello,
   type AgentHostStatus,
   type AgentIncusHttpParams,
@@ -31,6 +33,8 @@ export interface AgentHandlers {
    */
   incusWebSocket(params: AgentIncusWebSocketParams, signal: AbortSignal, session: AbortSignal): Promise<void>;
   collectMetrics(signal: AbortSignal): Promise<AgentMetricsResult>;
+  /** `firewall.apply`; `params` is whatever the frame carried, the handler validates it. */
+  applyFirewall(params: unknown, signal: AbortSignal): Promise<AgentFirewallApplyResult>;
 }
 
 export interface BackendConnectionOptions {
@@ -44,6 +48,10 @@ export interface BackendConnectionOptions {
   readonly maxConcurrentRequests?: number;
   /** Current host status, sent after welcome and again on every publishStatus(). */
   readonly status?: () => AgentHostStatus;
+  /** A control socket that was open closed (whether or not it was welcomed). */
+  readonly onDisconnected?: () => void;
+  /** Shortest gap between status frames on one connection (default AGENT_STATUS_MIN_INTERVAL_MS). */
+  readonly statusIntervalMs?: number;
 }
 
 /** Close codes the Backend uses on the control socket. */
@@ -68,15 +76,36 @@ export class BackendConnection {
   private readonly inFlight = new Map<string, AbortController>();
   /** The control socket once the Backend welcomed it; unsolicited frames go only there. */
   private welcomedSocket: WebSocket | undefined;
+  /** What the Backend last heard on the current socket (hello or status), and when a status frame went out. */
+  private reported: { socket: WebSocket; status: string; sentAt: number; timer?: NodeJS.Timeout } | undefined;
 
   constructor(private readonly options: BackendConnectionOptions) {}
 
-  /** Tell the Backend the host status changed; a no-op while not connected (hello carries it). */
+  /**
+   * Tell the Backend the host status changed; a no-op while not connected
+   * (hello carries it). At most one status frame per statusIntervalMs: changes
+   * in between are coalesced into one trailing frame with the latest status,
+   * and a status the Backend already has is not sent again.
+   */
   publishStatus(): void {
     const socket = this.welcomedSocket;
+    const reported = this.reported;
+    if (!socket || socket.readyState !== WebSocket.OPEN || reported?.socket !== socket || reported.timer) return;
+    const wait = reported.sentAt + (this.options.statusIntervalMs ?? AGENT_STATUS_MIN_INTERVAL_MS) - Date.now();
+    if (wait > 0) {
+      reported.timer = setTimeout(() => {
+        reported.timer = undefined;
+        this.publishStatus();
+      }, wait);
+      return;
+    }
     const status = this.options.status?.();
-    if (!socket || !status || socket.readyState !== WebSocket.OPEN) return;
+    if (!status) return;
+    const serialized = JSON.stringify(status);
+    if (serialized === reported.status) return;
     socket.send(JSON.stringify({ type: 'status', status }));
+    reported.status = serialized;
+    reported.sentAt = Date.now();
   }
 
   async run(signal: AbortSignal): Promise<void> {
@@ -140,7 +169,10 @@ export class BackendConnection {
       });
       socket.once('open', () => {
         void this.options.handlers.hello()
-          .then((hello) => socket.send(JSON.stringify(hello)))
+          .then((hello) => {
+            this.reported = { socket, status: JSON.stringify(hello.status), sentAt: 0 };
+            socket.send(JSON.stringify(hello));
+          })
           .catch((error: unknown) => {
             this.options.log(`hello failed: ${error instanceof Error ? error.message : String(error)}`);
             socket.close(1011, 'hello failed');
@@ -185,8 +217,20 @@ export class BackendConnection {
         cleanup();
         resolve({ code, reason: '' });
       });
+      let opened = false;
+      socket.once('open', () => {
+        opened = true;
+      });
       const cleanup = (): void => {
         if (this.welcomedSocket === socket) this.welcomedSocket = undefined;
+        if (this.reported?.socket === socket) {
+          clearTimeout(this.reported.timer);
+          this.reported = undefined;
+        }
+        if (opened) {
+          opened = false;
+          this.options.onDisconnected?.();
+        }
         clearTimeout(welcomeTimer);
         clearInterval(heartbeat);
         signal.removeEventListener('abort', abort);
@@ -234,6 +278,8 @@ export class BackendConnection {
         return this.options.handlers.incusWebSocket(request.params, signal, session).then(() => ({}));
       case 'metrics.collect':
         return this.options.handlers.collectMetrics(signal);
+      case 'firewall.apply':
+        return this.options.handlers.applyFirewall(request.params, signal);
     }
   }
 }

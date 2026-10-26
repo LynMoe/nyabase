@@ -186,11 +186,11 @@ describe('agent Incus policy', () => {
     expect((await create({ ...devices.eth0, 'security.port_isolation': 'yes' })).allowed).toBe(false);
   });
 
-  it('marks every request that brings a guest NIC up as needing the IPv6 guard', async () => {
+  it('marks every request that brings a guest NIC up', async () => {
     const needs = async (request: PolicyRequest, current?: Record<string, unknown>) => {
       const verdict = await check(request, current);
       expect(verdict.allowed, `${request.method} ${request.path}`).toBe(true);
-      return verdict.allowed && verdict.needsIpv6Guard === true;
+      return verdict.allowed && verdict.bringsUpGuestNic === true;
     };
     const state = (action: string): PolicyRequest =>
       ({ method: 'PUT', path: `/1.0/instances/${INSTANCE}/state`, body: body({ action }) });

@@ -55,6 +55,19 @@ start_agents() {
   done
 }
 
+# One nyabase agent per host: each owns the host's `bridge nyabase_guard` and
+# `bridge nyabase_firewall` tables, and two of them (a production agent, a
+# leftover e2e unit) would keep replacing each other's firewall document.
+refuse_other_agents() {
+  local target="$1" others
+  others="$(lab_sh "$target" "systemctl list-units --type=service --state=active,activating --no-legend --plain \
+      'nyabase-*agent*' 2>/dev/null | awk '{ print \$1 }'")" \
+    || die "cannot list the systemd units on $target"
+  [[ -z "$others" ]] && return 0
+  die "another nyabase agent runs on $target ($(echo "$others" | tr '\n' ' ' | sed 's/ $//')); \
+stop it (or run \`bash tests/e2e/e2e.sh down\` for a leftover e2e run) before \`up\`"
+}
+
 # <name> VAR=value... <command...>: detached, with a clean environment and its pid in <name>.pid.
 start_detached() {
   local name="$1"; shift
@@ -92,12 +105,19 @@ bootstrap() {
 cmd_up() {
   load_lab
   need E2E_PG_URL E2E_SERVERS E2E_BACKEND_PORT E2E_SSH_PROXY_PORT E2E_HTTP_PROXY_PORT \
-    E2E_IMAGE_ALIAS E2E_IMAGE_SOURCE_URL E2E_PREFLIGHT_IMAGE_FINGERPRINT E2E_PREFLIGHT_EGRESS_URL \
+    E2E_IMAGE_ALIAS E2E_IMAGE_SOURCE_URL E2E_PREFLIGHT_IMAGE_FINGERPRINT \
     E2E_IP_CIDR E2E_IP_ALLOCATION_CIDR E2E_IP_GATEWAY E2E_PROBE_ADDRESS
   need_tools psql openssl curl node pnpm cargo ssh-keygen ssh setsid
   if select_run "" && [[ -e "$RUN_DIR" ]]; then
     die "run $RUN_ID still exists (one run at a time); run \`bash tests/e2e/e2e.sh down\` first"
   fi
+
+  local server_idx server_var
+  for server_idx in $E2E_SERVERS; do
+    server_var="E2E_SERVER_${server_idx}_SSH"
+    [[ -n "${!server_var:-}" ]] || die "$server_var is required in lab.env"
+    refuse_other_agents "${!server_var}"
+  done
 
   RUN_ID="${E2E_RUN_ID:-$(date +%Y%m%d%H%M%S)-$(openssl rand -hex 2)}"
   select_run "$RUN_ID" || die "E2E_RUN_ID must look like 20260101120000-ab12"
@@ -156,7 +176,6 @@ cmd_up() {
     SSH_PROXY_PUBLIC_HOST="$E2E_LISTEN_HOST" SSH_PROXY_PUBLIC_PORT="$E2E_SSH_PROXY_PORT" \
     INCUS_PREFLIGHT_IMAGE_ALIAS="$E2E_IMAGE_ALIAS" \
     INCUS_PREFLIGHT_IMAGE_FINGERPRINT="$E2E_PREFLIGHT_IMAGE_FINGERPRINT" \
-    INCUS_PREFLIGHT_EGRESS_URL="$E2E_PREFLIGHT_EGRESS_URL" \
     INCUS_PREFLIGHT_SOURCE_SERVER="$E2E_IMAGE_SOURCE_URL" INCUS_IMAGE_SOURCE_URL="$E2E_IMAGE_SOURCE_URL" \
     METRICS_CONTAINER_SERIES_ENABLED=false VICTORIA_METRICS_URL=http://127.0.0.1:1 \
     node "$REPO_ROOT/packages/backend/dist/main.js"

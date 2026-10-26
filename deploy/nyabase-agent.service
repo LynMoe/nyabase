@@ -4,16 +4,19 @@ Documentation=file:/opt/nyabase/deploy/OPERATIONS.md
 After=network-online.target
 Wants=network-online.target
 # Incus restores the containers that were running when it starts (at boot).
-# The guest IPv6 guard must already be in place then, so the agent starts
-# first (ExecStartPre below); it reaches Incus later and retries until it can.
+# The guest IPv6 guard and egress firewall must already be in place then, so
+# the agent starts first (ExecStartPre below); it reaches Incus later and
+# retries until it can.
 Before=incus.service incus-startup.service
 
 [Service]
 Type=simple
 # Dedicated user in the incus-admin group: it reaches Incus only through
 # /var/lib/incus/unix.socket and keeps its credential in /var/lib/nyabase-agent.
-# CAP_NET_ADMIN maintains the `bridge nyabase_guard` nft table (guest IPv6 drop)
-# and reads `bridge incus`. Every Incus request is checked against the agent's
+# CAP_NET_ADMIN maintains the `bridge nyabase_guard` (guest IPv6 drop) and
+# `bridge nyabase_firewall` (guest egress firewall) nft tables and reads
+# `bridge incus`. The firewall document the Backend last sent is kept in
+# /var/lib/nyabase-agent/firewall.json. Every Incus request is checked against the agent's
 # policy before it reaches the socket (packages/agent/src/policy.ts).
 User=nyabase-agent
 Group=nyabase-agent
@@ -23,10 +26,12 @@ WorkingDirectory=/opt/nyabase/agent
 StateDirectory=nyabase-agent
 StateDirectoryMode=0700
 Environment=NYABASE_AGENT_STATE_DIR=/var/lib/nyabase-agent
-# Put the `bridge nyabase_guard` table in place before Incus starts. Best effort
+# Put `bridge nyabase_guard` and `bridge nyabase_firewall` in place before Incus
+# starts, from local state only: the firewall from firewall.json, or a table
+# that drops all guest traffic when there is none (fail-closed). Best effort
 # (`-`): if it fails, the agent itself still refuses to bring guest NICs up
-# and reports the missing guard to the Backend.
-ExecStartPre=-/usr/bin/env node dist/main.js ipv6-guard
+# and reports the missing tables to the Backend.
+ExecStartPre=-/usr/bin/env node dist/main.js guest-guards
 # Documented package start command: `node dist/main.js` (Node.js 20+).
 ExecStart=/usr/bin/env node dist/main.js
 Restart=always
