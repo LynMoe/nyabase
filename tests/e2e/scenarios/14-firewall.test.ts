@@ -150,7 +150,9 @@ describe('guest egress firewall', () => {
       priority: priority(8),
       action: 'drop',
       protocol: 'all',
-      cidrs: [`${target.routedIp!}/24`],
+      // Not the client's range too: rules hold for every guest on the server, so
+      // stateless they would also drop the target's replies to the client.
+      cidrs: [target.routedIp!],
     });
     await createRule({
       name: 'allow-one',
@@ -162,7 +164,7 @@ describe('guest egress firewall', () => {
     });
     await synced('accept before drop');
     assert.equal(await tcp(TCP_OPEN), '0', 'the earlier accept wins');
-    assert.equal(await tcp(TCP_OTHER), '124', 'everything else in the range is dropped');
+    assert.equal(await tcp(TCP_OTHER), '124', 'everything else to the target is dropped');
     assert.equal(await udp(), 'none');
     await h.api.patch(`/admin/firewall-rules/${wide.id}`, { expectedRevision: wide.revision, priority: priority(4) });
     await synced('drop before accept');
