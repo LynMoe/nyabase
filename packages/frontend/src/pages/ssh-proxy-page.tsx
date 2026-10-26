@@ -75,7 +75,7 @@ export default function SshProxyPage() {
         actions={
           <>
             {canViewStatus && (
-              <Button variant="outline" size="icon" aria-label="刷新 SSH 代理状态" onClick={() => refetch()} disabled={isFetching}>
+              <Button variant="outline" size="icon" aria-label="刷新 SSH 代理状态" onClick={() => { void refetch(); }} disabled={isFetching}>
                 <RefreshCw className={`h-4 w-4 ${isFetching ? 'animate-spin' : ''}`} />
               </Button>
             )}
@@ -111,7 +111,7 @@ export default function SshProxyPage() {
               query={hostKeyQuery}
               fetching={hostKeyFetching}
               rotating={rotateHostKey.isPending}
-              onRefresh={() => refetchHostKey()}
+              onRefresh={() => { void refetchHostKey(); }}
               onRotate={() => setRotateOpen(true)}
               resettingAuthorities={resetHostAuthorities.isPending}
               onResetAuthorities={() => setResetOpen(true)}

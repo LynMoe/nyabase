@@ -20,6 +20,9 @@ export default [
       '@typescript-eslint/no-unused-vars': ['warn', { argsIgnorePattern: '^_' }],
       '@typescript-eslint/no-explicit-any': 'warn',
       '@typescript-eslint/explicit-module-boundary-types': 'off',
+      // A dropped promise loses its rejection: await it, return it, or `void` it on purpose.
+      '@typescript-eslint/no-floating-promises': 'error',
+      '@typescript-eslint/no-misused-promises': 'error',
     },
   },
 ];

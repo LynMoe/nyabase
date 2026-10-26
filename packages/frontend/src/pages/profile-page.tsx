@@ -209,7 +209,7 @@ function SshKeysPanel({ userId }: { userId: string }) {
   const deleteKey = useMutation({
     mutationFn: (keyId: string) => api.delete(`/users/${userId}/ssh-keys/${keyId}`),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey });
+      void qc.invalidateQueries({ queryKey });
       toast({ title: 'SSH 公钥已删除' });
       setDeleteTarget(null);
     },
@@ -228,7 +228,7 @@ function SshKeysPanel({ userId }: { userId: string }) {
             variant="ghost"
             size="icon"
             className="h-8 w-8 text-muted-foreground"
-            onClick={() => refetch()}
+            onClick={() => { void refetch(); }}
             disabled={isFetching}
             aria-label="刷新 SSH 公钥"
           >
@@ -359,7 +359,7 @@ function AddSshKeyDialog({
       currentPassword: form.currentPassword,
     }),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey });
+      void qc.invalidateQueries({ queryKey });
       toast({ title: 'SSH 公钥已添加' });
       onSaved();
     },

@@ -298,7 +298,7 @@ export class ReconcileWorkerService implements OnApplicationBootstrap, OnModuleD
       }
       this.logger.error(`Reconcile intent ${intent.id} failed: ${boundedErrorMessage(error)}`);
     }));
-    this.trackOperation(tail);
+    void this.trackOperation(tail);
   }
 
   private finishRun(operation: Promise<void>): void {

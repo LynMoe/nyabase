@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi, type Mock } from 'vitest';
 import { AuditAction, FailureCode, IntentKind, IntentResourceType, IntentStatus } from '@nyabase/common';
 import {
   buildDesiredInstanceSpec,
@@ -810,7 +810,7 @@ describe('container reconciler full scan', () => {
         status: 'Running',
       });
       const listed = (await client.listInstances()).metadata;
-      const mocks = client as unknown as Record<string, ReturnType<typeof vi.fn>>;
+      const mocks = client as unknown as Record<string, Mock<(...args: never[]) => Promise<unknown>>>;
       mocks.listInstances!.mockResolvedValue(syncResponse([...listed, orphan]));
       mocks.getInstanceState!.mockImplementation(async (name?: string) =>
         syncResponse(name === orphanName ? orphan.state : listed[0]!.state));
@@ -1320,7 +1320,7 @@ function context(client: unknown, intentOverrides: Partial<IntentRecord> = {}): 
 function followPower(setup: Awaited<ReturnType<typeof harness>>) {
   let boots = 0;
   const actions: string[] = [];
-  (setup.client.updateInstanceState as ReturnType<typeof vi.fn>).mockImplementation(async (
+  (setup.client.updateInstanceState as Mock<(...args: never[]) => Promise<unknown>>).mockImplementation(async (
     _name: string,
     body: { action: string },
   ) => {

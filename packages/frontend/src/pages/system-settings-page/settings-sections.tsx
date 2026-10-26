@@ -426,7 +426,7 @@ export function useSettingsDraft(settingsQuery: UseQueryResult<SystemSettingsDto
     onSuccess: (updated) => {
       qc.setQueryData(queryKeys.systemSettings, updated);
       setDraftState(createRevisionedServerBackedDraft(editableInputs(updated), updated.revision));
-      qc.invalidateQueries({ queryKey: queryKeys.publicSettings });
+      void qc.invalidateQueries({ queryKey: queryKeys.publicSettings });
       toast({ title: '系统设置已保存' });
     },
     onError: async (error) => {

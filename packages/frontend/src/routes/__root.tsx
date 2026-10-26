@@ -24,7 +24,7 @@ function Root() {
   useEffect(() => {
     if (status === 'anonymous' && pathname !== '/login') {
       const reason = takePendingLoginReason();
-      navigate({
+      void navigate({
         to: '/login',
         search: { redirect: sanitizeInternalRedirect(locationHref), reason },
         replace: true,

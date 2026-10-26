@@ -75,7 +75,7 @@ export default function AuditPage() {
         title="审计日志"
         description={data ? `共 ${total} 条，当前显示 ${currentStart}-${currentEnd}` : '审计记录数量尚未加载'}
         actions={
-          <Button variant="outline" size="icon" aria-label="刷新审计日志" onClick={() => refetch()} disabled={isFetching}>
+          <Button variant="outline" size="icon" aria-label="刷新审计日志" onClick={() => { void refetch(); }} disabled={isFetching}>
             <RefreshCw className={cn('h-4 w-4', isFetching && 'animate-spin')} />
           </Button>
         }

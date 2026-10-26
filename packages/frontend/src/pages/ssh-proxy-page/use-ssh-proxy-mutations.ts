@@ -25,7 +25,7 @@ export function useSshProxyMutations({
     mutationFn: () => api.post<DisconnectAllResult>('/admin/ssh-proxy/disconnect-all'),
     onSuccess: (result) => {
       onDisconnected();
-      qc.invalidateQueries({ queryKey: queryKeys.sshProxy.status });
+      void qc.invalidateQueries({ queryKey: queryKeys.sshProxy.status });
       toast({
         title: '已发送断开命令',
         description: `已断开 ${result.disconnected} 个会话，目标代理 ${result.requested} 个。`,
@@ -43,7 +43,7 @@ export function useSshProxyMutations({
     onSuccess: (updated) => {
       onRotated();
       qc.setQueryData(queryKeys.sshProxy.hostKey, updated);
-      qc.invalidateQueries({ queryKey: queryKeys.sshProxy.status });
+      void qc.invalidateQueries({ queryKey: queryKeys.sshProxy.status });
       toast({ title: 'SSH 主机密钥已轮换' });
     },
     onError: (error) => toast({

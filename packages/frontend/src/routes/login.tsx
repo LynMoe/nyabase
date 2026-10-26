@@ -83,7 +83,7 @@ function LoginPage() {
               <AlertDescription>{reasonBanner}</AlertDescription>
             </Alert>
           )}
-          <form onSubmit={handleLogin} className="space-y-4">
+          <form onSubmit={(event) => { void handleLogin(event); }} className="space-y-4">
             {formError && (
               <Alert variant="destructive">
                 <AlertDescription>{formError}</AlertDescription>
