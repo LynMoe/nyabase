@@ -25,3 +25,7 @@ tests/e2e/lab.env
 *.db-wal
 *.log
 *.tmp
+
+# Local agent state and agent bundles are never part of an image build.
+.claude
+dist-agent

@@ -13,7 +13,7 @@ for command_name in docker; do
   }
 done
 
-postgres_image='postgres:18.4-bookworm@sha256:1961f96e6029a02c3812d7cb329a3b03a3ac2bb067058dec17b0f5596aca9296'
+postgres_image='postgres:18.6-bookworm@sha256:bbf83594798e144bff365a9c191c5d779f181fb3135902064ab8ff11918020fc'
 test_root="$(mktemp -d)"
 test_suffix="$$"
 network_name="nyabase-pg-ops-test-$test_suffix"

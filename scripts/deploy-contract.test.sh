@@ -276,7 +276,7 @@ git check-ignore -q deploy/config.yaml || {
   echo "deploy/config.yaml must be ignored by git" >&2
   exit 1
 }
-rg -q 'image: postgres:18\.4-bookworm@sha256:[0-9a-f]{64}' .github/workflows/ci.yml
+rg -q 'image: postgres:18\.6-bookworm@sha256:[0-9a-f]{64}' .github/workflows/ci.yml
 for deployment_file in \
   deploy/docker-compose.yml \
   deploy/Dockerfile.backend \
