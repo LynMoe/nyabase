@@ -14,8 +14,7 @@ import {
   zCreateVolumeRequest,
   zPatchVolumeRequest,
 } from '@nyabase/common';
-import { Button } from '../ui/button.js';
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '../ui/dialog.js';
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '../ui/dialog.js';
 import { Input } from '../ui/input.js';
 import { FormField, SelectField } from '../layout/form-field.js';
 import { toast } from '../../hooks/use-toast.js';
@@ -34,10 +33,10 @@ import {
 import { useOpenSession } from '../../hooks/use-dom-state.js';
 import { approxGibHint, formatGib, formatGibInput, grantAvailableLabel } from '../../lib/utils.js';
 import { defaultResourceName } from '../../lib/default-names.js';
-import { SizeField } from '../ui/size-slider.js';
 import { useFittedDefaultSize } from '../../hooks/use-fitted-default-size.js';
-import { QuotaLine, type QuotaLineQuota, overQuotaMessage, quotaFrom, quotaSliderLimits } from '../quota/quota-line.js';
+import { type QuotaLineQuota, quotaFrom, quotaSliderLimits } from '../quota/quota-line.js';
 import { VolumeShrinkOrchestrationDialog } from './volume-shrink-orchestration-dialog.js';
+import { CreateSizeField, VolumeFormError, VolumeFormFooter } from './volume-form-parts.js';
 
 export interface LocalVolumeFormProps {
   volume?: VolumeDto;
@@ -246,23 +245,19 @@ function LocalVolumeFormBody({
               />
             )}
             {!editing ? (
-              <SizeField
+              <CreateSizeField
                 id="volume-size"
-                label="大小"
                 value={sizeGiB}
                 onChange={(value) => {
                   sizeDefault.markTouched();
                   setSizeGiB(value);
                 }}
-                scale={createLimits.scale}
-                availableGib={createLimits.availableGib}
-                invalid={createOver}
-                error={createOver ? overQuotaMessage(createLimits.quota) : undefined}
-              >
-                {serverId ? (
-                  <QuotaLine quota={createLimits.quota} over={createOver} testId="volume-create-remaining" />
-                ) : null}
-              </SizeField>
+                limits={createLimits}
+                quota={createLimits.quota}
+                over={createOver}
+                showQuota={Boolean(serverId)}
+                quotaTestId="volume-create-remaining"
+              />
             ) : (
               <EditSizeField
                 scope={scope}
@@ -275,22 +270,15 @@ function LocalVolumeFormBody({
                 shrinkBlocked={shrinkBlocked}
               />
             )}
-            {(error || floorError || quotaError) && (
-              <p className="text-sm text-destructive" data-testid={quotaError ? 'volume-quota-ineffective' : undefined}>
-                {error ?? floorError ?? quotaError}
-              </p>
-            )}
+            <VolumeFormError message={error ?? floorError ?? quotaError} testId={quotaError ? 'volume-quota-ineffective' : undefined} />
           </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => onOpenChange(false)}>取消</Button>
-            <Button
-              onClick={submit}
-              disabled={pending || Boolean(floorError) || Boolean(quotaError) || shrinkBlocked || createOver}
-              title={quotaError ?? (shrinkBlocked ? shrinkNeverTooltip() : undefined)}
-            >
-              {pending ? '提交中...' : path === 'requires_stop' ? '继续缩容编排' : '保存'}
-            </Button>
-          </DialogFooter>
+          <VolumeFormFooter
+            onCancel={() => onOpenChange(false)}
+            onSubmit={submit}
+            disabled={pending || Boolean(floorError) || Boolean(quotaError) || shrinkBlocked || createOver}
+            blockedReason={quotaError ?? (shrinkBlocked ? shrinkNeverTooltip() : undefined)}
+            label={pending ? '提交中...' : path === 'requires_stop' ? '继续缩容编排' : '保存'}
+          />
         </DialogContent>
       </Dialog>
       {editing && orchestrate && Number.isFinite(nextSize) && (

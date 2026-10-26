@@ -12,8 +12,7 @@ import {
   zCreateSharedVolumeRequest,
   zPatchVolumeRequest,
 } from '@nyabase/common';
-import { Button } from '../ui/button.js';
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '../ui/dialog.js';
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '../ui/dialog.js';
 import { Input } from '../ui/input.js';
 import { FormField, SelectField } from '../layout/form-field.js';
 import { toast } from '../../hooks/use-toast.js';
@@ -31,10 +30,9 @@ import {
 import { useOpenSession } from '../../hooks/use-dom-state.js';
 import { approxGibHint, formatGibInput, sharedBackendAvailableBytes } from '../../lib/utils.js';
 import { defaultResourceName } from '../../lib/default-names.js';
-import { SizeField } from '../ui/size-slider.js';
 import { useFittedDefaultSize } from '../../hooks/use-fitted-default-size.js';
+import { CreateSizeField, VolumeFormError, VolumeFormFooter } from './volume-form-parts.js';
 import {
-  QuotaLine,
   type QuotaLineQuota,
   overQuotaMessage,
   quotaFrom,
@@ -281,43 +279,34 @@ function SharedVolumeFormBody({ sharedVolume: editing, open, onOpenChange }: Sha
               access={liveSharedAccess}
             />
           ) : (
-            <SizeField
+            <CreateSizeField
               id="shared-volume-size"
-              label="大小"
               value={sizeGiB}
               onChange={(value) => {
                 sizeDefault.markTouched();
                 setSizeGiB(value);
               }}
-              scale={createLimits.scale}
-              availableGib={createLimits.availableGib}
-              invalid={createOver}
-              error={createOver ? overQuotaMessage(createQuota) : undefined}
-            >
-              {sharedBackendId ? (
-                <QuotaLine quota={createQuota} over={createOver} testId="shared-volume-create-remaining" />
-              ) : null}
-            </SizeField>
+              limits={createLimits}
+              quota={createQuota}
+              over={createOver}
+              showQuota={Boolean(sharedBackendId)}
+              quotaTestId="shared-volume-create-remaining"
+            />
           )}
           {noOnlineExecutor && (
             <p className="text-xs text-muted-foreground" data-testid="shared-volume-no-executor">
               {NO_ONLINE_EXECUTOR_HINT}
             </p>
           )}
-          {(error || floorError || quotaError) && (
-            <p className="text-sm text-destructive">{error ?? floorError ?? quotaError}</p>
-          )}
+          <VolumeFormError message={error ?? floorError ?? quotaError} />
         </div>
-        <DialogFooter>
-          <Button variant="outline" onClick={() => onOpenChange(false)}>取消</Button>
-          <Button
-            onClick={submit}
-            disabled={pending || Boolean(floorError) || Boolean(quotaError) || shrinkBlocked || createOver}
-            title={quotaError ?? (shrinkBlocked ? shrinkNeverTooltip() : undefined)}
-          >
-            {pending ? '提交中...' : '保存'}
-          </Button>
-        </DialogFooter>
+        <VolumeFormFooter
+          onCancel={() => onOpenChange(false)}
+          onSubmit={submit}
+          disabled={pending || Boolean(floorError) || Boolean(quotaError) || shrinkBlocked || createOver}
+          blockedReason={quotaError ?? (shrinkBlocked ? shrinkNeverTooltip() : undefined)}
+          label={pending ? '提交中...' : '保存'}
+        />
       </DialogContent>
     </Dialog>
   );
