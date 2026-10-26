@@ -33,6 +33,9 @@ import {
 } from '../utils.js';
 import { normalizeOpenSshPublicKey } from './ssh-public-key.js';
 import { CONTAINER_NAME_MAX_LENGTH, CONTAINER_NAME_RE, serverNameProblem } from '../display-name.js';
+
+/** bash as a login shell (it reads ~/.bashrc and the image's prompt); sh where there is no bash. */
+const CONSOLE_DEFAULT_COMMAND = ['/bin/sh', '-c', 'command -v bash >/dev/null 2>&1 && exec bash -l; exec sh -l'];
 import { zGpuPciAddresses } from '../gpu/schema.js';
 
 const USERNAME_RE = /^[a-z0-9_-]+$/;
@@ -69,7 +72,7 @@ export const zIpv4Cidr = z.string().superRefine((value, context) => {
 
 const zName = z.string().trim().min(1).max(128);
 const zContainerName = z.string().min(1).max(CONTAINER_NAME_MAX_LENGTH).regex(CONTAINER_NAME_RE);
-const zServerName = z.string().trim().transform((value) => value.normalize('NFC')).superRefine((value, context) => {
+const zServerName = z.string().trim().max(128).transform((value) => value.normalize('NFC')).superRefine((value, context) => {
   const problem = serverNameProblem(value);
   if (problem) context.addIssue({ code: z.ZodIssueCode.custom, message: problem });
 });
@@ -477,7 +480,7 @@ export const zCreateExecSessionRequest = z.object({
     .max(MAX_CONSOLE_COMMAND_ARGUMENTS)
     .refine((parts) => parts.every((part) => !part.includes('\0')),
       'Command arguments must not contain NUL')
-    .default(['/bin/sh', '-l']),
+    .default(CONSOLE_DEFAULT_COMMAND),
   tty: z.boolean().default(true),
   cols: z.number().int().min(1).max(1_000).default(CONSOLE_DEFAULT_COLS),
   rows: z.number().int().min(1).max(1_000).default(CONSOLE_DEFAULT_ROWS),

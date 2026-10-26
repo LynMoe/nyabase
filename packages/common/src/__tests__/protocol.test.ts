@@ -442,7 +442,7 @@ describe('preflight and console contracts', () => {
 
   it('keeps browser console messages separate from control state', () => {
     expect(zCreateExecSessionRequest.parse({})).toMatchObject({
-      command: ['/bin/sh', '-l'],
+      command: ['/bin/sh', '-c', 'command -v bash >/dev/null 2>&1 && exec bash -l; exec sh -l'],
       tty: true,
       cols: 100,
       rows: 30,

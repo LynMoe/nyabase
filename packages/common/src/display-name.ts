@@ -12,6 +12,8 @@ export const SERVER_NAME_MAX_WIDTH = 32;
 
 /** Letters, marks, digits, punctuation, symbols and the plain space; no controls or invisible formatting. */
 const VISIBLE_NAME_RE = /^[\p{L}\p{M}\p{N}\p{P}\p{S} ]+$/u;
+/** Letters and symbols that render as blank: Hangul fillers and the empty Braille pattern. */
+const BLANK_CHARACTER_RE = /[\u115f\u1160\u3164\uffa0\u2800]/u;
 const ZERO_WIDTH_RE = /^[\p{Mn}\p{Me}]$/u;
 
 /** East Asian Width W/F ranges (CJK, Hangul, kana, fullwidth forms, emoji). */
@@ -57,7 +59,7 @@ export function displayWidth(value: string): number {
 /** Why `name` (already trimmed) cannot be a server name, or null when it can. */
 export function serverNameProblem(name: string): string | null {
   if (name.length === 0) return 'Server name is required';
-  if (!VISIBLE_NAME_RE.test(name)) return 'Server name may only contain visible characters and spaces';
+  if (!VISIBLE_NAME_RE.test(name) || BLANK_CHARACTER_RE.test(name)) return 'Server name may only contain visible characters and spaces';
   if (displayWidth(name) > SERVER_NAME_MAX_WIDTH) {
     return `Server name may take at most ${SERVER_NAME_MAX_WIDTH} columns (CJK characters count as 2)`;
   }

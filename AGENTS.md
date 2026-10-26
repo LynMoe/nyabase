@@ -260,7 +260,8 @@ lab 场景 API 测试，不在 CI 里跑；CI 只跑 `pnpm e2e:check`（e2e 包 
   系统盘在 Incus 已应用配额（无 `volatile.root.apply_quota` 挂起）的观测后释放。
 - guest 提示符：实例规格带 `user.nyabase.display.container` / `user.nyabase.display.server`（容器名、服务器显示名），
   镜像的 `/usr/lib/nyabase/prompt.sh`（nyabase-images 仓库）每次开交互 shell 经 `/dev/incus` 读取，显示 `root@<容器名> [<服务器名>] ~#`；
-  实例名与 guest 主机名保持 `nyc-<id>`。改服务器名唤醒全量扫描改写这两个键，不记 `container.drift_corrected`（`isDisplayConfigKey`）。
+  实例名与 guest 主机名保持 `nyc-<id>`。改服务器名唤醒全量扫描改写这两个键（被搁置 / failed 的容器扫描跳过，等下一个 intent），不记 `container.drift_corrected`（`isDisplayConfigKey`）。
+  控制台默认命令是 `bash -l`（没有 bash 才 `sh -l`）：dash 登录 shell 不读 `~/.bashrc`，提示符只在 bash 里生效。
   容器名仍只许 `[A-Za-z0-9-]`（SSH 按名路由）、≤ 16 个字符；服务器名任意可见字符与空格、≤ 32 列（中文 2 列，common 的 `displayWidth`）。
 - 进程数 / 网卡带宽 / 磁盘读写是可在线编辑的系统设置 `containers.*`，统一作用于所有容器（CephFS 卷不限 IO）。
 - 漂移：平台拥有整份实例文档，只放过 `volatile.*`、`image.*`；未知配置键、多出的设备、设备内多出的键、
