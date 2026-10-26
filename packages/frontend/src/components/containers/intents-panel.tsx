@@ -98,7 +98,7 @@ export function IntentRow({
         ))}
       </div>
       {showRequestSummary && (
-        <pre className="max-h-32 overflow-auto whitespace-pre-wrap break-all rounded bg-muted/50 p-2 text-xs">{JSON.stringify(intent.requestSummary)}</pre>
+        <pre className="max-h-32 overflow-auto whitespace-pre-wrap break-all rounded-sm bg-muted/50 p-2 text-xs">{JSON.stringify(intent.requestSummary)}</pre>
       )}
       {failure && (
         <p className="break-all text-xs text-destructive">{failure}</p>

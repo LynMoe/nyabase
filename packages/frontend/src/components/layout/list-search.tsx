@@ -35,7 +35,7 @@ export function ListSearch({
       {value ? (
         <button
           type="button"
-          className="absolute right-1.5 top-1/2 -translate-y-1/2 rounded p-1 text-muted-foreground hover:text-foreground"
+          className="absolute right-1.5 top-1/2 -translate-y-1/2 rounded-sm p-1 text-muted-foreground hover:text-foreground"
           aria-label="清除搜索"
           onClick={() => onChange('')}
         >
@@ -70,8 +70,8 @@ export function SegmentedFilter<T extends string>({
             aria-checked={active}
             onClick={() => onChange(option.value)}
             className={cn(
-              'rounded px-2.5 py-1 text-sm transition-colors',
-              active ? 'bg-background font-medium text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground',
+              'rounded-sm px-2.5 py-1 text-sm transition-colors',
+              active ? 'bg-background font-medium text-foreground shadow-xs' : 'text-muted-foreground hover:text-foreground',
             )}
           >
             {option.label}

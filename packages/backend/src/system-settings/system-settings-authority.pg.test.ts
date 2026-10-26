@@ -20,7 +20,7 @@ import {
 } from './system-settings-authority.service.js';
 
 const describePg = process.env.NYABASE_TEST_DATABASE_URL
-  ? describe.sequential
+  ? describe
   : describe.skip;
 
 afterEach(() => {

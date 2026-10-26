@@ -33,7 +33,7 @@ export function SummaryCard({
   );
   if (!to) return body;
   return (
-    <Link to={to} className="block rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+    <Link to={to} className="block rounded-lg focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring">
       {body}
     </Link>
   );

@@ -65,7 +65,7 @@ export function AuditTable({ items, onView }: { items: AuditLogDto[]; onView: (i
               </TableCell>
               <TableCell>
                 <span className={cn(
-                  'inline-block max-w-full truncate text-xs px-2 py-0.5 rounded font-medium',
+                  'inline-block max-w-full truncate text-xs px-2 py-0.5 rounded-sm font-medium',
                   auditActionTone(log.action),
                 )}>
                   {auditActionLabel(log.action)}

@@ -35,7 +35,7 @@ function CpuTopologyView({
                 {core.cpus.map((cpu) => {
                   const isReserved = reserved.has(cpu);
                   const className = cn(
-                    'min-w-[2rem] rounded px-1.5 py-0.5 text-center font-mono text-xs tabular-nums',
+                    'min-w-[2rem] rounded-sm px-1.5 py-0.5 text-center font-mono text-xs tabular-nums',
                     isReserved ? 'bg-warning/20 text-warning' : 'bg-muted text-foreground',
                     onToggle && 'cursor-pointer hover:ring-1 hover:ring-ring',
                   );

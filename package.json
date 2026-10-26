@@ -4,20 +4,7 @@
   "packageManager": "pnpm@9.15.0",
   "pnpm": {
     "overrides": {
-      "@grpc/grpc-js": "1.14.4",
-      "body-parser": "2.4.0",
-      "brace-expansion": "2.1.2",
-      "file-type": "21.3.2",
-      "js-yaml": "4.3.0",
-      "lodash": "4.18.1",
-      "multer": "2.5.0",
-      "postcss": "8.5.18",
-      "protobufjs": "7.6.5",
-      "proxy-addr": "2.0.8",
-      "qs": "6.16.1",
-      "seroval": "1.6.8",
-      "uuid": "11.1.1",
-      "ws": "8.21.0"
+      "multer": "2.5.0"
     }
   },
   "scripts": {
@@ -41,11 +28,11 @@
     "e2e:down": "bash tests/e2e/e2e.sh down"
   },
   "devDependencies": {
-    "@typescript-eslint/eslint-plugin": "^8.32.0",
-    "@typescript-eslint/parser": "^8.32.0",
-    "eslint": "^9.26.0",
-    "prettier": "^3.5.3",
-    "typescript": "^5.8.3",
-    "vitest": "^4.1.5"
+    "@typescript-eslint/eslint-plugin": "^8.72.0",
+    "@typescript-eslint/parser": "^8.72.0",
+    "eslint": "^10.13.0",
+    "prettier": "^3.9.10",
+    "typescript": "^6.0.3",
+    "vitest": "^5.0.5"
   }
 }

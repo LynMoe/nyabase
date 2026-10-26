@@ -556,10 +556,11 @@ export const zIntentListQuery = z.object({
 }).strict().superRefine((value, ctx) => {
   if (value.scope === 'mine' && value.limit !== undefined && value.limit > MAX_INTENT_LIST_PAGE_SIZE) {
     ctx.addIssue({
-      code: z.ZodIssueCode.too_big,
-      type: 'number',
+      code: 'too_big',
+      origin: 'number',
       maximum: MAX_INTENT_LIST_PAGE_SIZE,
       inclusive: true,
+      input: value.limit,
       path: ['limit'],
     });
   }
@@ -599,7 +600,7 @@ export const zPreflightReport = z.object({
   }).strict(),
   failureCode: z.nativeEnum(FailureCode).nullable(),
   checkedAt: zIsoDateTime.nullable(),
-  gpu: z.record(z.unknown()).optional(),
+  gpu: z.record(z.string(), z.unknown()).optional(),
 }).strict().superRefine((report, context) => {
   if (report.controlReady && report.checks.networkPrerequisites !== 'pass') {
     context.addIssue({
@@ -614,7 +615,7 @@ export const zErrorResponse = z.object({
   statusCode: z.number().int().min(400).max(599),
   code: z.string().min(1).max(128),
   message: z.string().min(1).max(4_096),
-  details: z.record(z.unknown()).optional(),
+  details: z.record(z.string(), z.unknown()).optional(),
   requestId: z.string().min(1).max(128),
 }).strict();
 
@@ -644,7 +645,7 @@ export const zAddGroupMemberRequest = z.object({
 
 export const zPatchSystemSettingsRequest = z.object({
   expectedRevision: zExpectedRevision,
-  values: z.record(z.unknown())
+  values: z.record(z.string(), z.unknown())
     .refine((values) => Object.keys(values).length > 0, 'At least one setting is required')
     .refine((values) => Object.keys(values).length <= 64, 'At most 64 settings may be updated at once'),
 }).strict();

@@ -7,8 +7,8 @@ export default defineConfig({
   plugins: [TanStackRouterVite(), react()],
   resolve: {
     alias: {
-      '@nyabase/common': path.resolve(__dirname, '../common/src/index.ts'),
-      '@': path.resolve(__dirname, './src'),
+      '@nyabase/common': path.resolve(import.meta.dirname, '../common/src/index.ts'),
+      '@': path.resolve(import.meta.dirname, './src'),
     },
   },
   build: {

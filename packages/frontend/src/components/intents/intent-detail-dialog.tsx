@@ -109,7 +109,7 @@ export function IntentServerRef({
 
 function JsonBlock({ value }: { value: unknown }) {
   return (
-    <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-all rounded bg-muted/50 p-2 text-xs">
+    <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-all rounded-sm bg-muted/50 p-2 text-xs">
       {JSON.stringify(value, null, 2)}
     </pre>
   );

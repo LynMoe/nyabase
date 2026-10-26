@@ -4,8 +4,8 @@ import { defineConfig } from 'vitest/config';
 export default defineConfig({
   resolve: {
     alias: {
-      '@nyabase/common': path.resolve(__dirname, '../common/src/index.ts'),
-      '@': path.resolve(__dirname, './src'),
+      '@nyabase/common': path.resolve(import.meta.dirname, '../common/src/index.ts'),
+      '@': path.resolve(import.meta.dirname, './src'),
     },
     extensionAlias: {
       '.js': ['.tsx', '.ts', '.js'],

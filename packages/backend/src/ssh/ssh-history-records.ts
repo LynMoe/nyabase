@@ -75,9 +75,9 @@ export function mergeConnection(
   b: SshProxyConnectionRecord,
 ): SshProxyConnectionRecord {
   const closing = b.closedAt !== null ? b : a.closedAt !== null ? a : b;
-  const rejectedRequests = { ...a.rejectedRequests };
-  for (const [kind, count] of Object.entries(b.rejectedRequests)) {
-    rejectedRequests[kind] = Math.max(rejectedRequests[kind] ?? 0, count);
+  const rejectedRequests: SshProxyConnectionRecord['rejectedRequests'] = { ...a.rejectedRequests };
+  for (const [kind, count] of Object.entries(b.rejectedRequests) as Array<[keyof typeof rejectedRequests, number | undefined]>) {
+    rejectedRequests[kind] = Math.max(rejectedRequests[kind] ?? 0, count ?? 0);
   }
   return {
     ...b,

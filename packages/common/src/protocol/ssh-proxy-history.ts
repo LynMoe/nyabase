@@ -17,6 +17,9 @@ const zClientText = (max: number) => z.string().max(max).regex(/^[\x20-\x7e]*$/)
 const zSafeCounter = z.number().int().min(0).max(Number.MAX_SAFE_INTEGER);
 const zCount32 = z.number().int().min(0).max(0xffff_ffff);
 /** Close reasons, refusal reasons and request kinds: `snake_case` codes. */
+/** An IPv4 or IPv6 address (zod 4 has no string().ip()). */
+const zIpAddress = z.union([z.ipv4(), z.ipv6()]);
+
 export const zSshHistoryCode = z.string().regex(/^[a-z][a-z0-9_]{0,63}$/);
 
 /** Kinds of refused requests kept per connection (the proxy has about 15). */
@@ -55,7 +58,8 @@ export const zSshProxyConnectionRecord = z.object({
   bytesToClient: zSafeCounter,
   channelsOpened: zCount32,
   channelsRejected: zCount32,
-  rejectedRequests: z.record(zSshHistoryCode, zCount32).refine(
+  // Only the codes that occurred are sent (a zod 4 record over an enum would demand every key).
+  rejectedRequests: z.partialRecord(zSshHistoryCode, zCount32).refine(
     (value) => Object.keys(value).length <= MAX_SSH_REJECTED_REQUEST_KINDS,
     'too many rejected request kinds',
   ),
@@ -86,7 +90,7 @@ export const zSshProxyRefusalsRecord = z.object({
   windowEnd: zSafeCounter,
   refusals: z.array(z.object({
     /** Null once the window already held the proxy's bound of distinct addresses. */
-    peerIp: z.string().ip().nullable(),
+    peerIp: zIpAddress.nullable(),
     reason: zSshHistoryCode,
     count: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
   }).strict()).max(MAX_SSH_PROXY_REFUSALS_PER_WINDOW),
@@ -137,7 +141,7 @@ export const zSshSessionListQuery = z.object({
   serverId: zUuid.optional(),
   /** Connections that opened (or tried to open) a channel to this container, or are pinned to it. */
   containerId: zUuid.optional(),
-  peerIp: z.string().ip().optional(),
+  peerIp: zIpAddress.optional(),
   state: z.enum(['open', 'closed']).optional(),
   since: zIsoDateTime.optional(),
   until: zIsoDateTime.optional(),

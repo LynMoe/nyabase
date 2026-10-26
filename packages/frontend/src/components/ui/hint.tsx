@@ -22,7 +22,7 @@ export function Hint({
       <Tooltip>
         <TooltipTrigger asChild>
           {disabled ? (
-            <span tabIndex={0} className="inline-flex rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+            <span tabIndex={0} className="inline-flex rounded-md focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring">
               {children}
             </span>
           ) : children}

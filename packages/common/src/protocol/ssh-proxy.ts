@@ -97,7 +97,7 @@ export const zSshProxyClientAck = z.object({
 
 export const zSshProxyMetric = z.object({
   name: z.string().min(1).max(128),
-  labels: z.record(z.string()),
+  labels: z.record(z.string(), z.string()),
   value: z.number().finite(),
   ts: z.number().finite(),
 }).strict();

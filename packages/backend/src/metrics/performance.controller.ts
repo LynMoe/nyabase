@@ -48,10 +48,7 @@ export class PerformanceController {
   }
 }
 
-function parseQuery<T extends z.ZodTypeAny>(
-  schema: T,
-  query: Record<string, unknown>,
-): {
+type PerformanceQuery = {
   scope: 'mine' | 'all';
   serverId?: string;
   userId?: string;
@@ -60,7 +57,12 @@ function parseQuery<T extends z.ZodTypeAny>(
   metrics?: string;
   spark?: '1';
   range?: PerformanceRange;
-} {
+};
+
+function parseQuery(
+  schema: z.ZodType<PerformanceQuery>,
+  query: Record<string, unknown>,
+): PerformanceQuery {
   const normalized: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(query)) {
     if (Array.isArray(value)) throw new BadRequestException(`${key} is invalid`);

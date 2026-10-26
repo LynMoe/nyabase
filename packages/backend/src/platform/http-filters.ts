@@ -29,7 +29,7 @@ export class ZodExceptionFilter implements ExceptionFilter {
       status: (code: number) => { json: (body: unknown) => void };
     }>();
 
-    const first = exception.errors[0];
+    const first = exception.issues[0];
     const field = first?.path.join('.') ?? '';
     const message = field ? `${field}: ${first.message}` : (first?.message ?? 'Invalid request parameters');
 
@@ -38,7 +38,7 @@ export class ZodExceptionFilter implements ExceptionFilter {
       code: 'INVALID_INPUT',
       message,
       details: {
-        issues: exception.errors.map((issue) => ({
+        issues: exception.issues.map((issue) => ({
           path: issue.path,
           message: issue.message,
           code: issue.code,
@@ -114,23 +114,28 @@ export class SpaFallbackFilter implements ExceptionFilter {
 
   catch(exception: NotFoundException, host: ArgumentsHost): void {
     const ctx = host.switchToHttp();
-    const request = ctx.getRequest<{ path: string; method: string }>();
+    // NestJS 12 mounts its router under the global prefix, so `path` is relative to it.
+    const request = ctx.getRequest<{ originalUrl: string; method: string }>();
     // Use any for the response to avoid requiring @types/express as a prod dep
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const response = ctx.getResponse<any>();
+    answerNotFound(request.originalUrl.split('?')[0]!, request.method, response, this.indexPath, exception.message);
+  }
+}
 
-    if (request.path.startsWith('/api')) {
-      response.status(404).json({
-        statusCode: 404,
-        message: exception.message,
-        error: 'Not Found',
-      });
-    } else if (isStaticFilePath(request.path) || (request.method !== 'GET' && request.method !== 'HEAD')) {
-      response.status(404).type('text/plain').send('Not Found');
-    } else {
-      response.setHeader('Cache-Control', REVALIDATE_CACHE_CONTROL);
-      response.sendFile(this.indexPath);
-    }
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function answerNotFound(path: string, method: string, response: any, indexPath: string, message: string): void {
+  if (path === '/api' || path.startsWith('/api/')) {
+    response.status(404).json({
+      statusCode: 404,
+      message,
+      error: 'Not Found',
+    });
+  } else if (isStaticFilePath(path) || (method !== 'GET' && method !== 'HEAD')) {
+    response.status(404).type('text/plain').send('Not Found');
+  } else {
+    response.setHeader('Cache-Control', REVALIDATE_CACHE_CONTROL);
+    response.sendFile(indexPath);
   }
 }
 
@@ -138,10 +143,22 @@ export class SpaFallbackFilter implements ExceptionFilter {
  * Serve the bundled frontend from `publicDir` with long-lived caching for the
  * hashed assets and the SPA fallback for client-side routes. Middleware
  * registered before this (security headers) still applies to every response.
+ * Paths outside the API never reach the Nest router (it is mounted under the
+ * global prefix), so the fallback for them is a middleware after the assets.
  */
 export function serveBundledFrontend(app: NestExpressApplication, publicDir: string): void {
+  const indexPath = join(publicDir, 'index.html');
   app.useStaticAssets(publicDir, frontendStaticOptions(publicDir));
-  app.useGlobalFilters(new SpaFallbackFilter(join(publicDir, 'index.html')));
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  app.use((request: any, response: any, next: () => void) => {
+    const path = String(request.originalUrl ?? request.url).split('?')[0]!;
+    if (path === '/api' || path.startsWith('/api/')) {
+      next();
+      return;
+    }
+    answerNotFound(path, request.method, response, indexPath, 'Not Found');
+  });
+  app.useGlobalFilters(new SpaFallbackFilter(indexPath));
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
