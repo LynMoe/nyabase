@@ -149,7 +149,7 @@ export interface InfrastructureImageTable {
   updated_at: InfrastructureGeneratedTimestamp;
 }
 
-/** A fingerprint the image has been pulled at; see migration 000005. */
+/** A fingerprint the image has been pulled at; see `infra.image_versions` in 000001_initial.sql. */
 export interface InfrastructureImageVersionTable {
   image_id: string;
   fingerprint: string;
@@ -159,7 +159,7 @@ export interface InfrastructureImageVersionTable {
   deleted_at: InfrastructureTimestamp | null;
 }
 
-/** An image copy nyabase pulled onto (or adopted on) a server; see migration 000005. */
+/** An image copy nyabase pulled onto (or adopted on) a server; see `infra.image_copies` in 000001_initial.sql. */
 export interface InfrastructureImageCopyTable {
   server_id: string;
   fingerprint: string;

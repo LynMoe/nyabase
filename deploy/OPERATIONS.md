@@ -1438,11 +1438,17 @@ and remove older ones by tag (`docker image rm nyabase-backend:<tag>`). Do not
 run `docker image prune -a` on this host: it deletes every image no container
 uses, including the previous release.
 
-Migration `000007_user-admin-role` removes the `operator` role: every operator
-becomes a plain `user` (their server, image and proxy duties are admin-only now).
-Before upgrading, list them (`SELECT username FROM iam.users WHERE role =
-'operator'`) and, after the upgrade, make the ones who administer people
-`user_admin` (用户管理员) or `admin` on the users page.
+The migrations up to `000007_user-admin-role` were squashed into
+`000001_initial.sql` on 2026-10-26; the new file yields exactly the schema the
+seven produced (compared with `pg_dump --schema-only`). A database that applied
+the seven (production did) is moved over by hand, once, with the Backend
+stopped: after a logical backup, in one transaction
+`DELETE FROM system.schema_migrations WHERE version <> '000001'` and
+`UPDATE system.schema_migrations SET checksum = '<sha256 of 000001_initial.sql>'
+WHERE version = '000001'`, then start the new release. A database on an older
+release than `000007` is not moved this way: upgrade it to a release that
+still ships `000007` first. That migration removed the `operator` role (every
+operator became a plain `user`).
 
 A database created by a pre-launch build is not upgradable to the launch
 build: before launch the single baseline migration was edited in place, so its
@@ -1471,8 +1477,7 @@ instance id; the Backend stores them per instance
 double counts, and folds instances silent for a day into one `archived` row
 per binding.
 
-The same holds for the SSH proxy and its connection history (migration
-`000003`): a Backend accepts an older SSH proxy (it just records no history),
+The same holds for the SSH proxy and its connection history: a Backend accepts an older SSH proxy (it just records no history),
 while an older Backend drops a newer SSH proxy's status reports and ignores
 its `history` frames. Those records stay in the proxy's bounded outbox
 (8192 records, oldest dropped first) until a Backend acknowledges them, so

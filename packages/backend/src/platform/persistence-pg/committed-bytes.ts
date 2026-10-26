@@ -4,7 +4,7 @@ import type { NyabaseDatabase } from './database.types.js';
 /*
  * The bytes a row commits against grants and pool / backend capacity, for sums
  * over `control.volumes` and `control.containers`. A shrink counts at the
- * larger size it reserved until the reconciler verified it (migration 000002),
+ * larger size it reserved until the reconciler verified it,
  * and a root quota Incus has not applied yet at its pending size. Columns are
  * unqualified: use them on a query over that one table.
  */

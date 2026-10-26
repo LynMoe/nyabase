@@ -51,7 +51,7 @@ Vite 通过 alias 将 `@nyabase/common` 指向 `src/index.ts`，但 `index.ts` �
 
 ## 授权模型（`iam/`、`groups/`、`access/`）
 
-- 角色（`user` / `user_admin` / `admin`）存在 `iam.users.role`（没有 operator：迁移 000007 把它降成 user），每个请求从库里读，改角色立即生效（不 bump `auth_version`）。
+- 角色（`user` / `user_admin` / `admin`）存在 `iam.users.role`（没有 operator，旧库里的 operator 已降成 user），每个请求从库里读，改角色立即生效（不 bump `auth_version`）。
   没有系统组：组只用于批量发放资源授权。不存在系统用户。`users/iam-bootstrap.service.ts` 启动时只在**没有任何 active admin** 时补救：创建保留账号 `admin`，
   或把已存在的 active `admin` 提升为 admin（审计归属 NULL）；已有 active admin 时什么都不做（不会撤销降级），`admin` 被禁用且无其他 admin 则报 `ADMIN_BOOTSTRAP_UNAVAILABLE`。资源授权（服务器、数据盘池、共享后端）可授给用户或组，
   同一用户对同一资源可有多条；`iam.effective_*_access` 只合并**当前有效**（未过期）的授权，且只含 active 用户：
@@ -216,7 +216,7 @@ HTTP 代理按路由撤销：每个 hostname 有一个 incarnation，只在连�
 同步状态只在内存（`GET /admin/firewall-rules/status`：`offline | synced | pending | failed`，服务器 DTO `agent.firewall`），不轮询。
 `firewall/` 只依赖 platform / iam / incus，servers → firewall 单向（`FirewallSyncService.agentStatuses`）。预检不再检查「容器可达宿主」与出站网络。
 
-GPU 是平台内置功能（`gpu/` 模块、`common/src/gpu/`、agent 的 `gpu-collector`），不存在扩展框架。卡与 CPU 一样共享：同一张卡可同时绑定到多个容器，只按授权准入，`control.container_gpu_claims` 不按（服务器, 卡）唯一（迁移 000006）。
+GPU 是平台内置功能（`gpu/` 模块、`common/src/gpu/`、agent 的 `gpu-collector`），不存在扩展框架。卡与 CPU 一样共享：同一张卡可同时绑定到多个容器，只按授权准入，`control.container_gpu_claims` 不按（服务器, 卡）唯一。
 
 ## Schema 规则（上线冻结）
 
@@ -225,6 +225,8 @@ GPU 是平台内置功能（`gpu/` 模块、`common/src/gpu/`、agent 的 `gpu-c
 `platform/persistence-pg/migration-freeze.test.ts` 的 `RELEASED_MIGRATION_CHECKSUMS`，**不要改已发布的迁移，也不要改这个常量去迁就**；
 schema 变更一律新增 `NNNNNN_name.sql`（只追加），随版本发布时把它的 sha256 加进常量。
 `000001_initial.sql` 随上线版本冻结；上线前用旧版 000001 建的库（试运行 / staging）必须重建。
+2026-10-26 把 000001–000007 压缩成了新的 `000001_initial.sql`（与旧的 7 个迁移依次应用后的 schema 逐字节相同，`pg_dump --schema-only` 比对过），
+正式库的 `system.schema_migrations` 已手工改写成只剩这一行；之后的 schema 变更照旧从 `000002_*.sql` 起只追加。
 
 ## 本地开发后端
 

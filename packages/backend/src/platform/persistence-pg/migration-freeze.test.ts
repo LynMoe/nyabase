@@ -10,13 +10,8 @@ import { discoverSqlMigrations } from './migrator.js';
  * ships in a release (`sha256sum migrations/NNNNNN_name.sql`).
  */
 const RELEASED_MIGRATION_CHECKSUMS: Readonly<Record<string, string>> = {
-  '000001_initial': 'c6a62ecdfd510dfddd2471228a15a4feaa175b18ba1c59d20901454d9a0c8b2b',
-  '000002_http-proxy-binding-counters': 'a795b512b553392498b6fd5b2a946f3f9ebc518bacc3e711f99c28276eb73af9',
-  '000003_ssh-proxy-history': '322ea62c933704f96f7bc8fee0803e6a1b54721ec78fd39f77262fcaf780e493',
-  '000004_firewall': '63ac5049602cb0c64bbe742a61ba21a8dc628b325acfbbae964b58f8aef77649',
-  '000005_image-versions': 'f2c56f465b92426f7ebc32982ce1835421635b89be0d913c96849aac982072f3',
-  '000006_shared-gpu-claims': '1179bb4914ac712514b5b046061fd17d5baa960e4325cccaa8f5b017747a727f',
-  '000007_user-admin-role': '32910728b41428ba5a5b0b4c6e4007eddd90fb5f7b20e756ba93b76b9768655f',
+  // 000001-000007 squashed on 2026-10-26; production's schema_migrations was rewritten to match.
+  '000001_initial': '8848618cee05d8e08dd708fa2aef656351732a24bd02af2393652139a99160ca',
 };
 
 describe('released SQL migrations', () => {

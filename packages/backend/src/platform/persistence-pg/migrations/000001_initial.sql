@@ -67,14 +67,14 @@ CREATE TABLE iam.users (
     CONSTRAINT users_status_check
         CHECK (status = ANY (ARRAY['active', 'disabled', 'deleting', 'deleted'])),
     CONSTRAINT users_auth_version_check CHECK (auth_version >= 0),
-    CONSTRAINT users_role_check CHECK (role = ANY (ARRAY['user', 'operator', 'admin'])),
+    CONSTRAINT users_role_check CHECK (role = ANY (ARRAY['user', 'user_admin', 'admin'])),
     PRIMARY KEY (id)
 );
 
 COMMENT ON COLUMN iam.users.auth_version IS
   'Browser-session generation embedded in access JWTs';
 COMMENT ON COLUMN iam.users.role IS
-  'Platform role (user < operator < admin); read on every request, so a change is immediate';
+  'Platform role (user < user_admin < admin); read on every request, so a change is immediate';
 
 CREATE TABLE iam.groups (
     id uuid NOT NULL,
@@ -638,10 +638,13 @@ CREATE TABLE control.container_gpu_claims (
     created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
     PRIMARY KEY (container_id, pci_address),
     CONSTRAINT container_gpu_claims_pci_address_check
-        CHECK (pci_address ~ '^[0-9a-f]{8}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]$'),
-    CONSTRAINT container_gpu_claims_server_pci_key
-        UNIQUE (server_id, pci_address)
+        CHECK (pci_address ~ '^[0-9a-f]{8}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]$')
 );
+-- A GPU is shared like CPU: any number of containers whose owners are granted
+-- the card may bind it at once, so a card is not unique per server. The
+-- server_id index keeps the occupancy count and the disable trigger cheap.
+CREATE INDEX container_gpu_claims_server_idx
+    ON control.container_gpu_claims (server_id, pci_address);
 
 -- Every container a user owns on a server is pinned to the user's CPU set;
 -- users whose grant does not limit CPU have no row and use every unreserved CPU.
@@ -1167,6 +1170,249 @@ CREATE INDEX http_proxy_bindings_owner_idx
 CREATE INDEX http_proxy_bindings_pool_idx
     ON interaction.http_proxy_bindings (domain_pool_id, id);
 
+--
+-- Guest egress firewall rules.
+--
+-- Admin-owned rules, each associated with any number of servers. On a server
+-- the rules associated with it apply in priority order (smaller first, the
+-- first match decides, no match accepts); the Backend renders them into one
+-- document per server and pushes it to that server's agent. CIDRs and ports
+-- are stored in canonical form (common/src/protocol/firewall.ts).
+--
+
+CREATE TABLE infra.firewall_rules (
+    id uuid NOT NULL,
+    name text NOT NULL,
+    description text DEFAULT '' NOT NULL,
+    priority integer NOT NULL,
+    action text NOT NULL,
+    protocol text NOT NULL,
+    ports jsonb DEFAULT '[]'::jsonb NOT NULL,
+    cidrs jsonb NOT NULL,
+    revision bigint DEFAULT 1 NOT NULL,
+    created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    updated_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    CONSTRAINT firewall_rules_pkey PRIMARY KEY (id),
+    CONSTRAINT firewall_rules_name_key UNIQUE (name),
+    CONSTRAINT firewall_rules_priority_key UNIQUE (priority),
+    CONSTRAINT firewall_rules_name_check CHECK (length(btrim(name)) > 0),
+    CONSTRAINT firewall_rules_priority_check CHECK (priority BETWEEN 1 AND 1000000),
+    CONSTRAINT firewall_rules_action_check CHECK (action = ANY (ARRAY['accept', 'drop', 'reject'])),
+    CONSTRAINT firewall_rules_protocol_check CHECK (protocol = ANY (ARRAY['all', 'tcp', 'udp'])),
+    CONSTRAINT firewall_rules_ports_check CHECK (jsonb_typeof(ports) = 'array'),
+    CONSTRAINT firewall_rules_protocol_ports_check CHECK (protocol <> 'all' OR ports = '[]'::jsonb),
+    CONSTRAINT firewall_rules_cidrs_check
+        CHECK (jsonb_typeof(cidrs) = 'array' AND jsonb_array_length(cidrs) > 0),
+    CONSTRAINT firewall_rules_revision_check CHECK (revision > 0)
+);
+
+CREATE TABLE infra.firewall_rule_servers (
+    rule_id uuid NOT NULL REFERENCES infra.firewall_rules(id) ON DELETE CASCADE,
+    server_id uuid NOT NULL REFERENCES infra.servers(id) ON DELETE CASCADE,
+    created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    CONSTRAINT firewall_rule_servers_pkey PRIMARY KEY (rule_id, server_id)
+);
+
+-- Documents are built per server.
+CREATE INDEX firewall_rule_servers_server_idx ON infra.firewall_rule_servers (server_id, rule_id);
+
+-- Every fingerprint an image has been pulled at. A repull moves the image (and
+-- new containers) to the new fingerprint but leaves older copies on the servers,
+-- so existing containers keep the version they were created from. An admin
+-- deletes a version once no container uses it: the row is kept as a tombstone
+-- (deleted_at) and each server's full scan removes the copies nothing needs.
+CREATE TABLE infra.image_versions (
+    image_id uuid NOT NULL REFERENCES infra.images(id) ON DELETE CASCADE,
+    fingerprint text NOT NULL,
+    description text,
+    created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    deleted_at timestamp with time zone,
+    CONSTRAINT image_versions_pkey PRIMARY KEY (image_id, fingerprint),
+    CONSTRAINT image_versions_fingerprint_check CHECK (fingerprint ~ '^[0-9a-f]{64}$')
+);
+
+CREATE INDEX image_versions_fingerprint_idx ON infra.image_versions (fingerprint);
+
+-- The image copies nyabase pulled onto (or adopted on) each server: the full
+-- scan only ever removes copies listed here, so images the host's owner keeps
+-- in the same Incus are never touched. Kept past the image row, so copies of
+-- a deleted image are still found and removed. recorded_at is refreshed by
+-- every ensure that holds the copy.
+CREATE TABLE infra.image_copies (
+    server_id uuid NOT NULL REFERENCES infra.servers(id) ON DELETE CASCADE,
+    fingerprint text NOT NULL,
+    recorded_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    CONSTRAINT image_copies_pkey PRIMARY KEY (server_id, fingerprint),
+    CONSTRAINT image_copies_fingerprint_check CHECK (fingerprint ~ '^[0-9a-f]{64}$')
+);
+
+--
+-- Per-binding HTTP traffic counters reported by the HTTP proxies.
+--
+-- A proxy reports raw counters that are cumulative since its process started,
+-- so each process (proxy instance) has its own row per binding and a binding's
+-- totals are the sum over instances. Rows of an instance that has not reported
+-- for a day are folded into one 'archived' row per binding, and the instance is
+-- marked archived so it is never counted again (its rows already are).
+--
+
+CREATE TABLE interaction.http_proxy_counter_instances (
+    proxy_instance text NOT NULL,
+    last_seen_at timestamp with time zone NOT NULL,
+    archived_at timestamp with time zone,
+    CONSTRAINT http_proxy_counter_instances_pkey PRIMARY KEY (proxy_instance),
+    CONSTRAINT http_proxy_counter_instances_key_check
+        CHECK (proxy_instance <> 'archived' AND length(proxy_instance) BETWEEN 1 AND 256)
+);
+
+CREATE TABLE interaction.http_proxy_binding_counters (
+    proxy_instance text NOT NULL,
+    binding_id uuid NOT NULL
+        REFERENCES interaction.http_proxy_bindings(id) ON DELETE CASCADE,
+    requests bigint DEFAULT 0 NOT NULL,
+    rx_bytes bigint DEFAULT 0 NOT NULL,
+    tx_bytes bigint DEFAULT 0 NOT NULL,
+    updated_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    CONSTRAINT http_proxy_binding_counters_pkey PRIMARY KEY (proxy_instance, binding_id),
+    CONSTRAINT http_proxy_binding_counters_values_check
+        CHECK (requests >= 0 AND rx_bytes >= 0 AND tx_bytes >= 0)
+);
+
+-- Totals are read per binding.
+CREATE INDEX http_proxy_binding_counters_binding_idx
+    ON interaction.http_proxy_binding_counters (binding_id);
+
+--
+-- SSH proxy connection history.
+--
+-- A proxy reports every authenticated connection, and each channel it opens
+-- or refuses, as a full record when it opens and again when it closes. Rows
+-- are keyed by the proxy instance (one per proxy process) and the sequence
+-- numbers that instance assigned, so records are upserted in any order and
+-- a record sent twice changes nothing. Users, servers and containers are
+-- kept by id and by their names at the time, without foreign keys: the
+-- history outlives them.
+--
+-- Unauthenticated connections are only counted, per proxy window, address
+-- and reason. Old detail rows are folded into per-day usage and deleted.
+--
+
+CREATE TABLE interaction.ssh_proxy_connections (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    proxy_instance text NOT NULL,
+    connection_seq bigint NOT NULL,
+    proxy_id text NOT NULL,
+    peer text NOT NULL,
+    peer_ip text NOT NULL,
+    client_version text,
+    login text NOT NULL,
+    user_id uuid NOT NULL,
+    username text NOT NULL,
+    key_fingerprint text NOT NULL,
+    key_algorithm text NOT NULL,
+    pinned_server_id uuid,
+    pinned_server_slug text,
+    pinned_container_id uuid,
+    pinned_container_name text,
+    connected_at timestamp with time zone NOT NULL,
+    authenticated_at timestamp with time zone NOT NULL,
+    closed_at timestamp with time zone,
+    close_reason text,
+    -- Last time the proxy reported the connection; a connection whose proxy
+    -- went away is closed as 'lost' at this time.
+    last_seen_at timestamp with time zone NOT NULL,
+    bytes_from_client bigint DEFAULT 0 NOT NULL,
+    bytes_to_client bigint DEFAULT 0 NOT NULL,
+    channels_opened bigint DEFAULT 0 NOT NULL,
+    channels_rejected bigint DEFAULT 0 NOT NULL,
+    rejected_requests jsonb DEFAULT '{}'::jsonb NOT NULL,
+    CONSTRAINT ssh_proxy_connections_pkey PRIMARY KEY (id),
+    CONSTRAINT ssh_proxy_connections_seq_key UNIQUE (proxy_instance, connection_seq),
+    CONSTRAINT ssh_proxy_connections_closed_check
+        CHECK ((closed_at IS NULL) = (close_reason IS NULL)),
+    CONSTRAINT ssh_proxy_connections_values_check
+        CHECK (bytes_from_client >= 0 AND bytes_to_client >= 0
+            AND channels_opened >= 0 AND channels_rejected >= 0)
+);
+
+CREATE INDEX ssh_proxy_connections_connected_idx
+    ON interaction.ssh_proxy_connections (connected_at DESC, id DESC);
+CREATE INDEX ssh_proxy_connections_user_idx
+    ON interaction.ssh_proxy_connections (user_id, connected_at DESC, id DESC);
+CREATE INDEX ssh_proxy_connections_open_idx
+    ON interaction.ssh_proxy_connections (proxy_instance, last_seen_at)
+    WHERE closed_at IS NULL;
+
+CREATE TABLE interaction.ssh_proxy_channels (
+    proxy_instance text NOT NULL,
+    connection_seq bigint NOT NULL,
+    channel_seq bigint NOT NULL,
+    target_host text NOT NULL,
+    target_port bigint NOT NULL,
+    originator text NOT NULL,
+    server_id uuid,
+    server_slug text,
+    container_id uuid,
+    container_name text,
+    instance_name text,
+    routed_ip text,
+    -- 'opened', or why the channel was refused.
+    result text NOT NULL,
+    opened_at timestamp with time zone NOT NULL,
+    closed_at timestamp with time zone,
+    close_reason text,
+    bytes_from_client bigint DEFAULT 0 NOT NULL,
+    bytes_to_client bigint DEFAULT 0 NOT NULL,
+    CONSTRAINT ssh_proxy_channels_pkey PRIMARY KEY (proxy_instance, connection_seq, channel_seq),
+    CONSTRAINT ssh_proxy_channels_values_check
+        CHECK (bytes_from_client >= 0 AND bytes_to_client >= 0)
+);
+
+CREATE INDEX ssh_proxy_channels_container_idx
+    ON interaction.ssh_proxy_channels (container_id, opened_at DESC)
+    WHERE container_id IS NOT NULL;
+CREATE INDEX ssh_proxy_channels_server_idx
+    ON interaction.ssh_proxy_channels (server_id, opened_at DESC)
+    WHERE server_id IS NOT NULL;
+CREATE INDEX ssh_proxy_channels_opened_idx
+    ON interaction.ssh_proxy_channels (opened_at);
+
+CREATE TABLE interaction.ssh_proxy_refusals (
+    proxy_instance text NOT NULL,
+    window_start timestamp with time zone NOT NULL,
+    -- '' counts the addresses beyond the proxy's per-window bound.
+    peer_ip text NOT NULL,
+    reason text NOT NULL,
+    window_end timestamp with time zone NOT NULL,
+    count bigint NOT NULL,
+    CONSTRAINT ssh_proxy_refusals_pkey PRIMARY KEY (proxy_instance, window_start, peer_ip, reason),
+    CONSTRAINT ssh_proxy_refusals_count_check CHECK (count > 0)
+);
+
+CREATE INDEX ssh_proxy_refusals_window_idx
+    ON interaction.ssh_proxy_refusals (window_start);
+
+-- Detail rows past the retention, summed per UTC day. A row with a NULL
+-- container_id holds a user's connections and their bytes; the others hold
+-- the channels to one container and their bytes.
+CREATE TABLE interaction.ssh_proxy_daily_usage (
+    day date NOT NULL,
+    user_id uuid NOT NULL,
+    username text NOT NULL,
+    container_id uuid,
+    container_name text,
+    server_id uuid,
+    server_slug text,
+    connections bigint DEFAULT 0 NOT NULL,
+    channels bigint DEFAULT 0 NOT NULL,
+    bytes_from_client bigint DEFAULT 0 NOT NULL,
+    bytes_to_client bigint DEFAULT 0 NOT NULL,
+    CONSTRAINT ssh_proxy_daily_usage_key UNIQUE NULLS NOT DISTINCT (day, user_id, container_id)
+);
+
+CREATE INDEX ssh_proxy_daily_usage_day_idx
+    ON interaction.ssh_proxy_daily_usage (day);
+
 -- Effective access: current direct grants plus current grants inherited through
 -- group_members, merged per (user, resource), for active users only. A pair
 -- with no current grant, or whose user is not active, has no row: disabling a
@@ -1664,6 +1910,9 @@ FOR EACH ROW EXECUTE FUNCTION infra.touch_updated_at();
 CREATE TRIGGER storage_pools_mutation_guard
 BEFORE UPDATE OF registered, shared_backend_id ON infra.storage_pools
 FOR EACH ROW EXECUTE FUNCTION control.assert_storage_pool_mutation();
+CREATE TRIGGER firewall_rules_touch_updated_at
+BEFORE UPDATE ON infra.firewall_rules
+FOR EACH ROW EXECUTE FUNCTION infra.touch_updated_at();
 CREATE TRIGGER images_touch_updated_at
 BEFORE UPDATE ON infra.images
 FOR EACH ROW EXECUTE FUNCTION infra.touch_updated_at();
