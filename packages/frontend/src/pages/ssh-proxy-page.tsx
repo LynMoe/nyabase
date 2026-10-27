@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { getRouteApi, useNavigate } from '@tanstack/react-router';
 import { RefreshCw, Unplug } from 'lucide-react';
-import type { SshProxyHostKeySummaryDto } from '@nyabase/common';
+import type { SshProxyHostKeySummaryDto, SshProxyLineDto } from '@nyabase/common';
 import { api } from '../lib/api.js';
 import { Button } from '../components/ui/button.js';
 import { Tabs, TabsContent } from '../components/ui/tabs.js';
@@ -15,8 +15,8 @@ import { ACCESS } from '../lib/route-access.js';
 import { useHasRole } from '../lib/use-role.js';
 import { queryPollInterval } from '../lib/query-lifecycle.js';
 import { queryKeys } from '../lib/query-keys.js';
-import { useSshProxyMutations } from './ssh-proxy-page/use-ssh-proxy-mutations.js';
 import { RefusalsSection } from './ssh-proxy-page/refusals-section.js';
+import { SshProxyLinesSection } from './ssh-proxy-page/lines-section.js';
 import { parseSshProxyTab, SshProxyTabsList, visibleSshProxyTab } from './ssh-proxy-page/tabs.js';
 import {
   emptyStatus,
@@ -24,6 +24,7 @@ import {
   HostKeySection,
   type SshProxyAdminStatus,
   SshStatusSections,
+  useSshProxyMutations,
 } from './ssh-proxy-page/status-sections.js';
 
 const routeApi = getRouteApi('/ssh-proxy/');
@@ -49,6 +50,11 @@ export default function SshProxyPage() {
   const hostKeyQuery = useQuery({
     queryKey: queryKeys.sshProxy.hostKey,
     queryFn: () => api.get<SshProxyHostKeySummaryDto>('/admin/ssh-proxy/host-key'),
+    enabled: canManageSettings,
+  });
+  const linesQuery = useQuery({
+    queryKey: queryKeys.sshProxy.lines,
+    queryFn: () => api.get<SshProxyLineDto[]>('/admin/ssh-proxy/lines'),
     enabled: canManageSettings,
   });
   const { data, isFetching, refetch } = statusQuery;
@@ -103,7 +109,7 @@ export default function SshProxyPage() {
         <TabsContent value="live" className="space-y-6">
           {canViewStatus && (
             <QueryView query={statusQuery} resourceName="SSH 代理状态" loadingLabel="加载 SSH 代理状态...">
-              {(loaded) => <SshStatusSections status={loaded} />}
+              {(loaded) => <SshStatusSections status={loaded} noLines={linesQuery.data?.length === 0} />}
             </QueryView>
           )}
           {canManageSettings && (
@@ -117,6 +123,9 @@ export default function SshProxyPage() {
               onResetAuthorities={() => setResetOpen(true)}
             />
           )}
+        </TabsContent>
+        <TabsContent value="lines">
+          {tab === 'lines' && canManageSettings ? <SshProxyLinesSection query={linesQuery} /> : null}
         </TabsContent>
         <TabsContent value="history" className="space-y-3">
           {tab === 'history' ? (

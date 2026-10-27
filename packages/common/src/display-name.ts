@@ -58,10 +58,15 @@ export function displayWidth(value: string): number {
 
 /** Why `name` (already trimmed) cannot be a server name, or null when it can. */
 export function serverNameProblem(name: string): string | null {
-  if (name.length === 0) return 'Server name is required';
-  if (!VISIBLE_NAME_RE.test(name) || BLANK_CHARACTER_RE.test(name)) return 'Server name may only contain visible characters and spaces';
-  if (displayWidth(name) > SERVER_NAME_MAX_WIDTH) {
-    return `Server name may take at most ${SERVER_NAME_MAX_WIDTH} columns (CJK characters count as 2)`;
+  return visibleNameProblem(name, 'Server name', SERVER_NAME_MAX_WIDTH);
+}
+
+/** Why `name` (already trimmed) is not a non-empty visible name of at most `maxWidth` columns. */
+export function visibleNameProblem(name: string, label: string, maxWidth: number): string | null {
+  if (name.length === 0) return `${label} is required`;
+  if (!VISIBLE_NAME_RE.test(name) || BLANK_CHARACTER_RE.test(name)) return `${label} may only contain visible characters and spaces`;
+  if (displayWidth(name) > maxWidth) {
+    return `${label} may take at most ${maxWidth} columns (CJK characters count as 2)`;
   }
   return null;
 }

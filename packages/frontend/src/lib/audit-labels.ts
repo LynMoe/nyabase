@@ -99,6 +99,10 @@ const AUDIT_ACTION_LABELS: Record<string, string> = {
   [AuditAction.DeleteHttpDomainPool]: '删除 HTTP 域名池',
   [AuditAction.DisconnectSshProxySessions]: '断开 SSH 代理会话',
   [AuditAction.RotateSshProxyHostKey]: '轮换 SSH 主机密钥',
+  [AuditAction.CreateSshProxyLine]: '新增 SSH 线路',
+  [AuditAction.UpdateSshProxyLine]: '修改 SSH 线路',
+  [AuditAction.DeleteSshProxyLine]: '删除 SSH 线路',
+  [AuditAction.ReorderSshProxyLines]: '调整 SSH 线路顺序',
   [AuditAction.ResetSshHostAuthorities]: '重置容器主机证书 CA',
 };
 

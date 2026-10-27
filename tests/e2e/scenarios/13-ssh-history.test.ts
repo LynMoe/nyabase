@@ -44,16 +44,17 @@ describe('SSH connection history', () => {
 
   it('records one connection with a channel per container, refused requests and bytes', async () => {
     const client = await user.session.api.get<SshClientConfigDto>(`/users/${user.id}/ssh-client-config`);
-    assert.ok(client.proxy && client.knownHosts);
+    const line = client.lines[0];
+    assert.ok(line && client.knownHosts);
     const config = join(h.dir, 'history.conf');
     const knownHosts = join(h.dir, 'history-known-hosts');
     writeFileSync(knownHosts, `${client.knownHosts}\n`);
     writeFileSync(config, [
       'Host jump',
-      `  HostName ${client.proxy.host}`,
-      `  Port ${client.proxy.port}`,
+      `  HostName ${line.host}`,
+      `  Port ${line.port}`,
       `  User ${user.username}`,
-      `  HostKeyAlias ${client.proxy.port === 22 ? client.proxy.host : `[${client.proxy.host}]:${client.proxy.port}`}`,
+      `  HostKeyAlias ${line.port === 22 ? line.host : `[${line.host}]:${line.port}`}`,
       'Host *',
       `  IdentityFile ${user.keyFile}`,
       '  IdentitiesOnly yes',

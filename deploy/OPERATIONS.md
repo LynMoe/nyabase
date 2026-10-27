@@ -395,12 +395,27 @@ alone; the jump login only labels the session. A `direct-tcpip` target is
 either a container's routed IP or its name, bare (`work`) or with the host
 suffix `ssh.proxyHostSuffix` (default `nya`, so `work.nya`), and a name is
 looked up only among the key holder's own containers. Container names are
-therefore unique per owner, ignoring case (and still per server). Each user's
-profile page shows a one-time `~/.ssh/config` block (`Host *.<suffix>` with
-`ProxyJump <user>@<proxy host>:<port>`) and two `known_hosts` lines: the
-proxy's host key and `@cert-authority *.<suffix> <the user's host CA>`. After
-that `ssh root@work.nya` works for every current and future container with
-strict host key checking and no fingerprint prompt.
+therefore unique per owner, ignoring case (and still per server). Every
+container's SSH card has a 快速连接 tab (`ssh <name>.<suffix>`) whose
+配置说明 is a one-time `~/.ssh/config` block (`Host *.<suffix>` with
+`ProxyJump <user>@<line host>:<port>`) plus `known_hosts` lines: the proxy's
+host key under every line's address and `@cert-authority *.<suffix> <the
+user's host CA>`. After that `ssh root@work.nya` works for every current and
+future container with strict host key checking and no fingerprint prompt.
+
+**Lines.** The addresses users reach the proxy by are *lines*, managed by
+admins under SSH 代理 → 线路 (`/admin/ssh-proxy/lines`): a name (自动, 校园网,
+广州…), a public host and port that end up at `NYABASE_SSH_LISTEN`, and an
+optional hint, in an order the admin sets. Every container's SSH card shows one
+`ssh -J` tab per line, in that order, with the hint under its command; the
+one-time setup goes through the line the user picks there (the first by
+default). Without a line users cannot reach their containers, and the live
+tab says so. Lines replaced the `ssh.proxyPublicHost` / `ssh.proxyPublicPort`
+settings in migration 000002: an address stored in the settings became the
+line `默认`, and the keys are now ignored in YAML and the environment, so
+check 线路 after upgrading a deployment that set them only through
+`SSH_PROXY_PUBLIC_HOST`. Deleting or re-addressing a line breaks the
+ssh_config and known_hosts lines users copied for it.
 
 **Container host certificates.** Every user has their own Ed25519 host CA
 (`interaction.ssh_host_authorities`, private key encrypted with

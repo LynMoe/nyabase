@@ -147,6 +147,7 @@ export enum FailureCode {
   IpPoolCidrConflict = 'IP_POOL_CIDR_CONFLICT',
   FirewallRuleConflict = 'FIREWALL_RULE_CONFLICT',
   FirewallTooLarge = 'FIREWALL_TOO_LARGE',
+  SshProxyLineConflict = 'SSH_PROXY_LINE_CONFLICT',
   SharedBackendQuotaExceeded = 'SHARED_BACKEND_QUOTA_EXCEEDED',
   SharedBackendInUse = 'SHARED_BACKEND_IN_USE',
   SharedBackendIdentityConflict = 'SHARED_BACKEND_IDENTITY_CONFLICT',
@@ -273,4 +274,8 @@ export enum AuditAction {
   DisconnectSshProxySessions = 'ssh_proxy.sessions.disconnect_all',
   RotateSshProxyHostKey = 'ssh_proxy.host_key.rotate',
   ResetSshHostAuthorities = 'ssh_proxy.host_authorities.reset',
+  CreateSshProxyLine = 'ssh_proxy.line.create',
+  UpdateSshProxyLine = 'ssh_proxy.line.update',
+  DeleteSshProxyLine = 'ssh_proxy.line.delete',
+  ReorderSshProxyLines = 'ssh_proxy.line.reorder',
 }

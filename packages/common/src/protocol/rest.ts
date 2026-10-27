@@ -21,6 +21,7 @@ import type {
 } from './rest-schema.js';
 import type { GpuContainerState, GpuHealthDto } from '../gpu/dto.js';
 import type { ConfigSourceName, ConfigValueKind } from '../config/definition.js';
+import type { SshProxyLineDto } from './ssh-proxy.js';
 
 export type {
   AddGroupMemberRequest,
@@ -110,11 +111,6 @@ export interface PublicSettingsDto {
     title: string;
     description: string;
   };
-  sshProxy: {
-    host: string;
-    port: number;
-    hostSuffix: string;
-  } | null;
 }
 
 export interface GroupSummaryDto {
@@ -220,12 +216,13 @@ export interface SshProxySnapshotSummaryDto {
 /** `GET /users/:id/ssh-client-config` (yourself only): reach every container as `<name>.<hostSuffix>`. */
 export interface SshClientConfigDto {
   hostSuffix: string;
-  /** Null until an administrator sets the SSH proxy's public address. */
-  proxy: { host: string; port: number; hostKey: string } | null;
+  /** The proxy's public addresses in the administrators' order; empty until one is added. */
+  lines: SshProxyLineDto[];
+  /** The proxy's host key (`ssh-ed25519 …`), the same on every line. */
+  proxyHostKey: string;
   /** Your host CA (`ssh-ed25519 …`); it signs only your containers' host keys. */
   hostCertificateAuthority: string;
-  /** Ready to paste into ~/.ssh/config and ~/.ssh/known_hosts; null without a proxy address. */
-  sshConfig: string | null;
+  /** Ready to paste into ~/.ssh/known_hosts, covering every line; null without one. */
   knownHosts: string | null;
 }
 
@@ -712,8 +709,6 @@ export interface ContainerSshDto {
   loginUser: string;
   /** `<name>.<suffix>`: the SSH proxy resolves it among the owner's containers. */
   hostName: string;
-  proxyHost: string | null;
-  proxyPort: number | null;
   observedAt: string | null;
   lastError: string | null;
 }

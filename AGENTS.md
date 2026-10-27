@@ -187,7 +187,9 @@ Vite 通过 alias 将 `@nyabase/common` 指向 `src/index.ts`，但 `index.ts` �
 读取源码文本的 surface 测试用 `lib/read-source.test-helper.ts` 的 `readSource` / `readSourceDir`。
 
 SSH 代理按公钥认证、按名路由：direct-tcpip 目标是容器 IP 或 `<容器名>[.<ssh.proxyHostSuffix>]`，只在持钥用户自己的容器里解析
-（所以容器名按所有者忽略大小写唯一，`containers_owner_name_key`）。快照只下发有可达路由的用户 / 容器。每个用户一个主机证书 CA
+（所以容器名按所有者忽略大小写唯一，`containers_owner_name_key`）。代理的公网地址是有序的「线路」（`interaction.ssh_proxy_lines`，admin 在 SSH 代理 → 线路 / `/admin/ssh-proxy/lines` 管理，名称 + host:port + 可选提示），
+不是系统设置（`ssh.proxyPublicHost/Port` 已由 000002 迁成第一条线路 `默认`）；用户经 `ssh-client-config` 读到全部线路，known_hosts 覆盖每条线路的地址。
+容器 SSH 卡片 = 「快速连接」tab（`ssh <名>.<后缀>`，旁边是一次性配置说明，ProxyJump 经用户选的线路，默认第一条）+ 每条线路一个 `ssh -J` tab（提示显示在命令下）。快照只下发有可达路由的用户 / 容器。每个用户一个主机证书 CA
 （`ssh-host-ca/`，只依赖 platform；`SshKeyCryptoService` 在 `platform/`），reconciler 在 sshd 就绪后签发确定性的主机证书并写 sshd drop-in，
 尽力而为、不让 intent 失败；guest 的 `authorized_keys` 只改标记块内的内容。
 

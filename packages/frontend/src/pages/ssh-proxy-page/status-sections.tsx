@@ -1,7 +1,7 @@
 import { Activity, Gauge, PlugZap, RefreshCw, RotateCcw, ShieldAlert, Wifi } from 'lucide-react';
 import { Link } from '@tanstack/react-router';
 import type { SshProxyHostKeySummaryDto, SshProxySnapshotSummaryDto, SshProxyStatusReport } from '@nyabase/common';
-import type { UseQueryResult } from '@tanstack/react-query';
+import { useMutation, useQueryClient, type UseQueryResult } from '@tanstack/react-query';
 import { formatBytes, formatRate } from '../../lib/utils.js';
 import { Badge } from '../../components/ui/badge.js';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../../components/ui/table.js';
@@ -9,6 +9,10 @@ import { MetricTile, SectionCard } from '../../components/layout/section-card.js
 import { TechnicalId } from '../../components/refs/technical-id.js';
 import { Button } from '../../components/ui/button.js';
 import { QueryView } from '../../components/layout/query-view.js';
+import { api } from '../../lib/api.js';
+import { errorMessage } from '../../lib/api-error.js';
+import { toast } from '../../hooks/use-toast.js';
+import { queryKeys } from '../../lib/query-keys.js';
 
 export interface SshProxyAdminStatus {
   connectedProxies: number;
@@ -21,7 +25,6 @@ export interface SshProxyAdminStatus {
   bandwidthInBps: number;
   bandwidthOutBps: number;
   updatedAt: string | null;
-  publicEndpoint: { host: string; port: number } | null;
   snapshot: SshProxySnapshotSummaryDto | null;
   proxies: SshProxyStatusReport[];
 }
@@ -29,7 +32,7 @@ export interface SshProxyAdminStatus {
 /** Above this share of the cap the next growth could make every build fail. */
 const SNAPSHOT_WARN_RATIO = 0.75;
 
-export function SshStatusSections({ status }: { status: SshProxyAdminStatus }) {
+export function SshStatusSections({ status, noLines }: { status: SshProxyAdminStatus; noLines: boolean }) {
   const proxies = status.proxies ?? [];
   const connections = proxies.flatMap((proxy) => (proxy.connections ?? []).map((connection) => ({
     ...connection,
@@ -39,7 +42,7 @@ export function SshStatusSections({ status }: { status: SshProxyAdminStatus }) {
   const latest = status.snapshot?.generation ?? null;
   return (
     <div className="space-y-6">
-      <SnapshotHealth status={status} />
+      <SnapshotHealth status={status} noLines={noLines} />
       <section className="grid grid-cols-2 gap-3 xl:grid-cols-4">
         <MetricTile icon={Wifi} label="在线代理" value={status.connectedProxies.toString()} sub={`${proxies.length} 个实例上报`} />
         <MetricTile icon={Activity} label="活跃连接" value={status.activeConnections.toString()} sub={`累计 ${status.totalConnections} 次`} />
@@ -174,15 +177,15 @@ export function SshStatusSections({ status }: { status: SshProxyAdminStatus }) {
   );
 }
 
-/** The facts an operator needs before users notice: no public address, a failing or nearly full snapshot. */
-function SnapshotHealth({ status }: { status: SshProxyAdminStatus }) {
+/** The facts an operator needs before users notice: no line, a failing or nearly full snapshot. */
+function SnapshotHealth({ status, noLines }: { status: SshProxyAdminStatus; noLines: boolean }) {
   const snapshot = status.snapshot;
   const ratio = snapshot && snapshot.maxBytes > 0 ? snapshot.bytes / snapshot.maxBytes : 0;
   return (
     <div className="space-y-3">
-      {!status.publicEndpoint ? (
-        <Notice testId="ssh-proxy-no-endpoint">
-          尚未配置 SSH 代理公网地址，在 <Link to="/system-settings" className="font-medium underline underline-offset-4">系统设置</Link> 填写「SSH 代理公网主机」。
+      {noLines ? (
+        <Notice testId="ssh-proxy-no-lines">
+          尚未添加线路，用户无法经代理登录容器。去 <Link to="/ssh-proxy" search={{ tab: 'lines' }} className="font-medium underline underline-offset-4">线路</Link> 添加。
         </Notice>
       ) : null}
       {snapshot?.error ? (
@@ -245,7 +248,6 @@ export const emptyStatus: SshProxyAdminStatus = {
   bandwidthInBps: 0,
   bandwidthOutBps: 0,
   updatedAt: null,
-  publicEndpoint: null,
   snapshot: null,
   proxies: [],
 };
@@ -320,4 +322,72 @@ export function HostKeySection({
         </QueryView>
       </section>
   );
+}
+
+/** The page actions on the proxy itself: disconnect everyone, rotate its host key, reset every host CA. */
+interface DisconnectAllResult {
+  requestId: string;
+  requested: number;
+  disconnected: number;
+}
+
+export function useSshProxyMutations({
+  onDisconnected,
+  onRotated,
+  onAuthoritiesReset,
+}: {
+  onDisconnected: () => void;
+  onRotated: () => void;
+  onAuthoritiesReset: () => void;
+}) {
+  const qc = useQueryClient();
+  const disconnectAll = useMutation({
+    mutationFn: () => api.post<DisconnectAllResult>('/admin/ssh-proxy/disconnect-all'),
+    onSuccess: (result) => {
+      onDisconnected();
+      void qc.invalidateQueries({ queryKey: queryKeys.sshProxy.status });
+      toast({
+        title: '已发送断开命令',
+        description: `已断开 ${result.disconnected} 个会话，目标代理 ${result.requested} 个。`,
+      });
+    },
+    onError: (error) => toast({
+      title: '断开失败',
+      description: errorMessage(error),
+      variant: 'destructive',
+    }),
+  });
+
+  const rotateHostKey = useMutation({
+    mutationFn: () => api.post<SshProxyHostKeySummaryDto>('/admin/ssh-proxy/host-key/rotate'),
+    onSuccess: (updated) => {
+      onRotated();
+      qc.setQueryData(queryKeys.sshProxy.hostKey, updated);
+      void qc.invalidateQueries({ queryKey: queryKeys.sshProxy.status });
+      toast({ title: 'SSH 主机密钥已轮换' });
+    },
+    onError: (error) => toast({
+      title: '轮换失败',
+      description: errorMessage(error),
+      variant: 'destructive',
+    }),
+  });
+
+  const resetHostAuthorities = useMutation({
+    mutationFn: () => api.post<{ reset: number }>('/admin/ssh-proxy/host-authorities/reset'),
+    onSuccess: (result) => {
+      onAuthoritiesReset();
+      toast({
+        title: '容器证书 CA 已重置',
+        description: `重置了 ${result.reset} 个用户的 CA，所有容器正在后台重新签发证书。`,
+      });
+    },
+    onError: (error) => toast({
+      title: '重置失败',
+      description: errorMessage(error),
+      variant: 'destructive',
+    }),
+  });
+
+  return { disconnectAll, rotateHostKey, resetHostAuthorities };
 }

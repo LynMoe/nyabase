@@ -160,8 +160,6 @@ export class ContainerDtoAssembler {
     const route = context.routes.get(row.id);
     const pool = context.pools.get(row.root_pool_id);
     const actualStatus = containerStatus(route?.runtimeStatus, row.power_intent as ContainerPowerIntent);
-    const proxyHost = this.config.get<string>('ssh.proxyPublicHost')?.trim() || null;
-    const proxyPort = this.config.get<number>('ssh.proxyPublicPort') || null;
     return {
       id: row.id,
       serverId: row.server_id,
@@ -205,8 +203,6 @@ export class ContainerDtoAssembler {
         ready: route?.sshStatus === 'running' && actualStatus === ContainerStatus.Running,
         loginUser: image?.login_user ?? 'root',
         hostName: sshContainerHostName(row.name, this.config.get<string>('ssh.proxyHostSuffix') ?? ''),
-        proxyHost,
-        proxyPort,
         observedAt: isoDate(route?.observedAt),
         lastError: route?.lastError ?? null,
       },

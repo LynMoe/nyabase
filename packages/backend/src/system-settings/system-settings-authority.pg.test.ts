@@ -252,8 +252,6 @@ describePg('System settings PostgreSQL authority', () => {
           'auth.refreshTokenExpiresDays',
           'audit.retentionDays',
           'audit.retentionMaxEntries',
-          'ssh.proxyPublicHost',
-          'ssh.proxyPublicPort',
           'ssh.proxySnapshotStaleMs',
         ]));
         expect(keys).not.toEqual(expect.arrayContaining([

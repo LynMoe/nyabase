@@ -27,7 +27,6 @@ function makeController() {
     revision: vi.fn(() => revision),
     publicSettings: vi.fn(() => ({
       branding: { title: 'nyabase', description: 'dev' },
-      sshProxy: null,
     })),
   };
   const committedSnapshot = {

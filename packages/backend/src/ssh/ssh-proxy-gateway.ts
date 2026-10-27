@@ -253,7 +253,6 @@ export class SshProxyGateway implements OnModuleInit, OnModuleDestroy {
     bandwidthInBps: number;
     bandwidthOutBps: number;
     updatedAt: string | null;
-    publicEndpoint: { host: string; port: number } | null;
     snapshot: SshProxySnapshotSummaryDto | null;
     proxies: SshProxyStatusReport[];
   } {
@@ -277,7 +276,6 @@ export class SshProxyGateway implements OnModuleInit, OnModuleDestroy {
       bandwidthInBps: boundedStatusSum(proxies, (proxy) => proxy.bandwidthInBps),
       bandwidthOutBps: boundedStatusSum(proxies, (proxy) => proxy.bandwidthOutBps),
       updatedAt: safeStatusTimestampIso(last),
-      publicEndpoint: this.snapshots.endpoint(),
       snapshot: this.snapshots.lastSummary(),
       proxies,
     };

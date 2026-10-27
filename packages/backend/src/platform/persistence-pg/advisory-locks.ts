@@ -10,6 +10,7 @@ const SERVER_ONBOARDING_ADVISORY_KEY = 5;
 const IMAGE_CAPACITY_ADVISORY_KEY = 6;
 const IP_POOL_TOPOLOGY_ADVISORY_KEY = 7;
 const FIREWALL_POLICY_ADVISORY_KEY = 8;
+const SSH_PROXY_LINES_ADVISORY_KEY = 9;
 
 /** Transaction-scoped lock serializing server admission and removal. */
 export async function lockServerOnboarding(executor: AdvisoryLockExecutor): Promise<void> {
@@ -48,6 +49,14 @@ export async function lockFirewallPolicy(executor: AdvisoryLockExecutor): Promis
   await sql`select pg_advisory_xact_lock(
     ${INFRASTRUCTURE_ADVISORY_NAMESPACE},
     ${FIREWALL_POLICY_ADVISORY_KEY}
+  )`.execute(executor);
+}
+
+/** Transaction-scoped lock serializing SSH proxy line writes (their count and order span every line). */
+export async function lockSshProxyLines(executor: AdvisoryLockExecutor): Promise<void> {
+  await sql`select pg_advisory_xact_lock(
+    ${INFRASTRUCTURE_ADVISORY_NAMESPACE},
+    ${SSH_PROXY_LINES_ADVISORY_KEY}
   )`.execute(executor);
 }
 

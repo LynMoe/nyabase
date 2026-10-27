@@ -16,6 +16,7 @@ import {
   type SshClientConfigDto,
   type SshPublicKeyDto,
   type UserDto,
+  formatSshClientConfig,
 } from '@nyabase/common';
 import { Api, ApiError, login, type Session } from './api.js';
 import { PollAbort, pollUntil, waitIntent } from './poll.js';
@@ -291,9 +292,8 @@ export class Harness {
   ): Promise<string> {
     if (!user.keyFile) throw new Error('user has no ssh key');
     const client = await user.session.api.get<SshClientConfigDto>(`/users/${user.id}/ssh-client-config`);
-    if (!client.proxy || !client.sshConfig || !client.knownHosts) {
-      throw new Error('the SSH proxy has no public address');
-    }
+    const line = client.lines[0];
+    if (!line || !client.knownHosts) throw new Error('the SSH proxy has no line');
     const trusted = options.knownHostsFrom
       ? await options.knownHostsFrom.session.api.get<SshClientConfigDto>(
         `/users/${options.knownHostsFrom.id}/ssh-client-config`,
@@ -304,7 +304,7 @@ export class Harness {
     writeFileSync(knownHosts, `${trusted.knownHosts}\n`);
     const config = join(this.dir, `ssh-${tag}.conf`);
     writeFileSync(config, [
-      client.sshConfig,
+      formatSshClientConfig({ username: user.username, host: line.host, port: line.port, hostSuffix: client.hostSuffix }),
       'Host *',
       `  IdentityFile ${user.keyFile}`,
       '  IdentitiesOnly yes',
@@ -315,7 +315,7 @@ export class Harness {
       '  ConnectTimeout 20',
     ].join('\n'));
     const target = options.target ?? container.ssh.hostName;
-    const { host, port } = client.proxy;
+    const { host, port } = line;
     // A target outside `*.<suffix>` gets no ProxyJump from the config.
     const jump = options.jumpLogin || !target.endsWith(`.${client.hostSuffix}`)
       ? ['-o', `ProxyJump=${options.jumpLogin ?? user.username}@${host}:${port}`]

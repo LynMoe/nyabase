@@ -31,7 +31,6 @@ describe('bounded SSH proxy snapshots', () => {
       createdAt: new Date(0).toISOString(),
       staleAfterMs: 120_000,
       validUntil: 120_000,
-      endpoint: null,
       hostKey: {
         privateKey: 'key',
         publicKey: 'key',
@@ -75,7 +74,6 @@ describe('bounded SSH proxy snapshots', () => {
       createdAt: new Date(0).toISOString(),
       staleAfterMs: 120_000,
       validUntil: 120_000,
-      endpoint: null,
       hostKey: { privateKey: 'key', publicKey: 'key', fingerprint: 'fingerprint', generation: 1 },
       hostSuffix: 'nya',
       users: [],
@@ -92,7 +90,6 @@ describe('bounded SSH proxy snapshots', () => {
       createdAt: new Date(0).toISOString(),
       staleAfterMs: 120_000,
       validUntil: 120_000,
-      endpoint: { host: repeated('h', 253), port: 22 },
       hostKey: {
         privateKey: repeated('p', 16 * 1024),
         publicKey: repeated('u', 4 * 1024),

@@ -106,8 +106,8 @@ export class UsersController {
   @Get(':id/ssh-client-config')
   async sshClientConfigFor(@Param('id') id: string, @CurrentActor() actor: Actor) {
     if (actor.userId !== id) throw new ForbiddenException();
-    const user = await this.usersService.findById(id);
-    return this.sshClientConfig.forUser({ id, username: user.username });
+    await this.usersService.findById(id);
+    return this.sshClientConfig.forUser({ id });
   }
 
   @Post(':id/ssh-keys')

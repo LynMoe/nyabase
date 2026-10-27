@@ -1,11 +1,11 @@
-import { BarChart3, History, RadioTower, ShieldX } from 'lucide-react';
+import { BarChart3, History, RadioTower, Route, ShieldX } from 'lucide-react';
 import { TabsList, TabsTrigger } from '../../components/ui/tabs.js';
 
-export const SSH_PROXY_TABS = ['live', 'history', 'stats', 'refusals'] as const;
+export const SSH_PROXY_TABS = ['live', 'lines', 'history', 'stats', 'refusals'] as const;
 export type SshProxyTab = (typeof SSH_PROXY_TABS)[number];
 
-/** Tabs about the proxy itself (status, host keys, refusals); the rest is everyone's connection history. */
-const OPERATIONS_TABS: readonly SshProxyTab[] = ['live', 'refusals'];
+/** Tabs about the proxy itself (status, host keys, lines, refusals); the rest is everyone's connection history. */
+const OPERATIONS_TABS: readonly SshProxyTab[] = ['live', 'lines', 'refusals'];
 
 export function parseSshProxyTab(value: unknown): SshProxyTab {
   return SSH_PROXY_TABS.includes(value as SshProxyTab) ? (value as SshProxyTab) : 'live';
@@ -18,6 +18,7 @@ export function visibleSshProxyTab(tab: SshProxyTab, canOperate: boolean): SshPr
 
 const TAB_ITEMS = [
   ['live', '实时', RadioTower],
+  ['lines', '线路', Route],
   ['history', '连接历史', History],
   ['stats', '统计', BarChart3],
   ['refusals', '未认证连接', ShieldX],

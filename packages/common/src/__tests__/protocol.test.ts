@@ -39,6 +39,8 @@ import {
   formatSshAgentSetupPrompt,
   formatSshClientConfig,
   formatSshKnownHosts,
+  zCreateSshProxyLineRequest,
+  zPatchSshProxyLineRequest,
   formatSshJumpCommand,
   formatSshProxyJump,
   sshContainerHostName,
@@ -237,12 +239,19 @@ describe('canonical container and volume contracts', () => {
     expect(formatSshClientConfig({ username: 'alice', host: 'ssh.example.com', port: 2222, hostSuffix: 'nya' }))
       .toBe('Host *.nya\n  User root\n  ProxyJump alice@ssh.example.com:2222');
     expect(formatSshKnownHosts({
-      host: 'ssh.example.com',
-      port: 2222,
+      endpoints: [
+        { host: 'ssh.example.com', port: 2222 },
+        { host: '10.0.0.1', port: 22 },
+        { host: 'ssh.example.com', port: 2222 },
+      ],
       hostSuffix: 'nya',
       proxyHostKey: 'ssh-ed25519 AAAAproxy nyabase-ssh-proxy',
       hostCertificateAuthority: 'ssh-ed25519 AAAAca alice',
-    })).toBe('[ssh.example.com]:2222 ssh-ed25519 AAAAproxy\n@cert-authority *.nya ssh-ed25519 AAAAca');
+    })).toBe([
+      '[ssh.example.com]:2222 ssh-ed25519 AAAAproxy',
+      '10.0.0.1 ssh-ed25519 AAAAproxy',
+      '@cert-authority *.nya ssh-ed25519 AAAAca',
+    ].join('\n'));
     const prompt = formatSshAgentSetupPrompt({
       sshConfig: 'Host *.nya\n  User root',
       knownHosts: '@cert-authority *.nya ssh-ed25519 AAAAca',
@@ -253,6 +262,19 @@ describe('canonical container and volume contracts', () => {
     expect(prompt).toContain('\nHost *.nya\n  User root\n');
     expect(prompt).toContain('\n@cert-authority *.nya ssh-ed25519 AAAAca\n');
     expect(prompt).toContain('`ssh -o BatchMode=yes work.nya true`');
+  });
+
+  it('validates SSH proxy lines', () => {
+    expect(zCreateSshProxyLineRequest.parse({ name: ' 校园网 ', host: 'SSH.Example.com', port: 52515, hint: '  ' }))
+      .toEqual({ name: '校园网', host: 'ssh.example.com', port: 52515, hint: null });
+    expect(zCreateSshProxyLineRequest.parse({ name: '广州', host: '2001:DB8::1', port: 22 }).host).toBe('2001:db8::1');
+    for (const host of ['ssh example.com', 'user@host', '-host', 'host:22', 'a..b', '']) {
+      expect(zCreateSshProxyLineRequest.safeParse({ name: 'x', host, port: 22 }).success, host).toBe(false);
+    }
+    expect(zCreateSshProxyLineRequest.safeParse({ name: '一二三四五六七八九', host: 'h', port: 22 }).success).toBe(false);
+    expect(zCreateSshProxyLineRequest.safeParse({ name: 'x', host: 'h', port: 22, hint: 'a\nb' }).success).toBe(false);
+    expect(zPatchSshProxyLineRequest.safeParse({}).success).toBe(false);
+    expect(zPatchSshProxyLineRequest.parse({ hint: '' })).toEqual({ hint: null });
   });
 
   it('uses local or shared storage scopes without source aliases', () => {
@@ -597,8 +619,6 @@ describe('canonical DTO shapes', () => {
         ready: true,
         loginUser: 'root',
         hostName: 'work.nya',
-        proxyHost: null,
-        proxyPort: null,
         observedAt: null,
         lastError: null,
       },

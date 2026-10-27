@@ -52,6 +52,7 @@ const USER_ADMIN_ROUTES = [
 const ADMIN_ROUTES = [
   'DELETE admin/firewall-rules/:param',
   'DELETE admin/ip-pools/:param',
+  'DELETE admin/ssh-proxy/lines/:param',
   'DELETE http-proxy/domain-pools/:param',
   'DELETE images/:param',
   'DELETE images/:param/assignments/:param',
@@ -66,6 +67,7 @@ const ADMIN_ROUTES = [
   'GET admin/ip-pools/:param',
   'GET admin/metrics/runtime',
   'GET admin/ssh-proxy/host-key',
+  'GET admin/ssh-proxy/lines',
   'GET admin/ssh-proxy/refusals',
   'GET admin/ssh-proxy/status',
   'GET admin/system-settings',
@@ -82,6 +84,7 @@ const ADMIN_ROUTES = [
   'GET shared-volumes/:param/catalogs',
   'PATCH admin/firewall-rules/:param',
   'PATCH admin/ip-pools/:param',
+  'PATCH admin/ssh-proxy/lines/:param',
   'PATCH admin/system-settings',
   'PATCH http-proxy/domain-pools/:param',
   'PATCH images/:param',
@@ -95,6 +98,7 @@ const ADMIN_ROUTES = [
   'POST admin/ssh-proxy/disconnect-all',
   'POST admin/ssh-proxy/host-authorities/reset',
   'POST admin/ssh-proxy/host-key/rotate',
+  'POST admin/ssh-proxy/lines',
   'POST http-proxy/domain-pools',
   'POST images',
   'POST images/:param/repull',
@@ -104,6 +108,7 @@ const ADMIN_ROUTES = [
   'POST servers/:param/storage-pools/discover',
   'POST shared-backends',
   'POST shared-backends/:param/executors/discover',
+  'PUT admin/ssh-proxy/lines/order',
   'PUT images/:param/assignments/:param',
 ];
 

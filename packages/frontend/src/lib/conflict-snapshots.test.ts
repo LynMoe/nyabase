@@ -24,7 +24,7 @@ describe('conflict snapshot validators', () => {
       fields: [field],
       editable: [field],
       readOnly: [],
-      publicSettings: { branding: { title: 'nyabase', description: '' }, sshProxy: null },
+      publicSettings: { branding: { title: 'nyabase', description: '' } },
     };
     expect(isSystemSettingsDto(dto)).toBe(true);
     expect(isSystemSettingsDto({ ...dto, revision: 0 })).toBe(false);

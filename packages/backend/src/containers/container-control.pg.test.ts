@@ -1226,8 +1226,6 @@ describePg('Container names and the SSH proxy snapshot', () => {
       const settings: Record<string, unknown> = {
         'ssh.proxySnapshotStaleMs': 300_000,
         'ssh.proxyHostSuffix': 'NYA',
-        'ssh.proxyPublicHost': '',
-        'ssh.proxyPublicPort': 2222,
       };
       const snapshots = new SshProxySnapshotService(
         new PgTransactionManager(database),

@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { ContainerStatus, ServerStatus, UserStatus } from '../enums.js';
+import { visibleNameProblem } from '../display-name.js';
 import {
   MAX_PLATFORM_ACTIVE_USERS,
   MAX_PLATFORM_IMAGES,
@@ -22,11 +23,6 @@ const zProxyTimestampMs = zSafeCounter.refine(
   (value) => value <= Date.now() + PROXY_SNAPSHOT_MAX_CLOCK_SKEW_MS,
   'Proxy timestamp exceeds the allowed clock-skew window',
 );
-
-export const zSshProxyEndpoint = z.object({
-  host: zAscii(253),
-  port: z.number().int().min(1).max(65_535),
-}).strict();
 
 export const zSshProxyHostKey = z.object({
   privateKey: zAsciiText(16 * 1024),
@@ -81,7 +77,6 @@ export const zSshProxySnapshot = z.object({
     .min(SSH_PROXY_SNAPSHOT_STALE_MIN_MS)
     .max(SSH_PROXY_SNAPSHOT_STALE_MAX_MS),
   validUntil: z.number().int().positive(),
-  endpoint: zSshProxyEndpoint.nullable(),
   hostKey: zSshProxyHostKey,
   hostSuffix: zAscii(200),
   users: z.array(zSshProxyUserSnapshot).max(MAX_PLATFORM_ACTIVE_USERS),
@@ -197,7 +192,6 @@ export const zSshProxyDisconnectAllResult = z.object({
   disconnected: z.number().int().min(0).max(MAX_SSH_PROXY_STATUS_CONNECTIONS),
 }).strict();
 
-export type SshProxyEndpoint = z.infer<typeof zSshProxyEndpoint>;
 export type SshProxyHostKey = z.infer<typeof zSshProxyHostKey>;
 export type SshProxyInstanceRouteSnapshot = z.infer<typeof zSshProxyInstanceRouteSnapshot>;
 export type SshProxySnapshot = z.infer<typeof zSshProxySnapshot>;
@@ -226,8 +220,13 @@ export function sshContainerHostName(containerName: string, hostSuffix: string):
  * key alone; the login only labels the session in audit and status.
  */
 export function formatSshProxyJump(input: { username: string; host: string; port: number }): string {
+  return `${input.username}@${formatSshAddress(input)}`;
+}
+
+/** `ssh.example.com:2222`, `[2001:db8::1]:2222`; no port for 22. */
+export function formatSshAddress(input: { host: string; port: number }): string {
   const host = input.host.includes(':') ? `[${input.host}]` : input.host;
-  return `${input.username}@${host}${input.port === 22 ? '' : `:${input.port}`}`;
+  return `${host}${input.port === 22 ? '' : `:${input.port}`}`;
 }
 
 /**
@@ -286,21 +285,82 @@ export function formatSshAgentSetupPrompt(input: {
 }
 
 /**
- * `~/.ssh/known_hosts` lines: the proxy's own host key, and the user's host
- * certificate authority for every container name under the suffix.
+ * `~/.ssh/known_hosts` lines: the proxy's own host key under every line's
+ * address, and the user's host certificate authority for every container
+ * name under the suffix.
  */
 export function formatSshKnownHosts(input: {
-  host: string;
-  port: number;
+  endpoints: ReadonlyArray<{ host: string; port: number }>;
   hostSuffix: string;
   proxyHostKey: string;
   hostCertificateAuthority: string | null;
 }): string {
   const keyOnly = (text: string) => text.trim().split(/\s+/).slice(0, 2).join(' ');
-  const host = input.port === 22 ? input.host : `[${input.host}]:${input.port}`;
-  const lines = [`${host} ${keyOnly(input.proxyHostKey)}`];
+  const hosts = new Set(input.endpoints.map(({ host, port }) => (port === 22 ? host : `[${host}]:${port}`)));
+  const lines = [...hosts].map((host) => `${host} ${keyOnly(input.proxyHostKey)}`);
   if (input.hostCertificateAuthority) {
     lines.push(`@cert-authority *.${input.hostSuffix} ${keyOnly(input.hostCertificateAuthority)}`);
   }
   return lines.join('\n');
+}
+
+// --- connection lines ------------------------------------------------------------
+
+/**
+ * Public addresses of the same SSH proxy (a campus network, a region, a
+ * relay). Every container's SSH card shows one `ssh -J` tab per line, in the
+ * administrators' order; the first is the default for the one-time setup.
+ */
+export const MAX_SSH_PROXY_LINES = 16;
+/** Terminal columns a line name may take (a CJK character takes two). */
+export const SSH_PROXY_LINE_NAME_MAX_WIDTH = 16;
+export const SSH_PROXY_LINE_HINT_MAX_LENGTH = 80;
+
+const SSH_HOST_LABEL = '[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?';
+/** A DNS name or IPv4 address, or an IPv6 address (it has a colon). */
+const SSH_PROXY_HOST_RE = new RegExp(`^(?:${SSH_HOST_LABEL}(?:\\.${SSH_HOST_LABEL})*|[0-9A-Fa-f:.]*:[0-9A-Fa-f:.]*)$`);
+
+const zSshProxyLineName = z.string().trim().max(64).transform((value) => value.normalize('NFC')).superRefine((value, context) => {
+  const problem = visibleNameProblem(value, 'Line name', SSH_PROXY_LINE_NAME_MAX_WIDTH);
+  if (problem) context.addIssue({ code: z.ZodIssueCode.custom, message: problem });
+});
+const zSshProxyLineHost = z.string().trim().min(1).max(253)
+  .regex(SSH_PROXY_HOST_RE, 'Host must be a DNS name or an IP address')
+  .transform((value) => value.toLowerCase());
+const zSshProxyLinePort = z.number().int().min(1).max(65_535);
+/** Shown with the line's tab; blank means none. */
+const zSshProxyLineHint = z.string().trim().max(SSH_PROXY_LINE_HINT_MAX_LENGTH)
+  .regex(/^[^\p{Cc}\p{Cf}\p{Zl}\p{Zp}]*$/u, 'Hint must be a single line of visible text')
+  .nullable()
+  .transform((value) => value || null);
+
+export const zCreateSshProxyLineRequest = z.object({
+  name: zSshProxyLineName,
+  host: zSshProxyLineHost,
+  port: zSshProxyLinePort,
+  hint: zSshProxyLineHint.default(null),
+}).strict();
+
+export const zPatchSshProxyLineRequest = z.object({
+  name: zSshProxyLineName.optional(),
+  host: zSshProxyLineHost.optional(),
+  port: zSshProxyLinePort.optional(),
+  hint: zSshProxyLineHint.optional(),
+}).strict().refine((value) => Object.keys(value).length > 0, 'At least one line field is required');
+
+/** Every line's id exactly once, in the new order. */
+export const zReorderSshProxyLinesRequest = z.object({
+  ids: z.array(z.string().uuid()).min(1).max(MAX_SSH_PROXY_LINES),
+}).strict();
+
+export type CreateSshProxyLineRequest = z.infer<typeof zCreateSshProxyLineRequest>;
+export type PatchSshProxyLineRequest = z.infer<typeof zPatchSshProxyLineRequest>;
+export type ReorderSshProxyLinesRequest = z.infer<typeof zReorderSshProxyLinesRequest>;
+
+export interface SshProxyLineDto {
+  id: string;
+  name: string;
+  host: string;
+  port: number;
+  hint: string | null;
 }

@@ -96,6 +96,17 @@ export interface InteractionSshProxyHostKeyTable {
   rotated_at: Timestamp;
 }
 
+export interface InteractionSshProxyLineTable {
+  id: string;
+  name: string;
+  host: string;
+  port: number;
+  hint: string | null;
+  sort_order: number;
+  created_at: GeneratedTimestamp;
+  updated_at: GeneratedTimestamp;
+}
+
 export interface NyabaseDatabase
   extends AuditDatabase,
     IamAuthorizationDatabase,
@@ -114,4 +125,5 @@ export interface NyabaseDatabase
   'iam.ssh_public_keys': IamSshPublicKeyTable;
   'interaction.ssh_proxy_host_keys': InteractionSshProxyHostKeyTable;
   'interaction.ssh_host_authorities': InteractionSshHostAuthorityTable;
+  'interaction.ssh_proxy_lines': InteractionSshProxyLineTable;
 }

@@ -113,16 +113,11 @@ export class NyabaseConfigService implements OnModuleInit {
   }
 
   publicSettings(): PublicSettingsDto {
-    const host = this.get<string>('ssh.proxyPublicHost')?.trim() ?? '';
-    const port = this.get<number>('ssh.proxyPublicPort');
     return {
       branding: {
         title: this.get<string>('branding.title'),
         description: this.get<string>('branding.description'),
       },
-      sshProxy: host && port
-        ? { host, port, hostSuffix: this.get<string>('ssh.proxyHostSuffix').trim().toLowerCase() }
-        : null,
     };
   }
 

@@ -194,7 +194,10 @@ async function main(): Promise<void> {
     }
   }
 
+  // 6. The SSH proxy's one line: the loopback listener the run started.
   const host = opt('E2E_LISTEN_HOST') || '127.0.0.1';
+  await api.post('/admin/ssh-proxy/lines', { name: 'lab', host, port: Number(need('E2E_SSH_PROXY_PORT')) });
+
   const state: RunState = {
     runId,
     runDir,

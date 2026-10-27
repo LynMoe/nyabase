@@ -101,8 +101,6 @@ chmod 0600 "$smoke_env"
   echo 'ssh:'
   echo '  keyEncryptionSecret: "smoke-ssh-encryption-secret-000000000000000000000000000000"'
   echo '  proxyToken: "smoke_ssh_proxy_token_000000000000000000000000000000000"'
-  echo '  proxyPublicHost: localhost'
-  echo '  proxyPublicPort: 2222'
   echo '  proxySnapshotStaleMs: 300000'
 } >"$smoke_config"
 chmod 0400 "$smoke_config"

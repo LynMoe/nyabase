@@ -9,7 +9,6 @@ import {
   MAX_SSH_PROXY_SNAPSHOT_BYTES,
   PROXY_SNAPSHOT_MAX_CLOCK_SKEW_MS,
   zSshProxySnapshot,
-  type SshProxyEndpoint,
   type SshProxyInstanceRouteSnapshot,
   type SshProxySnapshot,
   type SshProxySnapshotSummaryDto,
@@ -167,7 +166,6 @@ export class SshProxySnapshotService {
         createdAt: now.toISOString(),
         staleAfterMs,
         validUntil: now.getTime() + staleAfterMs,
-        endpoint: this.endpoint(),
         hostKey: {
           privateKey: hostKey.privateKey,
           publicKey: hostKey.publicKey,
@@ -226,12 +224,6 @@ export class SshProxySnapshotService {
   /** The DNS suffix of container hostnames (`work.<suffix>`), lower-cased. */
   hostSuffix(): string {
     return this.config.get<string>('ssh.proxyHostSuffix').trim().toLowerCase();
-  }
-
-  endpoint(): SshProxyEndpoint | null {
-    const host = this.config.get<string>('ssh.proxyPublicHost')?.trim();
-    const port = this.config.get<number>('ssh.proxyPublicPort');
-    return host && port ? { host, port } : null;
   }
 
   private routeSnapshot(

@@ -20,6 +20,7 @@ export const queryKeys = {
   sshProxy: {
     status: ['ssh-proxy-status'] as const,
     hostKey: ['ssh-proxy-host-key'] as const,
+    lines: ['ssh-proxy-lines'] as const,
     refusals: (hours: number) => ['ssh-proxy-refusals', hours] as const,
   },
   sshSessions: {

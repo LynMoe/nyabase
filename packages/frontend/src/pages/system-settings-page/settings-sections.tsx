@@ -274,12 +274,6 @@ const FIELD_LABELS: Record<string, { label: string; description?: string }> = {
   'ssh.proxyToken': {
     label: 'SSH 代理令牌',
   },
-  'ssh.proxyPublicHost': {
-    label: 'SSH 代理公网主机',
-  },
-  'ssh.proxyPublicPort': {
-    label: 'SSH 代理公网端口',
-  },
   'ssh.proxyHostSuffix': {
     label: '容器主机名后缀',
     description: '登录名为 <容器名>.<后缀>',
