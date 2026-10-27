@@ -12,6 +12,8 @@ import { discoverSqlMigrations } from './migrator.js';
 const RELEASED_MIGRATION_CHECKSUMS: Readonly<Record<string, string>> = {
   // 000001-000007 squashed on 2026-10-26; production's schema_migrations was rewritten to match.
   '000001_initial': '8848618cee05d8e08dd708fa2aef656351732a24bd02af2393652139a99160ca',
+  // Deployed to production on 2026-10-27 with 8356204.
+  '000002_ssh-proxy-lines': '4ab7dfdba4cb8227286dcd5ac755550daff2feeee1e0196b07a9bb305a9a6d9f',
 };
 
 describe('released SQL migrations', () => {
