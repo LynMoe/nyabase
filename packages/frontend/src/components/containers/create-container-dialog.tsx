@@ -10,6 +10,7 @@ import {
   type ImageDto,
   type IntentAcceptedDto,
   type LiveServerAccessDto,
+  MIN_CONTAINER_ROOT_SIZE_BYTES,
   type PerformanceUsageResponse,
   type StorageCapacityDto,
   type UserServerDto,
@@ -91,7 +92,7 @@ function CreateContainerBody({ open, onOpenChange, defaultServerId }: CreateCont
           {form.submitError ? <p className="text-sm text-destructive" role="alert">{form.submitError}</p> : null}
           <DialogFooter>
             <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>取消</Button>
-            <Button type="submit" disabled={form.pending || form.data.serversLoading || form.overQuota}>
+            <Button type="submit" disabled={form.pending || form.data.serversLoading || form.overQuota || form.rootBelowMin}>
               {form.pending ? '提交中...' : '创建'}
             </Button>
           </DialogFooter>
@@ -159,7 +160,7 @@ function CpuField({ access }: { access: LiveServerAccessDto | undefined }) {
 
 /** Locked CPU, then memory and root disk sliders, each with the quota left on the chosen server. */
 function SpecFields({ form }: { form: CreateContainerForm }) {
-  const { memLeft, diskLeft, memOver, diskOver } = form;
+  const { memLeft, diskLeft, memOver, diskOver, rootBelowMin, rootMinBytes } = form;
   const { selectedAccess } = form.data;
   const starting = form.form.startAfterCreate;
   return (
@@ -191,8 +192,10 @@ function SpecFields({ form }: { form: CreateContainerForm }) {
         onChange={(value) => form.update('rootSizeGib', value)}
         scale={form.limits.diskScale}
         availableGib={diskLeft === null ? null : diskLeft / GIB}
-        invalid={diskOver}
-        error={form.errors.rootSizeGib ?? (diskOver && diskLeft !== null ? `超出剩余容量 ${bytesText(diskLeft)}` : undefined)}
+        invalid={diskOver || rootBelowMin}
+        error={form.errors.rootSizeGib
+          ?? (rootBelowMin ? `至少 ${bytesText(rootMinBytes)}` : undefined)
+          ?? (diskOver && diskLeft !== null ? `超出剩余容量 ${bytesText(diskLeft)}` : undefined)}
       >
         {selectedAccess ? (
           <QuotaLine quota={form.limits.diskQuota} over={diskOver} testId="create-remaining-disk" />
@@ -265,6 +268,8 @@ function useCreateContainerForm({
   const rootNumber = parsePositiveGib(form.rootSizeGib);
   const memBytes = memNumber === null ? null : gibToBytes(memNumber);
   const rootSizeBytes = rootNumber === null ? null : gibToBytes(rootNumber);
+  const rootMinBytes = rootMinimumBytes(images.find((image) => image.id === form.imageId));
+  const rootBelowMin = rootSizeBytes !== null && rootSizeBytes < rootMinBytes;
 
   const containersQuery = data.containersQuery;
   const onServer = containersQuery.isSuccess
@@ -298,6 +303,7 @@ function useCreateContainerForm({
   const rootDefault = useFittedDefaultSize({
     enabled: open,
     defaultGib: Number(emptyForm.rootSizeGib),
+    minGib: rootMinBytes / GIB,
     stops: limits.diskScale.stops,
     availableGib: diskLeft === null ? null : diskLeft / GIB,
     setText: setRootText,
@@ -329,7 +335,7 @@ function useCreateContainerForm({
   const submit = () => {
     const fieldErrors = validateForm({ ...form, name });
     setErrors(fieldErrors);
-    if (Object.keys(fieldErrors).length > 0 || overQuota) return;
+    if (Object.keys(fieldErrors).length > 0 || overQuota || rootBelowMin) return;
     const parsed = zCreateContainerRequest.safeParse({
       serverId: form.serverId,
       imageId: form.imageId,
@@ -361,6 +367,8 @@ function useCreateContainerForm({
     memOver,
     diskOver,
     overQuota,
+    rootMinBytes,
+    rootBelowMin,
     gpuPciAddresses,
     setGpuPciAddresses,
     pending: create.isPending,
@@ -474,6 +482,11 @@ const emptyForm: FormState = {
   memGib: '2',
   startAfterCreate: true,
 };
+
+/** The platform's root disk floor, raised by the chosen image's own minimum. */
+function rootMinimumBytes(image: ImageDto | undefined): number {
+  return Math.max(MIN_CONTAINER_ROOT_SIZE_BYTES, image?.minRootSizeBytes ?? 0);
+}
 
 /** Remaining room under a grant; null when the grant does not limit it. */
 function remaining(limit: number | null, used: number): number | null {

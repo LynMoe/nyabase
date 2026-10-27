@@ -9,19 +9,22 @@ import { fitDefault, gibInputText } from '../lib/size-ladder.js';
 export function useFittedDefaultSize({
   enabled,
   defaultGib,
+  minGib = 0,
   stops,
   availableGib,
   setText,
 }: {
   enabled: boolean;
   defaultGib: number;
+  /** Never fitted below this (a hard floor, even when less is left). */
+  minGib?: number;
   stops: readonly number[];
   availableGib: number | null;
   /** Must be stable (a state setter or a memoised callback). */
   setText: (text: string) => void;
 }): { markTouched: () => void } {
   const [touched, setTouched] = useState(false);
-  const next = gibInputText(fitDefault(stops, defaultGib, availableGib));
+  const next = gibInputText(Math.max(minGib, fitDefault(stops, defaultGib, availableGib)));
   useEffect(() => {
     if (enabled && !touched) setText(next);
   }, [enabled, touched, next, setText]);

@@ -268,7 +268,12 @@ describe('canonical container and volume contracts', () => {
     expect(zCreateSshProxyLineRequest.parse({ name: ' 校园网 ', host: 'SSH.Example.com', port: 52515, hint: '  ' }))
       .toEqual({ name: '校园网', host: 'ssh.example.com', port: 52515, hint: null });
     expect(zCreateSshProxyLineRequest.parse({ name: '广州', host: '2001:DB8::1', port: 22 }).host).toBe('2001:db8::1');
-    for (const host of ['ssh example.com', 'user@host', '-host', 'host:22', 'a..b', '']) {
+    expect(zCreateSshProxyLineRequest.parse({ name: '广州', host: '2001:db8:0:0::1', port: 22 }).host).toBe('2001:db8::1');
+    expect(zCreateSshProxyLineRequest.parse({ name: '内网', host: '10.8.16.31', port: 22 }).host).toBe('10.8.16.31');
+    for (const host of [
+      'ssh example.com', 'user@host', '-host', 'host:22', 'a..b', '',
+      '1.2.3.4:22', '1:2', ':', '::::', 'a:b:c', '[::1]', 'fe80::1%eth0', '300.1.1.1', '1.2.3', '01.2.3.4',
+    ]) {
       expect(zCreateSshProxyLineRequest.safeParse({ name: 'x', host, port: 22 }).success, host).toBe(false);
     }
     expect(zCreateSshProxyLineRequest.safeParse({ name: '一二三四五六七八九', host: 'h', port: 22 }).success).toBe(false);

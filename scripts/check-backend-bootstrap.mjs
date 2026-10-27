@@ -87,8 +87,6 @@ try {
     'ssh:',
     '  keyEncryptionSecret: "bootstrap-key-secret-bootstrap-key-secret"',
     '  proxyToken: "bootstrap-ssh-token-bootstrap-ssh-token"',
-    '  proxyPublicHost: ""',
-    '  proxyPublicPort: 2222',
     '  proxySnapshotStaleMs: 300000',
     '',
   ].join('\n'), { mode: 0o600 });

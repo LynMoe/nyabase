@@ -68,4 +68,25 @@ describePg('SSH proxy lines', () => {
       expect(settings.values).toEqual({ 'branding.title': 'nya' });
     });
   });
+
+  it.each([
+    ['1.2.3.4:22', 2222],
+    ['ssh example.com', 2222],
+    ['ssh.example.com', 22.5],
+    ['ssh.example.com', 70000],
+  ])('drops an old address the lines table would refuse (%s, %s)', async (host, port) => {
+    await withPostgresTestDatabase(async ({ pool, database }) => {
+      const migration = await readFile(join(pgMigrationsDirectory(), '000002_ssh-proxy-lines.sql'), 'utf8');
+      await pool.query('DROP TABLE interaction.ssh_proxy_lines');
+      await pool.query(
+        `INSERT INTO system.settings (singleton, revision, "values") VALUES (true, 7, $1)`,
+        [JSON.stringify({ 'ssh.proxyPublicHost': host, 'ssh.proxyPublicPort': port })],
+      );
+      await pool.query(`BEGIN; ${migration} COMMIT;`);
+
+      expect(await database.selectFrom('interaction.ssh_proxy_lines').select('id').execute()).toEqual([]);
+      const settings = await database.selectFrom('system.settings').select('values').executeTakeFirstOrThrow();
+      expect(settings.values).toEqual({});
+    });
+  });
 });

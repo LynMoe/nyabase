@@ -9,6 +9,7 @@ import type {
   PatchContainerRootSizeRequest,
   UserServerDto,
 } from '@nyabase/common';
+import { MIN_CONTAINER_ROOT_SIZE_BYTES } from '@nyabase/common';
 import { Button } from '../ui/button.js';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '../ui/dialog.js';
 import { Input } from '../ui/input.js';
@@ -173,6 +174,10 @@ export function RootSizeDialog({
             onClick={() => {
               if (!Number.isFinite(rootSizeBytes)) {
                 toast({ title: '请输入有效的系统盘容量', variant: 'destructive' });
+                return;
+              }
+              if (rootSizeBytes < MIN_CONTAINER_ROOT_SIZE_BYTES) {
+                toast({ title: '容量不合法', description: `系统盘至少 ${MIN_CONTAINER_ROOT_SIZE_BYTES / 1024 ** 3} GiB`, variant: 'destructive' });
                 return;
               }
               if (path === 'never') {

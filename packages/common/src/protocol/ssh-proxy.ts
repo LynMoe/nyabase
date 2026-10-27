@@ -317,16 +317,40 @@ export const SSH_PROXY_LINE_NAME_MAX_WIDTH = 16;
 export const SSH_PROXY_LINE_HINT_MAX_LENGTH = 80;
 
 const SSH_HOST_LABEL = '[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?';
-/** A DNS name or IPv4 address, or an IPv6 address (it has a colon). */
-const SSH_PROXY_HOST_RE = new RegExp(`^(?:${SSH_HOST_LABEL}(?:\\.${SSH_HOST_LABEL})*|[0-9A-Fa-f:.]*:[0-9A-Fa-f:.]*)$`);
+const SSH_DNS_NAME_RE = new RegExp(`^${SSH_HOST_LABEL}(?:\\.${SSH_HOST_LABEL})*$`);
+const SSH_IPV4_RE = /^(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)$/;
+
+/**
+ * A line's host in canonical form (lower-case name, dotted IPv4, compressed
+ * IPv6), or null. Anything with a colon must be a whole IPv6 address, so a
+ * port typed into the host (`1.2.3.4:22`) is refused; an all-numeric dotted
+ * name must be a valid IPv4 address.
+ */
+function canonicalSshProxyHost(value: string): string | null {
+  if (value.includes(':')) {
+    if (!/^[0-9A-Fa-f:.]+$/.test(value)) return null;
+    try {
+      return new URL(`http://[${value}]/`).hostname.slice(1, -1);
+    } catch {
+      return null;
+    }
+  }
+  if (/^[0-9.]+$/.test(value)) return SSH_IPV4_RE.test(value) ? value : null;
+  return SSH_DNS_NAME_RE.test(value) ? value.toLowerCase() : null;
+}
 
 const zSshProxyLineName = z.string().trim().max(64).transform((value) => value.normalize('NFC')).superRefine((value, context) => {
   const problem = visibleNameProblem(value, 'Line name', SSH_PROXY_LINE_NAME_MAX_WIDTH);
   if (problem) context.addIssue({ code: z.ZodIssueCode.custom, message: problem });
 });
-const zSshProxyLineHost = z.string().trim().min(1).max(253)
-  .regex(SSH_PROXY_HOST_RE, 'Host must be a DNS name or an IP address')
-  .transform((value) => value.toLowerCase());
+const zSshProxyLineHost = z.string().trim().min(1).max(253).transform((value, context) => {
+  const host = canonicalSshProxyHost(value);
+  if (host === null) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: 'Host must be a DNS name or an IP address, without a port' });
+    return z.NEVER;
+  }
+  return host;
+});
 const zSshProxyLinePort = z.number().int().min(1).max(65_535);
 /** Shown with the line's tab; blank means none. */
 const zSshProxyLineHint = z.string().trim().max(SSH_PROXY_LINE_HINT_MAX_LENGTH)
