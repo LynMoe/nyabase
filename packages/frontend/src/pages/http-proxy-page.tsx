@@ -89,7 +89,7 @@ export default function HttpProxyPage() {
         empty={
           <EmptyState
             icon={Globe}
-            title={canCreate ? '暂无 HTTP 发布。' : '暂无 HTTP 发布。管理员配置通配域名后才能新建。'}
+            title="暂无 HTTP 发布。"
             action={createButton}
           />
         }
@@ -134,7 +134,7 @@ export default function HttpProxyPage() {
       <ConfirmDialog
         open={Boolean(deleteTarget)}
         title="删除 HTTP 发布？"
-        description={`将删除主机名「${deleteTarget?.hostname}」的发布绑定。域名将不再转发到该容器端口。`}
+        description={`将删除主机名「${deleteTarget?.hostname}」的发布绑定。`}
         confirmLabel="确认删除"
         pendingLabel="删除中..."
         pending={remove.isPending}

@@ -226,9 +226,6 @@ export function ServerGpuCard({ serverId, active }: { serverId: string; active: 
       <CardHeader className="flex flex-col gap-3 space-y-0 sm:flex-row sm:items-start sm:justify-between">
         <div className="space-y-1.5">
           <CardTitle className="text-base">GPU</CardTitle>
-          <CardDescription>
-            启用后才允许把 GPU 分配给容器。占用中的 GPU 不能关闭。本机检测只反映驱动与前置条件，不阻止启用。
-          </CardDescription>
         </div>
         <Button
           type="button"

@@ -60,7 +60,6 @@ export default function ContainersPage() {
         empty={
           <EmptyState
             title="还没有容器"
-            description="新建一个容器，几秒钟后就能通过 SSH 登录。"
             action={<Button onClick={() => setCreateOpen(true)}><Plus className="h-4 w-4" />新建容器</Button>}
           />
         }

@@ -133,7 +133,7 @@ export function ImageHeaderActions({ image }: { image: AdminImageDto }) {
       <ConfirmDialog
         open={deleteOpen}
         title="移除镜像？"
-        description="移除会先去掉各服务器上的指纹分配；仍被容器引用的镜像会由后端拒绝。"
+        description={`将移除「${image.alias}」。`}
         confirmLabel="确认移除"
         pendingLabel="提交中..."
         pending={deleteImage.isPending}

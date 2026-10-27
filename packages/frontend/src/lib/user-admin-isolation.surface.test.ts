@@ -69,7 +69,6 @@ describe('user panel pages stay on scope=mine', () => {
   it('manage-containers-page lists and operates without admin create', () => {
     const src = readPage('manage-containers-page.tsx');
     expect(src).toMatch(/api\.get<ContainerDto\[\]>\('\/containers\?scope=all'\)/);
-    expect(src).toMatch(/新建容器请到「容器」页/);
     expect(src).not.toMatch(/代建/);
     expect(src).not.toMatch(/AdminCreateContainerDialog/);
     expect(src).not.toMatch(/api\.post<IntentAcceptedDto>\('\/containers'/);

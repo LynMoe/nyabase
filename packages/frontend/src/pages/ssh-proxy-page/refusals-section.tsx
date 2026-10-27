@@ -29,7 +29,6 @@ export function RefusalsSection() {
   return (
     <SectionCard
       title="未认证连接"
-      description="没有通过公钥认证的连接（未知公钥、扫描器、超过连接上限等），按来源地址与原因汇总，不逐条记录。"
       actions={<SegmentedFilter label="时间范围" value={range} options={RANGES} onChange={setRange} />}
       flush
       testId="ssh-proxy-refusals"

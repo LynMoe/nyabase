@@ -56,11 +56,7 @@ export function SharedVolumeCatalogInspectDialog({
       <DialogContent className="sm:max-w-4xl" data-testid="shared-volume-catalog-inspect">
         <DialogHeader>
           <DialogTitle>Catalog 查看</DialogTitle>
-          <DialogDescription>
-            {volume
-              ? `「${volume.name}」在各机上的 catalog 占用（只读）。从未见过此卷的节点已省略。`
-              : '只读查看共享卷 catalog。'}
-          </DialogDescription>
+          {volume ? <DialogDescription>{volume.name}</DialogDescription> : null}
         </DialogHeader>
         {volume && (
           <QueryView
@@ -72,9 +68,7 @@ export function SharedVolumeCatalogInspectDialog({
               const items = inspect.items.filter((item) => !shouldSkipCatalogInspectRow(item));
               if (items.length === 0) {
                 return (
-                  <p className="text-sm text-muted-foreground">
-                    没有可见的 catalog（从未见过此卷的节点已省略）。
-                  </p>
+                  <p className="text-sm text-muted-foreground">没有可见的 catalog</p>
                 );
               }
               return (

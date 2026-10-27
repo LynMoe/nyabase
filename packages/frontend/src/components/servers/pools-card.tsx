@@ -110,7 +110,7 @@ export function PoolsCard({ server }: { server: ServerDto }) {
         )}
         {!canManageStoragePools && (
           <p className="text-xs text-muted-foreground" data-testid="storage-pool-register-gated">
-            可以查看存储池，但登记、取消登记与编辑备注需要「管理存储池」权限。
+            登记与编辑需要「管理存储池」权限
           </p>
         )}
       </CardContent>
@@ -205,7 +205,7 @@ export function StoragePoolRow({
             <DialogHeader>
               <DialogTitle>取消登记存储池？</DialogTitle>
               <DialogDescription>
-                取消后，「{pool.displayName ?? pool.incusName}」将从可建卷集合中移除；已有数据卷不受影响，但新建卷时将无法再选择该池。
+                已有数据卷不受影响。
               </DialogDescription>
             </DialogHeader>
             <DialogFooter>
@@ -268,9 +268,6 @@ function StorageSettingsDialog({
       <DialogContent>
         <DialogHeader>
           <DialogTitle>编辑存储设置</DialogTitle>
-          <DialogDescription data-testid="system-pool-new-containers-hint">
-            更改系统盘池只影响之后新建的容器，不会改动已有容器。
-          </DialogDescription>
         </DialogHeader>
         <FormField id="server-system-pool" label="系统盘池">
           <Select
@@ -297,9 +294,6 @@ function StorageSettingsDialog({
             value={overcommitRatio || String(server.storageOvercommitRatio)}
             onChange={(event) => setOvercommitRatio(event.target.value)}
           />
-          <p className="text-xs text-muted-foreground">
-            容器和数据卷可分配的总容量 = 物理容量 × 比例。1 表示不超分；大于 1 时分配总量可以超过磁盘实际大小。
-          </p>
         </div>
         <DialogFooter>
           <Button variant="outline" onClick={onClose}>取消</Button>

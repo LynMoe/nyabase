@@ -266,7 +266,6 @@ function SharedVolumeFormBody({ sharedVolume: editing, open, onOpenChange }: Sha
               placeholder="选择共享后端"
               loading={backendsQuery.isLoading}
               emptyText="没有可用的共享后端"
-              emptyHint="你还没有任何共享后端的授权，请联系管理员。"
             />
           )}
           {editing ? (

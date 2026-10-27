@@ -55,7 +55,7 @@ export function GroupMembersTab({ groupId, memberFallback }: { groupId: string; 
       description={
         canManage
           ? undefined
-          : '成员列表只读；需要「管理用户组」权限才能增删成员。'
+          : '只读'
       }
       actions={canManage ? (
         <Button size="sm" onClick={onAdd} data-testid="group-add-member-open">
@@ -122,7 +122,7 @@ export function GroupMembersTab({ groupId, memberFallback }: { groupId: string; 
     <ConfirmDialog
       open={Boolean(removeTarget)}
       title="移除成员？"
-      description={`将把「${removeTarget?.label}」移出本组。该用户将立即失去本组带来的授权（若仍有其他授权则不受影响）。`}
+      description={`将把「${removeTarget?.label}」移出本组。`}
       confirmLabel="确认移除"
       pendingLabel="移除中..."
       pending={removeMember.isPending}

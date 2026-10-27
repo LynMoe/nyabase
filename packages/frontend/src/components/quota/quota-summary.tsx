@@ -95,20 +95,16 @@ function QuotaBody({
   return (
     <SectionCard
       title="我的额度"
-      description={empty ? undefined : '已分配 = 容器与数据卷占用的规格，不是实时用量；内存只统计运行中的容器。'}
       flush={!empty}
     >
       {empty ? (
-        <p className="text-sm text-muted-foreground">
-          还没有可用的资源额度。管理员为你分配服务器或共享存储后，额度会显示在这里。
-        </p>
+        <p className="text-sm text-muted-foreground">暂无资源额度</p>
       ) : null}
       {lapsed.length > 0 ? (
         <div data-testid="quota-grace" className="space-y-1 border-b px-4 py-3 text-sm">
           {lapsed.map((grant) => (
             <p key={grant.serverId} className="text-muted-foreground">
-              {serverName.get(grant.serverId) ?? grant.serverId} 宽限中 · 将于 {new Date(grant.purgeAt).toLocaleString('zh-CN')} 清除
-              该服务器上的容器与数据卷（访问授权已失效，容器已停止）。
+              {serverName.get(grant.serverId) ?? grant.serverId} 宽限中 · {new Date(grant.purgeAt).toLocaleString('zh-CN')} 清除
             </p>
           ))}
         </div>
@@ -200,7 +196,7 @@ function ServerQuotaRow({
     <TableRow>
       <TableCell className="font-medium">{name}</TableCell>
       <TableCell>
-        <p className="min-w-[5rem] text-sm tabular-nums" data-testid="quota-cpu">{cpuGrantLabel(grant.cpuCores)}</p>
+        <p className="min-w-[5rem] text-sm tabular-nums" data-testid="quota-cpu">{cpuGrantLabel(grant)}</p>
       </TableCell>
       <TableCell>
         <QuotaCell used={mem.used} limit={mem.limit} remaining={mem.remaining} grant={grant.memBytes} consumed={memUsed} />

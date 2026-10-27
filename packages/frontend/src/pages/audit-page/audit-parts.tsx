@@ -5,7 +5,6 @@ import { Badge } from '../../components/ui/badge.js';
 import {
   Dialog,
   DialogContent,
-  DialogDescription,
   DialogFooter,
   DialogHeader,
   DialogTitle,
@@ -117,7 +116,6 @@ export function AuditDetailDialog({
       <DialogContent className="sm:max-w-4xl">
         <DialogHeader>
           <DialogTitle>审计详情</DialogTitle>
-          <DialogDescription>查看该条操作的主体、目标和原始记录。</DialogDescription>
         </DialogHeader>
         {loading ? (
           <div className="py-8 text-center text-sm text-muted-foreground">正在加载详情...</div>

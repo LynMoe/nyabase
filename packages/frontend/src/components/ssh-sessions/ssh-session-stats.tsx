@@ -34,7 +34,7 @@ export function SshSessionStats({ scope, containerId }: { scope: ListScope; cont
   return (
     <SectionCard
       title="SSH 使用统计"
-      description="按天（UTC）统计经 SSH 代理的连接、通道与流量。超过明细保留期的部分来自按天汇总。"
+      description="按天（UTC）"
       actions={<SegmentedFilter label="时间范围" value={range} options={RANGES} onChange={setRange} />}
       testId="ssh-session-stats"
     >

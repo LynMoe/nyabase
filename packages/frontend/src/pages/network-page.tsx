@@ -13,7 +13,7 @@ export default function NetworkPage() {
   const navigate = useNavigate({ from: '/network/' });
   return (
     <Page testId="network">
-      <PageHeader title="网络" description="容器的地址池与出站防火墙。" />
+      <PageHeader title="网络" />
       <Tabs
         value={tab}
         onValueChange={(value) => {

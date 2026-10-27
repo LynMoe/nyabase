@@ -350,9 +350,6 @@ function CapacityHint({ scope, serverId, poolId }: { scope: ListScope; serverId:
     const pool = (capacity?.pools ?? []).find((row) => row.poolId === poolId);
     return (
       <div className="space-y-1">
-        <p className="text-xs text-muted-foreground">
-          池剩余（物理，含超分；不是该用户的磁盘额度）。
-        </p>
         {pool ? (
           <p className="text-xs text-muted-foreground">
             {pool.availableBytes === null ? '物理剩余未知' : `物理剩余 ${formatGib(pool.availableBytes)}`}
@@ -413,7 +410,6 @@ function PlacementFields({
           disabled={serverLocked}
           loading={serversQuery.isLoading}
           emptyText={serverLocked ? undefined : '没有可用的服务器'}
-          emptyHint="你还没有可用的服务器，请联系管理员分配。"
         />
         <SelectField
           key={serverId || 'no-server'}
@@ -426,7 +422,6 @@ function PlacementFields({
           disabled={!serverId || poolLocked}
           loading={Boolean(serverId) && poolsQuery.isLoading}
           emptyText={serverId && !poolLocked ? '没有可用的存储池' : undefined}
-          emptyHint="这台服务器上没有分配给你的存储池，请联系管理员。"
         />
       </div>
       {selectedPool && (

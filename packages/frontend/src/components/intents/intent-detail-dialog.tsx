@@ -34,7 +34,6 @@ import { Button } from '../ui/button.js';
 import {
   Dialog,
   DialogContent,
-  DialogDescription,
   DialogFooter,
   DialogHeader,
   DialogTitle,
@@ -159,7 +158,6 @@ export function IntentDetailDialog({
       <DialogContent className="sm:max-w-3xl" data-testid="intent-detail">
         <DialogHeader>
           <DialogTitle>操作详情</DialogTitle>
-          <DialogDescription>查看请求摘要、基线与失败详情。</DialogDescription>
         </DialogHeader>
         {view ? (
           <div className="space-y-5">

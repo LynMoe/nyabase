@@ -175,10 +175,24 @@ export class AccessResolverService {
       imagesByServer.set(row.server_id, list);
     }
 
+    const cpuRows = live.length === 0
+      ? []
+      : await this.database.selectFrom('infra.servers')
+        .select(['id', 'cpu_topology', 'reserved_cpus'])
+        .where('id', 'in', [...liveIds])
+        .execute();
+    const serverCpuCores = new Map(cpuRows.map((row) => {
+      const reserved = new Set(row.reserved_cpus);
+      const topology = row.cpu_topology ?? [];
+      const cores = topology.filter((cpu) => !reserved.has(cpu.id)).length;
+      return [row.id, topology.length === 0 ? null : cores] as const;
+    }));
+
     return [
       ...live.map((access): EffectiveServerAccessDto => ({
         serverId: access.serverId,
         cpuCores: access.cpuCores,
+        serverCpuCores: serverCpuCores.get(access.serverId) ?? null,
         memBytes: access.memBytes,
         diskBytes: access.diskBytes,
         gpuPciAddresses: access.gpuPciAddresses,

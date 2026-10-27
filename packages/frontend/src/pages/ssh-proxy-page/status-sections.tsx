@@ -182,19 +182,17 @@ function SnapshotHealth({ status }: { status: SshProxyAdminStatus }) {
     <div className="space-y-3">
       {!status.publicEndpoint ? (
         <Notice testId="ssh-proxy-no-endpoint">
-          尚未配置 SSH 代理的公网地址，用户的容器页面和个人资料页不会生成登录命令与配置。
-          在 <Link to="/system-settings" className="font-medium underline underline-offset-4">系统设置</Link> 填写「SSH 代理公网主机」。
+          尚未配置 SSH 代理公网地址，在 <Link to="/system-settings" className="font-medium underline underline-offset-4">系统设置</Link> 填写「SSH 代理公网主机」。
         </Notice>
       ) : null}
       {snapshot?.error ? (
         <Notice testId="ssh-proxy-snapshot-error">
           最近一次路由快照构建失败（{snapshot.failedAt ? formatTime(snapshot.failedAt) : '未知时间'}）：{snapshot.error}。
-          代理仍在使用上一份快照，新的容器和公钥不会生效。
         </Notice>
       ) : null}
       {snapshot && ratio >= SNAPSHOT_WARN_RATIO ? (
         <Notice testId="ssh-proxy-snapshot-large">
-          路由快照已用 {Math.round(ratio * 100)}% 的上限（{formatBytes(snapshot.bytes)} / {formatBytes(snapshot.maxBytes)}），超过上限后快照将无法更新。
+          路由快照已用 {Math.round(ratio * 100)}% 的上限（{formatBytes(snapshot.bytes)} / {formatBytes(snapshot.maxBytes)}）。
         </Notice>
       ) : null}
       {snapshot && snapshot.builtAt ? (
@@ -313,7 +311,7 @@ export function HostKeySection({
               <InfoCell label="轮换时间" value={hostKey.rotatedAt ? formatTime(hostKey.rotatedAt) : '从未轮换'} />
               {hostKey.publicKey ? (
                 <div className="min-w-0 sm:col-span-3">
-                  <p className="text-xs text-muted-foreground">公钥（用户的 known_hosts 里是这一行）</p>
+                  <p className="text-xs text-muted-foreground">公钥</p>
                   <pre className="mt-1 overflow-x-auto rounded-md border bg-muted/50 px-3 py-2 font-mono text-xs">{hostKey.publicKey}</pre>
                 </div>
               ) : null}

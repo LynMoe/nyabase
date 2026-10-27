@@ -644,8 +644,9 @@ export type GrantExpiryPhase = 'live' | 'grace' | 'lost';
 export interface LiveServerAccessDto {
   accessPhase: 'live';
   serverId: string;
-  /** Whole logical CPUs pinned for the user; null = every unreserved CPU. */
+  /** Pinned logical CPUs; null = all of the server's `serverCpuCores` (null until its topology is reported). */
   cpuCores: number | null;
+  serverCpuCores: number | null;
   memBytes: number | null;
   diskBytes: number | null;
   /** PCI addresses the grant allows; empty means no GPU access. */

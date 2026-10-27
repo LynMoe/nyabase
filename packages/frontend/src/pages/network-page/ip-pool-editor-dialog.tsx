@@ -11,7 +11,7 @@ import {
 import { api } from '../../lib/api.js';
 import { errorMessage } from '../../lib/api-error.js';
 import { Button } from '../../components/ui/button.js';
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '../../components/ui/dialog.js';
+import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '../../components/ui/dialog.js';
 import { Checkbox } from '../../components/ui/checkbox.js';
 import { Input } from '../../components/ui/input.js';
 import { FormField } from '../../components/layout/form-field.js';
@@ -147,9 +147,6 @@ export function IpPoolEditorDialog({
       <DialogContent data-testid="ip-pool-editor">
         <DialogHeader>
           <DialogTitle>{mode === 'create' ? '创建 IP 池' : '编辑 IP 池'}</DialogTitle>
-          <DialogDescription>
-            可分配 CIDR 必须落在局域网内。绑定的服务器共享此池。
-          </DialogDescription>
         </DialogHeader>
         <div className="grid gap-3 sm:grid-cols-2">
           <FormField id="ip-pool-name" label="名称">

@@ -138,7 +138,6 @@ function ContainerDetailContent({
                       scope={scope}
                       containerId={container.id}
                       title="SSH 连接"
-                      description="经 SSH 代理连到这个容器的连接（含登录名直接指定它的）。"
                     />
                     <SshSessionStats scope={scope} containerId={container.id} />
                   </>

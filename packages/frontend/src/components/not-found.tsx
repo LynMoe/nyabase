@@ -13,7 +13,6 @@ export function NotFound() {
           <FileQuestion className="h-5 w-5" />
         </div>
         <h1 className="text-lg font-semibold text-foreground">页面不存在</h1>
-        <p className="text-sm text-muted-foreground">链接可能已失效，或页面已被移动。</p>
         <div className="flex justify-center gap-2">
           <Button variant="outline" onClick={() => window.history.back()}>返回上一页</Button>
           <Button asChild><Link to="/">返回首页</Link></Button>

@@ -2,15 +2,13 @@ import { useState } from 'react';
 import { Cpu, Pencil } from 'lucide-react';
 import type { ServerCpuDto, ServerDto } from '@nyabase/common';
 import { Button } from '../ui/button.js';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../ui/card.js';
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '../ui/dialog.js';
+import { Card, CardContent, CardHeader, CardTitle } from '../ui/card.js';
+import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '../ui/dialog.js';
 import { Input } from '../ui/input.js';
 import { Field, FormField } from '../layout/form-field.js';
 import { formatCpuList, groupCpuTopology, parseCpuList } from '../../lib/cpu-set.js';
 import { useUpdateServer } from '../../lib/server-queries.js';
 import { cn } from '../../lib/utils.js';
-
-const RESERVED_NOTE = '保留的逻辑 CPU 留给宿主机系统与 Agent，永远不会分配给任何容器；用户的 CPU 组只从其余 CPU 中划分。';
 
 /** Logical CPUs grouped by socket / NUMA node and physical core; reserved ones highlighted. */
 function CpuTopologyView({
@@ -83,7 +81,6 @@ function ReservedCpusDialog({ server, onClose }: { server: ServerDto; onClose: (
       <DialogContent className="sm:max-w-2xl">
         <DialogHeader>
           <DialogTitle>编辑保留 CPU</DialogTitle>
-          <DialogDescription>{RESERVED_NOTE}</DialogDescription>
         </DialogHeader>
         <FormField
           id="server-reserved-cpus"
@@ -103,10 +100,7 @@ function ReservedCpusDialog({ server, onClose }: { server: ServerDto; onClose: (
           />
         </FormField>
         {server.cpuTopology ? (
-          <div className="space-y-1.5">
-            <p className="text-xs text-muted-foreground">点击 CPU 切换是否保留；同一边框内为同一物理核的超线程。</p>
-            <CpuTopologyView topology={server.cpuTopology} reserved={reserved} onToggle={toggle} />
-          </div>
+          <CpuTopologyView topology={server.cpuTopology} reserved={reserved} onToggle={toggle} />
         ) : null}
         <DialogFooter>
           <Button variant="outline" onClick={onClose}>取消</Button>
@@ -134,10 +128,7 @@ export function ReservedCpusCard({ server }: { server: ServerDto }) {
   return (
     <Card data-testid="server-reserved-cpus">
       <CardHeader className="flex flex-row items-start justify-between gap-3 space-y-0">
-        <div className="space-y-1.5">
-          <CardTitle className="flex items-center gap-2 text-base"><Cpu className="h-4 w-4" />CPU 与保留核</CardTitle>
-          <CardDescription>{RESERVED_NOTE}</CardDescription>
-        </div>
+        <CardTitle className="flex items-center gap-2 text-base"><Cpu className="h-4 w-4" />CPU 与保留核</CardTitle>
         <Button size="sm" variant="outline" onClick={() => setEditing(true)}>
           <Pencil className="h-3.5 w-3.5" />编辑保留 CPU
         </Button>
@@ -151,7 +142,7 @@ export function ReservedCpusCard({ server }: { server: ServerDto }) {
         {server.cpuTopology ? (
           <CpuTopologyView topology={server.cpuTopology} reserved={reserved} />
         ) : (
-          <p className="text-sm text-muted-foreground">Agent 尚未上报 CPU 拓扑；接入后会在这里按插槽 / NUMA / 物理核显示。</p>
+          <p className="text-sm text-muted-foreground">Agent 尚未上报 CPU 拓扑</p>
         )}
       </CardContent>
       {editing ? <ReservedCpusDialog server={server} onClose={() => setEditing(false)} /> : null}

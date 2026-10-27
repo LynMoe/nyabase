@@ -66,10 +66,10 @@ export function ContainerActionBar({
         }
         description={
           confirmAction === 'delete'
-            ? `将永久删除容器「${container.name}」。数据卷会保留，仅解除挂载。此操作不可恢复。`
+            ? `将永久删除容器「${container.name}」，数据卷保留。`
             : confirmAction === 'restart'
-              ? `将重启容器「${container.name}」。运行中的进程与 SSH 会话会短暂中断。`
-              : `将停止容器「${container.name}」。运行中的进程与 SSH 会话会中断。`
+              ? `将重启容器「${container.name}」。`
+              : `将停止容器「${container.name}」。`
         }
         confirmLabel={
           confirmAction === 'delete'

@@ -36,7 +36,7 @@ export default function SystemSettingsPage() {
               className="h-8 w-8 text-muted-foreground"
               onClick={() => {
                 if ((draft.draftState?.dirtyFields.size ?? 0) > 0
-                  && !window.confirm('刷新会保留本地修改，并标记与服务器同时修改的冲突。继续刷新？')) return;
+                  && !window.confirm('保留本地修改并刷新？')) return;
                 void refetch();
               }}
               disabled={isFetching}

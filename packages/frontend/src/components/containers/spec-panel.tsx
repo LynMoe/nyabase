@@ -82,10 +82,7 @@ export function LimitsDialog({
           <div className="rounded-md border bg-muted/20 p-3 text-sm" data-testid="container-spec-cpu">
             <p className="tabular-nums">
               CPU：{cores === null ? '待分配' : `${cores} 核`}
-              {serverAccess ? <span className="text-muted-foreground">（授权：{cpuGrantLabel(serverAccess.cpuCores)}）</span> : null}
-            </p>
-            <p className="mt-1 text-xs text-muted-foreground">
-              CPU 不能按容器调整：核数由管理员在服务器授权中设置，你在这台服务器上的容器共用这些核。
+              {serverAccess ? <span className="text-muted-foreground">（授权：{cpuGrantLabel(serverAccess)}）</span> : null}
             </p>
           </div>
           <UnitField
@@ -93,9 +90,7 @@ export function LimitsDialog({
             label="内存 (GiB)"
             value={memGib}
             onChange={setMemGib}
-            hint={Number.isFinite(memBytes)
-              ? `${approxGibHint(memBytes)}；内存额度按你在这台服务器上运行中容器的合计计算，增加运行中容器的内存时检查`
-              : undefined}
+            hint={Number.isFinite(memBytes) ? approxGibHint(memBytes) : undefined}
           />
           <Button
             onClick={() => {

@@ -49,7 +49,7 @@ export function VolumeShrinkOrchestrationDialog({
         <DialogHeader>
           <DialogTitle>缩容需要先卸载</DialogTitle>
           <DialogDescription>
-            缩容前必须从相关容器卸载此数据卷（共 {flow.attachments.length} 处挂载），卸载完成后再提交缩容。目标容量 {formatBytes(sizeBytes)}。
+            {flow.attachments.length} 处挂载 · 目标容量 {formatBytes(sizeBytes)}
           </DialogDescription>
         </DialogHeader>
         <ShrinkDialogBody flow={flow} />
@@ -68,7 +68,7 @@ function ShrinkDialogBody({ flow }: { flow: VolumeShrinkFlow }) {
   return (
     <div className="space-y-3">
       {attachments.length === 0 && phase === 'list' && !busy ? (
-        <p className="text-sm text-muted-foreground">当前未发现挂载，可直接提交缩容。</p>
+        <p className="text-sm text-muted-foreground">没有挂载</p>
       ) : (
         <ul className="divide-y rounded-md border text-sm">
           {attachments.map((attachment) => (
@@ -85,19 +85,13 @@ function ShrinkDialogBody({ flow }: { flow: VolumeShrinkFlow }) {
         <p className="text-sm">缩容已提交。是否将刚才卸载的挂载点挂回？</p>
       )}
       {phase === 'failed' && failureStage === 'detach_partial' && (
-        <p className="text-sm text-muted-foreground">
-          部分挂载已卸载。可先挂回已成功项，或继续重试剩余卸载后再缩容。
-        </p>
+        <p className="text-sm text-muted-foreground">部分挂载已卸载</p>
       )}
       {phase === 'failed' && failureStage === 'remount' && (
-        <p className="text-sm text-muted-foreground">
-          挂回未完成。请仅重试挂回，不要再次执行卸载与缩容。
-        </p>
+        <p className="text-sm text-muted-foreground">挂回未完成</p>
       )}
       {phase === 'failed' && failureStage === 'shrink' && detached.length > 0 && (
-        <p className="text-sm text-muted-foreground">
-          缩容提交失败，相关挂载仍处于已卸载状态，可先挂回后再处理。
-        </p>
+        <p className="text-sm text-muted-foreground">缩容提交失败，挂载仍未挂回</p>
       )}
       {phase === 'done' && (
         <p className="text-sm text-muted-foreground">

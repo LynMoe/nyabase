@@ -14,7 +14,7 @@ import { formatBytes } from '../../lib/utils.js';
 import { QueryView } from '../layout/query-view.js';
 import { TechnicalId } from '../refs/technical-id.js';
 import { Badge } from '../ui/badge.js';
-import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '../ui/dialog.js';
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../ui/dialog.js';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../ui/table.js';
 
 /** One connection: who, from where, with which key, and every channel it opened or was refused. */
@@ -37,9 +37,6 @@ export function SshSessionDetailDialog({
       <DialogContent className="sm:max-w-4xl" data-testid="ssh-session-detail">
         <DialogHeader>
           <DialogTitle>SSH 连接详情</DialogTitle>
-          <DialogDescription>
-            代理只能看到这条连接打开了哪些通道和流量大小；会话里执行的命令、-A / -L / -R 等转发都在端到端加密的内层会话里，无法看到。
-          </DialogDescription>
         </DialogHeader>
         <QueryView query={detailQuery} resourceName="SSH 连接" loadingLabel="加载 SSH 连接...">
           {(session) => <SessionDetail session={session} />}

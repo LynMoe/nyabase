@@ -29,16 +29,12 @@ describe('网络 page', () => {
     expect(page).toContain("'/admin/firewall-rules'");
     expect(page).toContain("'/admin/firewall-rules/status'");
     expect(page).toMatch(/hasPendingFirewallSync/);
-    expect(page).toMatch(/规则只匹配容器发出的流量/);
-    expect(page).toMatch(/第一条命中的规则生效；都不命中的流量放行/);
-    expect(page).toMatch(/规则是无状态的/);
     expect(page).toMatch(/queryKeys\.firewall\.all/);
   });
 
   it('warns in the editor that stateless rules drop replies too', () => {
     const page = firewall();
-    expect(page).toMatch(/被拦截网段主动连入容器时，容器的回包同样会被拦截/);
-    expect(page).toMatch(/SSH \/ HTTP 代理、DNS 服务器或网关/);
+    expect(page).toMatch(/回包同样会被拦截/);
     expect(page).toMatch(/firewallRulePatch/);
     expect(page).toMatch(/FIREWALL_MAX_CIDRS_PER_RULE/);
     expect(page).toMatch(/disabled=\{portsDisabled\}/);

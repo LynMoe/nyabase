@@ -102,9 +102,7 @@ export function GpuPicker({
       )}
 
       {serverId && error && (
-        <p className="text-xs text-muted-foreground">
-          GPU 列表暂不可用（后端可能尚未就绪）。可稍后重试或继续其他配置。
-        </p>
+        <p className="text-xs text-muted-foreground">GPU 列表暂不可用</p>
       )}
 
       {serverId && !loading && !error && available.length === 0 && (

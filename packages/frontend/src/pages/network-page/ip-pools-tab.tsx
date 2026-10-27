@@ -48,8 +48,7 @@ export function IpPoolsTab() {
 
   return (
     <div className="space-y-4" data-testid="ip-pools">
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <p className="text-sm text-muted-foreground">勾选服务器后，这些服务器上的容器从同一地址段分配 IP。</p>
+      <div className="flex flex-wrap items-center justify-end gap-2">
         <div className="flex items-center gap-2">
           <Button variant="outline" size="icon" onClick={() => { void poolsQuery.refetch(); }} aria-label="刷新 IP 池">
             <RefreshCw className="h-4 w-4" />
@@ -64,7 +63,7 @@ export function IpPoolsTab() {
         showEmpty={poolsQuery.data?.length === 0}
         empty={
           <EmptyState
-            title="暂无 IP 池。创建后可勾选服务器共享同一地址段。"
+            title="暂无 IP 池。"
             action={<Button onClick={() => setCreateOpen(true)}><Plus className="h-4 w-4" />创建 IP 池</Button>}
           />
         }
@@ -144,7 +143,7 @@ export function IpPoolsTab() {
       <ConfirmDialog
         open={Boolean(deleteTarget)}
         title="删除 IP 池？"
-        description={`将删除「${deleteTarget?.name}」（${deleteTarget?.cidr}）。仍有地址占用时会拒绝删除。`}
+        description={`将删除「${deleteTarget?.name}」（${deleteTarget?.cidr}）。`}
         confirmLabel="确认删除"
         pendingLabel="删除中..."
         pending={deletePool.isPending}

@@ -13,7 +13,6 @@ import { Button } from '../../components/ui/button.js';
 import {
   Dialog,
   DialogContent,
-  DialogDescription,
   DialogFooter,
   DialogHeader,
   DialogTitle,
@@ -128,16 +127,12 @@ function BindingFormBody({ binding, pools, open, onOpenChange }: BindingFormDial
       <DialogContent data-testid="http-proxy-binding-form">
         <DialogHeader>
           <DialogTitle>{binding ? '编辑 HTTP 发布' : '新建 HTTP 发布'}</DialogTitle>
-          <DialogDescription>
-            选择域名根，只填写前缀。完整主机名形如 app.example.com。
-          </DialogDescription>
         </DialogHeader>
         <div className="space-y-3">
           {pools.length === 0 ? (
             <FormField
               id="http-proxy-domain-root"
               label="域名根"
-              hint="管理员尚未配置可用的通配域名，配置后才能发布。"
             >
               <Select disabled>
                 <SelectTrigger id="http-proxy-domain-root">

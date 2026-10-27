@@ -37,9 +37,12 @@ export function parseCpuList(text: string): CpuListParse {
   return { ok: true, cpus: [...cpus].sort((a, b) => a - b) };
 }
 
-/** A grant's cores on user surfaces; null means every core the server offers. */
-export function cpuGrantLabel(cores: number | null): string {
-  return cores === null ? '全部' : `${cores} 核`;
+/** A grant's cores on user surfaces; an unlimited grant has every unreserved core of the server. */
+export function cpuGrantLabel(access: { cpuCores: number | null; serverCpuCores: number | null }): string {
+  const { cpuCores, serverCpuCores } = access;
+  const cores = cpuCores === null ? serverCpuCores
+    : serverCpuCores === null ? cpuCores : Math.min(cpuCores, serverCpuCores);
+  return cores === null ? '—' : `${cores} 核`;
 }
 
 /** Whole cores of a grant; null means every unreserved CPU. */

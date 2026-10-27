@@ -44,7 +44,7 @@ const FIELDS: Array<[keyof OnboardingForm, string, string]> = [
   ['slug', '标识', 'prod-incus-1'],
   ['parentInterface', 'LAN 网桥 (vmbr)', 'vmbr0'],
   ['dnsServers', 'DNS（逗号分隔）', '1.1.1.1,8.8.8.8'],
-  ['reservedCpus', '保留 CPU（可选，留给宿主机，不分配给容器）', '0,1 或 0-1'],
+  ['reservedCpus', '保留 CPU（可选）', '0,1 或 0-1'],
 ];
 
 /**
@@ -128,7 +128,7 @@ export function ServerOnboardingDialog({
             <DialogHeader>
               <DialogTitle>安装主机 Agent</DialogTitle>
               <DialogDescription>
-                「{created.name}」已登记。在这台服务器上安装 nyabase-agent 并写入下面的接入令牌，Agent 会主动连接控制面。
+                「{created.name}」已登记。
               </DialogDescription>
             </DialogHeader>
             <EnrollmentInstructions enrollment={created.enrollment} />
@@ -140,7 +140,6 @@ export function ServerOnboardingDialog({
           <>
             <DialogHeader>
               <DialogTitle>服务器接入</DialogTitle>
-              <DialogDescription>登记后会生成一次性接入令牌，由服务器上的 Agent 主动连接控制面，无需开放 Incus API。</DialogDescription>
             </DialogHeader>
             <div className="grid gap-3 sm:grid-cols-2">
               {FIELDS.map(([key, label, placeholder]) => (

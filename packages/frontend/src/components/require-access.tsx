@@ -17,9 +17,7 @@ export function AccessDenied({ requiredLabel }: { requiredLabel?: string }) {
         </div>
         <h1 className="text-lg font-semibold text-foreground">无权访问</h1>
         <p className="text-sm text-muted-foreground">
-          当前账号没有访问该页面的权限
-          {requiredLabel ? `（需要：${requiredLabel}及以上角色）` : ''}
-          。如需开通，请联系管理员。
+          {requiredLabel ? `需要${requiredLabel}及以上角色` : '当前账号没有访问该页面的权限'}
         </p>
         <div className="flex justify-center gap-2">
           <Button variant="outline" onClick={() => window.history.back()}>返回上一页</Button>

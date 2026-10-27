@@ -68,7 +68,7 @@ export function EditableSettingsSection({ draft }: { draft: SettingsDraft }) {
       {draft.hasConflicts && draftState && (
         <Alert>
           <AlertDescription className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-            <span>服务器同时修改了 {draftState.conflictFields.size} 个字段；本地输入已保留，请选择处理方式。</span>
+            <span>服务器同时修改了 {draftState.conflictFields.size} 个字段</span>
             <div className="flex gap-2">
               <Button size="sm" variant="outline" onClick={() => setDraftState(resolveRevisionedDraftConflicts(draftState, 'use-server'))}>
                 使用服务器值
@@ -104,7 +104,9 @@ export function EditableSettingsSection({ draft }: { draft: SettingsDraft }) {
               <div className="mt-1">
                 <TechnicalId label="配置路径" value={field.yamlPath} kind="text" />
               </div>
-              <p className="mt-2 text-xs leading-5 text-muted-foreground">{fieldDescription(field)}</p>
+              {fieldDescription(field) ? (
+                <p className="mt-2 text-xs leading-5 text-muted-foreground">{fieldDescription(field)}</p>
+              ) : null}
             </div>
             <SettingInput
               field={field}
@@ -196,134 +198,116 @@ const GROUP_LABELS: Record<string, string> = {
   containers: '容器统一限制',
 };
 
-const FIELD_LABELS: Record<string, { label: string; description: string }> = {
+const FIELD_LABELS: Record<string, { label: string; description?: string }> = {
   'runtime.nodeEnv': {
     label: 'Node 运行环境',
-    description: '用于生产环境安全检查的运行环境。',
   },
   'server.port': {
     label: 'HTTP 端口',
-    description: '后端 HTTP 服务监听端口。',
   },
   'server.corsOrigin': {
     label: '跨域来源',
-    description: '当前端独立部署时允许访问后端 API 的浏览器来源。',
+    description: '前端独立部署时允许的浏览器来源',
   },
   'branding.title': {
     label: '产品标题',
-    description: '登录页和侧边栏显示的产品名称。',
   },
   'branding.description': {
     label: '产品描述',
-    description: '登录页显示的简短说明。',
   },
   'auth.jwtSecret': {
     label: 'JWT 密钥',
-    description: '用于签发浏览器和 API JWT 的密钥。',
   },
   'auth.jwtExpiresIn': {
     label: 'JWT 有效期',
-    description: '访问令牌传给 JWT 签发器的有效时间。',
   },
   'auth.sessionHours': {
     label: '会话时长',
-    description: '登录会话在无操作后保持有效的小时数。',
   },
   'auth.refreshTokenExpiresDays': {
     label: '刷新令牌有效天数',
-    description: '会话空闲超时：在此天数内未刷新的登录会话失效；每次刷新顺延，但不超过会话最长有效期。',
+    description: '会话空闲超时（天）',
   },
   'auth.sessionMaxLifetimeDays': {
     label: '会话最长有效天数',
-    description: '从登录起算的登录会话绝对有效期，刷新不会延长；到期后需重新登录。',
+    description: '从登录起算（天）',
   },
   'auth.adminInitPassword': {
     label: '初始管理员密码',
-    description: '仅用于初始化第一个管理员账号的密码。',
+    description: '仅用于初始化第一个管理员',
   },
   'database.url': {
     label: 'PostgreSQL 连接地址',
-    description: '控制面唯一事实源的 PostgreSQL 连接地址。',
   },
   'database.poolMax': {
     label: '最大连接池',
-    description: '当前进程最多使用的 PostgreSQL 连接数。',
   },
   'database.idleTimeoutMs': {
     label: '空闲连接超时',
-    description: 'PostgreSQL 空闲连接关闭前的毫秒数。',
+    description: '毫秒',
   },
   'database.statementTimeoutMs': {
     label: 'SQL 执行超时',
-    description: 'PostgreSQL 语句允许执行的最长毫秒数。',
+    description: '毫秒',
   },
   'database.migrationsRun': {
     label: '启动时执行迁移',
-    description: '持有 PostgreSQL advisory lock 时执行待运行的 SQL migration。',
   },
   'audit.retentionDays': {
     label: '审计保留天数',
-    description: '审计日志保留天数；设为 0 表示不按时间清理。',
+    description: '0 = 不按时间清理',
   },
   'audit.retentionMaxEntries': {
     label: '审计最大条数',
-    description: '最多保留的审计日志条数；设为 0 表示不按数量清理。',
+    description: '0 = 不按数量清理',
   },
   'metrics.victoriaMetricsUrl': {
     label: 'VictoriaMetrics 地址',
-    description: '指标写入和查询使用的 VictoriaMetrics 地址。',
   },
   'ssh.enabled': {
     label: '启用 SSH 代理',
-    description: '关闭后用户无法通过平台 SSH 代理 Jump 到容器。',
   },
   'ssh.keyEncryptionSecret': {
     label: '密钥加密密钥',
-    description: '用于加密 SSH 代理主机密钥和 HTTP 代理 TLS 材料。',
+    description: '加密 SSH 主机密钥与 HTTP 代理 TLS 材料',
   },
   'ssh.proxyToken': {
     label: 'SSH 代理令牌',
-    description: 'SSH 代理进程连接后端时使用的 Bearer 令牌。',
   },
   'ssh.proxyPublicHost': {
     label: 'SSH 代理公网主机',
-    description: '用户通过 SSH 代理连接时使用的主机名。',
   },
   'ssh.proxyPublicPort': {
     label: 'SSH 代理公网端口',
-    description: '用户通过 SSH 代理连接时使用的端口。',
   },
   'ssh.proxyHostSuffix': {
     label: '容器主机名后缀',
-    description: '用户通过 SSH 代理用 <容器名>.<后缀> 登录容器，容器主机证书也签发给这个名字。修改后用户已复制的 ssh_config 和 known_hosts 需要更新。',
+    description: '登录名为 <容器名>.<后缀>',
   },
   'containers.processLimit': {
     label: '进程数上限',
-    description: '每个容器可同时存在的进程与线程总数（limits.processes），对所有容器统一生效。',
+    description: '每个容器的进程与线程总数',
   },
   'containers.networkIngressMbit': {
     label: '入站带宽上限（Mbit/s）',
-    description: '每个容器网卡的入站带宽上限（limits.ingress）。',
   },
   'containers.networkEgressMbit': {
     label: '出站带宽上限（Mbit/s）',
-    description: '每个容器网卡的出站带宽上限（limits.egress）。',
   },
   'containers.diskReadMBps': {
     label: '磁盘读速率上限（MB/s）',
-    description: '系统盘与本地数据卷每块盘的读速率上限（limits.read）；CephFS 等网络文件系统无法限速。',
+    description: '每块盘；CephFS 不限速',
   },
   'containers.diskWriteMBps': {
     label: '磁盘写速率上限（MB/s）',
-    description: '系统盘与本地数据卷每块盘的写速率上限（limits.write）；CephFS 等网络文件系统无法限速。',
+    description: '每块盘；CephFS 不限速',
   },
   'ssh.proxySnapshotStaleMs': {
     label: 'SSH 代理快照过期时间',
-    description: 'SSH 代理状态快照被判定为过期前的毫秒数（120000–300000）。',
+    description: '毫秒，120000–300000',
   },
   'ssh.proxyHistoryRetentionDays': {
     label: 'SSH 连接历史保留天数',
-    description: 'SSH 代理的连接、通道和未认证连接明细保留的天数。更早的明细会汇总成按天用量后删除，汇总一直保留。',
   },
 };
 
@@ -332,7 +316,8 @@ export function fieldLabel(field: SystemSettingFieldDto): string {
 }
 
 export function fieldDescription(field: SystemSettingFieldDto): string {
-  return FIELD_LABELS[field.key]?.description ?? field.description;
+  const known = FIELD_LABELS[field.key];
+  return known ? known.description ?? '' : field.description;
 }
 
 export function displayValue(field: SystemSettingFieldDto, value: unknown): string {

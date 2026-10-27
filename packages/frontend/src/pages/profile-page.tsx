@@ -11,7 +11,6 @@ import { Button } from '../components/ui/button.js';
 import {
   Dialog,
   DialogContent,
-  DialogDescription,
   DialogFooter,
   DialogHeader,
   DialogTitle,
@@ -56,7 +55,6 @@ export default function ProfilePage() {
       <SshSessionList
         scope="mine"
         title="SSH 登录记录"
-        description="你经 SSH 代理建立的连接：来源地址、客户端、使用的公钥和连到的容器。看到不认识的来源时，请删除对应的公钥。"
         showPeerFilter
         defaultPageSize={20}
       />
@@ -73,7 +71,6 @@ function PasswordPanel({ userId }: { userId: string }) {
           <ShieldCheck className="h-4 w-4 text-primary mt-1 shrink-0" />
           <div>
             <h2 className="text-base font-semibold text-foreground">登录密码</h2>
-            <p className="text-xs text-muted-foreground mt-0.5">修改后需要使用新密码重新登录；SSH 公钥不受影响。</p>
           </div>
         </div>
         <Button size="sm" variant="outline" onClick={() => setOpen(true)} data-testid="change-password">
@@ -148,7 +145,6 @@ function ChangePasswordDialog({
       <DialogContent>
         <DialogHeader>
           <DialogTitle>修改密码</DialogTitle>
-          <DialogDescription>修改当前账号密码需要验证旧密码。成功后会退出并要求重新登录。SSH 公钥不会被删除：如果怀疑账号泄露，请同时检查下方的 SSH 公钥并删除不认识的公钥。</DialogDescription>
         </DialogHeader>
         <div className="space-y-3">
           <FormField id={curId} label="当前密码" error={errors.currentPassword}>
@@ -299,7 +295,6 @@ function SshKeysPanel({ userId }: { userId: string }) {
         description={
           <>
             将删除公钥「<span className="font-semibold text-foreground">{deleteTarget?.name}</span>」。
-            SSH 代理与容器会在同步后不再接受这把公钥。
           </>
         }
         confirmLabel="删除"
@@ -378,7 +373,6 @@ function AddSshKeyDialog({
       <DialogContent>
         <DialogHeader>
           <DialogTitle>添加公钥</DialogTitle>
-          <DialogDescription>公钥可以 root 身份登录你的全部容器，添加需要验证当前密码。修改密码不会删除公钥，不再使用的公钥请手动删除。</DialogDescription>
         </DialogHeader>
         <div className="space-y-3">
           <FormField id="ssh-key-text" label="公钥内容" error={errors.keyText}>

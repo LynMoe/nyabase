@@ -14,7 +14,6 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '.
 import {
   Dialog,
   DialogContent,
-  DialogDescription,
   DialogFooter,
   DialogHeader,
   DialogTitle,
@@ -207,9 +206,6 @@ function CreateSharedBackendDialog({
       <DialogContent data-testid="shared-backend-form">
         <DialogHeader>
           <DialogTitle>登记共享后端</DialogTitle>
-          <DialogDescription>
-            identity key 用于跨服务器合并；FSID 不一致时会拒绝合并并以红色告警展示冲突详情。
-          </DialogDescription>
         </DialogHeader>
         <div className="space-y-3">
           {(

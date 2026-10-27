@@ -228,10 +228,10 @@ function StorageCard({
 }) {
   const { admin, canManageVolumes, canManageSharedVolumes, canMutateLocal, canMutateShared } = useVolumeCaps(scope);
   const localBlocked = admin && !canManageVolumes
-    ? '挂载与卸载本地数据卷需要「管理本地数据卷」权限；当前账号可以管理容器，但无法列出或挂载本地数据卷。'
+    ? '需要「管理本地数据卷」权限'
     : null;
   const sharedBlocked = admin && !canManageSharedVolumes
-    ? '挂载与卸载共享卷需要「管理共享卷」权限；当前账号可以管理容器，但无法列出或挂载共享卷。'
+    ? '需要「管理共享卷」权限'
     : null;
   return (
     <SectionCard
@@ -332,10 +332,6 @@ function MountDialog({
         {disks.length === 0 ? (
           <div className="space-y-3 text-sm" data-testid="attach-volume-empty">
             <p>{serverName} 上没有空闲的数据卷或共享卷。</p>
-            <p className="text-muted-foreground">
-              数据卷只能挂到同一台服务器上的容器，且一次只挂一个容器。
-              {onCreateVolume ? '新建一个后，它会出现在这里。' : null}
-            </p>
             {onCreateVolume ? (
               <Button size="sm" variant="outline" onClick={onCreateVolume}>
                 <Plus className="h-4 w-4" />新建数据卷

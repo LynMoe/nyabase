@@ -91,7 +91,7 @@ export default function OpsPage() {
 
   return (
     <Page testId="ops-page">
-      <PageHeader title="操作记录" description="控制面对容器、存储、服务器等资源发起的所有异步操作。" />
+      <PageHeader title="操作记录" />
 
       <SectionCard
         toolbar={

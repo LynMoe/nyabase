@@ -99,12 +99,7 @@ export function ServerStorageTab({
       <ConfirmDialog
         open={Boolean(deleteTarget)}
         title="删除数据卷？"
-        description={
-          <>
-            <p>将删除「{deleteTarget?.name}」。</p>
-            <p className="mt-2">若该卷仍挂载在容器上，删除会被拒绝。请先卸载后再试。</p>
-          </>
-        }
+        description={`将删除「${deleteTarget?.name}」。`}
         confirmLabel="确认删除"
         pendingLabel="提交中..."
         pending={deleteVolume.isPending}

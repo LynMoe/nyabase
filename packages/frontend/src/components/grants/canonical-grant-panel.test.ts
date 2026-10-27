@@ -28,14 +28,7 @@ describe('grant panel copy', () => {
     .map((file) => readFileSync(new URL(file, import.meta.url), 'utf8'))
     .join('\n');
 
-  it('explains that several grants are merged per dimension by maximum', () => {
-    expect(source).toContain('多条授权逐项取最大');
-    expect(source).toContain('GPU 白名单取并集');
-    expect(source).toContain('到期取最晚');
-  });
-
   it('warns that revoking starts the grace and ends with a purge of the resources', () => {
-    expect(source).toContain('GRANT_EXPIRY_GRACE_DAYS} 天宽限期');
-    expect(source).toContain('容器与数据卷将被清除');
+    expect(source).toContain('${GRANT_EXPIRY_GRACE_DAYS} 天后清除');
   });
 });

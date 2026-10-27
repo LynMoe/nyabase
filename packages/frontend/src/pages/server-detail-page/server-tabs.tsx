@@ -143,7 +143,7 @@ function ServerOverviewTab({
             </li>
             <li>
               <Link to="/network" search={{ tab: 'ip-pools' }} className="underline">IP 池</Link>
-              {' · 在「网络 → IP 池」把地址段绑定到这台服务器'}
+              {' · 绑定地址段'}
             </li>
           </ol>
         </CardContent>

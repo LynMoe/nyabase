@@ -27,9 +27,7 @@ export function RejectedAgentsNotice({ servers }: { servers: ServerDto[] | undef
       <AlertTitle>{rejected.length} 个主机 Agent 的凭据被拒绝</AlertTitle>
       <AlertDescription>
         <p>
-          这些主机仍在连接，但本库不认可其凭据（例如恢复的备份早于该主机接入，或主机已重新接入而旧 Agent 仍在运行）。
-          已知服务器：重新签发接入令牌并重新接入其 Agent。本库没有的服务器：先停用该主机的 Agent，
-          手动清理其上的实例与卷，再作为新服务器接入（见运维手册 Restoring production 第 6 步）。
+          已知服务器：重新签发接入令牌后重新接入。未知服务器：停用其 Agent、清理实例与卷后作为新服务器接入。
         </p>
         <ul className="mt-2 space-y-1">
           {rejected.map((entry) => {

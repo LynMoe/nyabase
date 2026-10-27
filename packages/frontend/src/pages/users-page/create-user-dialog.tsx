@@ -65,7 +65,7 @@ export function CreateUserDialog({ open, onOpenChange }: { open: boolean; onOpen
             <DialogHeader>
               <DialogTitle>用户已创建</DialogTitle>
               <DialogDescription>
-                请立即复制并妥善交付初始密码。关闭此窗口后将无法再次查看明文密码。
+                关闭后无法再次查看。
               </DialogDescription>
             </DialogHeader>
             <div className="space-y-3 rounded-md border bg-muted/30 p-3">

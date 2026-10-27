@@ -71,7 +71,7 @@ function SpecCard({
     <SectionCard
       title="规格"
       testId="container-spec-card"
-      description={metricsDenied ? '没有查看实时指标的权限，仅显示规格' : stale ? '数据可能已过时' : undefined}
+      description={metricsDenied ? '无指标权限' : stale ? '数据可能已过时' : undefined}
       actions={(
         <>
           {metricsDenied ? null : (

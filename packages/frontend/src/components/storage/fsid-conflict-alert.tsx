@@ -29,9 +29,6 @@ export function FsidConflictAlert({
             <div><dt className="inline text-destructive/80">冲突 FSID：</dt><dd className="inline break-all">{conflict.conflictingFsid}</dd></div>
           )}
         </dl>
-        <p className="text-xs text-destructive/90">
-          相同 identity_key 必须对应同一 Ceph 集群 FSID；发现或登记时不一致将被拒绝合并。
-        </p>
         {onDismiss && (
           <button type="button" className="text-xs underline underline-offset-2" onClick={onDismiss}>
             关闭告警

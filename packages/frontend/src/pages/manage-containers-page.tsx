@@ -40,7 +40,7 @@ export default function ManageContainersPage() {
     <Page>
       <PageHeader
         title="全平台容器"
-        description={containersQuery.data ? `所有用户的 ${containersQuery.data.length} 个容器。新建容器请到「容器」页。` : '所有用户的容器。'}
+        description={containersQuery.data ? `${containersQuery.data.length} 个容器` : undefined}
       />
       <QueryView
         query={containersQuery}

@@ -120,16 +120,14 @@ export function RootShrinkOrchestrationDialog({
       <DialogContent data-testid="root-shrink-orchestration">
         <DialogHeader>
           <DialogTitle>缩容需要先停止容器</DialogTitle>
-          <DialogDescription>
-            此系统盘缩容前必须停止容器「{container.name}」；将依次停止 → 缩容 → 可选启动。目标容量 {formatBytes(sizeBytes)}。
-          </DialogDescription>
+          <DialogDescription>目标容量 {formatBytes(sizeBytes)}</DialogDescription>
         </DialogHeader>
         <div className="space-y-3">
           {progress && <p className="text-sm text-muted-foreground" data-testid="root-shrink-progress">{progress}</p>}
           {error && <p className="text-sm text-destructive">{error}</p>}
           {phase === 'offer_start' && <p className="text-sm">已提交缩容，正在生效。是否启动容器？</p>}
           {phase === 'failed' && failureStage === 'offer_start' && (
-            <p className="text-sm text-muted-foreground">启动失败。可仅重试启动，无需再次停止并缩容。</p>
+            <p className="text-sm text-muted-foreground">启动失败</p>
           )}
           {phase === 'done' && <p className="text-sm text-muted-foreground">编排完成。</p>}
         </div>

@@ -46,7 +46,6 @@ export function LinkedCharts({
       <EmptyState
         icon={ChartLine}
         title="这段时间还没有性能样本"
-        description="刚接入或刚启动时需要等几分钟才有数据，也可以换一个更长的时间范围看看。"
       />
     );
   }

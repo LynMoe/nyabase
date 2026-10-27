@@ -1,6 +1,6 @@
 import { Link } from '@tanstack/react-router';
 import { KeyRound } from 'lucide-react';
-import { Alert, AlertDescription, AlertTitle } from '../ui/alert.js';
+import { Alert, AlertTitle } from '../ui/alert.js';
 import { Button } from '../ui/button.js';
 import { cn } from '../../lib/utils.js';
 
@@ -33,7 +33,7 @@ export function SshKeyNotice({
         data-testid="ssh-key-missing"
       >
         <KeyRound className="mt-0.5 h-4 w-4 shrink-0 text-warning" aria-hidden />
-        <span>你还没有添加 SSH 公钥，登录会被拒绝。{link}</span>
+        <span>还没有 SSH 公钥。{link}</span>
       </p>
     );
   }
@@ -41,12 +41,7 @@ export function SshKeyNotice({
     <Alert variant="warning" className={className} data-testid="ssh-key-missing">
       <KeyRound className="h-4 w-4" />
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <AlertTitle>先添加 SSH 公钥</AlertTitle>
-          <AlertDescription className="text-muted-foreground">
-            容器只能用密钥登录。添加后会自动下发到你所有的容器。
-          </AlertDescription>
-        </div>
+        <AlertTitle className="mb-0">先添加 SSH 公钥</AlertTitle>
         <Button size="sm" variant="outline" asChild>
           <Link to="/profile" onClick={onNavigate}>去添加公钥</Link>
         </Button>

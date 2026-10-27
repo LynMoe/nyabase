@@ -4,16 +4,16 @@ import { Button } from './ui/button.js';
 
 export interface QueryErrorPresentation {
   title: string;
-  description: string;
+  description?: string;
   kind: 'forbidden' | 'not-found' | 'network' | 'error';
 }
 
 export function queryErrorPresentation(error: unknown, resourceName = '内容'): QueryErrorPresentation {
   if (error instanceof ApiError && error.status === 403) {
-    return { title: '无权访问', description: `当前账号没有查看此${resourceName}的权限。`, kind: 'forbidden' };
+    return { title: '无权访问', kind: 'forbidden' };
   }
   if (error instanceof ApiError && error.status === 404) {
-    return { title: `${resourceName}不存在`, description: `它可能已被删除，或链接已经失效。`, kind: 'not-found' };
+    return { title: `${resourceName}不存在`, kind: 'not-found' };
   }
   if (error instanceof ApiError && error.status === 0) {
     return { title: '网络连接失败', description: error.message, kind: 'network' };
@@ -54,7 +54,7 @@ export function QueryErrorState({
     <div className="flex flex-col items-center justify-center py-10 text-center">
       <Icon className="h-8 w-8 text-muted-foreground/50 mb-2" />
       <p className="text-sm font-medium text-foreground">{presentation.title}</p>
-      <p className="text-xs text-muted-foreground mt-1 max-w-md">{presentation.description}</p>
+      {presentation.description ? <p className="text-xs text-muted-foreground mt-1 max-w-md">{presentation.description}</p> : null}
       {(onRetry || onBack) && (
         <div className="flex gap-2 mt-4">
           {onBack && <Button size="sm" variant="outline" onClick={onBack}>返回</Button>}

@@ -50,7 +50,7 @@ function SyncBadge({ status }: { status: FirewallServerStatusDto | undefined }) 
   const badge = firewallSyncBadge(status.state);
   const content = status.state === 'failed'
     ? (status.error ?? '最近一次下发失败')
-    : status.state === 'offline' ? '服务器 Agent 未连接；连上后自动同步' : undefined;
+    : status.state === 'offline' ? 'Agent 未连接' : undefined;
   return (
     <Hint content={content}>
       <span tabIndex={content ? 0 : undefined} className="inline-flex" data-testid={`firewall-sync-${status.serverId}`}>

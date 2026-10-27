@@ -27,8 +27,11 @@ describe('parseCpuList', () => {
 
 describe('cpu labels', () => {
   it('labels grant cores', () => {
-    expect(cpuGrantLabel(null)).toBe('全部');
-    expect(cpuGrantLabel(4)).toBe('4 核');
+    expect(cpuGrantLabel({ cpuCores: null, serverCpuCores: 30 })).toBe('30 核');
+    expect(cpuGrantLabel({ cpuCores: 4, serverCpuCores: 30 })).toBe('4 核');
+    expect(cpuGrantLabel({ cpuCores: 40, serverCpuCores: 30 })).toBe('30 核');
+    expect(cpuGrantLabel({ cpuCores: 4, serverCpuCores: null })).toBe('4 核');
+    expect(cpuGrantLabel({ cpuCores: null, serverCpuCores: null })).toBe('—');
     expect(cpuCoresLabel(null)).toBe('不限');
     expect(cpuCoresLabel(4)).toBe('4 核');
   });

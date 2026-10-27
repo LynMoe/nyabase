@@ -21,8 +21,6 @@ describe('lane D product UI copy', () => {
       read('components/servers/pools-card.tsx'),
     ].join('\n');
     expect(src).toMatch(/ManageStoragePools/);
-    expect(src).toMatch(/可以查看存储池，但登记、取消登记与编辑备注需要「管理存储池」权限/);
-    expect(src).toMatch(/更改系统盘池只影响之后新建的容器，不会改动已有容器/);
     expect(read('components/servers/pools-card.tsx')).toMatch(/位置/);
     expect(read('components/servers/pools-card.tsx')).toMatch(/备注/);
     expect(read('components/servers/pools-card.tsx')).toMatch(/编辑备注/);
@@ -44,7 +42,6 @@ describe('lane D product UI copy', () => {
     expect(src).not.toMatch(/@nyabase\/[a-z0-9-]+-web/);
     expect(src).toMatch(/gpu\.support/);
     expect(src).toMatch(/本机检测/);
-    expect(src).toMatch(/不阻止启用/);
   });
 
   it('retries failed intents and renders GPU sections on container pages', () => {
@@ -61,8 +58,8 @@ describe('lane D product UI copy', () => {
     expect(src).toMatch(/编辑规格/);
     expect(src).toMatch(/调整容量/);
     expect(src).not.toMatch(/\['spec', '规格'/);
-    expect(src).toMatch(/挂载与卸载本地数据卷需要「管理本地数据卷」权限/);
-    expect(src).toMatch(/挂载与卸载共享卷需要「管理共享卷」权限/);
+    expect(src).toMatch(/需要「管理本地数据卷」权限/);
+    expect(src).toMatch(/需要「管理共享卷」权限/);
     expect(src).toMatch(/retryIntent/);
     expect(src).toMatch(/formatIntentAttempt/);
     expect(src).toMatch(/filterAttachableVolumes/);
@@ -322,7 +319,6 @@ describe('lane D product UI copy', () => {
     expect(grants).not.toMatch(/from '\.\.\/ui\/tabs/);
     expect(grants).toMatch(/formatGrantQuotaLine/);
     expect(grants).toMatch(/formatGpuGrantSummary/);
-    expect(grants).toMatch(/存储池（无服务器授权）/);
     expect(grants).toMatch(/磁盘（GiB，留空为不限，不含共享卷）/);
     expect(grants).toMatch(/SectionCard/);
     expect(grants).toMatch(/grant-servers/);

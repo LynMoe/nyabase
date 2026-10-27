@@ -46,7 +46,7 @@ function StaleErrorAlert({ error, resourceName }: { error: unknown; resourceName
     <Alert variant="destructive">
       <AlertTriangle className="h-4 w-4" />
       <AlertTitle>{presentation.title}</AlertTitle>
-      <AlertDescription>{presentation.description}</AlertDescription>
+      {presentation.description ? <AlertDescription>{presentation.description}</AlertDescription> : null}
     </Alert>
   );
 }

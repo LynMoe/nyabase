@@ -40,8 +40,6 @@ import {
   useSubjectGrants,
 } from './use-grant-panel-data.js';
 
-export const GRANT_MERGE_NOTE = '多条授权逐项取最大：同一用户在同一资源上的直接授权与所属各用户组的授权合并，额度取最大值（任一为不限则不限），GPU 白名单取并集，到期取最晚（任一不设期限则不过期）。';
-
 export type GrantResource = 'server-grants' | 'storage-pool-grants' | 'shared-backend-grants';
 
 /** A grant picked for deletion, awaiting confirmation. */
@@ -108,7 +106,7 @@ export function GraceCard({ subject }: { subject: GrantSubject }) {
               id={lapse.serverId}
               name={servers.find((item) => item.id === lapse.serverId)?.name}
             />
-            {' '}宽限中 · 将于 {expiryLabel(lapse.purgeAt)} 清除其容器与数据卷（容器已停止）。重新授权可取消清除（已停止的容器不会自动启动）。
+            {' '}宽限中 · {expiryLabel(lapse.purgeAt)} 清除
           </li>
         ))}
       </ul>
@@ -132,12 +130,11 @@ export function ServerGrantsCard({
   const blocked = !serversQuery.isSuccess
     ? null
     : servers.length === 0
-      ? '还没有服务器，请先在“服务器”页添加。'
+      ? '还没有服务器'
       : servers.every((server) => grantedIds.has(server.id)) ? '所有服务器都已授权。' : null;
   return (
     <SectionCard
       title="服务器授权"
-      description={GRANT_MERGE_NOTE}
       actions={<AddGrantButton blocked={blocked} onClick={() => setDialog('add')} testId="grant-add-server" />}
       flush={grants.length > 0}
       testId="grant-servers"
@@ -213,11 +210,6 @@ export function PoolGrantsCard({
   return (
     <SectionCard
       title="存储池授权"
-      description={
-        grants.some(isOrphan)
-          ? '只能授权已有服务器授权的机器上的存储池。存储池（无服务器授权）仍会列在表中，需先补上对应服务器授权。'
-          : undefined
-      }
       actions={<AddGrantButton blocked={blocked} onClick={() => setDialog('add')} testId="grant-add-pool" />}
       flush={grants.length > 0}
       testId="grant-pools"

@@ -210,7 +210,6 @@ export function ServerGrantDialog({
               value={cpuCores}
               onChange={setCpuCores}
               step="1"
-              hint="按整核绑定，该用户的容器共享；不限 = 全部未保留 CPU"
               error={parsedCores === undefined ? '请输入不小于 1 的整数' : undefined}
             />
             <NumberField id={`${idPrefix}-memory`} label="内存（GiB，留空为不限）" value={memGib} onChange={setMemGib} hint={gibHint(memGib)} error={parsedMem === undefined ? '请输入大于 0 的数值' : undefined} />

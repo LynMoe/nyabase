@@ -60,9 +60,7 @@ export function SshLoginCard({ container, scope }: { container: ContainerDto; sc
       <div className="space-y-4">
         {ownContainer && sshKeys.missing ? <SshKeyNotice variant="inline" /> : null}
         {!ownContainer ? (
-          <p className="text-sm text-muted-foreground">
-            这是 {container.ownerName ?? '其他用户'} 的容器。SSH 代理只按公钥持有者自己的容器解析名字，登录命令只对所有者有效。
-          </p>
+          <p className="text-sm text-muted-foreground">仅所有者（{container.ownerName ?? '其他用户'}）可登录</p>
         ) : loginCommand ? (
           <div className="space-y-2">
             <CommandLine command={loginCommand} copyText={copyText} testId="ssh-login-command" />
@@ -83,7 +81,7 @@ export function SshLoginCard({ container, scope }: { container: ContainerDto; sc
             <FileCode className="h-4 w-4" />一次性 SSH 配置
           </Button>
           <Hint
-            content={repairDisabled && !repairPending ? '容器处于创建或删除过程中，暂时无法修复。' : '重新下发你的 SSH 公钥并检查 sshd，适用于登录被拒绝时。'}
+            content={repairDisabled && !repairPending ? '容器正在创建或删除' : '重新下发公钥并检查 sshd'}
             disabled={repairDisabled}
           >
             <Button size="sm" variant="ghost" onClick={() => repairSsh.mutate()} disabled={repairDisabled} data-testid="repair-ssh">
@@ -147,11 +145,7 @@ function SshConfigDialog({
       <DialogContent>
         <DialogHeader>
           <DialogTitle>一次性 SSH 配置</DialogTitle>
-          <DialogDescription>
-            把下面整段交给本机的 AI agent（Claude Code、Codex 等），它会写入
-            {' '}<code className="font-mono">~/.ssh/config</code> 和 <code className="font-mono">~/.ssh/known_hosts</code>。
-            配置一次后，你的所有容器都能直接登录，也不会再出现主机指纹确认。
-          </DialogDescription>
+          <DialogDescription>复制给本机的 AI agent 执行</DialogDescription>
         </DialogHeader>
         {setupPrompt ? (
           <div className="space-y-3">
@@ -164,9 +158,6 @@ function SshConfigDialog({
             <Button variant="outline" onClick={() => { void copyText(setupPrompt, 'SSH 配置说明已复制'); }}>
               <Copy className="h-4 w-4" />复制
             </Button>
-            <p className="text-xs text-muted-foreground">
-              管理员修改主机名后缀、轮换代理主机密钥或重置证书 CA 后需要重新配置。
-            </p>
           </div>
         ) : null}
       </DialogContent>
@@ -214,10 +205,10 @@ export function useSshLogin(container: ContainerDto, ownContainer: boolean) {
   const unavailable = query.isLoading
     ? '正在加载 SSH 配置…'
     : query.isError
-      ? 'SSH 配置加载失败，请稍后刷新。'
+      ? 'SSH 配置加载失败'
       : !setupPrompt
-        ? '管理员尚未配置 SSH 代理的公网地址，暂时无法生成登录命令。'
-        : '容器还没有分配 IP，启动后即可登录。';
+        ? 'SSH 代理未配置'
+        : '等待容器 IP';
   const copyText = async (value: string, title: string) => {
     const ok = await copyOneTimeSecret(value);
     toast({

@@ -89,10 +89,16 @@ describePg('AccessResolverService', () => {
       await assign(database, image, serverId);
       await grantServer(database, { user: userId }, serverId, { cpuCores: 4, memBytes: 8 });
       await grantServer(database, { user: await seedUser(database) }, otherServer);
+      const topology = [0, 1, 2, 3].map((id) => ({ id, core: id, socket: 0, numa: 0 }));
+      await database.updateTable('infra.servers')
+        .set({ cpu_topology: JSON.stringify(topology), reserved_cpus: [0] })
+        .where('id', '=', serverId)
+        .execute();
 
       await expect(access.getEffectiveAccess(userId)).resolves.toEqual([{
         serverId,
         cpuCores: 4,
+        serverCpuCores: 3,
         memBytes: 8,
         diskBytes: null,
         gpuPciAddresses: [],

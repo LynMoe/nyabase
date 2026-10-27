@@ -91,7 +91,7 @@ export function PreflightCard({ server }: { server: ServerDto }) {
               placeholder="选择存储池"
               loading={poolsQuery.isLoading}
               emptyText="没有已登记的存储池"
-              emptyHint="先在「存储」中登记一个存储池，再运行前置检查。"
+              emptyHint="先在「存储」中登记存储池"
             />
             <FormField id="preflight-address" label="探针地址">
               <Input id="preflight-address" value={probeAddress} onChange={(event) => setProbeAddress(event.target.value)} placeholder="10.20.0.10" />

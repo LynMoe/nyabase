@@ -24,7 +24,6 @@ import { api } from '../../lib/api.js';
 import {
   Dialog,
   DialogContent,
-  DialogDescription,
   DialogFooter,
   DialogHeader,
   DialogTitle,
@@ -65,9 +64,7 @@ export function DomainPoolsCard({
       flush={pools.length > 0}
     >
       {pools.length === 0 ? (
-        <p className="text-sm text-muted-foreground">
-          暂无域名池。登记通配域名后，用户才能把容器端口发布到匹配的主机名。
-        </p>
+        <p className="text-sm text-muted-foreground">暂无域名池。</p>
       ) : (
         <Table className="min-w-[640px]">
           <TableHeader>
@@ -248,9 +245,6 @@ export function DomainPoolFormDialog({
       <DialogContent data-testid="http-domain-pool-form">
         <DialogHeader>
           <DialogTitle>{pool ? '编辑域名池' : '新建域名池'}</DialogTitle>
-          <DialogDescription>
-            通配域名形如 *.example.com。HTTPS 开启后再填写证书。
-          </DialogDescription>
         </DialogHeader>
         <div className="space-y-3">
           <FormField id="http-pool-wildcard" label="通配域名">

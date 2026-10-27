@@ -9,6 +9,7 @@ import {
   type EffectiveAccessDto,
   type ImageDto,
   type IntentAcceptedDto,
+  type LiveServerAccessDto,
   type PerformanceUsageResponse,
   type StorageCapacityDto,
   type UserServerDto,
@@ -35,6 +36,7 @@ import { SizeField, parsePositiveGib } from '../ui/size-slider.js';
 import { QuotaLine, type QuotaLineQuota, quotaFrom } from '../quota/quota-line.js';
 import { sizeScale } from '../../lib/size-ladder.js';
 import { useFittedDefaultSize } from '../../hooks/use-fitted-default-size.js';
+import { cpuGrantLabel } from '../../lib/cpu-set.js';
 import { defaultResourceName } from '../../lib/default-names.js';
 import { api } from '../../lib/api.js';
 import { errorMessage } from '../../lib/api-error.js';
@@ -72,7 +74,7 @@ function CreateContainerBody({ open, onOpenChange, defaultServerId }: CreateCont
             form.submit();
           }}
         >
-          <FormField id="container-name" label="名称" error={form.errors.name} hint={`字母、数字和连字符，最多 ${CONTAINER_NAME_MAX_LENGTH} 个字符，例如 dev-ubuntu`}>
+          <FormField id="container-name" label="名称" error={form.errors.name} hint={`字母、数字、连字符，最多 ${CONTAINER_NAME_MAX_LENGTH} 个字符`}>
             <Input
               id="container-name"
               value={form.name}
@@ -117,7 +119,6 @@ function PlacementFields({ form }: { form: CreateContainerForm }) {
         placeholder="选择服务器"
         loading={serversLoading}
         emptyText="没有可用的服务器"
-        emptyHint="没有你可以使用的在线服务器，请联系管理员分配。"
         error={form.errors.serverId}
       />
       <SelectField
@@ -131,7 +132,6 @@ function PlacementFields({ form }: { form: CreateContainerForm }) {
         disabled={!form.form.serverId}
         loading={Boolean(form.form.serverId) && imagesLoading}
         emptyText={form.form.serverId ? '没有可用的镜像' : undefined}
-        emptyHint="这台服务器还没有分配给你的镜像，请联系管理员。"
         error={form.errors.imageId}
       />
     </div>
@@ -139,10 +139,10 @@ function PlacementFields({ form }: { form: CreateContainerForm }) {
 }
 
 /** The CPU the grant pins on the chosen server: shown, never chosen. */
-function CpuField({ cores, known }: { cores: number | null; known: boolean }) {
-  const text = !known ? '—' : cores === null ? '全部' : `${cores} 核`;
+function CpuField({ access }: { access: LiveServerAccessDto | undefined }) {
+  const text = access ? cpuGrantLabel(access) : '—';
   return (
-    <FormField id="container-cpu" label="CPU" hint={known ? '由授权决定' : '选择服务器后显示，由授权决定'}>
+    <FormField id="container-cpu" label="CPU">
       <div className="relative sm:w-1/2">
         <Input
           id="container-cpu"
@@ -164,7 +164,7 @@ function SpecFields({ form }: { form: CreateContainerForm }) {
   const starting = form.form.startAfterCreate;
   return (
     <>
-      <CpuField cores={selectedAccess?.cpuCores ?? null} known={Boolean(selectedAccess)} />
+      <CpuField access={selectedAccess} />
       <SizeField
         id="container-memory"
         label="内存"
@@ -179,7 +179,7 @@ function SpecFields({ form }: { form: CreateContainerForm }) {
           <QuotaLine
             quota={form.limits.memQuota}
             over={memOver}
-            inactiveHint={starting ? undefined : '不立即启动时不占内存额度，启动时再检查'}
+            inactiveHint={starting ? undefined : '启动时检查'}
             testId="create-remaining-memory"
           />
         ) : null}

@@ -169,7 +169,6 @@ export function UserIdentityDialog({ user, onClose }: { user: UserDto; onClose: 
       <DialogContent>
         <DialogHeader>
           <DialogTitle>编辑用户</DialogTitle>
-          <DialogDescription>修改显示名称与角色。用户名创建后不可更改。</DialogDescription>
         </DialogHeader>
         <FormField id="user-display-name" label="显示名称">
           <Input
@@ -185,7 +184,7 @@ export function UserIdentityDialog({ user, onClose }: { user: UserDto; onClose: 
           onChange={(next) => setRole(next as Role)}
           options={ROLE_OPTIONS}
           disabled={!roleAvailability.allowed}
-          hint={roleAvailability.reason ?? '用户管理员可管理用户、用户组、授权、容器与数据卷；超级管理员另管服务器、镜像、网络与系统设置。'}
+          hint={roleAvailability.reason ?? undefined}
         />
         <DialogFooter>
           <Button variant="outline" onClick={() => onOpenChange(false)}>取消</Button>
@@ -234,7 +233,7 @@ function ResetPasswordDialog({
             <DialogHeader>
               <DialogTitle>密码已重置</DialogTitle>
               <DialogDescription>
-                请立即复制并妥善交付新密码。关闭此窗口后将无法再次查看明文密码。
+                关闭后无法再次查看。
               </DialogDescription>
             </DialogHeader>
             <div className="space-y-3 rounded-md border bg-muted/30 p-3">
@@ -270,7 +269,7 @@ function ResetPasswordDialog({
             <DialogHeader>
               <DialogTitle>重置密码？</DialogTitle>
               <DialogDescription>
-                将为「{displayName}」生成一次性新密码。原密码立即失效，该用户的登录会话会全部被吊销；SSH 公钥不受影响（如怀疑账号泄露，可先禁用该用户，禁用后其公钥不再可用）。
+                将为「{displayName}」生成新密码，原密码和登录会话立即失效。
               </DialogDescription>
             </DialogHeader>
             <DialogFooter>
@@ -362,7 +361,7 @@ export function UserHeaderActions({ user }: { user: UserDto }) {
       <ConfirmDialog
         open={disableOpen}
         title="停用用户？"
-        description={`将停用「${user.displayName}」。该账号将无法登录，已有会话会被终止，其容器会立即停止；14 天后其容器和数据卷将被清除。期间重新启用可保留资源（容器不会自动启动）。`}
+        description={`将停用「${user.displayName}」，其容器立即停止，14 天后清除其容器和数据卷。`}
         confirmLabel="确认停用"
         pendingLabel="处理中..."
         pending={patchUser.isPending}
@@ -372,7 +371,7 @@ export function UserHeaderActions({ user }: { user: UserDto }) {
       <ConfirmDialog
         open={deleteOpen}
         title="删除用户？"
-        description={`将永久删除用户「${user.displayName}」。其登录会话会被终止，组关系与资源授权会一并清理，且不可恢复。`}
+        description={`将永久删除用户「${user.displayName}」，不可恢复。`}
         confirmLabel="确认删除"
         pendingLabel="确认删除"
         pending={remove.isPending}

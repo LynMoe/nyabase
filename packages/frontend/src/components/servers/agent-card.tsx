@@ -4,8 +4,8 @@ import { KeyRound, PlugZap, Unplug } from 'lucide-react';
 import type { RotateServerEnrollmentRequest, ServerDto, ServerEnrollmentDto } from '@nyabase/common';
 import { Badge } from '../ui/badge.js';
 import { Button } from '../ui/button.js';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../ui/card.js';
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '../ui/dialog.js';
+import { Card, CardContent, CardHeader, CardTitle } from '../ui/card.js';
+import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '../ui/dialog.js';
 import { ConfirmDialog } from '../layout/confirm-dialog.js';
 import { Field } from '../layout/form-field.js';
 import { TechnicalId } from '../refs/technical-id.js';
@@ -73,10 +73,7 @@ export function AgentCard({ server }: { server: ServerDto }) {
   return (
     <Card data-testid="server-agent">
       <CardHeader className="flex flex-row items-start justify-between gap-3 space-y-0">
-        <div className="space-y-1.5">
-          <CardTitle className="flex items-center gap-2 text-base"><KeyRound className="h-4 w-4" />主机 Agent</CardTitle>
-          <CardDescription>服务器上的 nyabase-agent 主动连接控制面，Incus 操作与节点指标都经由这条连接。</CardDescription>
-        </div>
+        <CardTitle className="flex items-center gap-2 text-base"><KeyRound className="h-4 w-4" />主机 Agent</CardTitle>
         <Button size="sm" variant="outline" onClick={() => setConfirmOpen(true)} data-testid="server-agent-enrollment">
           重新签发接入令牌
         </Button>
@@ -94,14 +91,12 @@ export function AgentCard({ server }: { server: ServerDto }) {
         </div>
         {agent.ipv6Guard && !agent.ipv6Guard.present && (
           <p className="break-all text-xs text-destructive">
-            主机上的 nft 表 nyabase_guard 不在位{agent.ipv6Guard.error ? `（${agent.ipv6Guard.error}）` : ''}：
-            Agent 在它恢复前拒绝启动容器或给运行中的容器接入网卡，恢复后自动重试。
+            主机上的 nft 表 nyabase_guard 不在位{agent.ipv6Guard.error ? `（${agent.ipv6Guard.error}）` : ''}
           </p>
         )}
         {agent.firewall?.state === 'failed' && (
           <p className="break-all text-xs text-destructive" data-testid="server-agent-firewall-error">
-            出站防火墙规则同步失败{agent.firewall.error ? `（${agent.firewall.error}）` : ''}：
-            同步完成前 Agent 拒绝启动容器或给运行中的容器接入网卡。下发出错时控制面按退避自动重试；Agent 拒收的规则要等规则变更或 Agent 重连后才会再次下发。
+            出站防火墙规则同步失败{agent.firewall.error ? `（${agent.firewall.error}）` : ''}
           </p>
         )}
         <div className="grid gap-3 sm:grid-cols-2">
@@ -129,12 +124,7 @@ export function AgentCard({ server }: { server: ServerDto }) {
         open={confirmOpen}
         onOpenChange={setConfirmOpen}
         title="重新签发接入令牌？"
-        description={(
-          <div className="space-y-2">
-            <p>将生成新的一次性接入令牌，之前未使用的令牌立即作废。</p>
-            <p>当前正在运行的 Agent 不会断开；只有新的 Agent 用这枚令牌接入后，才会替换旧凭据。</p>
-          </div>
-        )}
+        description="之前未使用的令牌立即作废。"
         confirmLabel="签发"
         pendingLabel="签发中..."
         confirmVariant="default"
@@ -146,7 +136,6 @@ export function AgentCard({ server }: { server: ServerDto }) {
           <DialogContent className="sm:max-w-2xl" onInteractOutside={(event) => event.preventDefault()}>
             <DialogHeader>
               <DialogTitle>新的接入令牌</DialogTitle>
-              <DialogDescription>请立即复制；关闭此窗口后无法再次查看。</DialogDescription>
             </DialogHeader>
             <EnrollmentInstructions enrollment={issued} />
             <DialogFooter>

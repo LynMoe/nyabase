@@ -16,9 +16,9 @@ import { useDocumentTitle } from '../hooks/use-document-title.js';
 function loginReasonBanner(reason: string | undefined): string | null {
   switch (reason) {
     case 'password-changed':
-      return '密码已变更，原会话已安全结束。请使用新密码登录。';
+      return '密码已变更，请重新登录。';
     case 'account-changed':
-      return '账号状态已变更，原会话已安全结束。请重新登录。';
+      return '账号状态已变更，请重新登录。';
     case 'session-expired':
       return '登录已过期，请重新登录。';
     default:

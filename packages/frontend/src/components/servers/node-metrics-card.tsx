@@ -2,7 +2,7 @@ import { Activity } from 'lucide-react';
 import { NodeMetricsStatus, type NodeMetricsHealthDto, type ServerDto } from '@nyabase/common';
 import { Field } from '../layout/form-field.js';
 import { Badge } from '../ui/badge.js';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../ui/card.js';
+import { Card, CardContent, CardHeader, CardTitle } from '../ui/card.js';
 import { nodeMetricsStatusZh } from '../../lib/display-labels.js';
 import { relativeTime } from '../../lib/utils.js';
 
@@ -19,10 +19,7 @@ export function NodeMetricsCard({ server }: { server: ServerDto }) {
     <Card data-testid="server-node-metrics">
       <CardHeader>
         <div className="flex flex-wrap items-start justify-between gap-3">
-          <div>
-            <CardTitle className="flex items-center gap-2 text-base"><Activity className="h-4 w-4" />节点指标</CardTitle>
-            <CardDescription>由主机 Agent 采集并经控制连接上报，无需单独配置。</CardDescription>
-          </div>
+          <CardTitle className="flex items-center gap-2 text-base"><Activity className="h-4 w-4" />节点指标</CardTitle>
           <Badge variant={nodeMetricsBadgeVariant(health.status)}>{nodeMetricsStatusZh(health.status)}</Badge>
         </div>
       </CardHeader>

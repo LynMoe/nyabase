@@ -120,10 +120,7 @@ export default function SshProxyPage() {
         </TabsContent>
         <TabsContent value="history" className="space-y-3">
           {tab === 'history' ? (
-            <SshSessionList
-              scope="all"
-              description="经 SSH 代理的每一条认证通过的连接，以及它打开（或被拒绝）的每个通道。点一行查看通道明细。"
-            />
+            <SshSessionList scope="all" />
           ) : null}
         </TabsContent>
         <TabsContent value="stats">
@@ -139,7 +136,7 @@ export default function SshProxyPage() {
           open={disconnectOpen}
           onOpenChange={setDisconnectOpen}
           title="断开所有 SSH 代理会话？"
-          description={`${canViewStatus && data ? `当前有 ${status.activeConnections} 个活跃连接。` : '当前连接数不可见或尚未加载。'} 确认后会向所有在线 SSH 代理实例发送断开命令。`}
+          description={canViewStatus && data ? `当前有 ${status.activeConnections} 个活跃连接。` : '将断开所有在线代理上的连接。'}
           confirmLabel="断开全部"
           pendingLabel="断开全部"
           pending={disconnectAll.isPending}
@@ -151,7 +148,7 @@ export default function SshProxyPage() {
           open={rotateOpen}
           onOpenChange={setRotateOpen}
           title="轮换 SSH 主机密钥？"
-          description="轮换后所有客户端将失去对当前主机密钥的信任，需要更新 known_hosts 后才能再次连接。确认继续？"
+          description="所有用户需要更新 known_hosts 后才能再连接。"
           confirmLabel="确认轮换"
           pendingLabel="确认轮换"
           pending={rotateHostKey.isPending}
@@ -163,7 +160,7 @@ export default function SshProxyPage() {
           open={resetOpen}
           onOpenChange={setResetOpen}
           title="重置所有容器主机证书 CA？"
-          description="只在 ssh.keyEncryptionSecret 丢失、容器证书无法再签发时使用。每个用户都会得到新的 CA，所有容器重新签发主机证书；用户需要到个人资料页重新复制 known_hosts 中的 @cert-authority 行。"
+          description="所有用户需要重新复制 known_hosts 中的 @cert-authority 行。"
           confirmLabel="确认重置"
           pendingLabel="确认重置"
           pending={resetHostAuthorities.isPending}

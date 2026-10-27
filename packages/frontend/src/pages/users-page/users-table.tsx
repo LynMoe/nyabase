@@ -129,7 +129,7 @@ export function UsersTable({ users: visibleUsers, allUsers }: { users: UserDto[]
       <ConfirmDialog
         open={Boolean(deleteUser)}
         title="删除用户？"
-        description={`将永久删除用户「${deleteUser?.displayName}」。其登录会话会被终止，组关系与资源授权会一并清理，且不可恢复。`}
+        description={`将永久删除用户「${deleteUser?.displayName}」，不可恢复。`}
         confirmLabel="确认删除"
         pendingLabel="删除中..."
         pending={remove.isPending}

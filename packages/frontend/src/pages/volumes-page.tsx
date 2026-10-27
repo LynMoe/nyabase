@@ -107,7 +107,6 @@ export default function VolumesPage() {
         description={
           <>
             <p>将删除「{deleteTarget?.name}」。</p>
-            <p className="mt-2">若该卷仍挂载在容器上，删除会被拒绝。请先卸载后再试。</p>
           </>
         }
         confirmLabel="确认删除"
@@ -142,7 +141,7 @@ function VolumeList({
   if (servers.length === 0 && volumes.length === 0) {
     return (
       <EmptyState
-        title="暂无本地数据卷。创建后即可挂载到容器。"
+        title="暂无本地数据卷。"
         action={<Button onClick={() => onCreate()}><Plus className="h-4 w-4" />新建数据卷</Button>}
       />
     );

@@ -45,13 +45,12 @@ export function EnrollmentInstructions({ enrollment }: { enrollment: ServerEnrol
       <Alert variant="warning">
         <TriangleAlert className="h-4 w-4" />
         <AlertDescription>
-          接入令牌只显示这一次，关闭后无法再次查看；令牌在 {new Date(enrollment.expiresAt).toLocaleString('zh-CN')} 前有效，
-          使用一次即失效。丢失或过期后可在服务器详情「接入」页重新签发。
+          只显示一次，{new Date(enrollment.expiresAt).toLocaleString('zh-CN')} 前有效。
         </AlertDescription>
       </Alert>
       <div className="space-y-1.5">
         <div className="flex items-center justify-between gap-2">
-          <p className="text-xs text-muted-foreground">接入令牌（仅此一次）</p>
+          <p className="text-xs text-muted-foreground">接入令牌</p>
           <Button
             size="sm"
             variant="outline"
@@ -67,7 +66,7 @@ export function EnrollmentInstructions({ enrollment }: { enrollment: ServerEnrol
       <div className="space-y-1.5">
         <div className="flex items-center justify-between gap-2">
           <p className="text-xs text-muted-foreground">
-            在服务器上以 root 执行（写入 <span className="font-mono">{AGENT_ENV_FILE}</span> 并启动 nyabase-agent）
+            在服务器上以 root 执行
           </p>
           <Button size="sm" variant="outline" onClick={() => { void copyWithToast(snippet, '安装命令'); }}>
             <Copy className="h-3.5 w-3.5" />复制命令
@@ -77,8 +76,7 @@ export function EnrollmentInstructions({ enrollment }: { enrollment: ServerEnrol
           {snippet}
         </pre>
         <p className="text-xs text-muted-foreground">
-          Agent 只在本地没有凭据时使用令牌；若这台主机曾经接入过，请先停止 nyabase-agent 并清空
-          <span className="mx-1 font-mono">{AGENT_STATE_DIR}</span>再启动。
+          曾接入过的主机：先停止 nyabase-agent 并清空<span className="mx-1 font-mono">{AGENT_STATE_DIR}</span>
         </p>
       </div>
     </div>

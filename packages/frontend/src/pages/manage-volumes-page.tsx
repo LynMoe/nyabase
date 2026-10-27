@@ -64,7 +64,6 @@ export default function ManageVolumesPage() {
     <Page testId="manage-volumes">
       <PageHeader
         title="全平台数据卷"
-        description="所有用户的本地数据卷与共享卷。新建数据卷请到「数据卷」或「共享卷」页。"
       />
       <QueryView query={localQuery} resourceName="本地数据卷" loadingLabel="加载本地数据卷...">
         {(volumes) => (
@@ -109,7 +108,6 @@ export default function ManageVolumesPage() {
         description={
           <>
             <p>将删除「{deleteTarget?.volume.name}」。</p>
-            <p className="mt-2">若该卷仍挂载在容器上，删除会被拒绝。请先卸载后再试。</p>
           </>
         }
         confirmLabel="确认删除"

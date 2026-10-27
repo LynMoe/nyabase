@@ -48,9 +48,7 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
               <AlertTriangle className="h-5 w-5 text-destructive" />
               <CardTitle className="text-lg">页面出错了</CardTitle>
             </div>
-            <CardDescription>
-              抱歉，页面渲染时发生异常。可以尝试刷新页面恢复。
-            </CardDescription>
+            <CardDescription>请刷新页面</CardDescription>
           </CardHeader>
           <CardContent className="space-y-3">
             <pre className="max-h-40 overflow-auto rounded-md bg-muted p-3 text-xs text-muted-foreground whitespace-pre-wrap break-words">

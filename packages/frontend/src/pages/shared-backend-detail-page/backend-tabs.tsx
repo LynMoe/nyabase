@@ -163,9 +163,7 @@ export function BackendExecutorsTab({
     >
       <div data-testid="shared-backend-executors">
         {executors.length === 0 ? (
-          <p className="text-sm text-muted-foreground">
-            尚未发现执行端。先登记后端，再对在线服务器发现执行端。
-          </p>
+          <p className="text-sm text-muted-foreground">尚未发现执行端</p>
         ) : (
           <Table>
             <TableHeader>
@@ -370,7 +368,7 @@ export function DeleteBackendAction({
         title="删除共享后端？"
         description={
           <>
-            将删除登记「{backend.displayName ?? backend.name}」。仍有关联存储池或数据卷时后端可能拒绝删除。
+            将删除登记「{backend.displayName ?? backend.name}」。
             <dl className="mt-3 space-y-2 rounded-md border px-3 py-3 text-sm text-foreground">
               <div>
                 <dt className="text-xs text-muted-foreground">显示名称</dt>

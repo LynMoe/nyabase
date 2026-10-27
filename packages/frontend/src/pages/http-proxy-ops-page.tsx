@@ -141,7 +141,7 @@ export default function HttpProxyOpsPage() {
         open={Boolean(deletePool)}
         onOpenChange={(open) => { if (!open) setDeletePool(null); }}
         title="删除域名池？"
-        description={`将删除通配域名「${deletePool?.wildcardDomain}」。若仍有 HTTP 发布使用该池，删除会被拒绝。请先停用该池，或让用户删除相关发布。`}
+        description={`将删除通配域名「${deletePool?.wildcardDomain}」。`}
         confirmLabel="确认删除"
         pendingLabel="删除中..."
         pending={removePool.isPending}
@@ -151,7 +151,7 @@ export default function HttpProxyOpsPage() {
         open={Boolean(deleteBinding)}
         onOpenChange={(open) => { if (!open) setDeleteBinding(null); }}
         title="删除发布绑定？"
-        description={`将删除用户「${deleteBinding?.ownerUsername}」的发布「${deleteBinding?.hostname}」。主机名会在排空后才可再次使用。`}
+        description={`将删除用户「${deleteBinding?.ownerUsername}」的发布「${deleteBinding?.hostname}」。`}
         confirmLabel="确认删除"
         pendingLabel="删除中..."
         pending={removeBinding.isPending}

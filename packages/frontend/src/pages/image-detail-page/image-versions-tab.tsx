@@ -42,7 +42,6 @@ export function ImageVersionsTab({ image }: { image: AdminImageDto }) {
   return (
     <SectionCard
       title="版本"
-      description="拉取最新版本后新建的容器使用当前版本，已有容器保持创建时的版本。不再被任何容器使用的历史版本可以删除。"
       flush={rows.length > 0}
       testId="image-versions"
     >
@@ -51,7 +50,7 @@ export function ImageVersionsTab({ image }: { image: AdminImageDto }) {
       ) : versions.isError ? (
         <p className="text-sm text-destructive">版本加载失败：{errorMessage(versions.error)}</p>
       ) : rows.length === 0 ? (
-        <p className="text-sm text-muted-foreground">还没有拉取过任何版本。</p>
+        <p className="text-sm text-muted-foreground">暂无版本</p>
       ) : (
         <Table>
           <TableHeader>
@@ -79,7 +78,7 @@ export function ImageVersionsTab({ image }: { image: AdminImageDto }) {
         open={deleting !== null}
         title="删除这个版本？"
         description={deleting
-          ? `会从各服务器上移除 ${deleting.description ?? shortFingerprint(deleting.fingerprint)} 的副本，之后无法再用它创建或重建容器。`
+          ? `删除 ${deleting.description ?? shortFingerprint(deleting.fingerprint)} 后，无法再用它创建或重建容器。`
           : ''}
         confirmLabel="确认删除"
         pendingLabel="提交中..."

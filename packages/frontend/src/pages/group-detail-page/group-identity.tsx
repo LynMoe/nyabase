@@ -192,7 +192,7 @@ export function DeleteGroupAction({ groupId }: { groupId: string }) {
       <ConfirmDialog
         open={open}
         title="删除用户组？"
-        description="删除后成员关系与资源授权会一并清理，且不可恢复。"
+        description="删除后不可恢复。"
         confirmLabel="确认删除"
         pendingLabel="确认删除"
         pending={removeGroup.isPending}
