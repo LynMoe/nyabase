@@ -195,7 +195,7 @@ SSH 连接历史（`tools/ssh-proxy/src/history.rs`、`backend/src/ssh/ssh-histo
 看不到内层会话里的命令和 -A / -L / -R（不要为此做中间人）。认证通过的每条连接、它打开或被拒的每个通道，在打开和关闭时各上报一次**完整记录**，
 按（代理实例 `proxyId:instanceId`，序号）幂等 upsert：计数只增、关闭一经记录就保留、真实关闭覆盖 `lost`，所以记录乱序、重复都无妨。
 记录在代理的有界发件箱里等 `historyAck`，后端提交后才确认（累计确认，所以存储失败后丢弃后续帧直到代理重发）；字节数由 status 帧每 30 s 落库。
-未认证连接只按（窗口、地址、原因）计数。代理消失 10 分钟后其未关闭连接记为 `lost`；超过 `ssh.proxyHistoryRetentionDays` 的明细折叠进
+未认证连接只按（窗口、地址、原因）计数。来源地址是 TCP 对端；只有 `NYABASE_SSH_PROXY_PROTOCOL_TRUSTED`（地址 / CIDR）里的对端才读 PROXY v1/v2 头并以头里的地址为准（可不带头），读头在限流之前、在 accept 循环之外（`proxy_protocol.rs`），所以单地址限额按真实客户端算。容器里 sshd 看到的永远是代理机地址。代理消失 10 分钟后其未关闭连接记为 `lost`；超过 `ssh.proxyHistoryRetentionDays` 的明细折叠进
 `ssh_proxy_daily_usage` 后删除，统计同时读明细与汇总。`GET /ssh-sessions` 遵循 scope 规则（mine = 自己发起的连接，all = user_admin）。
 
 代理快照（`tools/`、`http-proxy/`、`ssh/`、`proxy-snapshots/`）：租约（`validUntil`）是撤销的上限，构建失败时什么都不发，

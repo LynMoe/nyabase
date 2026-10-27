@@ -10,6 +10,7 @@ mod control;
 mod history;
 mod listener;
 mod protocol;
+mod proxy_protocol;
 mod runtime;
 mod session;
 mod snapshot;

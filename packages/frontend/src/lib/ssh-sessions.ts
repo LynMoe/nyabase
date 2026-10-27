@@ -50,6 +50,7 @@ const LABELS: Record<string, string> = {
   rejected_client_limit: '超出单地址连接上限',
   rejected_site_limit: '超出网段连接上限',
   rejected_preauth_limit: '超出认证前连接上限',
+  proxy_header_invalid: 'PROXY 头部无效',
 };
 
 export function sshHistoryLabel(code: string): string {

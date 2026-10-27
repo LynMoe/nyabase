@@ -2,6 +2,7 @@ use crate::bridge::emit_metric;
 use crate::config::ProxyConfig;
 use crate::control::ControlPlane;
 use crate::protocol::TelemetrySender;
+use crate::proxy_protocol::{read_client_address, PROXY_HEADER_TIMEOUT};
 use crate::runtime::{ConnectionCleanup, ConnectionState, ProxyRuntime};
 use crate::session::ProxySshSession;
 use crate::snapshot::SnapshotStore;
@@ -14,11 +15,12 @@ use proxy_common::conn_limit::{
 };
 use russh::{MethodKind, MethodSet};
 use std::future::Future;
-use std::net::{Shutdown, SocketAddr};
+use std::net::{IpAddr, Shutdown, SocketAddr};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::Semaphore;
 use tracing::{debug, info, warn};
 
 pub(crate) async fn run_public_listener(
@@ -29,7 +31,11 @@ pub(crate) async fn run_public_listener(
     telemetry: TelemetrySender,
 ) -> Result<()> {
     let listener = TcpListener::bind(&config.listen).await?;
-    info!(listen = %config.listen, "SSH proxy listener started");
+    info!(
+        listen = %config.listen,
+        proxy_protocol_trusted = %config.proxy_protocol_trusted,
+        "SSH proxy listener started"
+    );
     serve_public(listener, config, store, runtime, control, telemetry).await
 }
 
@@ -41,7 +47,15 @@ pub(crate) async fn serve_public(
     control: Arc<ControlPlane>,
     telemetry: TelemetrySender,
 ) -> Result<()> {
-    let limiter = ConnectionLimiter::new(config.connection_limits());
+    let admission = Arc::new(Admission {
+        limiter: ConnectionLimiter::new(config.connection_limits()),
+        header_reads: Arc::new(Semaphore::new(config.max_preauth_connections)),
+        config,
+        store,
+        runtime,
+        control,
+        telemetry,
+    });
     loop {
         let (stream, peer) = accept_retrying(
             || listener.accept(),
@@ -50,56 +64,108 @@ pub(crate) async fn serve_public(
             },
         )
         .await;
+        if admission.config.proxy_protocol_trusted.contains(peer.ip()) {
+            admission.admit_after_proxy_header(stream, peer);
+        } else {
+            admission.admit(stream, peer);
+        }
+    }
+}
+
+struct Admission {
+    limiter: Arc<ConnectionLimiter>,
+    /// Trusted-relay connections whose PROXY header is still being read.
+    header_reads: Arc<Semaphore>,
+    config: ProxyConfig,
+    store: Arc<SnapshotStore>,
+    runtime: Arc<ProxyRuntime>,
+    control: Arc<ControlPlane>,
+    telemetry: TelemetrySender,
+}
+
+impl Admission {
+    /// The header is read off the accept loop and before any limit is taken:
+    /// limits and history are per client, and until the header is read the
+    /// only known address is the relay's, which all its clients share. Reads
+    /// in flight are bounded by the pre-auth pool size and each by
+    /// `PROXY_HEADER_TIMEOUT`.
+    fn admit_after_proxy_header(self: &Arc<Self>, mut stream: TcpStream, relay: SocketAddr) {
+        let Ok(slot) = self.header_reads.clone().try_acquire_owned() else {
+            warn!(%relay, "PROXY header reads at capacity; connection rejected");
+            self.reject(relay.ip(), "rejected_preauth_limit");
+            return;
+        };
+        let admission = self.clone();
+        tokio::spawn(async move {
+            let client = read_client_address(&mut stream, relay, PROXY_HEADER_TIMEOUT).await;
+            drop(slot);
+            match client {
+                Ok(client) => {
+                    if client != relay {
+                        debug!(%client, %relay, "PROXY header names the client");
+                    }
+                    admission.admit(stream, client);
+                }
+                Err(error) => {
+                    warn!(%relay, %error, "invalid PROXY header; connection rejected");
+                    admission.reject(relay.ip(), "proxy_header_invalid");
+                }
+            }
+        });
+    }
+
+    /// `peer` is the client: the socket peer, or the address a trusted
+    /// relay's PROXY header named.
+    fn admit(&self, stream: TcpStream, peer: SocketAddr) {
         // The permit is held by the connection task until the session ends,
         // so one address cannot exhaust the pool before authenticating.
-        let permit = match limiter.try_acquire(peer.ip()) {
+        let permit = match self.limiter.try_acquire(peer.ip()) {
             Ok(permit) => permit,
             Err(limit) => {
                 warn!(%peer, limit = limit.as_str(), "connection rejected by concurrency limit");
-                runtime.record_rejected_connection();
-                let result = match limit {
-                    LimitRejection::Global => "rejected_limit",
-                    LimitRejection::PerClient => "rejected_client_limit",
-                    LimitRejection::PerSite => "rejected_site_limit",
-                    LimitRejection::Pending => "rejected_preauth_limit",
-                };
-                runtime.history.refuse(peer.ip(), result);
-                emit_metric(
-                    &telemetry,
-                    "ssh_proxy_connections_total",
-                    vec![("result", result.to_string())],
-                    1.0,
+                self.reject(
+                    peer.ip(),
+                    match limit {
+                        LimitRejection::Global => "rejected_limit",
+                        LimitRejection::PerClient => "rejected_client_limit",
+                        LimitRejection::PerSite => "rejected_site_limit",
+                        LimitRejection::Pending => "rejected_preauth_limit",
+                    },
                 );
-                continue;
+                return;
             }
         };
-        if !control.admit() && store.load().is_none() {
+        if !self.control.admit() && self.store.load().is_none() {
             warn!(%peer, "SSH proxy rejected paused connection without host key");
-            runtime.record_rejected_connection();
-            runtime.history.refuse(peer.ip(), "rejected_paused");
-            emit_metric(
-                &telemetry,
-                "ssh_proxy_connections_total",
-                vec![("result", "rejected_paused".to_string())],
-                1.0,
-            );
+            self.reject(peer.ip(), "rejected_paused");
             let _ = stream
                 .into_std()
                 .map(|socket| socket.shutdown(Shutdown::Both));
-            continue;
+            return;
         }
-        let admit = control.admit();
+        let admit = self.control.admit();
         tokio::spawn(serve_connection(
             stream,
             peer,
             permit,
             admit,
-            store.clone(),
-            control.clone(),
-            config.clone(),
-            runtime.clone(),
-            telemetry.clone(),
+            self.store.clone(),
+            self.control.clone(),
+            self.config.clone(),
+            self.runtime.clone(),
+            self.telemetry.clone(),
         ));
+    }
+
+    fn reject(&self, ip: IpAddr, result: &'static str) {
+        self.runtime.record_rejected_connection();
+        self.runtime.history.refuse(ip, result);
+        emit_metric(
+            &self.telemetry,
+            "ssh_proxy_connections_total",
+            vec![("result", result.to_string())],
+            1.0,
+        );
     }
 }
 

@@ -375,3 +375,73 @@ fn authentication_releases_the_pre_auth_slot_but_not_the_connection_slot() {
     drop(permit);
     assert_eq!(limiter.active_for(peer.ip()), 0);
 }
+
+async fn connect_with_header(
+    source: &str,
+    target: std::net::SocketAddr,
+    header: &[u8],
+) -> TcpStream {
+    use tokio::io::AsyncWriteExt as _;
+    let mut stream = connect_from(source, target).await;
+    stream.write_all(header).await.unwrap();
+    stream
+}
+
+#[tokio::test]
+async fn limits_apply_to_the_client_a_trusted_relay_names() {
+    let mut config = test_config();
+    config.max_connections_per_ip = 1;
+    config.proxy_protocol_trusted =
+        crate::proxy_protocol::TrustedSources::parse("127.0.0.1").unwrap();
+    let listener = start_public_listener(config).await;
+    let header = |client: &str| format!("PROXY TCP4 {client} 127.0.0.1 40000 2222\r\n");
+
+    // One relay address, two clients: each has its own per-IP slot.
+    let mut first = connect_with_header(
+        "127.0.0.1",
+        listener.address,
+        header("203.0.113.1").as_bytes(),
+    )
+    .await;
+    let mut second = connect_with_header(
+        "127.0.0.1",
+        listener.address,
+        header("203.0.113.2").as_bytes(),
+    )
+    .await;
+    assert!(read_banner(&mut first).await.is_some());
+    assert!(read_banner(&mut second).await.is_some());
+    let mut again = connect_with_header(
+        "127.0.0.1",
+        listener.address,
+        header("203.0.113.1").as_bytes(),
+    )
+    .await;
+    assert!(read_banner(&mut again).await.is_none());
+
+    let mut malformed =
+        connect_with_header("127.0.0.1", listener.address, b"PROXY TCP4 nope\r\n").await;
+    assert!(read_banner(&mut malformed).await.is_none());
+    listener.task.abort();
+}
+
+#[tokio::test]
+async fn untrusted_peers_cannot_claim_another_address() {
+    let mut config = test_config();
+    config.max_connections_per_ip = 1;
+    config.proxy_protocol_trusted =
+        crate::proxy_protocol::TrustedSources::parse("127.0.0.2").unwrap();
+    let listener = start_public_listener(config).await;
+
+    let mut first = connect_from("127.0.0.1", listener.address).await;
+    assert!(read_banner(&mut first).await.is_some());
+    // Counted as 127.0.0.1, which is at its limit, whatever the header says.
+    let mut second = connect_with_header(
+        "127.0.0.1",
+        listener.address,
+        b"PROXY TCP4 203.0.113.2 127.0.0.1 40000 2222\r\n",
+    )
+    .await;
+    assert!(read_banner(&mut second).await.is_none());
+    listener.task.abort();
+}

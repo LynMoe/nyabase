@@ -237,6 +237,7 @@ pub(crate) fn test_config() -> ProxyConfig {
         status_interval: Duration::from_secs(1),
         control_hold: Duration::from_secs(300),
         control_liveness: Default::default(),
+        proxy_protocol_trusted: Default::default(),
     }
 }
 

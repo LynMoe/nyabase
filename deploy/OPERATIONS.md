@@ -306,6 +306,7 @@ enforced at start-up):
 | `NYABASE_SSH_MAX_PREAUTH_CONNECTIONS` | SSH | `128` (1–`NYABASE_SSH_MAX_CONNECTIONS`), not yet authenticated |
 | `NYABASE_SSH_AUTH_TIMEOUT_MS` | SSH | `30000` (1000–600000), accept to successful auth |
 | `NYABASE_SSH_CONTROL_HOLD_MS` | SSH | `300000` (180000–600000) |
+| `NYABASE_SSH_PROXY_PROTOCOL_TRUSTED` | SSH | unset = nobody; comma-separated addresses / CIDR networks whose PROXY header (v1 or v2) names the client |
 | `NYABASE_HTTP_LISTEN` | HTTP | `0.0.0.0:8080` (the example uses `:80`) |
 | `NYABASE_HTTPS_LISTEN` | HTTP | unset = HTTPS off (the example uses `:443`) |
 | `NYABASE_HTTP_MAX_CONNECTIONS` | HTTP | `4096` (1–65536) |
@@ -369,6 +370,25 @@ and evictions in `ssh_proxy_connections_total` (`rejected_preauth_limit`,
 YAML or panel settings. A transient `accept()` failure (descriptor
 exhaustion, `ECONNABORTED`, `ENOBUFS`) is logged and retried with a short
 backoff (5 ms doubling to 1 s); it does not restart the proxy.
+
+**Client addresses behind a relay.** The SSH proxy limits and records
+(connection history, refusals) by client address. A router that only
+port-forwards (DNAT) keeps the client's address, so nothing needs
+configuring. A hop that replaces it (a TCP relay such as frp, nginx
+`stream`, haproxy or a load balancer, or a router that also masquerades)
+makes every client look like that hop, sharing one per-IP limit; have it send
+a PROXY protocol header (frp `transport.proxyProtocolVersion = "v2"`, nginx
+`proxy_protocol on;`, haproxy `send-proxy-v2`) and list its address in
+`NYABASE_SSH_PROXY_PROTOCOL_TRUSTED`. Only connections from those addresses
+are read for a header, so no other client can claim an address; a trusted
+address may also connect without one (a LAN client inside a trusted range)
+and is then its own client. v2 `LOCAL` and v1 `UNKNOWN` (health checks) keep
+the relay's address. A malformed header, or one not completed within 3 s,
+closes the connection, counted as `proxy_header_invalid`; header reads in
+flight are capped at `NYABASE_SSH_MAX_PREAUTH_CONNECTIONS`. Inside the
+container sshd still sees the proxy host's address (the proxy is a jump host
+and opens its own TCP connection), so the panel's connection history is where
+the client address shows.
 
 **Reaching containers by name.** The proxy authenticates by public key
 alone; the jump login only labels the session. A `direct-tcpip` target is

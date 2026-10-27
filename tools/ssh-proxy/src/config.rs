@@ -4,6 +4,8 @@ use proxy_common::conn_limit::{validate_limit, LimitSettings};
 use proxy_common::control_link::ControlLiveness;
 use proxy_common::control_token::required_control_token;
 use proxy_common::env::{env_u64, env_usize, validate_status_interval_ms};
+
+use crate::proxy_protocol::TrustedSources;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -58,6 +60,8 @@ pub(crate) struct ProxyConfig {
     pub(crate) status_interval: Duration,
     pub(crate) control_hold: Duration,
     pub(crate) control_liveness: ControlLiveness,
+    /// Peers whose PROXY header names the client (`proxy_protocol.rs`).
+    pub(crate) proxy_protocol_trusted: TrustedSources,
 }
 
 impl ProxyConfig {
@@ -128,6 +132,7 @@ impl ProxyConfig {
             status_interval: Duration::from_millis(status_interval_ms),
             control_hold: Duration::from_millis(control_hold_ms),
             control_liveness: ControlLiveness::default(),
+            proxy_protocol_trusted: TrustedSources::from_env()?,
         })
     }
 }

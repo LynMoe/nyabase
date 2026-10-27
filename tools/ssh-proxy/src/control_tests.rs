@@ -42,6 +42,7 @@ async fn assert_invalid_key_snapshot_revokes(invalid: ProxySnapshot, expected_er
         status_interval: Duration::from_secs(1),
         control_hold: Duration::from_secs(300),
         control_liveness: Default::default(),
+        proxy_protocol_trusted: Default::default(),
     };
     let store = SnapshotStore::default();
     let runtime = ProxyRuntime::new(&config);
@@ -104,6 +105,7 @@ async fn snapshot_deadline_expires_and_revokes_without_a_status_tick() {
         status_interval: Duration::from_millis(MAX_STATUS_INTERVAL_MS),
         control_hold: Duration::from_secs(300),
         control_liveness: Default::default(),
+        proxy_protocol_trusted: Default::default(),
     };
     let store = Arc::new(SnapshotStore::default());
     let runtime = Arc::new(ProxyRuntime::new(&config));
@@ -174,6 +176,7 @@ async fn blocked_control_write_times_out_and_control_revocation_aborts_sessions(
         status_interval: Duration::from_secs(1),
         control_hold: Duration::from_secs(300),
         control_liveness: Default::default(),
+        proxy_protocol_trusted: Default::default(),
     };
     let runtime = ProxyRuntime::new(&config);
     let store = SnapshotStore::default();
