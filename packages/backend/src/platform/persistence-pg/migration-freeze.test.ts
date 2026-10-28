@@ -14,6 +14,8 @@ const RELEASED_MIGRATION_CHECKSUMS: Readonly<Record<string, string>> = {
   '000001_initial': '8848618cee05d8e08dd708fa2aef656351732a24bd02af2393652139a99160ca',
   // Deployed to production on 2026-10-27 with 8356204.
   '000002_ssh-proxy-lines': '4ab7dfdba4cb8227286dcd5ac755550daff2feeee1e0196b07a9bb305a9a6d9f',
+  // Deployed to production on 2026-10-28 with 0f4866c.
+  '000003_grant-bundles': 'a44266926e6f31ee4f728df16dd72217c124019f4525694848d9b6190915dc56',
 };
 
 describe('released SQL migrations', () => {
