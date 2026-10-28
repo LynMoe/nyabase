@@ -320,7 +320,7 @@ describe('lane D product UI copy', () => {
     expect(grants).toMatch(/grant-backends/);
     expect(grants).toMatch(/grant-add-pool-/);
     expect(grants).toMatch(/grant-add-backend/);
-    // The top form: pick a bundle, tick「修改」to override a field, replace on 409.
+    // The top form: pick a bundle, switch on「修改」to override a field, replace on 409.
     expect(grants).toMatch(/bundleOptionGroups/);
     expect(grants).toMatch(/>修改</);
     expect(grants).toMatch(/已覆盖/);
@@ -332,7 +332,6 @@ describe('lane D product UI copy', () => {
     // GPUs are a count now; no card picker in the grant editor.
     expect(grants).not.toMatch(/GpuPicker|ServerGrantGpu/);
     expect(grants).not.toMatch(/\btoolbar=/);
-    expect(grants).not.toMatch(/aria-expanded/);
     expect(grants).not.toMatch(/isLocalStoragePool/);
     expect(grants).not.toMatch(/\/admin\/groups|kind: 'groups'/);
     expect(quota).toMatch(/formatConsumedQuotaParts/);

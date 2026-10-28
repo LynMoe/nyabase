@@ -1,27 +1,23 @@
 import { useState } from 'react';
-import { ChevronRight } from 'lucide-react';
-import type { GrantBundleDto, PatchServerGrantRequest, ServerGrantDto } from '@nyabase/common';
+import { ChevronDown } from 'lucide-react';
+import type { GrantBundleDto, PatchServerGrantRequest, ServerGrantDto, ServerGrantOverrides } from '@nyabase/common';
 import { useActionMutation } from '../../hooks/use-action-mutation.js';
 import { api } from '../../lib/api.js';
 import { grantedGpuIndexLabel } from '../../lib/grant-quota.js';
+import { cn } from '../../lib/utils.js';
 import { useGpuDevices } from '../gpu/gpu-picker.js';
 import {
   GRANT_BUNDLE_FIELDS,
-  GRANT_FIELD_LABELS,
   type KnownQuotas,
-  type OverrideDraft,
   dataDiskSummary,
-  formatQuotaValue,
   quotaSummaryParts,
   overrideDraftFrom,
   overriddenFields,
   parseOverrideDraft,
 } from '../../lib/grant-bundle-form.js';
 import { SectionCard } from '../layout/section-card.js';
-import { ResourceRef } from '../refs/resource-ref.js';
 import { Badge } from '../ui/badge.js';
 import { Button } from '../ui/button.js';
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '../ui/dialog.js';
 import { DataDiskSection, type DataDiskDeleteTarget } from './data-disk-section.js';
 import { GrantExpiryInput, OverrideQuotaFields, PhaseBadge } from './grant-form-parts.js';
 import {
@@ -49,6 +45,13 @@ export function knownBundleQuotas(grant: ServerGrantDto, bundle: GrantBundleDto 
   return known;
 }
 
+/** Same override set: the same fields, each with the same value. */
+export function sameOverrides(left: ServerGrantOverrides, right: ServerGrantOverrides): boolean {
+  const fields = overriddenFields(left);
+  return fields.length === overriddenFields(right).length
+    && fields.every((field) => Object.hasOwn(right, field) && (left[field] ?? null) === (right[field] ?? null));
+}
+
 /** A server grant picked for deletion. */
 export interface ServerGrantDeleteTarget {
   serverId: string;
@@ -56,9 +59,9 @@ export interface ServerGrantDeleteTarget {
 }
 
 /**
- * The user's server grants, one compact row per server: its name, the
- * bundle, the effective quotas, the data disks summed, the expiry. A row
- * opens the grant's detail.
+ * The user's server grants, one row per server: its name, the bundle, the
+ * effective quotas and the data disks summed, the expiry. A row expands in
+ * place into its editor (quotas, expiry), the GPUs picked and the data disks.
  */
 export function ServerGrantList({
   userId,
@@ -74,8 +77,12 @@ export function ServerGrantList({
   onDeleteDisk: (target: DataDiskDeleteTarget) => void;
 }) {
   const servers = useGrantServers().data ?? [];
-  const [openServerId, setOpenServerId] = useState<string | null>(null);
-  const open = grants.find((grant) => grant.serverId === openServerId);
+  const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set());
+  const toggle = (serverId: string) => setExpanded((current) => {
+    const next = new Set(current);
+    if (!next.delete(serverId)) next.add(serverId);
+    return next;
+  });
   return (
     <SectionCard title="服务器授权" flush={grants.length > 0} testId="grant-servers">
       {grants.length === 0 ? (
@@ -86,48 +93,57 @@ export function ServerGrantList({
             const server = servers.find((row) => row.id === grant.serverId);
             const overridden = overriddenFields(grant.overrides).length > 0;
             const phase = expiryPhase(grant.expiresAt);
+            const open = expanded.has(grant.serverId);
+            const panelId = `grant-panel-${grant.serverId}`;
             return (
-              <li key={grant.id}>
+              <li key={grant.id} data-testid={`grant-server-${grant.serverId}`}>
                 <button
                   type="button"
-                  className="flex w-full items-center gap-3 px-4 py-2.5 text-left transition-colors hover:bg-accent/50 focus-visible:bg-accent/50 focus-visible:outline-hidden"
-                  onClick={() => setOpenServerId(grant.serverId)}
-                  data-testid={`grant-server-${grant.serverId}`}
+                  aria-expanded={open}
+                  aria-controls={panelId}
+                  className="flex w-full items-center gap-3 px-4 py-3 text-left transition-colors hover:bg-accent/50 focus-visible:bg-accent/50 focus-visible:outline-hidden"
+                  onClick={() => toggle(grant.serverId)}
                 >
                   <span className="min-w-0 flex-1">
-                    <span className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
-                      <span className="font-medium">{serverName(grant.serverId, servers)}</span>
-                      <span className="text-xs text-muted-foreground">模板 {grant.bundleName}</span>
-                      {overridden ? <Badge variant="secondary" className="px-1.5 py-0 text-[11px]">已覆盖</Badge> : null}
+                    <span className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                      <span className="text-base font-medium">{serverName(grant.serverId, servers)}</span>
+                      <span className="text-sm text-muted-foreground">模板 {grant.bundleName}</span>
+                      {overridden ? <Badge variant="secondary">已覆盖</Badge> : null}
+                      {phase === 'live' ? null : <PhaseBadge phase={phase} />}
                     </span>
-                    <span className="mt-0.5 block truncate text-xs text-muted-foreground tabular-nums">
+                    <span className="mt-1 block text-sm text-muted-foreground tabular-nums">
                       {[...quotaSummaryParts(grant, server ?? {}), dataDiskSummary(grant.storagePools)].join(' · ')}
                     </span>
                   </span>
-                  <span className="hidden shrink-0 text-xs text-muted-foreground sm:inline">
+                  <span className="hidden shrink-0 text-sm text-muted-foreground sm:inline">
                     {grant.expiresAt ? `至 ${expiryLabel(grant.expiresAt)}` : '永久'}
                   </span>
-                  {phase === 'live' ? null : <PhaseBadge phase={phase} />}
-                  <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground" />
+                  <ChevronDown
+                    className={cn('h-4 w-4 shrink-0 text-muted-foreground transition-transform', open && 'rotate-180')}
+                  />
                 </button>
+                {open ? (
+                  <div id={panelId} className="border-t bg-muted/20 px-4 py-4">
+                    <ServerGrantDetail
+                      // Remount after a save so the editor starts from the stored grant.
+                      key={grant.updatedAt}
+                      userId={userId}
+                      grant={grant}
+                      bundle={bundles.find((row) => row.id === grant.bundleId)}
+                      gpuEnabled={server?.gpuEnabled}
+                      onDelete={() => onDelete({
+                        serverId: grant.serverId,
+                        label: `${grant.bundleName} · ${serverName(grant.serverId, servers)}`,
+                      })}
+                      onDeleteDisk={onDeleteDisk}
+                    />
+                  </div>
+                ) : null}
               </li>
             );
           })}
         </ul>
       )}
-      {open ? (
-        <ServerGrantDetailDialog
-          userId={userId}
-          grant={open}
-          bundle={bundles.find((row) => row.id === open.bundleId)}
-          onClose={() => setOpenServerId(null)}
-          onDelete={() => {
-            setOpenServerId(null);
-            onDelete({ serverId: open.serverId, label: `${open.bundleName} · ${serverName(open.serverId, servers)}` });
-          }}
-          onDeleteDisk={onDeleteDisk}
-        />
-      ) : null}
     </SectionCard>
   );
 }
@@ -139,146 +155,87 @@ function GrantedGpus({ serverId, pciAddresses }: { serverId: string; pciAddresse
 }
 
 /**
- * One server grant: its bundle, the effective quotas (overridden ones marked,
- * with the bundle's value beside them), expiry, the GPUs picked for the user,
- * and the data disks that live under it.
+ * One server grant, expanded: its quotas as inputs (a switch per field turns
+ * an override on and enables the input; off follows the bundle), the expiry,
+ * the GPUs picked for the user, and the data disks that live under it.
  */
-function ServerGrantDetailDialog({
+function ServerGrantDetail({
   userId,
   grant,
   bundle,
-  onClose,
+  gpuEnabled,
   onDelete,
   onDeleteDisk,
 }: {
   userId: string;
   grant: ServerGrantDto;
   bundle: GrantBundleDto | undefined;
-  onClose: () => void;
+  gpuEnabled: boolean | undefined;
   onDelete: () => void;
   onDeleteDisk: (target: DataDiskDeleteTarget) => void;
 }) {
-  const servers = useGrantServers().data ?? [];
-  const server = servers.find((row) => row.id === grant.serverId);
   const access = useLiveServerAccess(userId, grant.serverId);
-  const [editing, setEditing] = useState(false);
-  const overridden = new Set(overriddenFields(grant.overrides));
-  const name = serverName(grant.serverId, servers);
-  return (
-    <Dialog open onOpenChange={(next) => { if (!next) onClose(); }}>
-      <DialogContent className="sm:max-w-3xl" data-testid={`grant-detail-${grant.serverId}`}>
-        <DialogHeader>
-          <DialogTitle className="flex flex-wrap items-center gap-2">
-            <ResourceRef kind="server" id={grant.serverId} name={name} />
-          </DialogTitle>
-          <DialogDescription>授权模板「{grant.bundleName}」</DialogDescription>
-        </DialogHeader>
-        <div className="space-y-4">
-          <dl className="grid gap-3 text-sm sm:grid-cols-2 lg:grid-cols-4">
-            {GRANT_BUNDLE_FIELDS.map((field) => (
-              <div key={field} className="min-w-0">
-                <dt className="text-xs text-muted-foreground">{GRANT_FIELD_LABELS[field]}</dt>
-                <dd className="mt-0.5 flex flex-wrap items-center gap-1.5">
-                  <span className="tabular-nums">{formatQuotaValue(field, grant[field], server ?? {})}</span>
-                  {overridden.has(field) ? (
-                    <>
-                      <Badge variant="secondary">已覆盖</Badge>
-                      {bundle ? (
-                        <span className="text-xs text-muted-foreground">模板 {formatQuotaValue(field, bundle[field], server ?? {})}</span>
-                      ) : null}
-                    </>
-                  ) : null}
-                </dd>
-              </div>
-            ))}
-          </dl>
-          <div className="flex flex-wrap items-center gap-x-6 gap-y-2 text-sm">
-            <span className="flex items-center gap-2">
-              <span className="text-xs text-muted-foreground">到期</span>
-              {expiryLabel(grant.expiresAt)}
-              <PhaseBadge phase={expiryPhase(grant.expiresAt)} />
-            </span>
-            {access && access.gpuPciAddresses.length > 0 ? (
-              <span className="flex items-center gap-2">
-                <span className="text-xs text-muted-foreground">分配的 GPU</span>
-                <span className="tabular-nums"><GrantedGpus serverId={grant.serverId} pciAddresses={access.gpuPciAddresses} /></span>
-              </span>
-            ) : null}
-          </div>
-          <DataDiskSection userId={userId} grant={grant} access={access} onDelete={onDeleteDisk} />
-        </div>
-        <DialogFooter>
-          <Button variant="ghost-destructive" onClick={onDelete}>删除授权</Button>
-          <Button variant="outline" onClick={() => setEditing(true)}>编辑额度与到期</Button>
-        </DialogFooter>
-        {editing ? (
-          <EditServerGrantDialog
-            userId={userId}
-            grant={grant}
-            bundle={knownBundleQuotas(grant, bundle)}
-            gpuEnabled={server?.gpuEnabled}
-            title={`编辑「${grant.bundleName} · ${name}」`}
-            onClose={() => setEditing(false)}
-          />
-        ) : null}
-      </DialogContent>
-    </Dialog>
-  );
-}
-
-/** Overrides and expiry of one grant; the overrides sent are the complete set. */
-function EditServerGrantDialog({
-  userId,
-  grant,
-  bundle,
-  gpuEnabled,
-  title,
-  onClose,
-}: {
-  userId: string;
-  grant: ServerGrantDto;
-  bundle: KnownQuotas;
-  gpuEnabled: boolean | undefined;
-  title: string;
-  onClose: () => void;
-}) {
   const invalidate = useInvalidateGrants(userId);
-  const [draft, setDraft] = useState<OverrideDraft>(() => overrideDraftFrom(grant.overrides));
+  const known = knownBundleQuotas(grant, bundle);
+  const [draft, setDraft] = useState(() => overrideDraftFrom(grant.overrides));
   const [expiresAt, setExpiresAt] = useState(() => initialExpiry(grant.expiresAt));
-  const overrides = parseOverrideDraft(draft, { overrides: grant.overrides, bundle });
+  const overrides = parseOverrideDraft(draft, { overrides: grant.overrides, bundle: known });
+  // The expiry input has minute precision, so it is compared as text against the stored one.
+  const expiryChanged = expiresAt !== initialExpiry(grant.expiresAt);
+  const dirty = overrides === undefined || !sameOverrides(overrides, grant.overrides) || expiryChanged;
+  const reset = () => {
+    setDraft(overrideDraftFrom(grant.overrides));
+    setExpiresAt(initialExpiry(grant.expiresAt));
+  };
   const save = useActionMutation({
     mutationFn: () => {
-      const body: PatchServerGrantRequest = { overrides: overrides ?? {}, expiresAt: isoOrNull(expiresAt) };
+      const body: PatchServerGrantRequest = {
+        overrides: overrides ?? {},
+        expiresAt: expiryChanged ? isoOrNull(expiresAt) : grant.expiresAt,
+      };
       return api.patch<ServerGrantDto>(`/users/${userId}/server-grants/${grant.serverId}`, body);
     },
     successTitle: '授权已保存',
     errorTitle: '授权保存失败',
-    onSuccess: () => { onClose(); invalidate(); },
+    onSuccess: invalidate,
   });
   return (
-    <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}>
-      <DialogContent className="sm:max-w-2xl">
-        <DialogHeader>
-          <DialogTitle>{title}</DialogTitle>
-          <DialogDescription>未勾选「修改」的字段跟随授权模板，模板修改后立即随之变化。</DialogDescription>
-        </DialogHeader>
-        <div className="space-y-4">
-          <OverrideQuotaFields
-            idPrefix={`grant-${grant.serverId}`}
-            bundle={bundle}
-            draft={draft}
-            onChange={setDraft}
-            gpuEnabled={gpuEnabled}
-          />
-          <GrantExpiryInput id={`grant-${grant.serverId}-expires-at`} value={expiresAt} onChange={setExpiresAt} />
+    <div className="space-y-5 text-sm">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <p className="text-muted-foreground">
+          授权模板「{grant.bundleName}」：未开启「修改」的额度跟随模板，模板修改后立即随之变化。
+        </p>
+        <Button size="sm" variant="ghost-destructive" onClick={onDelete}>删除授权</Button>
+      </div>
+      <OverrideQuotaFields
+        idPrefix={`grant-${grant.serverId}`}
+        bundle={known}
+        draft={draft}
+        onChange={setDraft}
+        gpuEnabled={gpuEnabled}
+      />
+      <div className="grid gap-3 sm:grid-cols-2">
+        <GrantExpiryInput id={`grant-${grant.serverId}-expires-at`} value={expiresAt} onChange={setExpiresAt} />
+        <div className="flex items-center gap-2 rounded-md border px-3 py-2 sm:self-start">
+          <span className="text-muted-foreground">分配的 GPU</span>
+          <span className="font-medium tabular-nums">
+            {access ? <GrantedGpus serverId={grant.serverId} pciAddresses={access.gpuPciAddresses} /> : '—'}
+          </span>
         </div>
-        <DialogFooter>
-          <Button variant="outline" onClick={onClose}>取消</Button>
-          <Button onClick={() => save.mutate()} disabled={overrides === undefined || save.isPending}>
+      </div>
+      {dirty ? (
+        <div className="flex justify-end gap-2">
+          <Button variant="outline" onClick={reset} disabled={save.isPending}>还原</Button>
+          <Button
+            onClick={() => save.mutate()}
+            disabled={overrides === undefined || save.isPending}
+            data-testid={`grant-save-${grant.serverId}`}
+          >
             {save.isPending ? '保存中...' : '保存'}
           </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+        </div>
+      ) : null}
+      <DataDiskSection userId={userId} grant={grant} access={access} onDelete={onDeleteDisk} />
+    </div>
   );
 }

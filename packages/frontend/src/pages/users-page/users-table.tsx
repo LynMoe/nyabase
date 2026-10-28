@@ -33,7 +33,7 @@ function ServerGrantBadge({ grant, servers }: { grant: ServerGrantDto; servers: 
     >
       <Badge
         variant={phase === 'live' ? 'outline' : 'warning'}
-        className="px-1.5 py-0 text-[11px] font-normal"
+        className="px-1.5 py-0 text-xs font-normal"
         data-testid={`user-grant-${grant.userId}-${grant.serverId}`}
       >
         {serverName(grant.serverId, servers)}
@@ -92,9 +92,13 @@ export function UsersTable({
             }}
           >
             <TableCell className="py-2">
-              <Link to="/users/$id" params={{ id: user.id }} className="flex min-w-0 items-baseline gap-1.5">
-                <span className="truncate font-medium">{user.displayName}</span>
-                <span className="font-mono text-xs text-muted-foreground">@{user.username}</span>
+              <Link
+                to="/users/$id"
+                params={{ id: user.id }}
+                className="block truncate font-medium"
+                title={`@${user.username}`}
+              >
+                {user.displayName.trim() || user.username}
               </Link>
             </TableCell>
             <TableCell className="py-2">{roleLabel(user.role)}</TableCell>

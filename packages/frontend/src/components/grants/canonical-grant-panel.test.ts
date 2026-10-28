@@ -82,3 +82,14 @@ describe('grant panel copy', () => {
     expect(source).toContain('替换后立即生效');
   });
 });
+
+describe('sameOverrides', () => {
+  it('compares the overridden fields and their values; null (不限) is a value', async () => {
+    const { sameOverrides } = await import('./server-grant-list.js');
+    expect(sameOverrides({}, {})).toBe(true);
+    expect(sameOverrides({ memBytes: null }, { memBytes: null })).toBe(true);
+    expect(sameOverrides({ memBytes: null }, {})).toBe(false);
+    expect(sameOverrides({ memBytes: 1 }, { memBytes: 2 })).toBe(false);
+    expect(sameOverrides({ memBytes: 1 }, { memBytes: 1, cpuCores: 4 })).toBe(false);
+  });
+});

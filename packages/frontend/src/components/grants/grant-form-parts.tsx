@@ -3,9 +3,11 @@ import { grantExpiryPhaseLabel } from '../../lib/display-labels.js';
 import {
   GRANT_BUNDLE_FIELDS,
   GRANT_FIELD_INPUT_LABELS,
+  GRANT_FIELD_LABELS,
   type KnownQuotas,
   type OverrideDraft,
   type QuotaTexts,
+  formatQuotaValue,
   parseQuotaText,
   quotaTextError,
   quotaToText,
@@ -14,7 +16,6 @@ import {
 import { approxGibHint } from '../../lib/utils.js';
 import { FormField } from '../layout/form-field.js';
 import { Badge } from '../ui/badge.js';
-import { Checkbox } from '../ui/checkbox.js';
 import { Input } from '../ui/input.js';
 import { Label } from '../ui/label.js';
 import { Switch } from '../ui/switch.js';
@@ -175,8 +176,8 @@ export function BundleQuotaFields({
 }
 
 /**
- * The four quotas of a user's grant: unticked fields follow the bundle and
- * show its value; ticking「修改」lets the administrator type the user's own.
+ * The four quotas of a user's grant: fields with「修改」off follow the bundle
+ * and show its value; switching it on enables the input for the user's own.
  * `bundle` fields may be unknown (undefined) while the bundle loads.
  */
 export function OverrideQuotaFields({
@@ -203,20 +204,26 @@ export function OverrideQuotaFields({
         const text = overridden ? draft.texts[field] : known !== undefined && !locked ? quotaToText(field, known) : '';
         const error = overridden ? quotaTextError(field, text) : null;
         const hint = overridden ? quotaHint(field, text) : undefined;
-        const note = locked ? GPU_DISABLED_HINT : !overridden ? (known === undefined ? '模板值加载中…' : '跟随模板') : null;
+        const bundleValue = known === undefined ? null : formatQuotaValue(field, known, { gpuEnabled });
+        const note = locked
+          ? GPU_DISABLED_HINT
+          : overridden
+            ? (bundleValue ? `模板 ${bundleValue}` : null)
+            : (bundleValue ? '跟随模板' : '模板值加载中…');
         return (
           <div key={field} className="flex flex-col gap-1.5">
             <div className="flex items-center justify-between gap-2">
               <Label htmlFor={inputId}>{GRANT_FIELD_INPUT_LABELS[field]}</Label>
               <div className="flex shrink-0 items-center gap-1.5">
-                <Checkbox
+                <Label htmlFor={checkboxId} className="text-xs font-normal text-muted-foreground">修改</Label>
+                <Switch
                   id={checkboxId}
                   checked={overridden}
-                  // Ticking starts from the bundle's value, so it waits for it; unticking always works.
+                  // Switching on starts from the bundle's value, so it waits for it; switching off always works.
                   disabled={!overridden && (locked || known === undefined)}
-                  onCheckedChange={(checked) => onChange(toggleOverride(draft, field, checked === true, bundle))}
+                  onCheckedChange={(checked) => onChange(toggleOverride(draft, field, checked, bundle))}
+                  aria-label={`修改${GRANT_FIELD_LABELS[field]}`}
                 />
-                <Label htmlFor={checkboxId} className="text-xs font-normal">修改</Label>
               </div>
             </div>
             <Input

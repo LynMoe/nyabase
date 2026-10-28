@@ -83,11 +83,26 @@ export function GpuPicker({
   }, [availableKey, defaultAll, error, loading, onChange, serverId, valueKey]);
 
   const emptyBecauseGrant = Boolean(grant && grant.pciAddresses.length === 0);
+  const selected = new Set(value.map(normalizePci));
+  const selectedCount = available.filter((gpu) => selected.has(normalizePci(gpu.pciAddress))).length;
+  const allSelected = available.length > 0 && selectedCount === available.length;
 
   return (
     <div className="space-y-2" data-testid="gpu-picker">
       <div className="flex items-center gap-2">
         <p className="text-sm font-medium">{label}</p>
+        {available.length > 0 ? (
+          <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
+            <Checkbox
+              id={`${idPrefix}-all`}
+              checked={allSelected ? true : selectedCount > 0 ? 'indeterminate' : false}
+              disabled={disabled}
+              onCheckedChange={(checked) => onChange(checked === true ? available.map((gpu) => gpu.pciAddress) : [])}
+              data-testid={`${idPrefix}-select-all`}
+            />
+            全选
+          </label>
+        ) : null}
         {value.length === 0 && available.length > 0 ? (
           <span className="text-xs text-muted-foreground">未选择</span>
         ) : null}
