@@ -281,6 +281,18 @@ export const zAgentResponse = z.discriminatedUnion('ok', [
   }).strict(),
 ]);
 
+/**
+ * Incus answers a CephFS custom volume's `/state` usage with its quota
+ * (`ceph.quota.max_bytes`), not what it holds. For `GET
+ * /1.0/storage-pools/<cephfs pool>/volumes/custom/nyv-<id>/state` the agent
+ * rewrites `usage.used` to the directory's recursive size (`ceph.dir.rbytes`)
+ * and adds this key with this value; the Backend trusts a CephFS `used` only
+ * with it. Both sides tolerate the other's older build: an unmarked answer
+ * reads as unknown usage, and an older Backend ignores the key.
+ */
+export const CEPHFS_USAGE_SOURCE_KEY = 'nyabase_used_source';
+export const CEPHFS_USAGE_SOURCE_RBYTES = 'ceph.dir.rbytes';
+
 /** Agent -> Backend control frames. */
 export const zAgentFrame = z.union([zAgentHello, zAgentResponse, zAgentStatus]);
 

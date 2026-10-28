@@ -1,5 +1,12 @@
 import { BadRequestException, ConflictException, NotFoundException } from '@nestjs/common';
-import { FailureCode, Role, StoragePoolResizeFamily, type ListScope } from '@nyabase/common';
+import {
+  CEPHFS_USAGE_SOURCE_KEY,
+  CEPHFS_USAGE_SOURCE_RBYTES,
+  FailureCode,
+  Role,
+  StoragePoolResizeFamily,
+  type ListScope,
+} from '@nyabase/common';
 import { assertListScope, isSystemActor, type Actor } from '../iam/actor.js';
 import type { VolumeRow } from './volume-dtos.js';
 
@@ -300,41 +307,46 @@ export function decideVolumeResize(input: VolumeResizeInput): VolumeResizeDecisi
   return { action: 'shrink' };
 }
 
-/** CephFS Incus echoes `used === size` with total missing for both empty and full. */
-export function isPhantomCephfsUsage(
-  usedBytes: bigint | null,
-  totalBytes: bigint | null,
-  currentSizeBytes: bigint,
-): boolean {
-  if (usedBytes === null) return false;
-  const totalMissing = totalBytes === null || totalBytes === 0n;
-  return totalMissing && usedBytes >= currentSizeBytes;
+/** Passes an admitted CephFS shrink retries an unreadable usage before it is undone. */
+export const CEPHFS_USAGE_UNKNOWN_RETRIES = 5;
+
+/**
+ * A CephFS shrink was admitted on a real reading; unknown usage at apply time
+ * means this executor's agent could not read ceph.dir.rbytes (a slow MDS, an
+ * agent not upgraded yet), so retry a few times before undoing the shrink.
+ */
+export function retriesUnknownCephfsUsage(reason: string, driver: string, attemptCount: number): boolean {
+  return reason === 'usage_unknown' && driver === 'cephfs' && attemptCount < CEPHFS_USAGE_UNKNOWN_RETRIES;
 }
 
 /**
- * CephFS `used === size` with total missing cannot tell empty from full, so
- * that shape is unknown. Dir/btrfs/zfs keep occupancy, including used===size.
+ * Whether a volume state's `usage` is the host agent's CephFS figure: Incus
+ * itself answers a CephFS volume's quota there, the agent replaces it with
+ * `ceph.dir.rbytes` and marks it (`CEPHFS_USAGE_SOURCE_KEY`).
+ */
+export function isCephRbytesUsage(usage: unknown): boolean {
+  return typeof usage === 'object'
+    && usage !== null
+    && (usage as Record<string, unknown>)[CEPHFS_USAGE_SOURCE_KEY] === CEPHFS_USAGE_SOURCE_RBYTES;
+}
+
+/**
+ * Observed usage, or null when unknown. CephFS usage counts only when the agent
+ * read it (`usedFromCephRbytes`): unmarked, Incus' answer is the quota, which
+ * cannot tell empty from full. Dir/btrfs/zfs keep occupancy, including used===size.
  */
 export function normalizeObservedVolumeUsage(input: {
   readonly resizeFamily: 'quota_online' | 'block_backed';
   readonly driver: VolumeDriver;
   readonly usedBytes: bigint | null;
   readonly totalBytes: bigint | null;
-  readonly currentSizeBytes: bigint;
+  /** `isCephRbytesUsage` of the state's `usage`. */
+  readonly usedFromCephRbytes: boolean;
 }): bigint | null {
+  if (input.driver === 'cephfs') return input.usedFromCephRbytes ? input.usedBytes : null;
   if (input.usedBytes === null) {
     // Empty dir/btrfs/zfs quota volumes report `{ total: 0 }` without `used`.
-    if (
-      input.resizeFamily === 'quota_online'
-      && input.driver !== 'cephfs'
-      && input.totalBytes === 0n
-    ) {
-      return 0n;
-    }
-    return null;
-  }
-  if (input.driver !== 'cephfs') return input.usedBytes;
-  if (isPhantomCephfsUsage(input.usedBytes, input.totalBytes, input.currentSizeBytes)) {
+    if (input.resizeFamily === 'quota_online' && input.totalBytes === 0n) return 0n;
     return null;
   }
   return input.usedBytes;

@@ -115,8 +115,6 @@ export function toSpecAttachments(
       id: attachment.volume_id,
       incusName: attachment.incus_name,
       poolName: attachment.pool_name,
-      // Shared volumes live on CephFS, which has no block device to throttle.
-      throttled: !attachment.shared,
     },
   }));
 }

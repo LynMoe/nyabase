@@ -11,6 +11,7 @@ import {
   type SharedVolumeDto,
   type VolumeAttachmentDto,
 } from '@nyabase/common';
+import { ApiError } from '../client/api.js';
 import { GIB, Harness, type TestUser } from '../client/harness.js';
 import { pollUntil, waitIntent } from '../client/poll.js';
 import { tryLoadState } from '../client/state.js';
@@ -122,6 +123,34 @@ describe('shared volume across two servers', { skip }, () => {
     const catalogs = await h.api.get<SharedVolumeCatalogInspectDto>(`/shared-volumes/${volumeId}/catalogs`);
     assert.equal(catalogs.volumeId, volumeId);
     assert.ok(catalogs.items.length >= 2);
+  });
+
+  it('reports the real usage and shrinks down to it, not below', async () => {
+    // Incus answers a CephFS volume's quota as its usage; the agent replaces it
+    // with ceph.dir.rbytes, so a shrink above the data goes through.
+    const api = user.session.api;
+    await h.ssh(user, containers[0]!, 'dd if=/dev/urandom of=/mnt/shared/blob bs=1M count=200 status=none && sync');
+    const before = await volume();
+    const shrunk = await api.patch<SharedVolumeDto | IntentAcceptedDto>(`/shared-volumes/${volumeId}`, {
+      expectedRevision: before.revision,
+      sizeBytes: GIB,
+    });
+    if ('intentId' in shrunk) await waitIntent(api, shrunk);
+    const after = await volume();
+    assert.equal(after.sizeBytes, GIB);
+    assert.ok(after.usedBytes !== null && after.usedBytes >= 190 * 1024 * 1024 && after.usedBytes < 400 * 1024 * 1024,
+      `usage is the data, not the quota: ${after.usedBytes}`);
+    const host = h.state.servers.find((server) => server.id === containers[0]!.serverId)!;
+    const pool = (await h.api.get<SharedBackendDto>(`/shared-backends/${backendId()}`, { scope: 'all' }))
+      .executors!.find((executor) => executor.serverId === host.id)!.incusName;
+    await pollUntil(async () => {
+      const quota = (await h.onHost(host,
+        `getfattr --only-values -n ceph.quota.max_bytes /var/lib/incus/storage-pools/${pool}/custom/default_${after.incusName}`)).trim();
+      return quota === String(GIB) ? quota : undefined;
+    }, { what: 'the CephFS quota to shrink', timeoutMs: 120_000 });
+    await assert.rejects(api.patch(`/shared-volumes/${volumeId}`, { expectedRevision: after.revision, sizeBytes: 100 * 1024 * 1024 }),
+      (error: unknown) => error instanceof ApiError && error.status === 409 && error.code === 'VOLUME_SHRINK_BELOW_USAGE');
+    await h.ssh(user, containers[0]!, 'rm -f /mnt/shared/blob && sync');
   });
 
   it('grows the volume, detaches from both containers and deletes it', async () => {

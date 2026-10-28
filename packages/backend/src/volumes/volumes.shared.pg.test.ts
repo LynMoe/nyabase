@@ -493,10 +493,11 @@ describePg('shared volume quota reservations', () => {
     });
   });
 
-  it('persists NULL and 409s unknown on a phantom CephFS live-GET', async () => {
+  it('persists NULL and 409s unknown when the CephFS live-GET is Incus\' quota echo', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
+      // Incus 7.5 answers used = total = quota; without the agent's mark it is unknown.
       const getStorageVolumeState = vi.fn().mockResolvedValue({
-        metadata: { usage: { used: 100, total: 0 } },
+        metadata: { usage: { used: 100, total: 100 } },
       });
       const getStorageVolume = vi.fn();
       const { userId, serverId, backendId, poolId } = await seedSharedBackend(database, {
@@ -545,7 +546,7 @@ describePg('shared volume quota reservations', () => {
   it('persists live used and 409s below-usage without an intent', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const getStorageVolumeState = vi.fn().mockResolvedValue({
-        metadata: { usage: { used: 80, total: 100 } },
+        metadata: { usage: { used: 80, total: 100, nyabase_used_source: 'ceph.dir.rbytes' } },
       });
       const { userId, serverId, backendId, poolId } = await seedSharedBackend(database, {
         serverStatus: 'online',
@@ -590,7 +591,7 @@ describePg('shared volume quota reservations', () => {
   it('creates volume.resize when live used is below the requested size', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const getStorageVolumeState = vi.fn().mockResolvedValue({
-        metadata: { usage: { used: 40, total: 0 } },
+        metadata: { usage: { used: 40, total: 100, nyabase_used_source: 'ceph.dir.rbytes' } },
       });
       const { userId, serverId, backendId, poolId } = await seedSharedBackend(database, {
         serverStatus: 'online',

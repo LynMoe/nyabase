@@ -111,6 +111,56 @@ describe('local volume create, attach, resize and delete', () => {
     }
   });
 
+  it('resizes the root disk and hot-attaches a second volume while the first is attached', async () => {
+    // Incus (7.4-7.5.1) fails every limit recompute of a running instance that
+    // holds a throttled custom volume (`Invalid block device "tmpfs"`), so only
+    // the root disk carries limits.read/write.
+    const api = user.session.api;
+    const current = await api.get<ContainerDto>(`/containers/${container.id}`);
+    await waitIntent(api, await api.patch<IntentAcceptedDto>(`/containers/${container.id}/root-size`, {
+      sizeBytes: current.rootSizeBytes + GIB,
+    }));
+    assert.equal((await api.get<ContainerDto>(`/containers/${container.id}`)).rootSizeBytes, current.rootSizeBytes + GIB);
+
+    const accepted = await api.post<IntentAcceptedDto>('/volumes', {
+      name: h.name('second'),
+      sizeBytes: GIB,
+      scope: { kind: 'local', serverId: h.server.id, poolId: h.server.poolId },
+    });
+    const secondId = accepted.resourceId;
+    h.defer('delete the second volume', () => h.deleteVolume(h.api, secondId));
+    await waitIntent(api, accepted);
+    await waitIntent(api, await api.post<IntentAcceptedDto>(`/containers/${container.id}/volumes`, {
+      volumeId: secondId,
+      containerPath: '/mnt/e2e-second',
+      readOnly: false,
+    }));
+    const withBoth = await h.waitContainer(api, container.id,
+      (c) => c.volumes.length === 2 && c.volumes.every((v) => v.bindState === 'attached'), 'both volumes attached');
+    const instance = withBoth.instanceName!;
+    const devices = JSON.parse(await h.incus(h.server, ['query', `/1.0/instances/${instance}`])) as {
+      devices: Record<string, Record<string, string>>;
+    };
+    for (const [name, device] of Object.entries(devices.devices)) {
+      if (device.type !== 'disk') continue;
+      if (name === 'root') assert.ok(device['limits.read'] && device['limits.write'], 'the root disk is throttled');
+      else assert.equal(device['limits.read'] ?? device['limits.write'], undefined, `${name} carries no limits`);
+    }
+
+    // A stop and start with two volumes attached (the start used to fail on the second).
+    await h.power(api, container.id, 'stop');
+    await h.power(api, container.id, 'start', user);
+    const out = await h.ssh(user, container, 'mountpoint -q /mnt/e2e-data && mountpoint -q /mnt/e2e-second && cat /mnt/e2e-data/f');
+    assert.match(out, /data-on-volume/);
+
+    await h.power(api, container.id, 'stop');
+    const second = (await api.get<ContainerDto>(`/containers/${container.id}`)).volumes.find((v) => v.volumeId === secondId)!;
+    await waitIntent(api, await api.delete<IntentAcceptedDto>(`/containers/${container.id}/volumes/${second.id}`));
+    await h.waitContainer(api, container.id, (c) => c.volumes.length === 1, 'the second volume to detach');
+    await h.deleteVolume(api, secondId);
+    await h.power(api, container.id, 'start', user);
+  });
+
   it('detaches after a stop and then deletes the volume', async () => {
     const api = user.session.api;
     await h.power(api, container.id, 'stop');

@@ -16,6 +16,7 @@ import {
   type AgentMetricsResult,
 } from '@nyabase/common';
 import { AgentRequestError, type AgentHandlers } from './backend-connection.js';
+import type { CephfsUsage } from './cephfs-usage.js';
 import { streamUrl, type AgentConfig } from './config.js';
 import { FirewallDocumentRefusedError, type GuestFirewall } from './firewall.js';
 import { LocalIncus, LocalIncusError } from './incus-local.js';
@@ -36,6 +37,8 @@ export interface AgentDependencies {
   /** Operations started through the policy; the only ones the Backend can reach. */
   readonly operations: OperationLedger;
   readonly metrics: MetricsSource;
+  /** Real usage for CephFS volume state answers (Incus reports the quota). */
+  readonly cephfsUsage: Pick<CephfsUsage, 'apply'>;
   readonly credential: () => string;
   readonly version: string;
   readonly log: (message: string) => void;
@@ -102,15 +105,20 @@ async function incusHttp(
   // the NIC comes up, not trusted from the last periodic check.
   if (verdict.bringsUpGuestNic) await requireGuestGuards(deps, `${params.method} ${params.path.split('?')[0]}`);
   try {
-    const response = await deps.incus.request({
-      method: params.method,
-      path: params.path,
-      headers: params.headers,
-      // Never the raw bytes: Incus would decode them differently from the policy.
-      body: verdict.body,
-      timeoutMs: params.timeoutMs,
+    const response = await deps.cephfsUsage.apply(
+      params.method,
+      params.path,
+      await deps.incus.request({
+        method: params.method,
+        path: params.path,
+        headers: params.headers,
+        // Never the raw bytes: Incus would decode them differently from the policy.
+        body: verdict.body,
+        timeoutMs: params.timeoutMs,
+        signal,
+      }),
       signal,
-    });
+    );
     deps.operations.recordResponse(response.status, response.body);
     return { status: response.status, headers: response.headers, body: response.body.toString('base64') };
   } catch (error) {

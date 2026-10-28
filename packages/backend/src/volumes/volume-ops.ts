@@ -10,6 +10,7 @@ import type { IntentFailure } from '../reconcile/intent.repository.js';
 import { intentFailure } from '../reconcile/intent-model.js';
 import { failedOutcome, type ReconcileOutcome } from '../reconcile/managed-reconciler.js';
 import {
+  isCephRbytesUsage,
   normalizeObservedVolumeUsage,
   type VolumeDriver,
   type VolumeResizeDecision,
@@ -192,7 +193,6 @@ export async function readVolumeUsage(
   client: IncusClientPort,
   pool: { readonly incus_name: string; readonly driver: string; readonly resize_family: string },
   incusName: string,
-  currentSizeBytes: bigint,
 ): Promise<bigint | null> {
   const state = (await client.getStorageVolumeState(pool.incus_name, 'custom', incusName)).metadata;
   return normalizeObservedVolumeUsage({
@@ -200,7 +200,7 @@ export async function readVolumeUsage(
     driver: pool.driver as VolumeDriver,
     usedBytes: asBytes(state.usage?.used) ?? null,
     totalBytes: asBytes(state.usage?.total) ?? null,
-    currentSizeBytes,
+    usedFromCephRbytes: isCephRbytesUsage(state.usage),
   });
 }
 

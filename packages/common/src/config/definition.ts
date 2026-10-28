@@ -426,7 +426,7 @@ export const controlPlaneConfigDefinitions = [
     restartRequired: false,
     public: false,
     label: 'Container disk read rate',
-    description: 'Per-disk read rate cap in MB/s for the root disk and local volumes (limits.read). Network filesystems (CephFS) cannot be throttled.',
+    description: 'Read rate cap in MB/s on the root disk (limits.read). Applies per backing block device, so local volumes on the same disks share it; volume devices carry no limit of their own.',
   }),
   field({
     key: 'containers.diskWriteMBps',
@@ -440,7 +440,7 @@ export const controlPlaneConfigDefinitions = [
     restartRequired: false,
     public: false,
     label: 'Container disk write rate',
-    description: 'Per-disk write rate cap in MB/s for the root disk and local volumes (limits.write). Network filesystems (CephFS) cannot be throttled.',
+    description: 'Write rate cap in MB/s on the root disk (limits.write). Applies per backing block device, so local volumes on the same disks share it; volume devices carry no limit of their own.',
   }),
   field({
     key: 'incus.requestTimeoutMs',

@@ -49,7 +49,6 @@ function input(overrides: Partial<InstanceSpecInput['container']> = {}): Instanc
           id: volumeId,
           incusName: deriveVolumeName(volumeId),
           poolName: 'data',
-          throttled: true,
         },
         containerPath: '/data/work',
         readOnly: true,
@@ -131,8 +130,6 @@ describe('buildDesiredInstanceSpec', () => {
           source: deriveVolumeName(volumeId),
           path: '/data/work',
           readonly: 'true',
-          'limits.read': '300MB',
-          'limits.write': '200MB',
         },
       },
     });
@@ -175,12 +172,12 @@ describe('buildDesiredInstanceSpec', () => {
     }
   });
 
-  it('does not throttle network filesystem attachments', () => {
-    const spec = buildDesiredInstanceSpec({
-      ...input(),
-      attachments: [{ ...input().attachments[0]!, volume: { ...input().attachments[0]!.volume, throttled: false } }],
-    });
-    expect(spec.devices?.[deriveAttachmentDeviceName(attachmentId)]).not.toHaveProperty('limits.read');
+  it('throttles only the root disk, never a volume device', () => {
+    const spec = buildDesiredInstanceSpec(input());
+    expect(spec.devices?.root).toMatchObject({ 'limits.read': '300MB', 'limits.write': '200MB' });
+    const volume = spec.devices?.[deriveAttachmentDeviceName(attachmentId)];
+    expect(volume).not.toHaveProperty('limits.read');
+    expect(volume).not.toHaveProperty('limits.write');
   });
 
   it('keeps attachment add and remove changes in one desired document', () => {
@@ -195,7 +192,6 @@ describe('buildDesiredInstanceSpec', () => {
             id: '66666666-6666-4666-8666-666666666666',
             incusName: deriveVolumeName('66666666-6666-4666-8666-666666666666'),
             poolName: 'data',
-            throttled: true,
           },
           containerPath: '/data/cache',
           readOnly: false,

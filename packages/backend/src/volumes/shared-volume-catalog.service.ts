@@ -10,13 +10,13 @@ import {
   IncusError,
   type IncusClientPort,
 } from '../incus/index.js';
-import { numberValue } from '../platform/domain-utils.js';
 import { createCustomVolume, isNotFound } from './volume-ops.js';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
 import {
   assertSharedExists,
   MANAGED_VOLUME_NAME,
+  isCephRbytesUsage,
   normalizeObservedVolumeUsage,
   type VolumeDriver,
 } from './volume-rules.js';
@@ -334,7 +334,7 @@ export class SharedVolumeCatalogInspectService {
           driver: candidate.driver,
           usedBytes: incusUsageToBigint(state.usage?.used),
           totalBytes: incusUsageToBigint(state.usage?.total),
-          currentSizeBytes: BigInt(numberValue(volume.size_bytes)),
+          usedFromCephRbytes: isCephRbytesUsage(state.usage),
         }),
       };
     } catch {
@@ -344,15 +344,23 @@ export class SharedVolumeCatalogInspectService {
     }
   }
 
-  /** Ask the servers that can reach a shared volume for its live usage; the first answer wins. */
+  /**
+   * Ask the servers that can reach a shared volume for its live usage; the
+   * first known figure wins. An answer without one (a CephFS executor whose
+   * agent did not read ceph.dir.rbytes) does not stop the search, and only
+   * stands when no other server knows better.
+   */
   async observeUsage(
     volume: VolumeRow,
   ): Promise<UsageObservation> {
     const candidates = await this.usageCandidates(volume);
+    let answeredUnknown = false;
     for (const candidate of candidates) {
       const result = await this.readVolumeStateUsage(candidate, volume);
-      if (result.status === 'observed') return result;
+      if (result.status !== 'observed') continue;
+      if (result.usedBytes !== null) return result;
+      answeredUnknown = true;
     }
-    return { status: 'unavailable' };
+    return answeredUnknown ? { status: 'observed', usedBytes: null } : { status: 'unavailable' };
   }
 }

@@ -3,7 +3,7 @@ import { IncusError } from '../incus/index.js';
 import type { ReconcileRunContext } from '../reconcile/managed-reconciler.js';
 import { VolumeReconciler } from './volume-reconciler.service.js';
 import { VolumeReconcileStore } from './volume-reconcile.store.js';
-import { decideVolumeResize, normalizeObservedVolumeUsage } from './volume-rules.js';
+import { decideVolumeResize, isCephRbytesUsage, normalizeObservedVolumeUsage } from './volume-rules.js';
 
 /** The reconciler's private SQL store, where the tests intercept data access. */
 function storeOf(reconciler: VolumeReconciler): object {
@@ -17,86 +17,45 @@ const serverB = '11111111-1111-4111-8111-111111111111';
 const incusName = `nyv-${'a'.repeat(32)}`;
 
 describe('volume reconciliation policy', () => {
-  it('normalizes false-full CephFS usage reports without rewriting dir occupancy', () => {
-    expect(normalizeObservedVolumeUsage({
-      resizeFamily: 'quota_online',
-      driver: 'cephfs',
-      usedBytes: 100n,
-      totalBytes: 0n,
-      currentSizeBytes: 100n,
-    })).toBeNull();
-    expect(normalizeObservedVolumeUsage({
-      resizeFamily: 'quota_online',
-      driver: 'cephfs',
-      usedBytes: 100n,
-      totalBytes: null,
-      currentSizeBytes: 100n,
-    })).toBeNull();
-    expect(normalizeObservedVolumeUsage({
-      resizeFamily: 'quota_online',
-      driver: 'dir',
-      usedBytes: 100n,
-      totalBytes: null,
-      currentSizeBytes: 100n,
-    })).toBe(100n);
-    expect(normalizeObservedVolumeUsage({
-      resizeFamily: 'quota_online',
-      driver: 'dir',
-      usedBytes: null,
-      totalBytes: 0n,
-      currentSizeBytes: 192n,
-    })).toBe(0n);
-    expect(normalizeObservedVolumeUsage({
-      resizeFamily: 'quota_online',
-      driver: 'dir',
-      usedBytes: null,
-      totalBytes: null,
-      currentSizeBytes: 192n,
-    })).toBeNull();
-    expect(normalizeObservedVolumeUsage({
-      resizeFamily: 'block_backed',
-      driver: 'cephfs',
-      usedBytes: 100n,
-      totalBytes: null,
-      currentSizeBytes: 100n,
-    })).toBeNull();
-    expect(normalizeObservedVolumeUsage({
-      resizeFamily: 'quota_online',
-      driver: 'cephfs',
-      usedBytes: 40n,
-      totalBytes: 0n,
-      currentSizeBytes: 100n,
-    })).toBe(40n);
-    expect(normalizeObservedVolumeUsage({
-      resizeFamily: 'quota_online',
-      driver: 'cephfs',
-      usedBytes: 0n,
-      totalBytes: null,
-      currentSizeBytes: 100n,
-    })).toBe(0n);
-    expect(normalizeObservedVolumeUsage({
-      resizeFamily: 'quota_online',
-      driver: 'cephfs',
-      usedBytes: 100n,
-      totalBytes: 100n,
-      currentSizeBytes: 100n,
-    })).toBe(100n);
-    expect(normalizeObservedVolumeUsage({
-      resizeFamily: 'block_backed',
-      driver: 'zfs',
-      usedBytes: 100n,
-      totalBytes: 0n,
-      currentSizeBytes: 100n,
-    })).toBe(100n);
+  it('counts CephFS usage only when the agent read ceph.dir.rbytes', () => {
+    const cephfs = (usedBytes: bigint | null, usedFromCephRbytes: boolean, totalBytes: bigint | null = 100n) =>
+      normalizeObservedVolumeUsage({ resizeFamily: 'quota_online', driver: 'cephfs', usedBytes, totalBytes, usedFromCephRbytes });
+    // Incus' own answer is the quota (7.5: used = total = size; 7.4: total missing).
+    expect(cephfs(100n, false)).toBeNull();
+    expect(cephfs(100n, false, null)).toBeNull();
+    expect(cephfs(40n, false, 0n)).toBeNull();
+    // The agent's rbytes, empty, partly used and over the quota alike.
+    expect(cephfs(0n, true)).toBe(0n);
+    expect(cephfs(40n, true)).toBe(40n);
+    expect(cephfs(100n, true)).toBe(100n);
+    expect(cephfs(130n, true)).toBe(130n);
+    expect(cephfs(null, true)).toBeNull();
   });
 
-  it('blocks CephFS shrink when a false-full usage report cannot be distinguished from empty', () => {
+  it('keeps dir, zfs and block occupancy as Incus reports it', () => {
+    const other = (driver: 'dir' | 'zfs', resizeFamily: 'quota_online' | 'block_backed', usedBytes: bigint | null, totalBytes: bigint | null) =>
+      normalizeObservedVolumeUsage({ resizeFamily, driver, usedBytes, totalBytes, usedFromCephRbytes: false });
+    expect(other('dir', 'quota_online', 100n, null)).toBe(100n);
+    expect(other('dir', 'quota_online', null, 0n)).toBe(0n);
+    expect(other('dir', 'quota_online', null, null)).toBeNull();
+    expect(other('zfs', 'block_backed', 100n, 0n)).toBe(100n);
+    expect(other('zfs', 'block_backed', null, 0n)).toBeNull();
+  });
+
+  it('marks agent-read CephFS usage by its key and value only', () => {
+    expect(isCephRbytesUsage({ used: 1, total: 2, nyabase_used_source: 'ceph.dir.rbytes' })).toBe(true);
+    expect(isCephRbytesUsage({ used: 1, total: 2 })).toBe(false);
+    expect(isCephRbytesUsage({ used: 1, nyabase_used_source: 'ceph.quota.max_bytes' })).toBe(false);
+    expect(isCephRbytesUsage(undefined)).toBe(false);
+  });
+
+  it('blocks CephFS shrink while the usage is Incus\' quota echo', () => {
     const usedBytes = normalizeObservedVolumeUsage({
       resizeFamily: 'quota_online',
       driver: 'cephfs',
       usedBytes: 20n,
-      totalBytes: 0n,
-      currentSizeBytes: 20n,
+      totalBytes: 20n,
+      usedFromCephRbytes: false,
     });
     expect(usedBytes).toBeNull();
     expect(decideVolumeResize({
@@ -109,21 +68,24 @@ describe('volume reconciliation policy', () => {
     })).toEqual({ action: 'blocked', reason: 'usage_unknown' });
   });
 
-  it('allows CephFS shrink when used is below size even if total is missing', () => {
-    expect(decideVolumeResize({
+  it('allows CephFS shrink to the agent-read usage, refuses below it', () => {
+    const usedBytes = normalizeObservedVolumeUsage({
+      resizeFamily: 'quota_online',
+      driver: 'cephfs',
+      usedBytes: 30n,
+      totalBytes: 100n,
+      usedFromCephRbytes: true,
+    });
+    const shrink = (desiredSizeBytes: bigint) => decideVolumeResize({
       resizeFamily: 'quota_online',
       currentSizeBytes: 100n,
-      desiredSizeBytes: 50n,
-      usedBytes: normalizeObservedVolumeUsage({
-        resizeFamily: 'quota_online',
-        driver: 'cephfs',
-        usedBytes: 0n,
-        totalBytes: null,
-        currentSizeBytes: 100n,
-      }),
+      desiredSizeBytes,
+      usedBytes,
       attached: true,
       allConsumersStopped: false,
-    })).toEqual({ action: 'shrink' });
+    });
+    expect(shrink(50n)).toEqual({ action: 'shrink' });
+    expect(shrink(20n)).toEqual({ action: 'blocked', reason: 'usage_floor' });
   });
 
   it('keeps dir occupancy when used equals size and total is missing', () => {
@@ -136,7 +98,7 @@ describe('volume reconciliation policy', () => {
         driver: 'dir',
         usedBytes: 20n,
         totalBytes: 0n,
-        currentSizeBytes: 20n,
+        usedFromCephRbytes: false,
       }),
       attached: true,
       allConsumersStopped: false,
@@ -843,7 +805,7 @@ describe('volume reconciler scan and shifted policy', () => {
     expect(wheres).toContainEqual(['revision', '=', 2]);
   });
 
-  it('reverts desired size and writes used_bytes NULL when CephFS usage is phantom', async () => {
+  it('retries an accepted CephFS shrink while its usage cannot be read, without undoing it', async () => {
     const db = volumeExistsDb();
     const reconciler = new VolumeReconciler(new VolumeReconcileStore(db as never, {} as never),
       { log: vi.fn().mockResolvedValue(undefined) } as never,
@@ -865,6 +827,83 @@ describe('volume reconciler scan and shifted policy', () => {
     const updateStorageVolume = vi.fn();
     const outcome = await reconciler.reconcile(runContext({
       kind: 'volume.resize',
+      attemptCount: 1,
+      client: {
+        getStorageVolume: vi.fn().mockResolvedValue({
+          metadata: { config: { size: '20', 'security.shifted': 'true' }, content_type: 'filesystem' },
+        }),
+        // Incus' own answer (the quota), unmarked: this agent did not read rbytes.
+        getStorageVolumeState: vi.fn().mockResolvedValue({ metadata: { usage: { used: '20', total: '20' } } }),
+        updateStorageVolume,
+      },
+    }));
+    expect(outcome).toMatchObject({ outcome: 'retry', failure: { code: 'VOLUME_USAGE_UNKNOWN' } });
+    expect(updateStorageVolume).not.toHaveBeenCalled();
+    const sets = (db.updateTable as ReturnType<typeof vi.fn>).mock.results.flatMap((result) => {
+      const query = result.value as { set: ReturnType<typeof vi.fn> };
+      return query.set.mock.calls.map((call) => call[0] as Record<string, unknown>);
+    });
+    expect(sets).not.toEqual(expect.arrayContaining([expect.objectContaining({ needs_attention: true })]));
+  });
+
+  it('shrinks a CephFS volume down to the agent-read usage', async () => {
+    const db = volumeExistsDb();
+    const reconciler = new VolumeReconciler(new VolumeReconcileStore(db as never, {} as never),
+      { log: vi.fn().mockResolvedValue(undefined) } as never,
+      { get: vi.fn().mockResolvedValue(undefined), listServerIds: vi.fn() } as never,
+      { register: vi.fn() } as never,
+    );
+    vi.spyOn(
+      storeOf(reconciler) as unknown as { readVolume: () => Promise<unknown> },
+      'readVolume',
+    ).mockResolvedValue({
+      ...ensureRow(),
+      size_bytes: '5',
+      driver: 'cephfs',
+    });
+    vi.spyOn(
+      storeOf(reconciler) as unknown as { readAttachments: () => Promise<unknown[]> },
+      'readAttachments',
+    ).mockResolvedValue([]);
+    const updateStorageVolume = vi.fn().mockResolvedValue({ status: 200, envelope: { type: 'sync' } });
+    await reconciler.reconcile(runContext({
+      kind: 'volume.resize',
+      client: {
+        getStorageVolume: vi.fn().mockResolvedValue({
+          metadata: { config: { size: '20', 'security.shifted': 'true' }, content_type: 'filesystem' },
+        }),
+        getStorageVolumeState: vi.fn().mockResolvedValue({
+          metadata: { usage: { used: '3', total: '20', nyabase_used_source: 'ceph.dir.rbytes' } },
+        }),
+        updateStorageVolume,
+      },
+    }));
+    expect(updateStorageVolume).toHaveBeenCalled();
+  });
+
+  it('reverts desired size and writes used_bytes NULL once retries of an unreadable CephFS usage run out', async () => {
+    const db = volumeExistsDb();
+    const reconciler = new VolumeReconciler(new VolumeReconcileStore(db as never, {} as never),
+      { log: vi.fn().mockResolvedValue(undefined) } as never,
+      { get: vi.fn().mockResolvedValue(undefined), listServerIds: vi.fn() } as never,
+      { register: vi.fn() } as never,
+    );
+    vi.spyOn(
+      storeOf(reconciler) as unknown as { readVolume: () => Promise<unknown> },
+      'readVolume',
+    ).mockResolvedValue({
+      ...ensureRow(),
+      size_bytes: '5',
+      driver: 'cephfs',
+    });
+    vi.spyOn(
+      storeOf(reconciler) as unknown as { readAttachments: () => Promise<unknown[]> },
+      'readAttachments',
+    ).mockResolvedValue([]);
+    const updateStorageVolume = vi.fn();
+    const outcome = await reconciler.reconcile(runContext({
+      kind: 'volume.resize',
+      attemptCount: 5,
       client: {
         getStorageVolume: vi.fn().mockResolvedValue({
           metadata: {
@@ -873,7 +912,7 @@ describe('volume reconciler scan and shifted policy', () => {
           },
         }),
         getStorageVolumeState: vi.fn().mockResolvedValue({
-          metadata: { usage: { used: '20', total: '0' } },
+          metadata: { usage: { used: '20', total: '20' } },
         }),
         updateStorageVolume,
       },

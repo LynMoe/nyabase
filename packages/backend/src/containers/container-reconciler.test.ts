@@ -1003,7 +1003,6 @@ function desiredFrom(options: HarnessOptions): DesiredInstanceSpec {
         id: item.volumeId,
         incusName: deriveVolumeName(item.volumeId),
         poolName: ROOT_POOL,
-        throttled: item.shared !== true,
       },
     })),
     limits: TEST_LIMITS,

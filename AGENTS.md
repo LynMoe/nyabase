@@ -292,7 +292,7 @@ lab 场景 API 测试，不在 CI 里跑；CI 只跑 `pnpm e2e:check`（e2e 包 
   旧版只能由 admin 删除，且只在不是当前版本、没有任何容器（不分阶段）引用时；删除只写 `deleted_at`，副本由镜像 reconciler 的全量扫描
   按库里状态移除（`listUnneededCopies` / `removeCopyIfUnneeded`），只碰 `infra.image_copies` 里记录为本服务器拉取的副本
   （aya-1 等主机不专用，宿主机自己的同指纹镜像不能删），记录不随镜像行级联删除。没有一次性的删除 intent——它会被同资源的 settle 吞掉。
-- 进程数 / 网卡带宽 / 磁盘读写是可在线编辑的系统设置 `containers.*`，统一作用于所有容器（CephFS 卷不限 IO）。
+- 进程数 / 网卡带宽 / 磁盘读写是可在线编辑的系统设置 `containers.*`，统一作用于所有容器。磁盘读写只设在系统盘 `root` 上（按块设备生效，同盘的本地卷共享这个限额）；卷设备一律不带 `limits.*`：Incus 为自定义卷解析块设备时会落到 tmpfs 暂存目录，挂着带限速的卷时每次重算限速都失败（`Invalid block device "tmpfs"`）。CephFS 卷不限 IO。
 - 漂移：平台拥有整份实例文档，只放过 `volatile.*`、`image.*`；未知配置键、多出的设备、设备内多出的键、
   非空 profiles 都算漂移，写回时整份覆盖并记审计 `container.drift_corrected`。
 - `power_intent='stopped'` 时 reconciler 先停机再准备挂载，停机绝不等卷就绪；卸载（含强制卸载）同样先于其他挂载的就绪检查：

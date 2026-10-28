@@ -1882,7 +1882,9 @@ sudo systemctl enable --now nyabase-agent
 `NYABASE_BACKEND_CA_FILE` 时也必须是 `https://`。
 
 unit 以 `nyabase-agent` 用户运行，附加 `incus-admin` 组（访问 Incus socket），
-只保留 `CAP_NET_ADMIN`（维护 `nyabase_guard` 与 `nyabase_firewall`、读取 `bridge incus`）。需要 Node.js 20+。
+只保留 `CAP_NET_ADMIN`（维护 `nyabase_guard` 与 `nyabase_firewall`、读取 `bridge incus`）和 `CAP_DAC_READ_SEARCH`
+（读 Incus 0700 的 `storage-pools/<cephfs 池>/custom/` 下平台卷的 `ceph.dir.rbytes`，见下文共享卷用量）。
+需要 Node.js 20+ 和 `getfattr`（`attr` 包，Zabbly 的 Incus 包已依赖它）。
 `nvidia-smi` 需要 `video`/`render` 组时自行追加 `SupplementaryGroups`。
 
 ### 升级与版本匹配
@@ -1899,6 +1901,14 @@ Backend 与 agent 只在 **agent 协议号**（`AGENT_PROTOCOL_VERSION`，`@nyab
   别名）后 `systemctl daemon-reload`。新 agent 首次启动时还没有 `firewall.json`，装的是 fail-closed 表：
   **该主机所有容器的出站（含 ARP）中断**，直到它连上 Backend 并收到第一份文档（通常数秒内）。
   所以只在 Backend 已升级、可达时升级 agent，一台确认卡片显示防火墙已同步后再升级下一台。
+- **CephFS 用量与卷设备限速（协议仍为 3）**：Backend 与 agent 仍可按任意顺序升级；共享卷的真实用量
+  要等每台 CephFS 执行器的 agent 都升级、并**重新安装 unit 文件**（新增 `CAP_DAC_READ_SEARCH`）后才有，
+  在此之前这些卷的用量显示为未知、缩容被拒（`VOLUME_USAGE_UNKNOWN`），与升级前一样不能缩容。
+  新 Backend 不再给卷设备设 `limits.read/write`：首次全量扫描会把仍带这两个键的运行中容器按漂移改写
+  （审计 `container.drift_corrected`，这次是预期的）。如果某个运行中的容器挂着带限速的本地卷，
+  这次改写本身也会撞上同一个 Incus 缺陷而失败，停掉该容器后它会在停机状态下完成；
+  已因 `Invalid block device "tmpfs"` 被搁置（needs attention / failed）的容器全量扫描会跳过，
+  停机后在面板重试它的 intent。
 - **协议号变化的升级**（发布说明会写明）：在同一个维护窗口里升级 Backend 和全部 agent。
   先升级 Backend 时，未升级的服务器显示上面的协议错误；先升级 agent 时，旧 Backend 只会以
   1008 关闭新 agent 的连接（agent 日志 `control connection closed (1008 expected hello)`）。
@@ -1932,8 +1942,19 @@ Backend 的 `NodeMetricsScrapeService` 每 15 秒经控制连接请求一次
 - **内存**：每个容器单独设大小，但（用户, 服务器）的总和不超过授权。
 - **统一限额**（系统设置，在线生效）：`containers.processLimit`（`limits.processes`）、
   `containers.networkIngressMbit` / `networkEgressMbit`（网卡 `limits.ingress/egress`）、
-  `containers.diskReadMBps` / `diskWriteMBps`（root 与本地卷 `limits.read/write`；
-  CephFS 无块设备，限不了）。
+  `containers.diskReadMBps` / `diskWriteMBps`（只设在系统盘 `root` 的 `limits.read/write` 上）。
+  cgroup `io.max` 按底层块设备生效，同一块盘上的本地卷读写也计入这个限额；放在**另一块盘的池**上的
+  本地卷不限速，CephFS 共享卷没有块设备，也不限。卷设备上不设 `limits.*`：Incus（7.4–7.5.1，
+  `device/disk.go` 的 `getDiskLimits`）为自定义卷找块设备时用的是 tmpfs 上的空暂存目录，运行中的实例
+  只要挂着带限速的卷，之后每次重算限速（系统盘扩容、热挂其他卷、部分启动）都报
+  `Invalid block device "tmpfs"`。
+- **共享卷用量**：Incus 的 cephfs 驱动把卷的配额（`ceph.quota.max_bytes`）当作用量返回。agent 转发
+  `GET /1.0/storage-pools/<cephfs 池>/volumes/custom/nyv-*/state` 时把 `usage.used` 换成该目录的
+  `ceph.dir.rbytes`（CephFS 配额据以执行的同一个值），并加上 `usage.nyabase_used_source`；Backend 只信任带这个
+  标记的 CephFS 用量，没有标记（旧 agent、读取失败、超过 3 秒）时按「未知」处理：面板不显示用量，
+  缩容准入被拒（`VOLUME_USAGE_UNKNOWN`）；已准入的缩容在执行时读不到用量会先重试几次再回退。
+  `rbytes` 由 MDS 延迟汇总，另一台客户端尚未刷回的数据可能暂时没有计入（CephFS 配额本身也按这个值
+  执行）；万一缩到实际数据之下，结果是该卷写入报 `EDQUOT`，数据不会丢。
 - **隔离**：`security.idmap.isolated=true`（每个容器独立 uid 段，需要 `/etc/subuid`
   给 root 足够的范围），自定义卷 `security.shifted=true`，同一用户的容器共享卷时
   属主一致；网卡不开 `security.port_isolation`（同机容器互通）；出站由 `nyabase_firewall` 约束；

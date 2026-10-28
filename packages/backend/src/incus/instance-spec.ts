@@ -52,8 +52,6 @@ export interface InstanceSpecVolumeInput {
   readonly id: string;
   readonly incusName: string;
   readonly poolName: string;
-  /** False for network filesystems (CephFS), which cgroup I/O limits cannot reach. */
-  readonly throttled: boolean;
 }
 
 export interface InstanceSpecAttachmentInput {
@@ -370,9 +368,12 @@ export function buildDesiredInstanceSpec(input: InstanceSpecInput): DesiredInsta
     if (attachment.readOnly) {
       device.readonly = 'true';
     }
-    if (attachment.volume.throttled) {
-      Object.assign(device, diskLimits(input.limits));
-    }
+    // No limits.read/write on volume devices: Incus resolves a custom volume's
+    // block device from its empty staging dir on tmpfs, so while one is attached
+    // to a running instance every limit recompute (root resize, hot-attach,
+    // some starts) fails with `Invalid block device "tmpfs"` (Incus 7.4-7.5.1,
+    // device/disk.go getDiskLimits). cgroup io.max is per block device, so the
+    // root disk's limit already covers volumes on the same disks.
     devices[`nyd-${attachmentId}`] = device;
   }
 

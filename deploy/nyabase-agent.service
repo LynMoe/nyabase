@@ -15,7 +15,11 @@ Type=simple
 # /var/lib/incus/unix.socket and keeps its credential in /var/lib/nyabase-agent.
 # CAP_NET_ADMIN maintains the `bridge nyabase_guard` (guest IPv6 drop) and
 # `bridge nyabase_firewall` (guest egress firewall) nft tables and reads
-# `bridge incus`. The firewall document the Backend last sent is kept in
+# `bridge incus`. CAP_DAC_READ_SEARCH lets it read `ceph.dir.rbytes` of
+# platform volumes under Incus' 0700 `storage-pools/<cephfs pool>/custom/`
+# (Incus reports a CephFS volume's quota as its usage); the agent reads nothing
+# else with it. The incus-admin group already makes this user root-equivalent
+# on the host, so the capability adds no reach. The firewall document the Backend last sent is kept in
 # /var/lib/nyabase-agent/firewall.json. Every Incus request is checked against the agent's
 # policy before it reaches the socket (packages/agent/src/policy.ts).
 User=nyabase-agent
@@ -37,8 +41,8 @@ ExecStart=/usr/bin/env node dist/main.js
 Restart=always
 RestartSec=5s
 NoNewPrivileges=true
-AmbientCapabilities=CAP_NET_ADMIN
-CapabilityBoundingSet=CAP_NET_ADMIN
+AmbientCapabilities=CAP_NET_ADMIN CAP_DAC_READ_SEARCH
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_DAC_READ_SEARCH
 PrivateTmp=true
 ProtectHome=true
 ProtectSystem=strict

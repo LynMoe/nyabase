@@ -10,6 +10,8 @@ export interface AgentConfig {
   /** One-time enrollment token; only read when no credential is stored yet. */
   readonly enrollmentToken?: string;
   readonly incusSocket: string;
+  /** Incus' state directory (`INCUS_DIR`, as Incus itself reads it); holds `storage-pools/`. */
+  readonly incusDir: string;
 }
 
 /** Where the agent keeps its credential and firewall document unless NYABASE_AGENT_STATE_DIR says otherwise. */
@@ -34,6 +36,7 @@ export async function loadAgentConfig(
     stateDir: agentStateDir(environment),
     enrollmentToken,
     incusSocket: environment.INCUS_SOCKET?.trim() || '/var/lib/incus/unix.socket',
+    incusDir: environment.INCUS_DIR?.trim() || '/var/lib/incus',
   };
 }
 

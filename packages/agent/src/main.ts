@@ -1,5 +1,6 @@
 import { AGENT_PROTOCOL_VERSION, parseAgentSecret } from '@nyabase/common';
 import { createAgentHandlers, hostStatus } from './agent.js';
+import { CephfsUsage, readCephRbytes } from './cephfs-usage.js';
 import { BackendConnection } from './backend-connection.js';
 import { readAgentBuild } from './build-info.js';
 import { LinuxNodeMetricsCollector } from './collector.js';
@@ -138,6 +139,7 @@ async function serve(
       firewall,
       operations: new OperationLedger(),
       metrics,
+      cephfsUsage: new CephfsUsage({ incus, incusDir: config.incusDir, readRbytes: readCephRbytes, log }),
       credential: () => credential,
       version,
       log,

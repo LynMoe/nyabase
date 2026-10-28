@@ -35,7 +35,6 @@ import {
   updateCustomVolume,
   verifyCustomVolume,
   type StorageVolume,
-  type StorageVolumeState,
   volumeLabels,
   volumeOwnerScope,
 } from './volume-ops.js';
@@ -49,7 +48,7 @@ import {
 import {
   decideVolumeResize,
   MANAGED_VOLUME_NAME,
-  normalizeObservedVolumeUsage,
+  retriesUnknownCephfsUsage,
 } from './volume-rules.js';
 
 type Executor = { server_id: string; pool_name: string };
@@ -244,18 +243,11 @@ export class VolumeReconciler implements ManagedReconciler, OnModuleInit {
           'Incus did not return a readable volume size',
         );
     }
-    const state: StorageVolumeState = (await client.getStorageVolumeState(
-      row.placement_pool_name,
-      'custom',
-      row.incus_name,
-    )).metadata;
-    const usedBytes = normalizeObservedVolumeUsage({
-      resizeFamily: row.resize_family,
+    const usedBytes = await readVolumeUsage(client, {
+      incus_name: row.placement_pool_name,
       driver: row.driver,
-      usedBytes: asBytes(state.usage?.used) ?? null,
-      totalBytes: asBytes(state.usage?.total) ?? null,
-      currentSizeBytes: currentSize,
-    });
+      resize_family: row.resize_family,
+    }, row.incus_name);
     const decision = decideVolumeResize({
       resizeFamily: row.resize_family,
       currentSizeBytes: currentSize,
@@ -266,6 +258,9 @@ export class VolumeReconciler implements ManagedReconciler, OnModuleInit {
     });
     if (decision.action === 'blocked') {
       const failure = blockedResizeFailure(decision, row.id, desiredSize, usedBytes, attachments);
+      if (retriesUnknownCephfsUsage(decision.reason, row.driver, context.intent.attemptCount)) {
+        return { outcome: 'retry', failure };
+      }
       const current = decision.reason === 'usage_floor' || decision.reason === 'usage_unknown'
         ? await this.store.revertImpossibleShrink(row, currentSize, usedBytes, failure.code)
         : await this.store.isCurrentRevision(row.id, row.revision);
@@ -663,7 +658,7 @@ export class VolumeReconciler implements ManagedReconciler, OnModuleInit {
   ): Promise<void> {
     if (!pool) return;
     try {
-      const used = await readVolumeUsage(client, pool, row.incus_name, asBytes(row.size_bytes) ?? 0n);
+      const used = await readVolumeUsage(client, pool, row.incus_name);
       await this.store.recordObservedUsage(row.id, used);
     } catch (error) {
       if (!isNotFound(error)) {
