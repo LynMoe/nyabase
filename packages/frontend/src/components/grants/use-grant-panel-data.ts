@@ -1,54 +1,60 @@
-import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { type QueryClient, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   type EffectiveAccessDto,
   GRANT_EXPIRY_GRACE_DAYS,
+  type GrantBundleDto,
   type GrantExpiryPhase,
+  type LiveServerAccessDto,
   type ServerGrantDto,
   type SharedBackendDto,
   type SharedBackendGrantDto,
   type StoragePoolDto,
-  type StoragePoolGrantDto,
   type UserServerDto,
 } from '@nyabase/common';
 import { api } from '../../lib/api.js';
-import { graceServerAccess } from '../../lib/effective-access.js';
-import { grantSubjectPath } from '../../lib/scoped-paths.js';
+import { graceServerAccess, liveServerAccess } from '../../lib/effective-access.js';
 import { queryKeys } from '../../lib/query-keys.js';
-import { approxGibHint, GIB } from '../../lib/utils.js';
+import { approxGibHint, formatGibInput, GIB } from '../../lib/utils.js';
 import { truncateId } from '../refs/technical-id.js';
 
-export type SubjectKind = 'users' | 'groups';
-
-/** The user or group whose grants are shown. */
-export interface GrantSubject {
-  kind: SubjectKind;
-  id: string;
-}
-
-const GRANT_LIST_PATHS = {
-  servers: 'server-grants',
-  pools: 'storage-pool-grants',
-  backends: 'shared-backend-grants',
-} as const;
-type GrantListName = keyof typeof GRANT_LIST_PATHS;
-type GrantListRow = { servers: ServerGrantDto; pools: StoragePoolGrantDto; backends: SharedBackendGrantDto };
-
-/** One kind of grant the subject holds. */
-export function useSubjectGrants<N extends GrantListName>(subject: GrantSubject, name: N) {
+/** The user's bundle on each server, with its data disks. */
+export function useServerGrants(userId: string) {
   return useQuery({
-    queryKey: queryKeys.grants.subjectList(subject.kind, subject.id, name),
-    queryFn: () => api.get<Array<GrantListRow[N]>>(`${grantSubjectPath(subject.kind, subject.id)}/${GRANT_LIST_PATHS[name]}`),
+    queryKey: queryKeys.grants.userList(userId, 'servers'),
+    queryFn: () => api.get<ServerGrantDto[]>(`/users/${userId}/server-grants`),
   });
 }
 
-/** Lapsed (in grace) servers of a user; groups have no effective access of their own. */
-export function useLapsedServers(subject: GrantSubject) {
-  const { data } = useQuery({
-    queryKey: queryKeys.grants.subjectList(subject.kind, subject.id, 'effective-access'),
-    queryFn: () => api.get<EffectiveAccessDto>(`${grantSubjectPath(subject.kind, subject.id)}/effective-access`),
-    enabled: subject.kind === 'users',
+export function useBackendGrants(userId: string) {
+  return useQuery({
+    queryKey: queryKeys.grants.userList(userId, 'backends'),
+    queryFn: () => api.get<SharedBackendGrantDto[]>(`/users/${userId}/shared-backend-grants`),
   });
-  return graceServerAccess(data?.servers);
+}
+
+function useEffectiveAccess(userId: string) {
+  return useQuery({
+    queryKey: queryKeys.grants.userList(userId, 'effective-access'),
+    queryFn: () => api.get<EffectiveAccessDto>(`/users/${userId}/effective-access`),
+  });
+}
+
+/** Servers whose access lapsed: stopped now, purged when the grace ends. */
+export function useLapsedServers(userId: string) {
+  return graceServerAccess(useEffectiveAccess(userId).data?.servers);
+}
+
+/** The user's current access on one server (the GPUs picked for them), if live. */
+export function useLiveServerAccess(userId: string, serverId: string): LiveServerAccessDto | undefined {
+  return liveServerAccess(useEffectiveAccess(userId).data?.servers).find((access) => access.serverId === serverId);
+}
+
+/** Every bundle, of every server. */
+export function useGrantBundles() {
+  return useQuery({
+    queryKey: queryKeys.grantBundles.list,
+    queryFn: () => api.get<GrantBundleDto[]>('/admin/grant-bundles'),
+  });
 }
 
 /** Every server an administrator could grant (user admins get the user DTO). */
@@ -59,21 +65,6 @@ export function useGrantServers() {
   });
 }
 
-/** Every storage pool on those servers. */
-export function useGrantPools() {
-  const serversQuery = useGrantServers();
-  return useQuery({
-    queryKey: queryKeys.grants.targets.pools,
-    queryFn: async () => {
-      const rows = await Promise.all((serversQuery.data ?? []).map(
-        (server) => api.get<StoragePoolDto[]>(`/servers/${server.id}/storage-pools?scope=all`),
-      ));
-      return rows.flat();
-    },
-    enabled: serversQuery.isSuccess,
-  });
-}
-
 export function useGrantBackends() {
   return useQuery({
     queryKey: queryKeys.grants.targets.backends,
@@ -81,12 +72,24 @@ export function useGrantBackends() {
   });
 }
 
-/** Refresh the subject's grants and the current user's access after a change. */
-export function useInvalidateGrants(subject: GrantSubject) {
+/**
+ * What a grant change can move for the signed-in administrator too (their own
+ * grant, or a bundle they follow): their access, storage quotas and the pools
+ * the volume form offers them.
+ */
+export function invalidateOwnAccess(queryClient: QueryClient): void {
+  void queryClient.invalidateQueries({ queryKey: queryKeys.meAccess });
+  void queryClient.invalidateQueries({ queryKey: queryKeys.storageCapacityAll });
+  void queryClient.invalidateQueries({ queryKey: queryKeys.volumeForm.poolsAll });
+}
+
+/** Refresh the user's grants, bundle counts and the current user's access after a change. */
+export function useInvalidateGrants(userId: string) {
   const queryClient = useQueryClient();
   return () => {
-    void queryClient.invalidateQueries({ queryKey: queryKeys.grants.subject(subject.kind, subject.id) });
-    void queryClient.invalidateQueries({ queryKey: queryKeys.meAccess });
+    void queryClient.invalidateQueries({ queryKey: queryKeys.grants.user(userId) });
+    void queryClient.invalidateQueries({ queryKey: queryKeys.grantBundles.all });
+    invalidateOwnAccess(queryClient);
   };
 }
 
@@ -99,14 +102,6 @@ export function defaultExpiryLocal(): string {
   return toDatetimeLocalValue(new Date(Date.now() + 30 * 24 * 60 * 60 * 1000));
 }
 
-/** Whole-core grant input: empty → null (不限); a positive integer → that count; anything else → undefined (invalid). */
-export function parseCoreCount(value: string): number | null | undefined {
-  if (!value.trim()) return null;
-  const cores = Number(value);
-  if (!Number.isInteger(cores) || cores < 1) return undefined;
-  return cores;
-}
-
 /** GiB quota input: empty → null (不限); a positive amount → bytes; anything else (0, negative, NaN) → undefined (invalid). */
 export function parseGibQuota(value: string): number | null | undefined {
   if (!value.trim()) return null;
@@ -114,6 +109,20 @@ export function parseGibQuota(value: string): number | null | undefined {
   if (!Number.isFinite(gib)) return undefined;
   const bytes = Math.round(gib * GIB);
   return bytes > 0 ? bytes : undefined;
+}
+
+/** The input text of a GiB limit; '' = 不限. */
+export function gibQuotaText(bytes: number | null | undefined): string {
+  return bytes == null ? '' : formatGibInput(bytes);
+}
+
+/**
+ * `parseGibQuota`, except that a text still reading as the stored limit keeps
+ * its exact bytes (the input shows at most 3 decimals of GiB).
+ */
+export function parseGibQuotaKeeping(value: string, stored: number | null | undefined): number | null | undefined {
+  if (stored !== undefined && value.trim() === gibQuotaText(stored)) return stored;
+  return parseGibQuota(value);
 }
 
 export function gibHint(value: string): string | undefined {
@@ -132,14 +141,18 @@ export function serverName(id: string, servers: UserServerDto[]): string {
   return servers.find((server) => server.id === id)?.name ?? truncateId(id);
 }
 
-export function poolFullName(id: string, pools: StoragePoolDto[], servers: UserServerDto[]): string | undefined {
-  const pool = pools.find((item) => item.id === id);
-  if (!pool) return undefined;
-  return `${pool.displayName ?? pool.incusName} · ${serverName(pool.serverId, servers)}`;
+export function poolLabel(pool: Pick<StoragePoolDto, 'displayName' | 'incusName'>): string {
+  return pool.displayName ?? pool.incusName;
 }
 
-export function poolName(id: string, pools: StoragePoolDto[], servers: UserServerDto[]): string {
-  return poolFullName(id, pools, servers) ?? truncateId(id);
+/** Registered local pools of one server that the grant has no data disk on yet. */
+export function addablePools(pools: StoragePoolDto[], grant: ServerGrantDto): StoragePoolDto[] {
+  return pools.filter((pool) => (
+    pool.registered
+    && !pool.shareable
+    && pool.serverId === grant.serverId
+    && !grant.storagePools.some((row) => row.poolId === pool.id)
+  ));
 }
 
 export function backendDisplayName(id: string, backends: SharedBackendDto[]): string | undefined {
@@ -151,7 +164,7 @@ export function backendName(id: string, backends: SharedBackendDto[]): string {
   return backendDisplayName(id, backends) ?? truncateId(id);
 }
 
-/** Phase of one grant by its own expiry; the access a user actually has is the merge of all of them. */
+/** Phase of one grant by its own expiry. */
 export function expiryPhase(value: string | null): GrantExpiryPhase {
   if (!value) return 'live';
   const timestamp = new Date(value).getTime();
@@ -160,26 +173,13 @@ export function expiryPhase(value: string | null): GrantExpiryPhase {
 }
 
 export function expiryLabel(value: string | null): string {
-  return value ? new Date(value).toLocaleString('zh-CN') : '不设期限';
+  return value ? new Date(value).toLocaleString('zh-CN') : '永久';
 }
 
 export function expirySummary(value: string): string {
-  return value ? expiryLabel(isoOrNull(value)) : '不设期限';
+  return value ? expiryLabel(isoOrNull(value)) : '永久';
 }
 
 export function initialExpiry(expiresAt: string | null | undefined): string {
   return expiresAt ? toDatetimeLocalValue(new Date(expiresAt)) : '';
-}
-
-/** Registered pools on already granted servers that the subject does not hold a pool grant for yet. */
-export function grantablePools(
-  pools: StoragePoolDto[],
-  grantedServerIds: ReadonlySet<string>,
-  poolGrants: StoragePoolGrantDto[],
-): StoragePoolDto[] {
-  return pools.filter((pool) => (
-    pool.registered
-    && grantedServerIds.has(pool.serverId)
-    && !poolGrants.some((row) => row.poolId === pool.id)
-  ));
 }

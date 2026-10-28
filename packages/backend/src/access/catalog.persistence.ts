@@ -21,15 +21,6 @@ export class CatalogPersistence {
       .execute();
   }
 
-  listGroups() {
-    return this.database
-      .selectFrom('iam.groups')
-      .select(['id', 'name'])
-      .orderBy('name')
-      .orderBy('id')
-      .execute();
-  }
-
   listServers() {
     return this.database
       .selectFrom('infra.servers')

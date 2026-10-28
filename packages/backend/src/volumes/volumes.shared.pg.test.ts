@@ -12,6 +12,7 @@ import { StoragePoolsRepository } from '../storage-pools/storage-pools.repositor
 import { VolumesRepository } from './volumes.repository.js';
 import { makeVolumeServices } from './volume-services.test-helper.js';
 import { noopWake } from '../reconcile/reconcile-wake.test-helper.js';
+import { grantPool, grantServer } from '../iam/access.pg-test-helper.js';
 
 const describePg = process.env.NYABASE_TEST_DATABASE_URL ? describe : describe.skip;
 
@@ -112,7 +113,6 @@ async function seedSharedBackend(
     await database.insertInto('iam.shared_backend_grants').values({
       id: randomUUID(),
       user_id: userId,
-      group_id: null,
       shared_backend_id: backendId,
       limit_bytes: options?.grantLimit ?? null,
       expires_at: options?.expiresAt ?? null,
@@ -258,7 +258,7 @@ describePg('shared volume quota reservations', () => {
     });
   });
 
-  it('requires a live shared-backend grant to create and ignores disk_bytes-only grants', async () => {
+  it('requires a live shared-backend grant to create and ignores server and data-disk grants', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const userId = randomUUID();
       const serverId = randomUUID();
@@ -316,23 +316,8 @@ describePg('shared volume quota reservations', () => {
           revision: 1,
         },
       ]).execute();
-      await database.insertInto('iam.server_grants').values({
-        id: randomUUID(),
-        user_id: userId,
-        group_id: null,
-        server_id: serverId,
-        cpu_cores: null,
-        mem_bytes: null,
-        disk_bytes: 5_000,
-        expires_at: null,
-      }).execute();
-      await database.insertInto('iam.storage_pool_grants').values({
-        id: randomUUID(),
-        user_id: userId,
-        group_id: null,
-        pool_id: localPoolId,
-        expires_at: null,
-      }).execute();
+      await grantServer(database, { user: userId }, serverId, { rootDiskBytes: 5_000 });
+      await grantPool(database, { user: userId }, localPoolId);
       const service = makeService(database);
       await expect(service.createShared(testActor(userId), {
         name: 'no-backend-grant',
@@ -343,7 +328,6 @@ describePg('shared volume quota reservations', () => {
       await database.insertInto('iam.shared_backend_grants').values({
         id: randomUUID(),
         user_id: userId,
-        group_id: null,
         shared_backend_id: backendId,
         limit_bytes: 1_000,
         expires_at: null,
@@ -416,7 +400,6 @@ describePg('shared volume quota reservations', () => {
       await database.insertInto('iam.shared_backend_grants').values({
         id: randomUUID(),
         user_id: ownerId,
-        group_id: null,
         shared_backend_id: backendId,
         limit_bytes: null,
         expires_at: null,

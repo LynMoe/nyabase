@@ -92,15 +92,25 @@ function useDefaultVolumeName(enabled: boolean, initial: string) {
 }
 
 /**
- * Slider limits of a new volume on the chosen server and pool: the disk grant,
- * or the pool's free space when the grant is unlimited.
+ * The quota a new volume on `poolId` counts against: the owner's data-disk
+ * grant on that pool (administrators acting for others are not limited by it).
+ */
+function poolQuota(scope: ListScope, capacity: StorageCapacityDto | undefined, poolId: string): QuotaLineQuota {
+  if (scope === 'all') return { kind: 'unlimited' };
+  if (!capacity || !poolId) return { kind: 'loading' };
+  const grant = capacity.pools.find((pool) => pool.poolId === poolId)?.grant;
+  if (!grant) return { kind: 'unknown' };
+  return quotaFrom(grant.limitBytes, grant.availableBytes);
+}
+
+/**
+ * Slider limits of a new volume on the chosen server and pool: the data-disk
+ * grant on the pool, or the pool's free space when the grant is unlimited.
  */
 function useCreateSizeLimits(scope: ListScope, serverId: string, poolId: string, sizeBytes: number) {
   const capacityQuery = useStorageCapacity(scope, serverId);
   const capacity = capacityQuery.data;
-  const quota: QuotaLineQuota = capacityQuery.isError
-    ? { kind: 'unknown' }
-    : quotaFrom(capacity ? capacity.grantLimitBytes : undefined, capacity?.availableBytes);
+  const quota: QuotaLineQuota = capacityQuery.isError ? { kind: 'unknown' } : poolQuota(scope, capacity, poolId);
   const poolFree = capacity?.pools.find((pool) => pool.poolId === poolId)?.availableBytes ?? null;
   const selected = Number.isFinite(sizeBytes) && sizeBytes > 0 ? sizeBytes : null;
   return { quota, ...quotaSliderLimits('volume', quota, poolFree, selected) };
@@ -359,12 +369,13 @@ function CapacityHint({ scope, serverId, poolId }: { scope: ListScope; serverId:
       </div>
     );
   }
-  if (!capacity) return null;
+  const grant = capacity?.pools.find((row) => row.poolId === poolId)?.grant;
+  if (!grant) return null;
   return (
     <p className="text-xs text-muted-foreground">
-      {capacity.grantLimitBytes === null || capacity.grantLimitBytes === 0
-        ? '额度不限'
-        : `剩余 ${grantAvailableLabel(capacity.availableBytes, capacity.grantLimitBytes)} / 额度 ${formatGrantBytes(capacity.grantLimitBytes)}`}
+      {grant.limitBytes === null
+        ? '数据盘额度不限'
+        : `剩余 ${grantAvailableLabel(grant.availableBytes, grant.limitBytes)} / 数据盘额度 ${formatGrantBytes(grant.limitBytes)}`}
     </p>
   );
 }
@@ -397,6 +408,12 @@ function PlacementFields({
   const servers = serversQuery.data ?? [];
   const poolsQuery = useLocalPools(scope, serverId, true);
   const localPools = (poolsQuery.data ?? []).filter((pool) => pool.registered);
+  const capacity = useStorageCapacity(scope, serverId).data;
+  const poolLabel = (pool: StoragePoolDto): string => {
+    const name = pool.displayName ?? pool.incusName;
+    const grant = capacity?.pools.find((row) => row.poolId === pool.id)?.grant;
+    return grant ? `${name} · 数据盘额度 ${formatGrantBytes(grant.limitBytes)}` : name;
+  };
   return (
     <>
       <div className="grid gap-3 sm:grid-cols-2">
@@ -417,7 +434,7 @@ function PlacementFields({
           label="存储池"
           value={poolId}
           onChange={onPoolChange}
-          options={localPools.map((pool): [string, string] => [pool.id, pool.displayName ?? pool.incusName])}
+          options={localPools.map((pool): [string, string] => [pool.id, poolLabel(pool)])}
           placeholder={serverId ? '选择存储池' : '先选择服务器'}
           disabled={!serverId || poolLocked}
           loading={Boolean(serverId) && poolsQuery.isLoading}

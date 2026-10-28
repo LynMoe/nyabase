@@ -27,6 +27,7 @@ describe('SQL migration discovery', () => {
     expect(migrations.map(({ version, name }) => ({ version, name }))).toEqual([
       { version: '000001', name: 'initial' },
       { version: '000002', name: 'ssh-proxy-lines' },
+      { version: '000003', name: 'grant-bundles' },
     ]);
     const [initial] = migrations;
     expect(initial.sql).toContain('CREATE TABLE iam.users');

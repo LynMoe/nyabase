@@ -2,7 +2,7 @@ import { AuditAction } from '@nyabase/common';
 
 export const AUDIT_RESOURCE_LABELS: Record<string, string> = {
   user: '用户',
-  group: '用户组',
+  grant_bundle: '授权模板',
   server: '服务器',
   image: '镜像',
   image_assignment: '镜像分配',
@@ -82,11 +82,9 @@ const AUDIT_ACTION_LABELS: Record<string, string> = {
   [AuditAction.DeleteUser]: '删除用户',
   [AuditAction.AddUserSshPublicKey]: '添加 SSH 公钥',
   [AuditAction.DeleteUserSshPublicKey]: '删除 SSH 公钥',
-  [AuditAction.CreateGroup]: '创建用户组',
-  [AuditAction.UpdateGroup]: '更新用户组',
-  [AuditAction.DeleteGroup]: '删除用户组',
-  [AuditAction.AddGroupMember]: '添加组成员',
-  [AuditAction.RemoveGroupMember]: '移除组成员',
+  [AuditAction.CreateGrantBundle]: '创建授权模板',
+  [AuditAction.UpdateGrantBundle]: '更新授权模板',
+  [AuditAction.DeleteGrantBundle]: '删除授权模板',
   [AuditAction.UserLogin]: '用户登录',
   [AuditAction.UserLogout]: '用户登出',
   [AuditAction.RetryIntent]: '重试操作',

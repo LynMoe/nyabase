@@ -12,34 +12,50 @@ type IamNullableTimestamp = ColumnType<
   Date | string | null
 >;
 
-export interface IamServerGrantTable {
-  id: string;
-  user_id: string | null;
-  group_id: string | null;
-  server_id: string;
+type IamQuotaColumns = {
+  /** NULL = unlimited. */
   cpu_cores: number | null;
   mem_bytes: IamBigInt | null;
-  disk_bytes: IamBigInt | null;
-  gpu_pci_addresses: ColumnType<string[], string[] | undefined, string[]>;
+  root_disk_bytes: IamBigInt | null;
+  gpu_count: number | null;
+};
+
+export interface IamGrantBundleTable extends IamQuotaColumns {
+  id: string;
+  server_id: string;
+  name: string;
+  revision: IamBigInt;
+  created_at: IamGeneratedTimestamp;
+  updated_at: IamGeneratedTimestamp;
+}
+
+/** One bundle per (user, server); a quota column is set only for a field named in `overridden`. */
+export interface IamServerGrantTable extends IamQuotaColumns {
+  id: string;
+  user_id: string;
+  server_id: string;
+  bundle_id: string;
+  overridden: ColumnType<string[], string[] | undefined, string[]>;
   expires_at: IamNullableTimestamp;
   created_at: IamGeneratedTimestamp;
   updated_at: IamGeneratedTimestamp;
 }
 
+/** A data-disk quota on one pool of the server grant's server; current while the server grant is. */
 export interface IamStoragePoolGrantTable {
   id: string;
-  user_id: string | null;
-  group_id: string | null;
+  server_grant_id: string;
+  user_id: string;
+  server_id: string;
   pool_id: string;
-  expires_at: IamNullableTimestamp;
+  limit_bytes: IamBigInt | null;
   created_at: IamGeneratedTimestamp;
   updated_at: IamGeneratedTimestamp;
 }
 
 export interface IamSharedBackendGrantTable {
   id: string;
-  user_id: string | null;
-  group_id: string | null;
+  user_id: string;
   shared_backend_id: string;
   limit_bytes: IamBigInt | null;
   expires_at: IamNullableTimestamp;
@@ -47,14 +63,17 @@ export interface IamSharedBackendGrantTable {
   updated_at: IamGeneratedTimestamp;
 }
 
-/** Read-only view: merged direct + group-inherited server grants (see 000001_initial.sql). */
+/** Read-only view: current grants of active users with overrides applied (see 000003_grant-bundles.sql). */
 export interface IamEffectiveServerAccessView {
   user_id: string;
   server_id: string;
   /** NULL = unlimited. */
   cpu_cores: number | null;
   mem_bytes: string | null;
-  disk_bytes: string | null;
+  root_disk_bytes: string | null;
+  /** NULL = every observed card. */
+  gpu_count: number | null;
+  /** The cards picked for the user from the server's observed GPUs. */
   gpu_pci_addresses: string[];
   /** NULL = never expires. */
   expires_at: Date | null;
@@ -63,6 +82,9 @@ export interface IamEffectiveServerAccessView {
 export interface IamEffectivePoolAccessView {
   user_id: string;
   pool_id: string;
+  /** NULL = unlimited. */
+  limit_bytes: string | null;
+  /** The server grant's expiry. */
   expires_at: Date | null;
 }
 
@@ -86,6 +108,7 @@ export interface AccessLapseTable {
 }
 
 export interface IamAuthorizationDatabase {
+  'iam.grant_bundles': IamGrantBundleTable;
   'iam.server_grants': IamServerGrantTable;
   'iam.storage_pool_grants': IamStoragePoolGrantTable;
   'iam.shared_backend_grants': IamSharedBackendGrantTable;

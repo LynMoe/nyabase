@@ -51,7 +51,7 @@ describe('AuditService retention paths', () => {
     await harness.service.append(
       harness.transaction as never,
       null,
-      AuditAction.CreateGroup,
+      AuditAction.CreateGrantBundle,
       null,
       null,
       {
@@ -89,7 +89,7 @@ describe('AuditService retention paths', () => {
 
     await harness.service.log(
       null,
-      AuditAction.CreateGroup,
+      AuditAction.CreateGrantBundle,
       null,
       null,
       { authorization: 'do-not-store' },
@@ -121,7 +121,7 @@ describe('AuditService retention paths', () => {
       .mockReturnValueOnce(61_000);
 
     for (let index = 0; index < 3; index += 1) {
-      await harness.service.log(null, AuditAction.CreateGroup, null, null);
+      await harness.service.log(null, AuditAction.CreateGrantBundle, null, null);
     }
 
     // 0 ms: two batches (the first was full); 30 s: cooling down; 61 s: one more.
@@ -134,13 +134,13 @@ describe('AuditService retention paths', () => {
     await harness.service.append(
       harness.transaction as never,
       null,
-      AuditAction.CreateGroup,
+      AuditAction.CreateGrantBundle,
       null,
       null,
     );
     await harness.service.log(
       null,
-      AuditAction.CreateGroup,
+      AuditAction.CreateGrantBundle,
       null,
       null,
     );

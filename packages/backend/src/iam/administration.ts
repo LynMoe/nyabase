@@ -6,7 +6,7 @@ import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.
 /**
  * The administration rules, in one place:
  *
- *  - Users and groups are administered by user admins and admins (the route
+ *  - Users, bundles and grants are administered by user admins and admins (the route
  *    guard says so; `assertActorRole` re-checks inside the write transaction).
  *    Only an admin changes roles or administers an admin
  *    (`assertCanAdministerUser`).

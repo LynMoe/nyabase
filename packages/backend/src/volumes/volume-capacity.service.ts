@@ -20,6 +20,11 @@ import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.
 import { StoragePoolsRepository } from '../storage-pools/storage-pools.repository.js';
 import { isLocalPoolRow, storagePoolCapability } from '../storage-pools/storage-pool-capability.js';
 import {
+  listPoolAccess,
+  type PoolAccess,
+  type ServerAccess,
+} from '../iam/effective-access.js';
+import {
   assertPoolGrant,
   effectiveSharedGrant,
   requireServerAccess,
@@ -127,6 +132,15 @@ export class VolumeCapacityService {
       this.repository.sumLiveSizeBytes({ kind: 'local', ownerId, serverId }, executor),
     ]);
     return { root, local };
+  }
+
+  /** The owner's committed local-volume bytes on one pool, as its data-disk quota counts them. */
+  async ownerPoolCommittedBytes(
+    ownerId: string,
+    poolId: string,
+    executor: VolumeExecutor = this.database,
+  ): Promise<number> {
+    return this.repository.sumLiveSizeBytes({ kind: 'local', ownerId, poolId }, executor);
   }
 
   async serverCommittedBytes(
@@ -285,16 +299,17 @@ export class VolumeCapacityService {
     if (!serverId) throw new BadRequestException('Local capacity requires a server');
     const pool = await transaction.selectFrom('infra.storage_pools')
       .selectAll().where('id', '=', poolId).executeTakeFirstOrThrow();
-    const grant = await this.assertLocalCoverage(transaction, ownerId, serverId, poolId);
-    const sums = await this.ownerServerCommittedBytes(ownerId, serverId, transaction);
-    if (grant.diskBytes !== null && sums.root + sums.local + delta > grant.diskBytes) {
+    const { pool: poolGrant } = await this.assertLocalCoverage(transaction, ownerId, serverId, poolId);
+    const used = await this.ownerPoolCommittedBytes(ownerId, poolId, transaction);
+    if (poolGrant.limitBytes !== null && used + delta > poolGrant.limitBytes) {
       throw new ConflictException({
         code: FailureCode.StorageGrantExceeded,
-        message: 'Server storage grant exceeded',
+        message: 'Data disk grant exceeded',
         details: {
+          poolId,
           requestedBytes: delta,
-          availableBytes: Math.max(0, grant.diskBytes - sums.root - sums.local),
-          grantLimitBytes: grant.diskBytes,
+          availableBytes: Math.max(0, poolGrant.limitBytes - used),
+          grantLimitBytes: poolGrant.limitBytes,
         },
       });
     }
@@ -304,17 +319,17 @@ export class VolumeCapacityService {
   /**
    * The owner's current server and pool coverage of a local volume, needed
    * for every grow, also one that stays within a pending shrink's
-   * reservation and so commits no new bytes. Returns the server grant.
+   * reservation and so commits no new bytes. Returns both grants.
    */
   async assertLocalCoverage(
     transaction: Tx,
     ownerId: string,
     serverId: string,
     poolId: string,
-  ): Promise<Awaited<ReturnType<typeof requireServerAccess>>> {
-    const grant = await requireServerAccess(transaction, ownerId, serverId);
-    await assertPoolGrant(transaction, ownerId, poolId);
-    return grant;
+  ): Promise<{ server: ServerAccess; pool: PoolAccess }> {
+    const server = await requireServerAccess(transaction, ownerId, serverId);
+    const pool = await assertPoolGrant(transaction, ownerId, poolId);
+    return { server, pool };
   }
 
   /** Physical capacity only, for administrators who bypass per-user grant limits. */
@@ -363,13 +378,21 @@ export class VolumeCapacityService {
     }
   }
 
+  /** Each local pool of the server; with `ownerId`, also that owner's data-disk grant and usage on it. */
   private async poolCapacities(
-    serverId: string): Promise<PoolCapacityDto[]> {
+    serverId: string,
+    ownerId?: string,
+  ): Promise<PoolCapacityDto[]> {
     const pools = (await this.pools.list(serverId)).filter(isLocalPoolRow);
     const overcommitRatio = await this.serverOvercommit(serverId);
+    const grants = ownerId === undefined
+      ? new Map<string, PoolAccess>()
+      : new Map((await listPoolAccess(this.database, ownerId)).map((access) => [access.poolId, access]));
     const result: PoolCapacityDto[] = [];
     for (const pool of pools) {
       const committed = await this.committedPoolBytes(pool.id);
+      const grant = grants.get(pool.id);
+      const used = grant && ownerId !== undefined ? await this.ownerPoolCommittedBytes(ownerId, pool.id) : 0;
       result.push({
         poolId: pool.id,
         displayName: pool.display_name,
@@ -387,6 +410,13 @@ export class VolumeCapacityService {
           pool.quota_effective,
           pool.block_filesystem,
         ),
+        grant: grant
+          ? {
+              limitBytes: grant.limitBytes,
+              usedBytes: used,
+              availableBytes: grant.limitBytes === null ? null : Math.max(0, grant.limitBytes - used),
+            }
+          : null,
       });
     }
     return result;
@@ -398,14 +428,14 @@ export class VolumeCapacityService {
     serverId: string,
   ): Promise<StorageCapacityDto> {
     const grant = await requireServerAccess(this.database, ownerId, serverId);
-    const pools = await this.poolCapacities(serverId);
+    const pools = await this.poolCapacities(serverId, ownerId);
     const sums = await this.ownerServerCommittedBytes(ownerId, serverId);
-    const limit = grant.diskBytes;
+    const limit = grant.rootDiskBytes;
     return {
-      grantLimitBytes: limit,
+      rootDiskLimitBytes: limit,
       usedByRootDisksBytes: sums.root,
+      rootDiskAvailableBytes: limit === null ? null : Math.max(0, limit - sums.root),
       usedByLocalVolumesBytes: sums.local,
-      availableBytes: limit === null ? null : Math.max(0, limit - sums.root - sums.local),
       pools,
     };
   }
@@ -417,10 +447,10 @@ export class VolumeCapacityService {
     const pools = await this.poolCapacities(serverId);
     const sums = await this.serverCommittedBytes(serverId);
     return {
-      grantLimitBytes: null,
+      rootDiskLimitBytes: null,
       usedByRootDisksBytes: sums.root,
+      rootDiskAvailableBytes: null,
       usedByLocalVolumesBytes: sums.local,
-      availableBytes: null,
       pools,
     };
   }

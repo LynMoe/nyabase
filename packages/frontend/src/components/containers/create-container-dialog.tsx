@@ -278,7 +278,7 @@ function useCreateContainerForm({
   const memLeft = selectedAccess && onServer
     ? remaining(selectedAccess.memBytes, runningMemBytes(onServer))
     : null;
-  const diskLeft = data.capacityQuery.data?.availableBytes ?? null;
+  const diskLeft = data.capacityQuery.data?.rootDiskAvailableBytes ?? null;
 
   // A stopped create needs no memory headroom; it is checked when the container starts.
   const memOver = form.startAfterCreate && memLeft !== null && memBytes !== null && memBytes > memLeft;
@@ -437,7 +437,7 @@ type CreateContainerData = ReturnType<typeof useCreateContainerData>;
 
 /**
  * Slider ranges and quota lines of the chosen server. Memory runs to the grant
- * limit, or the host's memory when unlimited; the root disk to the disk grant,
+ * limit, or the host's memory when unlimited; the root disk to the system-disk grant,
  * or the 4 TiB ladder when unlimited (its pool is not exposed to users).
  */
 function specLimits(data: CreateContainerData, memLeft: number | null): {
@@ -450,7 +450,7 @@ function specLimits(data: CreateContainerData, memLeft: number | null): {
   const memLimit = selectedAccess?.memBytes || null;
   const memMaxBytes = memLimit ?? data.hostMemBytes;
   const capacity = capacityQuery.data;
-  const diskLimit = capacity?.grantLimitBytes || null;
+  const diskLimit = capacity?.rootDiskLimitBytes || null;
   return {
     memScale: sizeScale('memory', memMaxBytes === null ? null : memMaxBytes / GIB),
     diskScale: sizeScale('disk', diskLimit === null ? null : diskLimit / GIB),
@@ -459,7 +459,7 @@ function specLimits(data: CreateContainerData, memLeft: number | null): {
       : quotaFrom(selectedAccess ? memLimit : undefined, memLeft),
     diskQuota: capacityQuery.isError
       ? { kind: 'unknown' }
-      : quotaFrom(capacity ? capacity.grantLimitBytes : undefined, capacity?.availableBytes),
+      : quotaFrom(capacity ? capacity.rootDiskLimitBytes : undefined, capacity?.rootDiskAvailableBytes),
   };
 }
 
@@ -495,7 +495,7 @@ function remaining(limit: number | null, used: number): number | null {
 }
 
 function bytesText(bytes: number): string {
-  return formatConsumedQuotaParts({ cpuCores: null, memBytes: bytes, diskBytes: null })[0] ?? '';
+  return formatConsumedQuotaParts({ cpuCores: null, memBytes: bytes, rootDiskBytes: null })[0] ?? '';
 }
 
 /** Field-level problems of the form; empty when it can be submitted. */

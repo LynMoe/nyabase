@@ -5,7 +5,8 @@ export type CpuMemDisk = {
   /** Whole logical CPUs; null on a grant = every unreserved CPU. */
   cpuCores: number | null;
   memBytes: number | null;
-  diskBytes: number | null;
+  /** System disks on the server (data disks are per-pool quotas). */
+  rootDiskBytes: number | null;
 };
 
 const UNLIMITED = '不限';
@@ -35,7 +36,7 @@ export function formatGrantQuotaParts(grant: CpuMemDisk): string[] {
   return [
     formatGrantNumber(grant.cpuCores, formatCompactCpu),
     formatGrantNumber(grant.memBytes, formatCompactBytes),
-    formatGrantNumber(grant.diskBytes, formatCompactBytes),
+    formatGrantNumber(grant.rootDiskBytes, formatCompactBytes),
   ];
 }
 
@@ -46,16 +47,22 @@ export function formatGrantQuotaLine(
   return [...formatGrantQuotaParts(grant), ...(gpuSummary ? [gpuSummary] : [])].join(' / ');
 }
 
+/** A GPU count of a grant: null = every card of the server, 0 = none. */
+export function formatGpuCount(count: number | null): string {
+  if (count === null) return '全部 GPU';
+  return count === 0 ? '无' : `${count} 张 GPU`;
+}
+
 /** Allocated/committed usage. 0 → 0 核 / 0 GiB. null = no observation (omit the dim). */
 export function formatConsumedQuotaParts(consumed: CpuMemDisk): string[] {
   const parts: string[] = [];
   if (consumed.cpuCores !== null) parts.push(formatCompactCpu(consumed.cpuCores));
   if (consumed.memBytes !== null) parts.push(formatCompactBytes(consumed.memBytes));
-  if (consumed.diskBytes !== null) parts.push(formatCompactBytes(consumed.diskBytes));
+  if (consumed.rootDiskBytes !== null) parts.push(formatCompactBytes(consumed.rootDiskBytes));
   return parts;
 }
 
-/** Grant ceiling for a byte quota (shared backend limit). null → 不限. */
+/** Grant ceiling for a byte quota (memory, system disk, data disk, shared backend). null → 不限. */
 export function formatGrantBytes(bytes: number | null): string {
   return formatGrantNumber(bytes, formatCompactBytes);
 }

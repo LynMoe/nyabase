@@ -11,6 +11,7 @@ import { StoragePoolsRepository } from '../storage-pools/storage-pools.repositor
 import { VolumesRepository } from './volumes.repository.js';
 import { makeVolumeServices } from './volume-services.test-helper.js';
 import { noopWake } from '../reconcile/reconcile-wake.test-helper.js';
+import { ensureServerGrant, grantPool } from '../iam/access.pg-test-helper.js';
 
 const describePg = process.env.NYABASE_TEST_DATABASE_URL ? describe : describe.skip;
 
@@ -84,20 +85,7 @@ async function insertContainer(
 ) {
   const id = randomUUID();
   // Attaching needs current coverage of the container's server (and the volume's pool).
-  await database.insertInto('iam.server_grants').values({
-    id: randomUUID(),
-    user_id: ownerId,
-    group_id: null,
-    server_id: serverId,
-    cpu_cores: null,
-    mem_bytes: null,
-    disk_bytes: null,
-    gpu_pci_addresses: [],
-    expires_at: null,
-  }).onConflict((conflict) => conflict
-    .columns(['user_id', 'server_id'])
-    .where('user_id', 'is not', null)
-    .doNothing()).execute();
+  await ensureServerGrant(database, ownerId, serverId);
   await database.insertInto('control.containers').values({
     id,
     server_id: serverId,
@@ -135,16 +123,12 @@ async function insertVolume(
 ) {
   const id = randomUUID();
   if (poolId && !sharedBackendId) {
-    await database.insertInto('iam.storage_pool_grants').values({
-      id: randomUUID(),
-      user_id: ownerId,
-      group_id: null,
-      pool_id: poolId,
-      expires_at: null,
-    }).onConflict((conflict) => conflict
-      .columns(['user_id', 'pool_id'])
-      .where('user_id', 'is not', null)
-      .doNothing()).execute();
+    const pool = await database.selectFrom('infra.storage_pools').select('server_id')
+      .where('id', '=', poolId).executeTakeFirstOrThrow();
+    await ensureServerGrant(database, ownerId, pool.server_id);
+    const granted = await database.selectFrom('iam.storage_pool_grants').select('id')
+      .where('user_id', '=', ownerId).where('pool_id', '=', poolId).executeTakeFirst();
+    if (!granted) await grantPool(database, { user: ownerId }, poolId);
   }
   await database.insertInto('control.volumes').values({
     id,
@@ -400,7 +384,6 @@ describePg('volume attachment ownership, visibility, and drain guards', () => {
       await database.insertInto('iam.shared_backend_grants').values({
         id: randomUUID(),
         user_id: userId,
-        group_id: null,
         shared_backend_id: backendId,
         limit_bytes: null,
         expires_at: null,
@@ -541,7 +524,6 @@ describePg('volume attachment ownership, visibility, and drain guards', () => {
       await database.insertInto('iam.shared_backend_grants').values({
         id: randomUUID(),
         user_id: userId,
-        group_id: null,
         shared_backend_id: backendId,
         limit_bytes: null,
         expires_at: null,
@@ -667,7 +649,6 @@ describePg('volume attachment ownership, visibility, and drain guards', () => {
       await database.insertInto('iam.shared_backend_grants').values({
         id: randomUUID(),
         user_id: userId,
-        group_id: null,
         shared_backend_id: backendId,
         limit_bytes: null,
         expires_at: null,

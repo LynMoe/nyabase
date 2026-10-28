@@ -29,28 +29,6 @@ export async function seedUser(
   return id;
 }
 
-export async function seedGroup(
-  database: Db,
-  options: { name?: string } = {},
-): Promise<string> {
-  const id = randomUUID();
-  await database.insertInto('iam.groups').values({
-    id,
-    name: options.name ?? `group-${nextName++}`,
-    description: null,
-    revision: 1,
-  }).execute();
-  return id;
-}
-
-export async function addMember(database: Db, groupId: string, userId: string): Promise<void> {
-  await database.insertInto('iam.group_members').values({
-    id: randomUUID(),
-    group_id: groupId,
-    user_id: userId,
-  }).execute();
-}
-
 export async function seedServer(database: Db, name = `server-${nextName++}`): Promise<string> {
   const id = randomUUID();
   await database.insertInto('infra.servers').values({
@@ -202,14 +180,45 @@ export async function seedVolume(
   return id;
 }
 
-type Subject = { user: string } | { group: string };
+type Subject = { user: string };
 
-function subject(value: Subject) {
-  return 'user' in value
-    ? { user_id: value.user, group_id: null }
-    : { user_id: null, group_id: value.group };
+export async function seedBundle(
+  database: Db,
+  serverId: string,
+  values: {
+    name?: string;
+    cpuCores?: number | null;
+    memBytes?: number | null;
+    rootDiskBytes?: number | null;
+    gpuCount?: number | null;
+  } = {},
+): Promise<string> {
+  const id = randomUUID();
+  await database.insertInto('iam.grant_bundles').values({
+    id,
+    server_id: serverId,
+    name: values.name ?? `bundle-${nextName++}`,
+    cpu_cores: values.cpuCores ?? null,
+    mem_bytes: values.memBytes ?? null,
+    root_disk_bytes: values.rootDiskBytes ?? null,
+    gpu_count: values.gpuCount ?? null,
+    revision: 1,
+  }).execute();
+  return id;
 }
 
+/** The server's observed NVIDIA cards, which grants pick their GPUs from. */
+export async function observeGpus(database: Db, serverId: string, pciAddresses: string[]): Promise<void> {
+  await database.updateTable('infra.servers')
+    .set({ observed_gpu_pci_addresses: [...pciAddresses].sort() })
+    .where('id', '=', serverId)
+    .execute();
+}
+
+/**
+ * The user's grant on the server: a fresh bundle holding `values` (or
+ * `bundleId`), without overrides unless given. Returns the grant id.
+ */
 export async function grantServer(
   database: Db,
   who: Subject,
@@ -217,35 +226,61 @@ export async function grantServer(
   values: {
     cpuCores?: number | null;
     memBytes?: number | null;
-    diskBytes?: number | null;
-    gpu?: string[];
+    rootDiskBytes?: number | null;
+    gpuCount?: number | null;
     expiresAt?: Date | null;
+    bundleId?: string;
   } = {},
-): Promise<void> {
+): Promise<string> {
+  const bundleId = values.bundleId ?? await seedBundle(database, serverId, values);
+  const id = randomUUID();
   await database.insertInto('iam.server_grants').values({
-    id: randomUUID(),
-    ...subject(who),
+    id,
+    user_id: who.user,
     server_id: serverId,
-    cpu_cores: values.cpuCores ?? null,
-    mem_bytes: values.memBytes ?? null,
-    disk_bytes: values.diskBytes ?? null,
-    gpu_pci_addresses: values.gpu ?? [],
+    bundle_id: bundleId,
     expires_at: values.expiresAt ?? null,
   }).execute();
+  return id;
 }
 
+/** The user's grant on the server, created with an unlimited bundle when there is none. */
+export async function ensureServerGrant(database: Db, userId: string, serverId: string): Promise<string> {
+  const existing = await database.selectFrom('iam.server_grants')
+    .select('id')
+    .where('user_id', '=', userId)
+    .where('server_id', '=', serverId)
+    .executeTakeFirst();
+  return existing?.id ?? grantServer(database, { user: userId }, serverId);
+}
+
+/** A data-disk quota on the pool, under the user's existing grant on the pool's server. */
 export async function grantPool(
   database: Db,
   who: Subject,
   poolId: string,
-  expiresAt: Date | null = null,
-): Promise<void> {
+  limitBytes: number | null = null,
+): Promise<string> {
+  const pool = await database.selectFrom('infra.storage_pools')
+    .select('server_id')
+    .where('id', '=', poolId)
+    .executeTakeFirstOrThrow();
+  const serverGrant = await database.selectFrom('iam.server_grants')
+    .select('id')
+    .where('user_id', '=', who.user)
+    .where('server_id', '=', pool.server_id)
+    .executeTakeFirst();
+  if (!serverGrant) throw new Error('grantPool needs the user\'s server grant on the pool\'s server first');
+  const id = randomUUID();
   await database.insertInto('iam.storage_pool_grants').values({
-    id: randomUUID(),
-    ...subject(who),
+    id,
+    server_grant_id: serverGrant.id,
+    user_id: who.user,
+    server_id: pool.server_id,
     pool_id: poolId,
-    expires_at: expiresAt,
+    limit_bytes: limitBytes,
   }).execute();
+  return id;
 }
 
 export async function grantBackend(
@@ -257,7 +292,7 @@ export async function grantBackend(
 ): Promise<void> {
   await database.insertInto('iam.shared_backend_grants').values({
     id: randomUUID(),
-    ...subject(who),
+    user_id: who.user,
     shared_backend_id: backendId,
     limit_bytes: limitBytes,
     expires_at: expiresAt,

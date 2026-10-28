@@ -5,7 +5,7 @@ import {
   type Role,
   type EffectiveServerAccessDto,
   type EffectiveSharedBackendAccessDto,
-  type GroupSummaryDto,
+  type LiveServerAccessDto,
 } from '@nyabase/common';
 import { numberValue } from '../platform/domain-utils.js';
 import { committedVolumeBytesSql } from '../platform/persistence-pg/committed-bytes.js';
@@ -14,6 +14,7 @@ import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
 import { assertActorRole } from './administration.js';
 import {
+  listPoolAccess,
   listServerAccess,
   listSharedBackendAccess,
   resolvePoolAccess,
@@ -129,19 +130,6 @@ export class AccessResolverService {
     return (await listServerAccess(this.database, userId)).map((access) => access.serverId);
   }
 
-  async getUserGroupSummaries(userId: string): Promise<GroupSummaryDto[]> {
-    const rows = await this.database.selectFrom('iam.group_members as member')
-      .innerJoin('iam.groups as group', 'group.id', 'member.group_id')
-      .innerJoin('iam.users as user', 'user.id', 'member.user_id')
-      .select(['group.id', 'group.name'])
-      .where('member.user_id', '=', userId)
-      .where('user.status', '=', 'active')
-      .orderBy('group.name')
-      .orderBy('group.id')
-      .execute();
-    return rows.map((row) => ({ id: row.id, name: row.name }));
-  }
-
   /**
    * Servers the user is covered on (`live`) plus servers on which coverage
    * lapsed and the 14-day grace has not ended (`grace`, read from the lapse
@@ -188,14 +176,18 @@ export class AccessResolverService {
       return [row.id, topology.length === 0 ? null : cores] as const;
     }));
 
+    const poolsByServer = await this.livePoolAccess(userId);
+
     return [
       ...live.map((access): EffectiveServerAccessDto => ({
         serverId: access.serverId,
         cpuCores: access.cpuCores,
         serverCpuCores: serverCpuCores.get(access.serverId) ?? null,
         memBytes: access.memBytes,
-        diskBytes: access.diskBytes,
+        rootDiskBytes: access.rootDiskBytes,
+        gpuCount: access.gpuCount,
         gpuPciAddresses: access.gpuPciAddresses,
+        storagePools: poolsByServer.get(access.serverId) ?? [],
         expiresAt: access.expiresAt?.toISOString() ?? null,
         accessPhase: 'live',
         allowedImageIds: imagesByServer.get(access.serverId) ?? [],
@@ -207,6 +199,44 @@ export class AccessResolverService {
         purgeAt: new Date(lapse.lapsed_at.getTime() + GRACE_MS).toISOString(),
       })),
     ];
+  }
+
+  /** Current data-disk quotas by server, with the committed size of the user's local volumes on each pool. */
+  private async livePoolAccess(
+    userId: string,
+  ): Promise<Map<string, LiveServerAccessDto['storagePools']>> {
+    const pools = await listPoolAccess(this.database, userId);
+    const result = new Map<string, LiveServerAccessDto['storagePools']>();
+    if (pools.length === 0) return result;
+    const poolIds = pools.map((pool) => pool.poolId);
+    const [servers, usedRows] = await Promise.all([
+      this.database.selectFrom('infra.storage_pools')
+        .select(['id', 'server_id'])
+        .where('id', 'in', poolIds)
+        .execute(),
+      this.database.selectFrom('control.volumes')
+        .select(['pool_id', sql<string>`coalesce(sum(${committedVolumeBytesSql()}), 0)`.as('used')])
+        .where('owner_id', '=', userId)
+        .where('pool_id', 'in', poolIds)
+        .where('shared_backend_id', 'is', null)
+        .where('lifecycle_phase', 'not in', ['failed', 'deleting'])
+        .groupBy('pool_id')
+        .execute(),
+    ]);
+    const serverByPool = new Map(servers.map((row) => [row.id, row.server_id]));
+    const usedByPool = new Map(usedRows.map((row) => [row.pool_id, numberValue(row.used)]));
+    for (const pool of pools) {
+      const serverId = serverByPool.get(pool.poolId);
+      if (!serverId) continue;
+      const list = result.get(serverId) ?? [];
+      list.push({
+        poolId: pool.poolId,
+        limitBytes: pool.limitBytes,
+        usedBytes: usedByPool.get(pool.poolId) ?? 0,
+      });
+      result.set(serverId, list);
+    }
+    return result;
   }
 
   /**
@@ -239,7 +269,7 @@ export class AccessResolverService {
 }
 
 /**
- * In-process signal that IAM state which decides who is covered (membership,
+ * In-process signal that IAM state which decides who is covered (bundles,
  * grants, user status) changed. IAM writers fire it through `afterCommit`, so
  * a listener never looks before the commit; the access-lapse processor listens
  * and scans out of its regular schedule. A missed signal only costs latency:

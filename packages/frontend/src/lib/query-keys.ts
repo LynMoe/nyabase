@@ -2,8 +2,7 @@ import type { ListScope } from '@nyabase/common';
 
 /** Which rows a cached response holds: the caller's own (`mine`) or everyone's (`all`). */
 type Scope = ListScope;
-type GrantKind = 'users' | 'groups';
-type GrantSlice = 'servers' | 'pools' | 'backends' | 'effective-access';
+type GrantSlice = 'servers' | 'backends' | 'effective-access';
 
 export const queryKeys = {
   publicSettings: ['public-settings'] as const,
@@ -54,9 +53,9 @@ export const queryKeys = {
     admin: ['users', 'admin'] as const,
     detail: (userId: string) => ['users', 'admin', userId] as const,
   },
-  groups: {
-    admin: ['groups', 'admin'] as const,
-    detail: (id: string) => ['group', id] as const,
+  grantBundles: {
+    all: ['grant-bundles'] as const,
+    list: ['grant-bundles', 'list'] as const,
   },
   containers: {
     adminList: ['containers', 'admin'] as const,
@@ -82,6 +81,8 @@ export const queryKeys = {
   },
   volumeForm: {
     servers: ['volume-form', 'servers'] as const,
+    /** Prefix of every server's `pools`. */
+    poolsAll: ['volume-form', 'pools'] as const,
     pools: (serverId: string) => ['volume-form', 'pools', serverId] as const,
   },
   sharedBackends: {
@@ -119,6 +120,8 @@ export const queryKeys = {
       range: string,
     ) => ['performance', 'series', scope, serverId, userId, containerId, metric, range] as const,
   },
+  /** Prefix of every `storageCapacity` (and the admin view's `['storage-capacity', 'admin', id]`). */
+  storageCapacityAll: ['storage-capacity'] as const,
   storageCapacity: (serverId: string) => ['storage-capacity', serverId] as const,
   resourceIntentFailures: (listPath: string, limit: number) =>
     ['resource-intent-failures', listPath, limit] as const,
@@ -132,12 +135,10 @@ export const queryKeys = {
   }) => ['admin-intents', filters] as const,
   adminIntent: (id: string) => ['admin-intent', id] as const,
   grants: {
-    subject: (kind: GrantKind, subjectId: string) => ['grants', kind, subjectId] as const,
-    subjectList: (kind: GrantKind, subjectId: string, slice: GrantSlice) =>
-      ['grants', kind, subjectId, slice] as const,
+    user: (userId: string) => ['grants', 'users', userId] as const,
+    userList: (userId: string, slice: GrantSlice) => ['grants', 'users', userId, slice] as const,
     targets: {
       servers: ['grant-targets', 'servers'] as const,
-      pools: ['grant-targets', 'pools'] as const,
       backends: ['grant-targets', 'backends'] as const,
     },
   },

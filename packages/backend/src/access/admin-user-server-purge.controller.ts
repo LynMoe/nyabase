@@ -2,7 +2,7 @@ import { Controller, Param, Post } from '@nestjs/common';
 import { Role } from '@nyabase/common';
 import { RequireRole, CurrentActor } from '../iam/decorators.js';
 import type { Actor } from '../iam/actor.js';
-import { GrantsService } from '../groups/grants.service.js';
+import { GrantsService } from '../grants/grants.service.js';
 import { UserServerResourcePurgeService } from './user-server-resource-purge.service.js';
 
 @Controller('users/:userId')
@@ -19,7 +19,7 @@ export class AdminUserServerPurgeController {
     @Param('serverId') serverId: string,
     @CurrentActor() actor: Actor,
   ) {
-    await this.grants.assertSubjectExists({ kind: 'user', id: userId });
+    await this.grants.assertUserExists(userId);
     return this.purgeResources.purge(actor, userId, serverId);
   }
 }

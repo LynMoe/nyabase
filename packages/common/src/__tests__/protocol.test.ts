@@ -33,7 +33,6 @@ import {
   zPatchServerRequest,
   zPatchStoragePoolRequest,
   zPreflightReport,
-  zPutServerGrantRequest,
   zSshProxyInstanceRouteSnapshot,
   zSshProxyPauseAdmitCommand,
   formatSshAgentSetupPrompt,
@@ -176,29 +175,6 @@ describe('canonical container and volume contracts', () => {
       expect(attach(path), path).toBe(true);
     }
     expect(isForbiddenContainerMountPath('/./proc')).toBe(true);
-  });
-
-  it('canonicalizes GPU PCI addresses on grants and defaults to none', () => {
-    expect(zPutServerGrantRequest.parse({
-      cpuCores: null,
-      memBytes: null,
-      diskBytes: null,
-      expiresAt: null,
-    }).gpuPciAddresses).toEqual([]);
-    expect(zPutServerGrantRequest.parse({
-      cpuCores: null,
-      memBytes: null,
-      diskBytes: null,
-      gpuPciAddresses: ['0000:41:00.0'],
-      expiresAt: null,
-    }).gpuPciAddresses).toEqual(['00000000:41:00.0']);
-    expect(zPutServerGrantRequest.safeParse({
-      cpuCores: null,
-      memBytes: null,
-      diskBytes: null,
-      gpuPciAddresses: ['0000:41:00.*'],
-      expiresAt: null,
-    }).success).toBe(false);
   });
 
   it('rejects old physical identity and address fields', () => {

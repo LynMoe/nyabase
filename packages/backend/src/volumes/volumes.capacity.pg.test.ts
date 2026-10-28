@@ -3,9 +3,10 @@ import { randomUUID } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
 import { testActor } from '../iam/actor.test-helper.js';
 import {
-  days,
   grantPool,
   grantServer,
+  seedContainer,
+  seedImage,
   seedServer,
   seedUser,
   seedVolume,
@@ -111,6 +112,36 @@ function makeService(database: Kysely<NyabaseDatabase>) {
 }
 
 describePg('volume capacity locking and scope exclusions', () => {
+  it('counts the owner\'s local volumes on the pool against its data-disk quota, never system disks', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const ownerId = await seedUser(database);
+      const serverId = await seedServer(database);
+      const poolId = await insertLocalPool(database, serverId, 100_000);
+      const otherPool = await insertLocalPool(database, serverId, 100_000);
+      // The system disks alone already exceed the system-disk quota; they must not count here.
+      await grantServer(database, { user: ownerId }, serverId, { rootDiskBytes: 50 });
+      await grantPool(database, { user: ownerId }, poolId, 1_000);
+      await grantPool(database, { user: ownerId }, otherPool, 300);
+      const imageId = await seedImage(database);
+      await seedContainer(database, { ownerId, serverId, poolId, imageId });
+      await seedContainer(database, { ownerId, serverId, poolId, imageId });
+      const service = makeService(database);
+      const create = (name: string, sizeBytes: number, pool = poolId) => service.create(testActor(ownerId), {
+        name, sizeBytes, scope: { kind: 'local', serverId, poolId: pool },
+      });
+
+      await expect(create('fits', 900)).resolves.toMatchObject({ resourceId: expect.any(String) });
+      await expect(create('over', 101)).rejects.toMatchObject({
+        response: { code: FailureCode.StorageGrantExceeded, details: { poolId, grantLimitBytes: 1_000 } },
+      });
+      // Each pool has its own quota.
+      await expect(create('other', 300, otherPool)).resolves.toMatchObject({ resourceId: expect.any(String) });
+      await expect(create('other-over', 1, otherPool)).rejects.toMatchObject({
+        response: { code: FailureCode.StorageGrantExceeded },
+      });
+    });
+  });
+
   it('excludes shared volume bytes from server and local-pool capacity', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const userId = randomUUID();
@@ -149,27 +180,11 @@ describePg('volume capacity locking and scope exclusions', () => {
         last_observed_at: new Date(),
         revision: 1,
       }).execute();
-      await database.insertInto('iam.server_grants').values({
-        id: randomUUID(),
-        user_id: userId,
-        group_id: null,
-        server_id: serverId,
-        cpu_cores: null,
-        mem_bytes: null,
-        disk_bytes: null,
-        expires_at: null,
-      }).execute();
-      await database.insertInto('iam.storage_pool_grants').values({
-        id: randomUUID(),
-        user_id: userId,
-        group_id: null,
-        pool_id: recreatedLocalPoolId,
-        expires_at: null,
-      }).execute();
+      await grantServer(database, { user: userId }, serverId);
+      await grantPool(database, { user: userId }, recreatedLocalPoolId);
       await database.insertInto('iam.shared_backend_grants').values({
         id: randomUUID(),
         user_id: userId,
-        group_id: null,
         shared_backend_id: backendId,
         limit_bytes: 1000,
         expires_at: null,
@@ -276,23 +291,8 @@ describePg('volume capacity locking and scope exclusions', () => {
       await database.insertInto('iam.users').values(userValues(userId)).execute();
       await database.insertInto('infra.servers').values(serverValues(serverId)).execute();
       const poolId = await insertLocalPool(database, serverId);
-      await database.insertInto('iam.server_grants').values({
-        id: randomUUID(),
-        user_id: userId,
-        group_id: null,
-        server_id: serverId,
-        cpu_cores: null,
-        mem_bytes: null,
-        disk_bytes: null,
-        expires_at: null,
-      }).execute();
-      await database.insertInto('iam.storage_pool_grants').values({
-        id: randomUUID(),
-        user_id: userId,
-        group_id: null,
-        pool_id: poolId,
-        expires_at: null,
-      }).execute();
+      await grantServer(database, { user: userId }, serverId);
+      await grantPool(database, { user: userId }, poolId);
       const service = makeService(database);
       const results = await Promise.allSettled([1, 2].map((index) => service.create(testActor(userId),
         {
@@ -332,23 +332,8 @@ describePg('volume capacity locking and scope exclusions', () => {
         storage_overcommit_ratio: 2,
       }).execute();
       const poolId = await insertLocalPool(database, serverId, 1_000);
-      await database.insertInto('iam.server_grants').values({
-        id: randomUUID(),
-        user_id: userId,
-        group_id: null,
-        server_id: serverId,
-        cpu_cores: null,
-        mem_bytes: null,
-        disk_bytes: null,
-        expires_at: null,
-      }).execute();
-      await database.insertInto('iam.storage_pool_grants').values({
-        id: randomUUID(),
-        user_id: userId,
-        group_id: null,
-        pool_id: poolId,
-        expires_at: null,
-      }).execute();
+      await grantServer(database, { user: userId }, serverId);
+      await grantPool(database, { user: userId }, poolId);
 
       const service = makeService(database);
       const existing = await service.create(testActor(userId), {
@@ -407,23 +392,8 @@ describePg('volume capacity locking and scope exclusions', () => {
       await database.insertInto('iam.users').values(userValues(userId)).execute();
       await database.insertInto('infra.servers').values(serverValues(serverId)).execute();
       const poolId = await insertLocalPool(database, serverId);
-      await database.insertInto('iam.server_grants').values({
-        id: randomUUID(),
-        user_id: userId,
-        group_id: null,
-        server_id: serverId,
-        cpu_cores: null,
-        mem_bytes: null,
-        disk_bytes: null,
-        expires_at: null,
-      }).execute();
-      await database.insertInto('iam.storage_pool_grants').values({
-        id: randomUUID(),
-        user_id: userId,
-        group_id: null,
-        pool_id: poolId,
-        expires_at: null,
-      }).execute();
+      await grantServer(database, { user: userId }, serverId);
+      await grantPool(database, { user: userId }, poolId);
       const volumeIds = [randomUUID(), randomUUID()];
       await database.insertInto('control.volumes').values(volumeIds.map((id, index) => ({
         id,
@@ -527,23 +497,8 @@ describePg('volume capacity locking and scope exclusions', () => {
         failure_reason: null,
         last_observed_at: new Date(),
       }).execute();
-      await database.insertInto('iam.server_grants').values({
-        id: randomUUID(),
-        user_id: userId,
-        group_id: null,
-        server_id: serverId,
-        cpu_cores: 10,
-        mem_bytes: 10_000,
-        disk_bytes: 10_000,
-        expires_at: null,
-      }).execute();
-      await database.insertInto('iam.storage_pool_grants').values({
-        id: randomUUID(),
-        user_id: userId,
-        group_id: null,
-        pool_id: poolId,
-        expires_at: null,
-      }).execute();
+      await grantServer(database, { user: userId }, serverId, { cpuCores: 10, memBytes: 10_000, rootDiskBytes: 10_000 });
+      await grantPool(database, { user: userId }, poolId);
 
       const transactionManager = new PgTransactionManager(database);
       const retryStates: string[] = [];
@@ -656,7 +611,6 @@ describePg('volume capacity locking and scope exclusions', () => {
       await database.insertInto('iam.shared_backend_grants').values({
         id: randomUUID(),
         user_id: userId,
-        group_id: null,
         shared_backend_id: backendId,
         limit_bytes: 1_000,
         expires_at: null,
@@ -749,8 +703,7 @@ describePg('volume capacity locking and scope exclusions', () => {
       const serverId = await seedServer(database);
       const poolId = await insertLocalPool(database, serverId);
       await grantServer(database, { user: ownerId }, serverId);
-      // The pool grant lapsed: the owner keeps the server but no longer the pool.
-      await grantPool(database, { user: ownerId }, poolId, days(-1));
+      // No data-disk grant on the pool: the owner keeps the server but not the pool.
       const volumeId = await seedVolume(database, { ownerId, poolId, serverId });
       await database.insertInto('control.volume_placements').values({
         volume_id: volumeId,
@@ -786,8 +739,8 @@ describePg('volume shrink reservations', () => {
       const ownerId = await seedUser(database);
       const serverId = await seedServer(database);
       const poolId = await insertLocalPool(database, serverId, 10_000);
-      await grantServer(database, { user: ownerId }, serverId, { diskBytes: 1_000 });
-      await grantPool(database, { user: ownerId }, poolId);
+      await grantServer(database, { user: ownerId }, serverId);
+      await grantPool(database, { user: ownerId }, poolId, 1_000);
       const volumeId = await seedVolume(database, { ownerId, poolId, serverId });
       // 1000 bytes, last scanned at 100 used: the floor the API sees is stale.
       await database.updateTable('control.volumes').set({ size_bytes: 1_000, used_bytes: 100 })
@@ -871,8 +824,8 @@ describePg('volume shrink reservations', () => {
       const ownerId = await seedUser(database);
       const serverId = await seedServer(database);
       const poolId = await insertLocalPool(database, serverId, 10_000);
-      await grantServer(database, { user: ownerId }, serverId, { diskBytes: 1_000 });
-      await grantPool(database, { user: ownerId }, poolId);
+      await grantServer(database, { user: ownerId }, serverId);
+      await grantPool(database, { user: ownerId }, poolId, 1_000);
       const volumeId = await seedVolume(database, { ownerId, poolId, serverId });
       await database.updateTable('control.volumes').set({ size_bytes: 1_000, used_bytes: 100 })
         .where('id', '=', volumeId).execute();

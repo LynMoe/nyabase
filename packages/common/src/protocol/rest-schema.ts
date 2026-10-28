@@ -36,7 +36,7 @@ import { CONTAINER_NAME_MAX_LENGTH, CONTAINER_NAME_RE, serverNameProblem } from 
 
 /** bash as a login shell (it reads ~/.bashrc and the image's prompt); sh where there is no bash. */
 const CONSOLE_DEFAULT_COMMAND = ['/bin/sh', '-c', 'command -v bash >/dev/null 2>&1 && exec bash -l; exec sh -l'];
-import { zGpuPciAddresses } from '../gpu/schema.js';
+import { MAX_GPU_DEVICES } from '../gpu/pci.js';
 
 const USERNAME_RE = /^[a-z0-9_-]+$/;
 const SERVER_SLUG_RE = /^[a-z0-9][a-z0-9_-]*$/;
@@ -522,17 +522,62 @@ export const zPutImageAssignmentRequest = z.object({
 // Quotas: null = unlimited; a number is a positive limit (0 is not a sentinel).
 const zNullableBytes = zPositiveBytes.nullable();
 
-export const zPutServerGrantRequest = z.object({
+const zGrantCpuCores = z.number().int().min(1).max(MAX_SERVER_LOGICAL_CPU_ID + 1).nullable();
+/** GPUs picked from the server's cards; null = every card, 0 = none. */
+const zGrantGpuCount = z.number().int().min(0).max(MAX_GPU_DEVICES).nullable();
+
+/** The server quotas a bundle defines and a server grant may override. */
+export const zGrantBundleQuotas = z.object({
   /** Whole logical CPUs pinned for the user on this server; null = every unreserved CPU. */
-  cpuCores: z.number().int().min(1).max(MAX_SERVER_LOGICAL_CPU_ID + 1).nullable(),
+  cpuCores: zGrantCpuCores,
   memBytes: zNullableBytes,
-  diskBytes: zNullableBytes,
-  gpuPciAddresses: zGpuPciAddresses.default([]),
-  expiresAt: zIsoDateTime.nullable(),
+  /** Sum of the user's system disks on the server. */
+  rootDiskBytes: zNullableBytes,
+  gpuCount: zGrantGpuCount,
 }).strict();
 
+export const zGrantBundleName = z.string().trim().min(1).max(64);
+
+export const zCreateGrantBundleRequest = zGrantBundleQuotas.extend({
+  serverId: zResourceIdentity,
+  name: zGrantBundleName,
+}).strict();
+
+/** Proposed bundle changes; the preview shows which grants follow them. */
+export const zPreviewGrantBundleRequest = zGrantBundleQuotas.partial().extend({
+  name: zGrantBundleName.optional(),
+}).strict();
+
+export const zPatchGrantBundleRequest = zPreviewGrantBundleRequest.extend({
+  expectedRevision: zExpectedRevision,
+}).strict().refine(
+  (value) => Object.keys(value).some((key) => key !== 'expectedRevision'),
+  'At least one bundle field is required',
+);
+
+/** A key present overrides that bundle field for this user (null = unlimited); an absent key follows the bundle. */
+export const zServerGrantOverrides = zGrantBundleQuotas.partial();
+
+export const zPutServerGrantRequest = z.object({
+  bundleId: zResourceIdentity,
+  overrides: zServerGrantOverrides.default({}),
+  expiresAt: zIsoDateTime.nullable().default(null),
+  /** Required to replace the user's existing grant on the server; without it that is a 409. */
+  replace: z.boolean().default(false),
+}).strict();
+
+export const zPatchServerGrantRequest = z.object({
+  /** The complete set of overrides; fields left out follow the bundle again. */
+  overrides: zServerGrantOverrides.optional(),
+  expiresAt: zIsoDateTime.nullable().optional(),
+}).strict().refine(
+  (value) => value.overrides !== undefined || value.expiresAt !== undefined,
+  'At least one grant field is required',
+);
+
+/** A data-disk quota on one pool of a server the user holds a grant for. */
 export const zPutStoragePoolGrantRequest = z.object({
-  expiresAt: zIsoDateTime.nullable(),
+  limitBytes: zNullableBytes,
 }).strict();
 
 export const zPutSharedBackendGrantRequest = z.object({
@@ -619,30 +664,7 @@ export const zErrorResponse = z.object({
   requestId: z.string().min(1).max(128),
 }).strict();
 
-// User, group, and settings metadata requests remain database-only.
-export const zCreateGroupRequest = z.object({
-  name: zName,
-  description: z.string().max(4_096).optional(),
-}).strict();
-
-export const zUpdateGroupRequest = z.object({
-  name: zName.optional(),
-  description: z.string().max(4_096).nullable().optional(),
-}).strict().refine((value) => Object.keys(value).length > 0, 'At least one group field is required');
-
-export const zPatchAdminGroupRequest = z.object({
-  expectedRevision: zExpectedRevision,
-  name: zName.optional(),
-  description: z.string().max(4_096).nullable().optional(),
-}).strict().refine(
-  (value) => Object.keys(value).some((key) => key !== 'expectedRevision'),
-  'At least one group field is required',
-);
-
-export const zAddGroupMemberRequest = z.object({
-  userId: zResourceIdentity,
-}).strict();
-
+// Settings requests.
 export const zPatchSystemSettingsRequest = z.object({
   expectedRevision: zExpectedRevision,
   values: z.record(z.string(), z.unknown())
@@ -683,7 +705,13 @@ export type AddCatalogImageRequest = z.infer<typeof zAddCatalogImageRequest>;
 export type CreateImageRequest = z.infer<typeof zCreateImageRequest>;
 export type PatchImageRequest = z.infer<typeof zPatchImageRequest>;
 export type PutImageAssignmentRequest = z.infer<typeof zPutImageAssignmentRequest>;
-export type PutServerGrantRequest = z.infer<typeof zPutServerGrantRequest>;
+export type GrantBundleQuotas = z.infer<typeof zGrantBundleQuotas>;
+export type CreateGrantBundleRequest = z.infer<typeof zCreateGrantBundleRequest>;
+export type PreviewGrantBundleRequest = z.infer<typeof zPreviewGrantBundleRequest>;
+export type PatchGrantBundleRequest = z.infer<typeof zPatchGrantBundleRequest>;
+export type ServerGrantOverrides = z.infer<typeof zServerGrantOverrides>;
+export type PutServerGrantRequest = z.input<typeof zPutServerGrantRequest>;
+export type PatchServerGrantRequest = z.infer<typeof zPatchServerGrantRequest>;
 export type PutStoragePoolGrantRequest = z.infer<typeof zPutStoragePoolGrantRequest>;
 export type PutSharedBackendGrantRequest = z.infer<typeof zPutSharedBackendGrantRequest>;
 export type IntentListQuery = z.infer<typeof zIntentListQuery>;
@@ -692,8 +720,4 @@ export type RetryIntentRequest = z.infer<typeof zRetryIntentRequest>;
 export type NodeMetricsHealth = z.infer<typeof zNodeMetricsHealth>;
 export type PreflightReport = z.infer<typeof zPreflightReport>;
 export type ErrorResponse = z.infer<typeof zErrorResponse>;
-export type CreateGroupRequest = z.infer<typeof zCreateGroupRequest>;
-export type UpdateGroupRequest = z.infer<typeof zUpdateGroupRequest>;
-export type PatchAdminGroupRequest = z.infer<typeof zPatchAdminGroupRequest>;
-export type AddGroupMemberRequest = z.infer<typeof zAddGroupMemberRequest>;
 export type PatchSystemSettingsRequest = z.infer<typeof zPatchSystemSettingsRequest>;

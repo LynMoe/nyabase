@@ -248,11 +248,12 @@ describe('volume API placement paths', () => {
         server_id: peerServer,
         revision: 1,
       })
-      // Current coverage: the server (merged view row), then the shared backend.
+      // Current coverage: the server (effective view row), then the shared backend.
       .mockResolvedValueOnce({
         cpu_cores: null,
         mem_bytes: null,
-        disk_bytes: null,
+        root_disk_bytes: null,
+        gpu_count: null,
         gpu_pci_addresses: [],
         expires_at: null,
       })

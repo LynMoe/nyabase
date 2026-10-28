@@ -61,7 +61,6 @@ export async function usersPgFixture(
     fixture.database,
     transactions,
     auth as never,
-    access,
     proxySnapshots as never,
     { get: vi.fn((key: string) => key === 'runtime.nodeEnv' ? 'test' : 'admin123') } as never,
     audit as never,

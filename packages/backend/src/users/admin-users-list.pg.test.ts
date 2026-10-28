@@ -10,13 +10,6 @@ const describePg = process.env.NYABASE_TEST_DATABASE_URL ? describe : describe.s
 describePg('Admin user bulk projection', () => {
   it('projects active, disabled, and deleting users while omitting tombstones', async () => {
     await withPostgresTestDatabase(async (fixture) => {
-      const groupId = randomUUID();
-      await fixture.database.insertInto('iam.groups').values({
-        id: groupId,
-        name: 'Projection group',
-        description: null,
-        revision: 1,
-      }).execute();
       const rows = [
         userRow(randomUUID(), 1001, 'listed-active', UserStatus.Active, Role.UserAdmin),
         userRow(randomUUID(), 1002, 'listed-disabled', UserStatus.Disabled),
@@ -24,15 +17,9 @@ describePg('Admin user bulk projection', () => {
         userRow(randomUUID(), 1004, 'listed-deleted', UserStatus.Deleted),
       ];
       await fixture.database.insertInto('iam.users').values(rows).execute();
-      await fixture.database.insertInto('iam.group_members').values(rows.map((row) => ({
-        id: randomUUID(),
-        group_id: groupId,
-        user_id: row.id,
-      }))).execute();
 
       const service = new UsersService(
         fixture.database,
-        undefined as never,
         undefined as never,
         undefined as never,
         undefined as never,
@@ -50,7 +37,6 @@ describePg('Admin user bulk projection', () => {
       expect(listed.some((user) => user.status === UserStatus.Deleted)).toBe(false);
       const active = listed.find((user) => user.username === 'listed-active');
       expect(active?.role).toBe(Role.UserAdmin);
-      expect(active?.groups).toEqual([{ id: groupId, name: 'Projection group' }]);
       expect(listed.find((user) => user.username === 'listed-disabled')?.role).toBe(Role.User);
     });
   });

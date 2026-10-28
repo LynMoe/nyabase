@@ -79,7 +79,7 @@ export const NAV_SECTIONS: NavSection[] = [
     label: '访问控制',
     items: [
       { to: '/users', icon: Users, label: '用户', access: ACCESS.users },
-      { to: '/groups', icon: Shield, label: '用户组', access: ACCESS.groups },
+      { to: '/grant-bundles', icon: Shield, label: '授权模板', access: ACCESS.grantBundles },
       { to: '/audit', icon: ScrollText, label: '审计日志', access: ACCESS.audit },
       { to: '/system-settings', icon: Settings, label: '系统设置', access: ACCESS.systemSettings },
     ],

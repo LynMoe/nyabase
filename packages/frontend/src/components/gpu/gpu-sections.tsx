@@ -155,31 +155,6 @@ function pciKey(value: string): string {
   return canonicalPciAddress(value) ?? value.trim().toLowerCase();
 }
 
-/** Server grant editor: which cards the grantee may claim. */
-export function ServerGrantGpu({
-  serverId,
-  gpuEnabled,
-  value,
-  onChange,
-}: {
-  serverId: string;
-  gpuEnabled: boolean;
-  value: string[];
-  onChange: (pciAddresses: string[]) => void;
-}) {
-  if (!gpuEnabled) return null;
-  return (
-    <GpuPicker
-      serverId={serverId}
-      scope="all"
-      value={value}
-      onChange={onChange}
-      idPrefix="grant-gpu"
-      label="NVIDIA GPU 授权"
-    />
-  );
-}
-
 function runtimeLabel(ready: boolean | null | undefined): string {
   return ready === true ? '就绪' : ready === false ? '未就绪' : '未知';
 }

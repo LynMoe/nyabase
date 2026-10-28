@@ -2,10 +2,9 @@ import { Role, UserStatus } from '@nyabase/common';
 import { describe, expect, it } from 'vitest';
 import { testActor } from '../iam/actor.test-helper.js';
 import {
-  addMember,
   grantServer,
   seedContainer,
-  seedGroup,
+  grantPool,
   seedImage,
   seedPool,
   seedServer,
@@ -38,13 +37,13 @@ describePg('UsersService.deleteUserPermanently', () => {
     });
   });
 
-  it('deletes credentials, memberships, grants and ledger rows, and marks the user deleted', async () => {
+  it('deletes credentials, grants and ledger rows, and marks the user deleted', async () => {
     await withPostgresTestDatabase(async (fixture) => {
       const context = await usersPgFixture(fixture);
       const { database } = fixture;
       const serverId = await seedServer(database);
       await grantServer(database, { user: context.userId }, serverId);
-      await addMember(database, await seedGroup(database), context.userId);
+      await grantPool(database, { user: context.userId }, await seedPool(database, serverId), 10);
       await database.insertInto('control.access_lapses').values({
         user_id: context.userId, resource_kind: 'server', resource_id: serverId, lapsed_at: new Date(),
       }).execute();
@@ -56,8 +55,7 @@ describePg('UsersService.deleteUserPermanently', () => {
       expect((await database.selectFrom('iam.users').select('status')
         .where('id', '=', context.userId).executeTakeFirstOrThrow()).status).toBe(UserStatus.Deleted);
       expect(await database.selectFrom('iam.server_grants').select('id').execute()).toEqual([]);
-      expect(await database.selectFrom('iam.group_members').select('id')
-        .where('user_id', '=', context.userId).execute()).toEqual([]);
+      expect(await database.selectFrom('iam.storage_pool_grants').select('id').execute()).toEqual([]);
       expect(await database.selectFrom('control.access_lapses').select('user_id').execute()).toEqual([]);
       await expect(context.users.deleteUserPermanently(actor, context.userId))
         .rejects.toMatchObject({ status: 404 });

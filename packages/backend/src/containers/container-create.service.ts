@@ -41,8 +41,9 @@ type CreateAccess = NonNullable<
 >;
 
 /**
- * Admission check for growing root-disk commitments: the owner's server
- * storage grant, then the pool's overcommitted capacity. Locks the server and
+ * Admission check for growing root-disk commitments: the owner's system-disk
+ * quota on the server (system disks only; data volumes have their own quota
+ * per pool), then the pool's overcommitted capacity. Locks the server and
  * pool rows so concurrent admissions serialise.
  */
 export async function assertRootCapacity(
@@ -60,24 +61,17 @@ export async function assertRootCapacity(
     .where('id', '=', serverId)
     .forUpdate()
     .executeTakeFirstOrThrow();
-  // Custom volumes belong to the volumes module; only their committed size is read here.
-  const sumVolumes = async (filter: { ownerId?: string; serverId?: string; poolId?: string }) => {
-    let query = transaction.selectFrom('control.volumes')
-      .select(sql<string>`coalesce(sum(${committedVolumeBytesSql()}), 0)`.as('bytes'))
-      .where('lifecycle_phase', 'not in', ['failed', 'deleting']);
-    if (filter.ownerId !== undefined) query = query.where('owner_id', '=', filter.ownerId);
-    if (filter.serverId !== undefined) {
-      query = query.where('server_id', '=', filter.serverId).where('shared_backend_id', 'is', null);
-    }
-    if (filter.poolId !== undefined) query = query.where('pool_id', '=', filter.poolId);
-    return numberValue((await query.executeTakeFirstOrThrow()).bytes);
-  };
-  const used = await repository.sumLiveRootBytes({ ownerId, serverId }, transaction)
-    + await sumVolumes({ ownerId, serverId });
+  // Custom volumes belong to the volumes module; only their committed size on the pool is read here.
+  const sumPoolVolumes = async () => numberValue((await transaction.selectFrom('control.volumes')
+    .select(sql<string>`coalesce(sum(${committedVolumeBytesSql()}), 0)`.as('bytes'))
+    .where('lifecycle_phase', 'not in', ['failed', 'deleting'])
+    .where('pool_id', '=', poolId)
+    .executeTakeFirstOrThrow()).bytes);
+  const used = await repository.sumLiveRootBytes({ ownerId, serverId }, transaction);
   if (grantLimit !== null && used + delta > grantLimit) {
     throw new ConflictException({
       code: FailureCode.StorageGrantExceeded,
-      message: 'Server storage grant exceeded',
+      message: 'System disk grant exceeded',
       details: {
         requestedBytes: delta,
         availableBytes: Math.max(0, grantLimit - used),
@@ -92,7 +86,7 @@ export async function assertRootCapacity(
     .executeTakeFirstOrThrow();
   if (pool.total_bytes === null) return;
   const committed = await repository.sumLiveRootBytes({ poolId }, transaction)
-    + await sumVolumes({ poolId });
+    + await sumPoolVolumes();
   const server = await transaction.selectFrom('infra.servers')
     .select('storage_overcommit_ratio')
     .where('id', '=', serverId)
@@ -373,7 +367,7 @@ export class ContainerCreateService {
       request.serverId,
       rootPoolId,
       request.rootSizeBytes,
-      access.grant.diskBytes ?? null,
+      access.grant.rootDiskBytes ?? null,
     );
     const { networkKey, address } = await this.allocateAddress(
       transaction,

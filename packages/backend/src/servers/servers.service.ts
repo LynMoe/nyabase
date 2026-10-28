@@ -497,7 +497,7 @@ async function finishStrandedDestroys(
   }
 }
 
-/** Grants, lapses, assignments, addresses, pools and finally the server row. */
+/** Grants, bundles, lapses, assignments, addresses, pools and finally the server row. */
 async function purgeGrantsAndInventory(transaction: Tx, serverId: string): Promise<void> {
   await transaction
     .deleteFrom('control.access_lapses')
@@ -515,14 +515,9 @@ async function purgeGrantsAndInventory(transaction: Tx, serverId: string): Promi
       ]),
     ]))
     .execute();
+  // Data-disk grants go with their server grants (foreign key cascade), then the bundles.
   await transaction.deleteFrom('iam.server_grants').where('server_id', '=', serverId).execute();
-  await transaction
-    .deleteFrom('iam.storage_pool_grants')
-    .where('pool_id', 'in', transaction
-      .selectFrom('infra.storage_pools')
-      .select('id')
-      .where('server_id', '=', serverId))
-    .execute();
+  await transaction.deleteFrom('iam.grant_bundles').where('server_id', '=', serverId).execute();
   await transaction.deleteFrom('infra.image_server_assignments').where('server_id', '=', serverId).execute();
   await transaction.deleteFrom('control.container_network_claims').where('server_id', '=', serverId).execute();
   await transaction.deleteFrom('infra.ip_pool_servers').where('server_id', '=', serverId).execute();

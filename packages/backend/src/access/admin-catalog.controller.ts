@@ -24,16 +24,6 @@ export class AdminCatalogController {
     }));
   }
 
-  @Get('groups')
-  @RequireRole(Role.UserAdmin)
-  async listGroups() {
-    const rows = await this.persistence.listGroups();
-    return rows.map((group) => ({
-      id: group.id,
-      name: group.name,
-    }));
-  }
-
   @Get('grant-servers')
   @RequireRole(Role.UserAdmin)
   async listGrantServers() {

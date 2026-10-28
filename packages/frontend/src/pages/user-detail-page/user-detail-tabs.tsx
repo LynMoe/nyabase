@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { Copy, Gauge, KeyRound, Pencil, ShieldCheck, Trash2 } from 'lucide-react';
 import { Role, type UpdateUserRequest, type UserDto, UserStatus } from '@nyabase/common';
-import { Link, useNavigate } from '@tanstack/react-router';
+import { useNavigate } from '@tanstack/react-router';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '../../components/ui/tabs.js';
 import { CanonicalGrantPanel } from '../../components/grants/canonical-grant-panel.js';
@@ -10,7 +10,6 @@ import { Button } from '../../components/ui/button.js';
 import { Field, FormField, SelectField } from '../../components/layout/form-field.js';
 import { SectionCard } from '../../components/layout/section-card.js';
 import { StatusBadge } from '../../components/layout/status-badge.js';
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../../components/ui/table.js';
 import { ROLE_OPTIONS, roleLabel, userStatusLabel } from '../../lib/display-labels.js';
 import { userDeleting } from '../../lib/in-progress.js';
 import { relativeTime } from '../../lib/utils.js';
@@ -66,7 +65,7 @@ export function UserDetailTabs({
       </TabsContent>
       <TabsContent value="grants" className="mt-4 space-y-6">
         {canManageGrants ? (
-          <CanonicalGrantPanel subject={user} kind="users" />
+          <CanonicalGrantPanel user={user} />
         ) : (
           <p className="text-sm text-muted-foreground">查看与编辑授权需要用户管理员及以上角色。</p>
         )}
@@ -75,7 +74,7 @@ export function UserDetailTabs({
   );
 }
 
-/** Identity, role and group membership of a user. */
+/** Identity and role of a user. */
 function UserOverviewTab({ user }: { user: UserDto }) {
   const canManageUsers = useUserAvailability(user).edit.allowed;
   const [identityOpen, setIdentityOpen] = useState(false);
@@ -105,38 +104,6 @@ function UserOverviewTab({ user }: { user: UserDto }) {
           <Field label="角色" value={roleLabel(user.role)} />
           <Field label="创建时间" value={relativeTime(user.createdAt)} />
         </div>
-      </SectionCard>
-      <SectionCard
-        title="用户组"
-        flush={user.groups.length > 0}
-      >
-        {user.groups.length === 0 ? (
-          <p className="text-sm text-muted-foreground">未加入任何用户组。</p>
-        ) : (
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>名称</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {user.groups.map((group) => (
-                <TableRow key={group.id}>
-                  <TableCell>
-                    <Link
-                      to="/groups/$id"
-                      params={{ id: group.id }}
-                      search={{ tab: 'overview' }}
-                      className="font-medium"
-                    >
-                      {group.name}
-                    </Link>
-                  </TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
-        )}
       </SectionCard>
       {identityOpen ? <UserIdentityDialog user={user} onClose={() => setIdentityOpen(false)} /> : null}
     </>
@@ -295,7 +262,6 @@ export function useUserPatch(id: string) {
     mutationFn: (body: UpdateUserRequest) => api.patch<UserDto>(`/users/${id}`, body),
     onSuccess: (_user, body) => {
       void queryClient.invalidateQueries({ queryKey: queryKeys.users.admin });
-      void queryClient.invalidateQueries({ queryKey: queryKeys.groups.admin });
       if (body.status === UserStatus.Disabled) toast({ title: '用户已停用' });
       else if (body.status === UserStatus.Active) toast({ title: '用户已启用' });
       else if (body.displayName || body.role) toast({ title: '用户已更新' });
@@ -320,7 +286,6 @@ export function UserHeaderActions({ user }: { user: UserDto }) {
       toast({ title: '用户已删除' });
       setDeleteOpen(false);
       void queryClient.invalidateQueries({ queryKey: queryKeys.users.admin });
-      void queryClient.invalidateQueries({ queryKey: queryKeys.groups.admin });
       void navigate({ to: '/users' });
     },
     onError: (error) => toast({ title: '删除用户失败', description: errorMessage(error), variant: 'destructive' }),

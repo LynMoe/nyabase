@@ -240,7 +240,7 @@ function refsFromPayload(
     ['actorId', 'user'],
     ['ownerId', 'user'],
     ['createdBy', 'user'],
-    ['groupId', 'group'],
+    ['bundleId', 'grant_bundle'],
     ['serverId', 'server'],
     ['imageId', 'image'],
     ['containerId', 'container'],

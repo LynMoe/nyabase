@@ -3,7 +3,6 @@ import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
 import { Trash2 } from 'lucide-react';
 import { Role, type UserDto } from '@nyabase/common';
-import { Badge } from '../../components/ui/badge.js';
 import { Button } from '../../components/ui/button.js';
 import { StatusBadge } from '../../components/layout/status-badge.js';
 import {
@@ -62,14 +61,13 @@ export function UsersTable({ users: visibleUsers, allUsers }: { users: UserDto[]
             <TableHead>用户</TableHead>
             <TableHead>角色</TableHead>
             <TableHead>状态</TableHead>
-            <TableHead>用户组</TableHead>
             {canManage ? <TableHead className="text-right">操作</TableHead> : null}
           </TableRow>
         </TableHeader>
         <TableBody>
           {visibleUsers.length === 0 ? (
             <TableRow>
-              <TableCell colSpan={canManage ? 5 : 4} className="py-8 text-center text-muted-foreground">
+              <TableCell colSpan={canManage ? 4 : 3} className="py-8 text-center text-muted-foreground">
                 没有符合条件的用户
               </TableCell>
             </TableRow>
@@ -94,22 +92,6 @@ export function UsersTable({ users: visibleUsers, allUsers }: { users: UserDto[]
                   pending={userDeleting(user.status)}
                   variant={user.status === 'active' ? 'success' : 'secondary'}
                 />
-              </TableCell>
-              <TableCell className="whitespace-normal">
-                <div className="flex flex-wrap gap-1">
-                  {user.groups.length === 0
-                    ? <span className="text-muted-foreground">无</span>
-                    : user.groups.map((group) => (
-                      <Link
-                        key={group.id}
-                        to="/groups/$id"
-                        params={{ id: group.id }}
-                        search={{ tab: 'overview' }}
-                      >
-                        <Badge variant="outline">{group.name}</Badge>
-                      </Link>
-                    ))}
-                </div>
               </TableCell>
               {canManage ? (
                 <TableCell className="text-right">

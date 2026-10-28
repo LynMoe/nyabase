@@ -15,7 +15,7 @@ describe('role-based route access', () => {
   });
 
   it('gives user admins people and their resources', () => {
-    for (const rule of [ACCESS.users, ACCESS.groups, ACCESS.manageContainers, ACCESS.manageVolumes,
+    for (const rule of [ACCESS.users, ACCESS.grantBundles, ACCESS.manageContainers, ACCESS.manageVolumes,
       ACCESS.ops, ACCESS.adminUsage, ACCESS.audit, ACCESS.sshProxy]) {
       expect(canAccess(Role.UserAdmin, rule)).toBe(true);
     }

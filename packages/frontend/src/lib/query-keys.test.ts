@@ -1,26 +1,29 @@
 import { describe, expect, it } from 'vitest';
 import { queryKeys } from './query-keys.js';
 
-const GRANT_SLICES = ['servers', 'pools', 'backends', 'effective-access'] as const;
+const GRANT_SLICES = ['servers', 'backends', 'effective-access'] as const;
 
 describe('queryKeys catalog', () => {
-  it('keeps the four grant subjectList slices unequal by shape', () => {
-    const keys = GRANT_SLICES.map((slice) => queryKeys.grants.subjectList('users', 'u1', slice));
-    expect(new Set(keys.map((key) => JSON.stringify(key))).size).toBe(4);
+  it('keeps the grant userList slices unequal by shape', () => {
+    const keys = GRANT_SLICES.map((slice) => queryKeys.grants.userList('u1', slice));
+    expect(new Set(keys.map((key) => JSON.stringify(key))).size).toBe(3);
     expect(keys[0]).toEqual(['grants', 'users', 'u1', 'servers']);
-    expect(keys[1]).toEqual(['grants', 'users', 'u1', 'pools']);
-    expect(keys[2]).toEqual(['grants', 'users', 'u1', 'backends']);
-    expect(keys[3]).toEqual(['grants', 'users', 'u1', 'effective-access']);
+    expect(keys[1]).toEqual(['grants', 'users', 'u1', 'backends']);
+    expect(keys[2]).toEqual(['grants', 'users', 'u1', 'effective-access']);
   });
 
-  it('treats grants.subject as the prefix of each subjectList slice', () => {
-    const prefix = queryKeys.grants.subject('groups', 'g1');
-    expect(prefix).toEqual(['grants', 'groups', 'g1']);
+  it('treats grants.user as the prefix of each userList slice', () => {
+    const prefix = queryKeys.grants.user('u1');
+    expect(prefix).toEqual(['grants', 'users', 'u1']);
     for (const slice of GRANT_SLICES) {
-      const key = queryKeys.grants.subjectList('groups', 'g1', slice);
+      const key = queryKeys.grants.userList('u1', slice);
       expect(key.slice(0, prefix.length)).toEqual(prefix);
       expect(key).not.toEqual(prefix);
     }
+  });
+
+  it('keeps grant bundle lists under one prefix', () => {
+    expect(queryKeys.grantBundles.list.slice(0, 1)).toEqual(queryKeys.grantBundles.all);
   });
 
   it('preserves existing tuple literals', () => {
@@ -51,7 +54,7 @@ describe('queryKeys catalog', () => {
     expect(queryKeys.users.detail('u1')).toEqual(['users', 'admin', 'u1']);
     expect(queryKeys.users.detail('u1').slice(0, queryKeys.users.admin.length))
       .toEqual(queryKeys.users.admin);
-    expect(queryKeys.grants.subject('users', 'abc')).toEqual(['grants', 'users', 'abc']);
+    expect(queryKeys.grants.user('abc')).toEqual(['grants', 'users', 'abc']);
     expect(queryKeys.meAccess).toEqual(['me', 'access']);
     expect(queryKeys.publicSettings).toEqual(['public-settings']);
     expect(queryKeys.systemSettings).toEqual(['system-settings']);

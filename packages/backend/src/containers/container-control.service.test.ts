@@ -89,7 +89,7 @@ function makeHarness() {
   resolveServerAccessMock.mockReset().mockResolvedValue({
     cpuCores: 2,
     memBytes: 4_000_000_000,
-    diskBytes: 8_000_000_000,
+    rootDiskBytes: 8_000_000_000,
     gpuPciAddresses: [],
   });
   const intent = {

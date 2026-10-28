@@ -24,7 +24,7 @@ class FakeChannel {
 
 const alice: UserDto = {
   id: 'u1', username: 'alice', displayName: 'Alice', status: UserStatus.Active,
-  createdAt: '2026-01-01T00:00:00.000Z', role: Role.User, groups: [],
+  createdAt: '2026-01-01T00:00:00.000Z', role: Role.User,
 };
 const bob: UserDto = { ...alice, id: 'u2', username: 'bob', displayName: 'Bob' };
 

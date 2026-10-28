@@ -24,12 +24,10 @@ import type { ConfigSourceName, ConfigValueKind } from '../config/definition.js'
 import type { SshProxyLineDto } from './ssh-proxy.js';
 
 export type {
-  AddGroupMemberRequest,
   AddSshKeyRequest,
   AttachVolumeRequest,
   RotateServerEnrollmentRequest,
   CreateContainerRequest,
-  CreateGroupRequest,
   AddCatalogImageRequest,
   CreateImageRequest,
   CreateIpPoolRequest,
@@ -45,7 +43,6 @@ export type {
   ListSharedVolumesQuery,
   LocalVolumeScope,
   LoginRequest,
-  PatchAdminGroupRequest,
   PatchContainerLimitsRequest,
   PatchContainerRootSizeRequest,
   PatchImageRequest,
@@ -60,6 +57,12 @@ export type {
   PreflightReport,
   PutImageAssignmentRequest,
   PutServerGrantRequest,
+  PatchServerGrantRequest,
+  GrantBundleQuotas,
+  CreateGrantBundleRequest,
+  PreviewGrantBundleRequest,
+  PatchGrantBundleRequest,
+  ServerGrantOverrides,
   PutSharedBackendGrantRequest,
   PutStoragePoolGrantRequest,
   RetryIntentRequest,
@@ -67,7 +70,6 @@ export type {
   RunPreflightRequest,
   ServerNetworkFields,
   SharedVolumeScope,
-  UpdateGroupRequest,
   UpdateUserRequest,
   VolumeScope,
 } from './rest-schema.js';
@@ -96,7 +98,6 @@ export interface UserDto {
   status: UserStatus;
   createdAt: string;
   role: Role;
-  groups: GroupSummaryDto[];
 }
 
 export interface SshPublicKeyDto {
@@ -111,32 +112,6 @@ export interface PublicSettingsDto {
     title: string;
     description: string;
   };
-}
-
-export interface GroupSummaryDto {
-  id: string;
-  name: string;
-}
-
-export interface GroupDto {
-  id: string;
-  name: string;
-  description: string | null;
-  revision: number;
-  createdAt: string;
-  updatedAt: string;
-  serverIds?: string[];
-  serverGrants?: ServerGrantDto[];
-  storagePoolGrants?: StoragePoolGrantDto[];
-  sharedBackendGrants?: SharedBackendGrantDto[];
-  members?: GroupMemberDto[];
-  memberCount?: number;
-}
-
-export interface GroupMemberDto {
-  userId: string;
-  username: string;
-  displayName: string;
 }
 
 export interface SystemSettingFieldDto {
@@ -349,13 +324,20 @@ export interface StorageCapacityPoolDto {
   quotaEffective: boolean | null;
   overcommitRatio: number;
   capability: StoragePoolCapabilityDto;
+  /**
+   * `scope=mine`: the caller's data-disk quota on this pool and the committed
+   * size of their volumes there; null when they hold no grant for it (and always
+   * in the `scope=all` view).
+   */
+  grant: { limitBytes: number | null; usedBytes: number; availableBytes: number | null } | null;
 }
 
 export interface StorageCapacityDto {
-  grantLimitBytes: number | null;
+  /** `scope=mine`: the caller's system-disk quota on the server (null = unlimited, and in `scope=all`). */
+  rootDiskLimitBytes: number | null;
   usedByRootDisksBytes: number;
+  rootDiskAvailableBytes: number | null;
   usedByLocalVolumesBytes: number;
-  availableBytes: number | null;
   pools: StorageCapacityPoolDto[];
 }
 
@@ -597,47 +579,9 @@ export interface CatalogImageDto {
   added: boolean;
 }
 
-export interface ServerGrantDto {
-  id: string;
-  scope: 'group' | 'user';
-  scopeId: string;
-  serverId: string;
-  /** Whole logical CPUs pinned for the user; null = every unreserved CPU. */
-  cpuCores: number | null;
-  memBytes: number | null;
-  diskBytes: number | null;
-  /** PCI addresses the grant allows; empty means no GPU access. */
-  gpuPciAddresses: string[];
-  expiresAt: string | null;
-  createdAt: string;
-  updatedAt: string;
-}
-
-export interface StoragePoolGrantDto {
-  id: string;
-  scope: 'group' | 'user';
-  scopeId: string;
-  poolId: string;
-  expiresAt: string | null;
-  createdAt: string;
-  updatedAt: string;
-}
-
-export interface SharedBackendGrantDto {
-  id: string;
-  scope: 'group' | 'user';
-  scopeId: string;
-  sharedBackendId: string;
-  /** null = unlimited. */
-  limitBytes: number | null;
-  expiresAt: string | null;
-  createdAt: string;
-  updatedAt: string;
-}
-
 export type GrantExpiryPhase = 'live' | 'grace' | 'lost';
 
-/** Current coverage of a server: the merged quotas of the user's current grants. */
+/** Current coverage of a server: the user's grant there, with overrides applied. */
 export interface LiveServerAccessDto {
   accessPhase: 'live';
   serverId: string;
@@ -645,9 +589,14 @@ export interface LiveServerAccessDto {
   cpuCores: number | null;
   serverCpuCores: number | null;
   memBytes: number | null;
-  diskBytes: number | null;
-  /** PCI addresses the grant allows; empty means no GPU access. */
+  /** Sum of the user's system disks on the server; null = unlimited. */
+  rootDiskBytes: number | null;
+  /** GPUs the grant asks for; null = every card. */
+  gpuCount: number | null;
+  /** The cards picked for the user from the server's observed GPUs; empty means no GPU access. */
   gpuPciAddresses: string[];
+  /** Data-disk quotas on the server's pools, with the committed size of the user's volumes. */
+  storagePools: Array<{ poolId: string; limitBytes: number | null; usedBytes: number }>;
   expiresAt: string | null;
   allowedImageIds: string[];
 }

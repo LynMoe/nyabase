@@ -6,6 +6,7 @@ export * from './display-name.js';
 export * from './config/definition.js';
 export * from './protocol/ws.js';
 export * from './protocol/rest.js';
+export * from './protocol/grants.js';
 export * from './protocol/rest-schema.js';
 export * from './protocol/image-versions.js';
 export * from './protocol/node-metrics.js';

@@ -65,7 +65,9 @@ describe('lapse: revoke, grace, purge and disable', () => {
     assert.equal(await user.session.api.status('GET', `/volumes/${volume.resourceId}`), 200);
 
     // Coverage back inside the grace cancels it; the container stays stopped.
+    // (The data-disk grant went with the server grant, so it is granted again too.)
     await h.grantServer(user, h.server);
+    await h.grantPool(user, h.server.poolId);
     await pollUntil(async () => (lapseRow(user) === undefined ? true : undefined),
       { what: 'the grace to be cleared', timeoutMs: 240_000, intervalMs: 3_000 });
     assert.equal((await asAdmin(container.id)).actual.status, ContainerStatus.Stopped);
@@ -79,7 +81,8 @@ describe('lapse: revoke, grace, purge and disable', () => {
       WHERE user_id = '${uuid(user.id)}' AND resource_kind = 'server' AND resource_id = '${uuid(serverId())}'
     `);
     // Any IAM write wakes the processor right away; otherwise its minute timer does.
-    await h.api.put(`/users/${user.id}/storage-pool-grants/${h.server.poolId}`, { expiresAt: null });
+    const nudge = await h.newBundle(h.server);
+    await h.api.patch(`/admin/grant-bundles/${nudge.id}`, { expectedRevision: nudge.revision, cpuCores: 1 });
     await pollUntil(async () => (await h.api.status('GET', `/containers/${container.id}?scope=all`)) === 404 ? true : undefined,
       { what: 'the container to be purged', timeoutMs: 420_000, intervalMs: 5_000 });
     await pollUntil(async () => (await h.api.status('GET', `/volumes/${volume.resourceId}?scope=all`)) === 404 ? true : undefined,

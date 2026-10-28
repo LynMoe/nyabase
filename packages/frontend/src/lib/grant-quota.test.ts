@@ -5,6 +5,7 @@ import {
   formatConsumedQuotaParts,
   formatGrantBytes,
   formatGrantQuotaLine,
+  formatGpuCount,
   formatGrantQuotaParts,
   formatQuotaDimension,
   formatRemainingBytes,
@@ -13,7 +14,7 @@ import {
 
 describe('formatGrantQuotaParts', () => {
   it('maps null grant ceilings to 不限', () => {
-    expect(formatGrantQuotaParts({ cpuCores: null, memBytes: null, diskBytes: null })).toEqual([
+    expect(formatGrantQuotaParts({ cpuCores: null, memBytes: null, rootDiskBytes: null })).toEqual([
       '不限',
       '不限',
       '不限',
@@ -24,25 +25,25 @@ describe('formatGrantQuotaParts', () => {
     expect(formatGrantQuotaLine({
       cpuCores: 1,
       memBytes: 2 * GIB,
-      diskBytes: 100 * GIB,
+      rootDiskBytes: 100 * GIB,
     })).toBe('1 核 / 2 GiB / 100 GiB');
     expect(formatGrantQuotaParts({
       cpuCores: 1,
       memBytes: 2 * GIB,
-      diskBytes: 100 * GIB,
+      rootDiskBytes: 100 * GIB,
     })).toEqual(['1 核', '2 GiB', '100 GiB']);
   });
 });
 
 describe('formatGrantQuotaLine', () => {
   it('omits the GPU summary by default', () => {
-    expect(formatGrantQuotaLine({ cpuCores: 2, memBytes: 2 * GIB, diskBytes: 100 * GIB }))
+    expect(formatGrantQuotaLine({ cpuCores: 2, memBytes: 2 * GIB, rootDiskBytes: 100 * GIB }))
       .toBe('2 核 / 2 GiB / 100 GiB');
   });
 
   it('appends the GPU summary', () => {
     expect(formatGrantQuotaLine(
-      { cpuCores: 2, memBytes: 2 * GIB, diskBytes: 100 * GIB },
+      { cpuCores: 2, memBytes: 2 * GIB, rootDiskBytes: 100 * GIB },
       '2 张 GPU',
     )).toBe('2 核 / 2 GiB / 100 GiB / 2 张 GPU');
   });
@@ -50,17 +51,25 @@ describe('formatGrantQuotaLine', () => {
 
 describe('formatConsumedQuotaParts', () => {
   it('prints zeros as 0 核 / 0 GiB, never 不限', () => {
-    expect(formatConsumedQuotaParts({ cpuCores: 0, memBytes: 0, diskBytes: 0 }))
+    expect(formatConsumedQuotaParts({ cpuCores: 0, memBytes: 0, rootDiskBytes: 0 }))
       .toEqual(['0 核', '0 GiB', '0 GiB']);
-    expect(formatConsumedQuotaParts({ cpuCores: 0, memBytes: 0, diskBytes: 0 }).join(' / '))
+    expect(formatConsumedQuotaParts({ cpuCores: 0, memBytes: 0, rootDiskBytes: 0 }).join(' / '))
       .toBe('0 核 / 0 GiB / 0 GiB');
-    expect(formatConsumedQuotaParts({ cpuCores: 0, memBytes: 0, diskBytes: 0 }).join(' / '))
+    expect(formatConsumedQuotaParts({ cpuCores: 0, memBytes: 0, rootDiskBytes: 0 }).join(' / '))
       .not.toMatch(/不限/);
   });
 
   it('omits null consumed dimensions', () => {
-    expect(formatConsumedQuotaParts({ cpuCores: null, memBytes: 0, diskBytes: null }))
+    expect(formatConsumedQuotaParts({ cpuCores: null, memBytes: 0, rootDiskBytes: null }))
       .toEqual(['0 GiB']);
+  });
+});
+
+describe('formatGpuCount', () => {
+  it('reads null as every card and 0 as none', () => {
+    expect(formatGpuCount(null)).toBe('全部 GPU');
+    expect(formatGpuCount(0)).toBe('无');
+    expect(formatGpuCount(2)).toBe('2 张 GPU');
   });
 });
 

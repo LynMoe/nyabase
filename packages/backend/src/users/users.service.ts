@@ -21,7 +21,7 @@ import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.
 import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
 import { AuthService, currentPasswordIncorrect } from '../iam/auth.service.js';
-import { AccessResolverService, AccessChangeNotifier } from '../iam/access-resolver.service.js';
+import { AccessChangeNotifier } from '../iam/access-resolver.service.js';
 import type { Actor } from '../iam/actor.js';
 import { NyabaseConfigService } from '../platform/config/nyabase-config.service.js';
 import { ProxySnapshotNotifierService } from '../proxy-snapshots/proxy-snapshot-notifier.service.js';
@@ -94,7 +94,6 @@ export class UsersService {
     private readonly database: Kysely<NyabaseDatabase>,
     private readonly transactions: PgTransactionManager,
     private readonly authService: AuthService,
-    private readonly accessResolver: AccessResolverService,
     private readonly proxySnapshots: ProxySnapshotNotifierService,
     private readonly config: NyabaseConfigService,
     private readonly auditService: AuditService,
@@ -216,29 +215,12 @@ export class UsersService {
    * Administrative collection projection: one query per table, never a per-user lookup.
    */
   async listDtos(): Promise<UserDto[]> {
-    const [users, memberships] = await Promise.all([
-      this.database.selectFrom('iam.users')
-        .select(['id', 'username', 'display_name', 'status', 'role', 'created_at'])
-        .where('status', '!=', UserStatus.Deleted)
-        .orderBy('username')
-        .orderBy('id')
-        .execute(),
-      this.database.selectFrom('iam.group_members as membership')
-        .innerJoin('iam.groups as group', 'group.id', 'membership.group_id')
-        .select(['membership.user_id', 'group.id', 'group.name'])
-        .innerJoin('iam.users as user', 'user.id', 'membership.user_id')
-        .where('user.status', '=', UserStatus.Active)
-        .orderBy('membership.user_id')
-        .orderBy('group.name')
-        .orderBy('group.id')
-        .execute(),
-    ]);
-    const groupsByUser = new Map<string, UserDto['groups']>();
-    for (const membership of memberships) {
-      const groups = groupsByUser.get(membership.user_id) ?? [];
-      groups.push({ id: membership.id, name: membership.name });
-      groupsByUser.set(membership.user_id, groups);
-    }
+    const users = await this.database.selectFrom('iam.users')
+      .select(['id', 'username', 'display_name', 'status', 'role', 'created_at'])
+      .where('status', '!=', UserStatus.Deleted)
+      .orderBy('username')
+      .orderBy('id')
+      .execute();
     return users.map((user) => ({
       id: user.id,
       username: user.username,
@@ -246,7 +228,6 @@ export class UsersService {
       status: user.status as UserStatus,
       createdAt: user.created_at.toISOString(),
       role: user.role as Role,
-      groups: groupsByUser.get(user.id) ?? [],
     }));
   }
 
@@ -370,7 +351,7 @@ export class UsersService {
 
   /**
    * Permanent deletion. The user must own no containers or volumes (delete or
-   * purge them first); the credentials, group memberships and grants go with
+   * purge them first); the credentials and grants go with
    * the account, and the final active administrator is protected.
    */
   async deleteUserPermanently(actor: Actor, userId: string): Promise<{ deleted: boolean }> {
@@ -403,9 +384,8 @@ export class UsersService {
       }
       await transaction.deleteFrom('iam.refresh_tokens').where('user_id', '=', userId).execute();
       await transaction.deleteFrom('iam.ssh_public_keys').where('user_id', '=', userId).execute();
-      await transaction.deleteFrom('iam.group_members').where('user_id', '=', userId).execute();
+      // Data-disk grants go with their server grants (foreign key cascade).
       await transaction.deleteFrom('iam.server_grants').where('user_id', '=', userId).execute();
-      await transaction.deleteFrom('iam.storage_pool_grants').where('user_id', '=', userId).execute();
       await transaction.deleteFrom('iam.shared_backend_grants').where('user_id', '=', userId).execute();
       await transaction.deleteFrom('control.access_lapses').where('user_id', '=', userId).execute();
       await transaction.updateTable('iam.users')
@@ -574,7 +554,6 @@ export class UsersService {
   }
 
   async toDto(user: IamUser): Promise<UserDto> {
-    const groups = await this.accessResolver.getUserGroupSummaries(user.id);
     return {
       id: user.id,
       username: user.username,
@@ -582,7 +561,6 @@ export class UsersService {
       status: user.status,
       createdAt: user.createdAt.toISOString(),
       role: user.role,
-      groups,
     };
   }
 

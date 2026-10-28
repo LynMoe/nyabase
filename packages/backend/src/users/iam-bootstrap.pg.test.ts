@@ -4,7 +4,7 @@ import { JwtService } from '@nestjs/jwt';
 import { Role, UserStatus } from '@nyabase/common';
 import type { Kysely } from 'kysely';
 import { describe, expect, it, vi } from 'vitest';
-import { AccessChangeNotifier, AccessResolverService } from '../iam/access-resolver.service.js';
+import { AccessChangeNotifier } from '../iam/access-resolver.service.js';
 import { AuthService } from '../iam/auth.service.js';
 import { SessionRevocationService } from '../iam/session-revocation.service.js';
 import { IamAuthRepository } from '../iam/iam-auth.repository.js';
@@ -27,9 +27,6 @@ describePg('API IAM bootstrap', () => {
         first.app.onApplicationBootstrap(),
         second.app.onApplicationBootstrap(),
       ]);
-
-      // No system groups: roles live on the users.
-      await expect(database.selectFrom('iam.groups').select('id').execute()).resolves.toEqual([]);
 
       const admin = await database.selectFrom('iam.users')
         .select(['id', 'username', 'status', 'role'])
@@ -176,7 +173,6 @@ function createBootstrapContext(
   auth: AuthService;
 } {
   const transactions = new PgTransactionManager(database);
-  const access = new AccessResolverService(database, transactions);
   const audit = {
     append: async (..._args: unknown[]) => undefined,
   };
@@ -208,7 +204,6 @@ function createBootstrapContext(
     database,
     transactions,
     auth,
-    access,
     { notify: async () => undefined } as never,
     config as never,
     audit as never,
@@ -221,18 +216,15 @@ function createBootstrapContext(
 
 async function bootstrapCounts(database: Kysely<NyabaseDatabase>): Promise<{
   users: number;
-  groups: number;
-  memberships: number;
+  grants: number;
 }> {
-  const [users, groups, memberships] = await Promise.all([
+  const [users, grants] = await Promise.all([
     database.selectFrom('iam.users').select('id').execute(),
-    database.selectFrom('iam.groups').select('id').execute(),
-    database.selectFrom('iam.group_members').select('id').execute(),
+    database.selectFrom('iam.server_grants').select('id').execute(),
   ]);
   return {
     users: users.length,
-    groups: groups.length,
-    memberships: memberships.length,
+    grants: grants.length,
   };
 }
 

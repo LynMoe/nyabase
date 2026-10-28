@@ -3,7 +3,7 @@ import { Role, type UserDto, UserStatus } from '@nyabase/common';
 import { activeAdminCount, userActionAvailability } from './user-administration.js';
 
 function user(id: string, role: Role, status = UserStatus.Active): UserDto {
-  return { id, username: id, displayName: id, status, createdAt: '2026-01-01T00:00:00Z', role, groups: [] };
+  return { id, username: id, displayName: id, status, createdAt: '2026-01-01T00:00:00Z', role };
 }
 
 const ALLOWED = { allowed: true, reason: null };

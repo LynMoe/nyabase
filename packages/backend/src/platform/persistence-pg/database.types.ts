@@ -37,22 +37,6 @@ export interface IamUserTable {
   updated_at: GeneratedTimestamp;
 }
 
-export interface IamGroupTable {
-  id: string;
-  name: string;
-  description: string | null;
-  revision: BigIntColumn;
-  created_at: GeneratedTimestamp;
-  updated_at: GeneratedTimestamp;
-}
-
-export interface IamGroupMemberTable {
-  id: string;
-  group_id: string;
-  user_id: string;
-  created_at: GeneratedTimestamp;
-}
-
 export interface IamRefreshTokenTable {
   id: string;
   user_id: string;
@@ -118,8 +102,6 @@ export interface NyabaseDatabase
     SystemSettingsDatabase {
   'system.schema_migrations': SchemaMigrationTable;
   'iam.users': IamUserTable;
-  'iam.groups': IamGroupTable;
-  'iam.group_members': IamGroupMemberTable;
   'iam.refresh_tokens': IamRefreshTokenTable;
   'iam.refresh_token_ancestors': IamRefreshTokenAncestorTable;
   'iam.ssh_public_keys': IamSshPublicKeyTable;

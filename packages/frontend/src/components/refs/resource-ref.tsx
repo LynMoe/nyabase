@@ -4,7 +4,6 @@ import {
   type AdminImageDto,
   Role,
   type ContainerDto,
-  type GroupDto,
   type ServerDto,
   type SharedBackendDto,
   type SharedVolumeDto,
@@ -71,8 +70,6 @@ export function ResourceRef({ kind, id, name }: ResourceRefProps) {
   switch (kind) {
     case 'user':
       return <UserRef id={id} name={name} />;
-    case 'group':
-      return <GroupRef id={id} name={name} />;
     case 'server':
       return <ServerRef id={id} name={name} />;
     case 'container':
@@ -148,17 +145,6 @@ function UserRef({ id, name }: { id: string; name?: string }) {
   return <RefLabel id={id} name={resolved} />;
 }
 
-function GroupRef({ id, name }: { id: string; name?: string }) {
-  const role = useRole();
-  const explicit = providedName(name);
-  const query = useQuery({
-    queryKey: queryKeys.groups.admin,
-    queryFn: () => api.get<GroupDto[]>('/admin/groups'),
-    enabled: Boolean(id) && !explicit && canAccess(role, Role.UserAdmin),
-  });
-  return <RefLabel id={id} name={explicit ?? query.data?.find((row) => row.id === id)?.name} />;
-}
-
 function ServerRef({ id, name }: { id: string; name?: string }) {
   const role = useRole();
   const explicit = providedName(name);
@@ -224,24 +210,17 @@ function ImageRef({ id, name }: { id: string; name?: string }) {
 function PoolRef({ id, name }: { id: string; name?: string }) {
   const queryClient = useQueryClient();
   const explicit = providedName(name);
-  const grantPoolsQuery = useQuery({
-    queryKey: queryKeys.grants.targets.pools,
-    queryFn: () => Promise.resolve([] as StoragePoolDto[]),
-    enabled: false,
-  });
   const cached = queryClient.getQueriesData<StoragePoolDto[]>({
     predicate: (query) => {
       const root = query.queryKey[0];
       return root === 'storage-pools'
-        || (root === 'grant-targets' && query.queryKey[1] === 'pools')
         || (root === 'volume-form' && query.queryKey[1] === 'pools');
     },
   });
-  const fromGrant = grantPoolsQuery.data?.find((row) => row.id === id);
   const fromCached = cached
     .flatMap(([, list]) => (Array.isArray(list) ? list : []))
     .find((row) => row.id === id);
-  return <RefLabel id={id} name={explicit ?? poolLabel(fromGrant) ?? poolLabel(fromCached)} />;
+  return <RefLabel id={id} name={explicit ?? poolLabel(fromCached)} />;
 }
 
 function SharedBackendRef({ id, name }: { id: string; name?: string }) {

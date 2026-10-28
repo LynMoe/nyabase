@@ -50,6 +50,8 @@ export interface InfrastructureServerTable {
   preflight_report: InfrastructureJson<Record<string, unknown>> | null;
   gpu_enabled: ColumnType<boolean, boolean | undefined, boolean>;
   gpu_enabled_by: string | null;
+  /** NVIDIA cards last seen in the server's Incus resources, canonical and sorted. */
+  observed_gpu_pci_addresses: ColumnType<string[], string[] | undefined, string[]>;
   gpu_health: ColumnType<
     Record<string, unknown>,
     Record<string, unknown> | string | undefined,

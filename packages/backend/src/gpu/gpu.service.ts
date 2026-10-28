@@ -16,7 +16,7 @@ import {
   type ServerGpuDto,
   Role,
 } from '@nyabase/common';
-import type { Kysely } from 'kysely';
+import { sql, type Kysely } from 'kysely';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
@@ -27,7 +27,7 @@ import { INCUS_CLIENT_FACTORY, type IncusClientFactory } from '../incus/incus-cl
 import { AgentNodeMetricsPullAdapter } from '../metrics/node-metrics-pull.adapter.js';
 import { assertGpuCanDisable, gpuOccupiedError, isGpuOccupiedSqlError } from './admit.js';
 import { GpuClaimsRepository } from './gpu-claims.repository.js';
-import { listGpuDevices, refreshGpuHealth, probeGpuSupport } from './inventory.js';
+import { gpuInventoryFromResources, listGpuDevices, refreshGpuHealth, probeGpuSupport } from './inventory.js';
 import { assertActorRole } from '../iam/administration.js';
 
 const FAILED_HOST_PROBE: GpuSupportDto = {
@@ -85,11 +85,7 @@ export class GpuService {
         );
       });
       const { resources, metricSamples } = await this.loadInventory(serverId);
-      await refreshGpuHealth({
-        health: this.claims.health(serverId),
-        resources,
-        metricSamples,
-      });
+      await this.refreshHealth(serverId, resources, metricSamples);
     } else {
       try {
         await this.transactions.run(async (transaction) => {
@@ -157,11 +153,23 @@ export class GpuService {
     };
   }
 
+  /**
+   * Health, plus the server's observed NVIDIA cards when its Incus resources
+   * were read: grants pick their GPUs from that list (`iam.effective_server_access`).
+   */
   async refreshHealth(
     serverId: string,
     resources: unknown,
     metricSamples: readonly NodeMetricSample[],
   ): Promise<void> {
+    if (resources !== null && resources !== undefined) {
+      const observed = [...new Set(gpuInventoryFromResources(resources).map((card) => card.pciAddress))].sort();
+      await this.database.updateTable('infra.servers')
+        .set({ observed_gpu_pci_addresses: observed })
+        .where('id', '=', serverId)
+        .where(sql<boolean>`observed_gpu_pci_addresses IS DISTINCT FROM ${observed}::text[]`)
+        .execute();
+    }
     await refreshGpuHealth({
       health: this.claims.health(serverId),
       resources,

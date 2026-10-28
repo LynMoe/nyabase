@@ -44,7 +44,7 @@ describe('HTTP API route uniqueness', () => {
       'agent-rejections',
       'catalog',
       'firewall-rules',
-      'groups',
+      'grant-bundles',
       'ip-pools',
       'metrics',
       'ssh-proxy',

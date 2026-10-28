@@ -91,7 +91,7 @@ assert_clean_cutover_architecture() {
       echo "backend intent/reconciliation sources are missing" >&2
       exit 1
     }
-  if rg -n "from '\.\./(containers|volumes|servers|images|gpu|access|users|groups|storage-pools|shared-backends|ssh|http-proxy)/" \
+  if rg -n "from '\.\./(containers|volumes|servers|images|gpu|access|users|grants|storage-pools|shared-backends|ssh|http-proxy)/" \
     packages/backend/src/reconcile; then
     echo "the reconcile engine must not import domain modules" >&2
     exit 1

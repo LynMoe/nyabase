@@ -87,7 +87,6 @@ export function TechnicalId({
 
 export type ResourceKind =
   | 'user'
-  | 'group'
   | 'server'
   | 'container'
   | 'volume'

@@ -10,6 +10,7 @@ import {
 import {
   resolvePoolAccess,
   resolveServerAccess,
+  type PoolAccess,
   resolveSharedBackendAccess,
 } from '../iam/effective-access.js';
 import { numberValue } from '../platform/domain-utils.js';
@@ -507,14 +508,15 @@ export async function requireServerAccess(
   return access;
 }
 
+/** The owner's current data-disk grant on a pool (its quota); 403 without one. */
 export async function assertPoolGrant(
   executor: VolumeExecutor,
   ownerId: string,
   poolId: string,
-): Promise<void> {
-  if (!await resolvePoolAccess(executor, ownerId, poolId)) {
-    throw new ForbiddenException('Storage pool access is not granted');
-  }
+): Promise<PoolAccess> {
+  const access = await resolvePoolAccess(executor, ownerId, poolId);
+  if (!access) throw new ForbiddenException('Storage pool access is not granted');
+  return access;
 }
 
 /** Capacity limit of the owner's current backend coverage: null = unlimited, undefined = none. */

@@ -82,7 +82,7 @@ types come from `@nyabase/common`, so DTO drift fails `pnpm e2e:check`.
 | `04-container-lifecycle` | create, memory limit, root resize, power, SSH via ssh-proxy, console, delete |
 | `05-local-volume` | create, attach, resize, detach, delete |
 | `06-shared-volume` | one CephFS volume in uid-isolated containers on two servers (skipped without it) |
-| `07-authorization-merge` | user + group grants merge: max quotas, unlimited wins, GPU union |
+| `07-grant-bundles` | bundles per server: overrides, live bundle edits with preview, replace keeps data disks, GPU count picks cards |
 | `08-lapse` | revoke = immediate grace and stop; purge after the grace; disable never purges |
 | `09-http-proxy` | domain pool, binding, requests through the http-proxy |
 | `10-gpu` | GPU enablement, claim, release (skipped without a GPU host) |

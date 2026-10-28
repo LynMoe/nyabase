@@ -3,7 +3,7 @@ import { sanitizeInternalRedirect } from './auth-session.js';
 
 describe('sanitizeInternalRedirect', () => {
   it('preserves a valid deep link with search and hash', () => {
-    expect(sanitizeInternalRedirect('/groups/g-1?tab=grants#image')).toBe('/groups/g-1?tab=grants#image');
+    expect(sanitizeInternalRedirect('/users/u-1?tab=grants#image')).toBe('/users/u-1?tab=grants#image');
   });
 
   it.each([

@@ -36,7 +36,8 @@ describe('GPU', { skip }, () => {
     if (!prior.enabled) h.defer('restore GPU switch', () => h.api.patch(`/servers/${server.id}/gpu`, { enabled: false }));
     user = await h.newUser('gpu');
     await h.addSshKey(user);
-    await h.grantServer(user, server, { gpuPciAddresses: [pci] });
+    // Every card of the server: the configured one is among them.
+    await h.grantServer(user, server, { gpuCount: null });
   });
   after(async () => h?.cleanup());
 
@@ -47,7 +48,11 @@ describe('GPU', { skip }, () => {
     const all = await h.api.get<GpuDevicesResponseDto>(`/servers/${server.id}/gpus`, { scope: 'all' });
     assert.ok(all.items.some((device) => device.pciAddress === pci), 'the configured card is in the inventory');
     const mine = await user.session.api.get<GpuDevicesResponseDto>(`/servers/${server.id}/gpus`);
-    assert.deepEqual(mine.items.map((device) => device.pciAddress), [pci]);
+    assert.deepEqual(
+      mine.items.map((device) => device.pciAddress).sort(),
+      all.items.map((device) => device.pciAddress).sort(),
+      'a grant of every card lists the whole inventory',
+    );
     assert.equal(await user.session.api.status('GET', `/servers/${server.id}/gpus?scope=all`), 403);
   });
 

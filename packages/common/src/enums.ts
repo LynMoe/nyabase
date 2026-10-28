@@ -116,7 +116,7 @@ export enum PreflightStatus {
 
 /**
  * Platform roles, strictly nested: admin ⊇ user_admin ⊇ user. A user admin
- * administers people and their resources (users, groups, grants, every
+ * administers people and their resources (users, bundles, grants, every
  * container and volume); infrastructure and system settings are admin-only.
  */
 export enum Role {
@@ -137,6 +137,12 @@ export enum FailureCode {
   /** A concurrent write kept the request's transaction from committing; retry it. */
   TransactionConflict = 'TRANSACTION_CONFLICT',
   StorageGrantExceeded = 'STORAGE_GRANT_EXCEEDED',
+  /** The user already holds a bundle on the server; resend with `replace: true` to swap it. */
+  ServerGrantExists = 'SERVER_GRANT_EXISTS',
+  /** A data-disk grant needs the user's server grant on the pool's server. */
+  ServerGrantRequired = 'SERVER_GRANT_REQUIRED',
+  GrantBundleConflict = 'GRANT_BUNDLE_CONFLICT',
+  GrantBundleInUse = 'GRANT_BUNDLE_IN_USE',
   MemoryGrantExceeded = 'MEMORY_GRANT_EXCEEDED',
   StoragePoolExhausted = 'STORAGE_POOL_EXHAUSTED',
   StoragePoolQuotaIneffective = 'STORAGE_POOL_QUOTA_INEFFECTIVE',
@@ -236,6 +242,9 @@ export enum AuditAction {
   DeleteImageVersion = 'image.version.delete',
   EnsureImageAssignment = 'image_assignment.ensure',
   DeleteImageAssignment = 'image_assignment.delete',
+  CreateGrantBundle = 'grant_bundle.create',
+  UpdateGrantBundle = 'grant_bundle.update',
+  DeleteGrantBundle = 'grant_bundle.delete',
   UpsertServerGrant = 'grant.server.upsert',
   DeleteServerGrant = 'grant.server.delete',
   UpsertStoragePoolGrant = 'grant.storage_pool.upsert',
@@ -256,11 +265,6 @@ export enum AuditAction {
   DeleteUser = 'user.delete',
   AddUserSshPublicKey = 'user.ssh_public_key.add',
   DeleteUserSshPublicKey = 'user.ssh_public_key.delete',
-  CreateGroup = 'group.create',
-  UpdateGroup = 'group.update',
-  DeleteGroup = 'group.delete',
-  AddGroupMember = 'group.member.add',
-  RemoveGroupMember = 'group.member.remove',
   UserLogin = 'user.login',
   UserLogout = 'user.logout',
   /** A rotated-out refresh token was presented again; its session was revoked. */

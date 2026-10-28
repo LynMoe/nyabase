@@ -10,6 +10,8 @@ import {
   ContainerStatus,
   type ContainerDto,
   type CreateContainerRequest,
+  type GrantBundleDto,
+  type GrantBundleQuotas,
   type IntentAcceptedDto,
   type PutServerGrantRequest,
   type Role,
@@ -100,27 +102,38 @@ export class Harness {
     return { id: created.id, username, password, session: await login(this.state.baseUrl, username, password) };
   }
 
-  /** Server grant with roomy defaults; removed again on cleanup. */
+  /** A bundle on the server with roomy defaults (no GPU unless asked); deleted again on cleanup. */
+  async newBundle(server: RunServer, quotas: Partial<GrantBundleQuotas> = {}): Promise<GrantBundleDto> {
+    const bundle = await this.api.post<GrantBundleDto>('/admin/grant-bundles', {
+      serverId: server.id,
+      name: this.name('bundle'),
+      cpuCores: 2,
+      memBytes: 8 * GIB,
+      rootDiskBytes: 64 * GIB,
+      gpuCount: 0,
+      ...quotas,
+    });
+    this.defer(`delete bundle ${bundle.name}`, () => this.api.delete(`/admin/grant-bundles/${bundle.id}`));
+    return bundle;
+  }
+
+  /** Assigns a fresh bundle holding `quotas` to the user (replacing any); revoked again on cleanup. */
   async grantServer(
     user: Pick<TestUser, 'id'>,
     server: RunServer,
-    overrides: Partial<PutServerGrantRequest> = {},
-  ): Promise<void> {
-    const body: PutServerGrantRequest = {
-      cpuCores: 2,
-      memBytes: 8 * GIB,
-      diskBytes: 64 * GIB,
-      gpuPciAddresses: [],
-      expiresAt: null,
-      ...overrides,
-    };
+    quotas: Partial<GrantBundleQuotas> = {},
+  ): Promise<GrantBundleDto> {
+    const bundle = await this.newBundle(server, quotas);
+    const body: PutServerGrantRequest = { bundleId: bundle.id, replace: true };
     await this.api.put(`/users/${user.id}/server-grants/${server.id}`, body);
     this.defer(`revoke server grant ${user.id}/${server.slug}`, () =>
       this.api.delete(`/users/${user.id}/server-grants/${server.id}`));
+    return bundle;
   }
 
-  async grantPool(user: Pick<TestUser, 'id'>, poolId: string): Promise<void> {
-    await this.api.put(`/users/${user.id}/storage-pool-grants/${poolId}`, { expiresAt: null });
+  /** A data-disk quota (null = unlimited) under the user's grant on the pool's server. */
+  async grantPool(user: Pick<TestUser, 'id'>, poolId: string, limitBytes: number | null = null): Promise<void> {
+    await this.api.put(`/users/${user.id}/storage-pool-grants/${poolId}`, { limitBytes });
     this.defer(`revoke pool grant ${user.id}/${poolId}`, () =>
       this.api.delete(`/users/${user.id}/storage-pool-grants/${poolId}`));
   }

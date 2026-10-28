@@ -202,22 +202,18 @@ describePg('PostgreSQL runtime/type schema contract', () => {
           AND indexname IN (
             'storage_pools_shared_backend_server_unique',
             'volumes_incus_name_key',
-            'server_grants_user_unique',
-            'server_grants_group_unique',
-            'storage_pool_grants_user_unique',
-            'storage_pool_grants_group_unique',
-            'shared_backend_grants_user_unique',
-            'shared_backend_grants_group_unique'
+            'grant_bundles_server_name_key',
+            'server_grants_user_server_key',
+            'storage_pool_grants_user_pool_key',
+            'shared_backend_grants_user_unique'
           )
         ORDER BY index_name
       `.execute(database);
       expect(requiredIndexes.rows.map((row) => row.index_name)).toEqual([
-        'server_grants_group_unique',
-        'server_grants_user_unique',
-        'shared_backend_grants_group_unique',
+        'grant_bundles_server_name_key',
+        'server_grants_user_server_key',
         'shared_backend_grants_user_unique',
-        'storage_pool_grants_group_unique',
-        'storage_pool_grants_user_unique',
+        'storage_pool_grants_user_pool_key',
         'storage_pools_shared_backend_server_unique',
         'volumes_incus_name_key',
       ]);

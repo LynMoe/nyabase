@@ -32,6 +32,7 @@ import {
   days,
   grantPool,
   grantServer,
+  observeGpus,
   seedAttachment,
   seedUser,
   seedVolume,
@@ -62,7 +63,7 @@ interface SeedOptions {
 }
 
 interface GrantOptions {
-  diskBytes: number | null;
+  rootDiskBytes: number | null;
   gpuPciAddresses?: string[];
 }
 
@@ -73,7 +74,7 @@ describePg('PostgreSQL container create admission and capacity', () => {
         poolTotalBytes: 10_000 * DISK_UNIT,
         minimumRootSizeBytes: 500 * DISK_UNIT,
       });
-      const service = containerService(database, { diskBytes: 10_000 * DISK_UNIT });
+      const service = containerService(database, { rootDiskBytes: 10_000 * DISK_UNIT });
       await expectCode(
         service.service.create(testActor(fixture.userId), request(fixture, 'below-min-root', {
           rootSizeBytes: 400 * DISK_UNIT,
@@ -88,7 +89,7 @@ describePg('PostgreSQL container create admission and capacity', () => {
   it('rejects container create below the 5 GiB platform floor even when the image allows less', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const fixture = await seedFixture(database, { minimumRootSizeBytes: 1 });
-      const service = containerService(database, { diskBytes: 10_000 * DISK_UNIT });
+      const service = containerService(database, { rootDiskBytes: 10_000 * DISK_UNIT });
       await expectCode(
         service.service.create(testActor(fixture.userId), request(fixture, 'below-floor', {
           rootSizeBytes: MIN_CONTAINER_ROOT_SIZE_BYTES - 1,
@@ -104,7 +105,7 @@ describePg('PostgreSQL container create admission and capacity', () => {
   it('requires an active assignment whose observed fingerprint matches the image', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const fixture = await seedFixture(database);
-      const service = containerService(database, { diskBytes: 10_000 * DISK_UNIT });
+      const service = containerService(database, { rootDiskBytes: 10_000 * DISK_UNIT });
       await database.updateTable('infra.image_server_assignments')
         .set({ lifecycle_phase: 'provisioning' })
         .where('image_id', '=', fixture.imageId)
@@ -133,7 +134,7 @@ describePg('PostgreSQL container create admission and capacity', () => {
   it('rejects failed preflight and a missing server system pool inside the transaction', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const fixture = await seedFixture(database, { preflightStatus: 'failed' });
-      const service = containerService(database, { diskBytes: 10_000 * DISK_UNIT });
+      const service = containerService(database, { rootDiskBytes: 10_000 * DISK_UNIT });
 
       await expectCode(
         service.service.create(testActor(fixture.userId), request(fixture, 'preflight-failed')),
@@ -155,7 +156,7 @@ describePg('PostgreSQL container create admission and capacity', () => {
   it('does not grow settled container intents across repeated full scans', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const fixture = await seedFixture(database);
-      const service = containerService(database, { diskBytes: 10_000 * DISK_UNIT });
+      const service = containerService(database, { rootDiskBytes: 10_000 * DISK_UNIT });
       const created = await service.service.create(
         testActor(fixture.userId),
         request(fixture, 'scan-idempotent'),
@@ -198,7 +199,7 @@ describePg('PostgreSQL container create admission and capacity', () => {
         poolTotalBytes: 10_000 * DISK_UNIT,
         minimumRootSizeBytes: 1 * DISK_UNIT,
       });
-      const service = containerService(database, { diskBytes: 150 * DISK_UNIT });
+      const service = containerService(database, { rootDiskBytes: 150 * DISK_UNIT });
       await service.service.create(testActor(fixture.userId), request(fixture, 'quota-first', {
         rootSizeBytes: 100 * DISK_UNIT,
       }));
@@ -215,7 +216,7 @@ describePg('PostgreSQL container create admission and capacity', () => {
         poolTotalBytes: 150 * DISK_UNIT,
         minimumRootSizeBytes: 1 * DISK_UNIT,
       });
-      const service = containerService(database, { diskBytes: 10_000 * DISK_UNIT });
+      const service = containerService(database, { rootDiskBytes: 10_000 * DISK_UNIT });
       await service.service.create(testActor(fixture.userId), request(fixture, 'pool-first', {
         rootSizeBytes: 100 * DISK_UNIT,
       }));
@@ -228,6 +229,31 @@ describePg('PostgreSQL container create admission and capacity', () => {
     });
   });
 
+  it('counts only system disks against the system-disk quota, not data volumes', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const fixture = await seedFixture(database, {
+        poolTotalBytes: 10_000 * DISK_UNIT,
+        minimumRootSizeBytes: 1 * DISK_UNIT,
+      });
+      // A data volume far above the system-disk quota, on the same pool.
+      const volumeId = await seedVolume(database, {
+        ownerId: fixture.userId, poolId: fixture.poolId, serverId: fixture.serverId,
+      });
+      await database.updateTable('control.volumes').set({ size_bytes: 1_000 * DISK_UNIT })
+        .where('id', '=', volumeId).execute();
+      const service = containerService(database, { rootDiskBytes: 150 * DISK_UNIT });
+      await service.service.create(testActor(fixture.userId), request(fixture, 'root-first', {
+        rootSizeBytes: 100 * DISK_UNIT,
+      }));
+      await expectCode(
+        service.service.create(testActor(fixture.userId), request(fixture, 'root-second', {
+          rootSizeBytes: 60 * DISK_UNIT,
+        })),
+        FailureCode.StorageGrantExceeded,
+      );
+    });
+  });
+
   it('serializes concurrent creates so exactly one wins the final pool capacity race', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const fixture = await seedFixture(database, {
@@ -235,7 +261,7 @@ describePg('PostgreSQL container create admission and capacity', () => {
         overcommitRatio: 1.5,
         minimumRootSizeBytes: 1 * DISK_UNIT,
       });
-      const service = containerService(database, { diskBytes: 10_000 * DISK_UNIT });
+      const service = containerService(database, { rootDiskBytes: 10_000 * DISK_UNIT });
       const results = await Promise.allSettled([
         service.service.create(testActor(fixture.userId), request(fixture, 'concurrent-a', { rootSizeBytes: 100 * DISK_UNIT })),
         service.service.create(testActor(fixture.userId), request(fixture, 'concurrent-b', { rootSizeBytes: 100 * DISK_UNIT })),
@@ -252,7 +278,7 @@ describePg('PostgreSQL container create admission and capacity', () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const fixture = await seedFixture(database);
       const adminId = await seedUser(database, undefined, UserStatus.Active, Role.Admin);
-      const containerState = containerService(database, { diskBytes: 10_000 * DISK_UNIT });
+      const containerState = containerService(database, { rootDiskBytes: 10_000 * DISK_UNIT });
       const imageIntents = {
         ensurePending: vi.fn(async (input: {
           resourceId: string;
@@ -328,7 +354,7 @@ describePg('PostgreSQL container create admission and capacity', () => {
         poolTotalBytes: 10_000 * DISK_UNIT,
         minimumRootSizeBytes: 1 * DISK_UNIT,
       });
-      const serviceState = containerService(database, { diskBytes: 10_000 * DISK_UNIT });
+      const serviceState = containerService(database, { rootDiskBytes: 10_000 * DISK_UNIT });
 
       const first = await serviceState.service.create(
         testActor(fixture.userId),
@@ -350,7 +376,7 @@ describePg('PostgreSQL container create admission and capacity', () => {
 
       await seedSharedVolume(database, fixture, 9_000_000 * DISK_UNIT);
       serviceState.access.resolveContainerCreateAccessInTransaction.mockResolvedValue({
-        grant: grant({ diskBytes: 1_000 * DISK_UNIT }),
+        grant: grant({ rootDiskBytes: 1_000 * DISK_UNIT }),
         imageAvailable: true,
       });
 
@@ -373,7 +399,7 @@ describePg('PostgreSQL GPU claims', () => {
   it('inserts the container before claims and lets containers share a card', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const fixture = await seedFixture(database, { poolTotalBytes: 10_000 * DISK_UNIT });
-      const harness = gpuHarness(database, { diskBytes: 10_000 * DISK_UNIT, gpuPciAddresses: [GPU_A, GPU_B] });
+      const harness = gpuHarness(database, { rootDiskBytes: 10_000 * DISK_UNIT, gpuPciAddresses: [GPU_A, GPU_B] });
       await enableGpu(database, fixture);
 
       const first = await harness.service.create(
@@ -416,7 +442,7 @@ describePg('PostgreSQL GPU claims', () => {
   it('rejects GPU payload while disabled and occupancy-blocks disable', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const fixture = await seedFixture(database, { poolTotalBytes: 10_000 * DISK_UNIT });
-      const harness = gpuHarness(database, { diskBytes: 10_000 * DISK_UNIT, gpuPciAddresses: [GPU_A, GPU_B] });
+      const harness = gpuHarness(database, { rootDiskBytes: 10_000 * DISK_UNIT, gpuPciAddresses: [GPU_A, GPU_B] });
 
       await expectCode(
         harness.service.create(
@@ -447,7 +473,7 @@ describePg('PostgreSQL GPU claims', () => {
   it('keeps GPU on while a live container carries the NVIDIA runtime, even without a card', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const fixture = await seedFixture(database, { poolTotalBytes: 10_000 * DISK_UNIT });
-      const harness = gpuHarness(database, { diskBytes: 10_000 * DISK_UNIT });
+      const harness = gpuHarness(database, { rootDiskBytes: 10_000 * DISK_UNIT });
       await enableGpu(database, fixture);
       const disable = () => database.updateTable('infra.servers')
         .set({ gpu_enabled: false })
@@ -481,7 +507,7 @@ describePg('PostgreSQL GPU claims', () => {
   it('rejects a card outside the server grant', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const fixture = await seedFixture(database, { poolTotalBytes: 10_000 * DISK_UNIT });
-      const harness = gpuHarness(database, { diskBytes: 10_000 * DISK_UNIT, gpuPciAddresses: [GPU_A] });
+      const harness = gpuHarness(database, { rootDiskBytes: 10_000 * DISK_UNIT, gpuPciAddresses: [GPU_A] });
       await enableGpu(database, fixture);
 
       await expectCode(
@@ -497,7 +523,7 @@ describePg('PostgreSQL GPU claims', () => {
   it('releases claims on failed phase so a later create can reuse the card', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const fixture = await seedFixture(database, { poolTotalBytes: 10_000 * DISK_UNIT });
-      const harness = gpuHarness(database, { diskBytes: 10_000 * DISK_UNIT, gpuPciAddresses: [GPU_A] });
+      const harness = gpuHarness(database, { rootDiskBytes: 10_000 * DISK_UNIT, gpuPciAddresses: [GPU_A] });
       await enableGpu(database, fixture);
 
       const first = await harness.service.create(
@@ -530,7 +556,7 @@ describePg('PostgreSQL GPU claims', () => {
   it('mutates claims for a stopped container', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const fixture = await seedFixture(database, { poolTotalBytes: 10_000 * DISK_UNIT });
-      const harness = gpuHarness(database, { diskBytes: 10_000 * DISK_UNIT });
+      const harness = gpuHarness(database, { rootDiskBytes: 10_000 * DISK_UNIT });
       await enableGpu(database, fixture);
 
       const created = await harness.service.create(
@@ -571,7 +597,7 @@ describePg('PostgreSQL container actor authorization', () => {
   it('shows a container to its owner, to a user admin only with scope=all, and hides it from others', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const fixture = await seedFixture(database);
-      const { service } = containerService(database, { diskBytes: 10_000 * DISK_UNIT });
+      const { service } = containerService(database, { rootDiskBytes: 10_000 * DISK_UNIT });
       const created = await service.create(testActor(fixture.userId), request(fixture, 'authz'));
       const containerId = created.resourceId;
       const owner = testActor(fixture.userId);
@@ -648,27 +674,24 @@ describePg('PostgreSQL container admission needs current coverage', () => {
     });
   });
 
-  it('enforces the merged ceiling: the larger of a direct and a group grant applies', async () => {
+  it('enforces the effective memory: an override replaces the bundle\'s value', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const fixture = await seedFixture(database);
       const service = coveredService(database);
       const owner = testActor(fixture.userId);
-      const group = randomUUID();
-      await database.insertInto('iam.groups').values({
-        id: group, name: `merge-${group.slice(0, 8)}`, description: null, revision: 1,
-      }).execute();
-      await database.insertInto('iam.group_members')
-        .values({ id: randomUUID(), group_id: group, user_id: fixture.userId }).execute();
-      await grantServer(database, { user: fixture.userId }, fixture.serverId, {
-        cpuCores: 1, memBytes: 1_000,
+      const grantId = await grantServer(database, { user: fixture.userId }, fixture.serverId, {
+        cpuCores: 1, memBytes: 400,
       });
-      await grantServer(database, { group }, fixture.serverId, { cpuCores: 4, memBytes: 400 });
+      await database.updateTable('iam.server_grants')
+        .set({ overridden: ['mem'], mem_bytes: 1_000 })
+        .where('id', '=', grantId)
+        .execute();
 
       await expectCode(
         service.create(owner, request(fixture, 'mem-too-big', { memBytes: 2_000, powerIntent: ContainerPowerIntent.Running })),
         FailureCode.MemoryGrantExceeded,
       );
-      // Memory comes from the larger (direct) grant and is a total across the user's running containers.
+      // Memory comes from the override and is a total across the user's running containers.
       const running = { powerIntent: ContainerPowerIntent.Running };
       await expect(service.create(owner, request(fixture, 'first', { memBytes: 600, ...running }))).resolves.toBeDefined();
       await expectCode(
@@ -709,7 +732,6 @@ describePg('PostgreSQL container admission needs current coverage', () => {
       const service = coveredService(database);
       const owner = testActor(fixture.userId);
       await grantServer(database, { user: fixture.userId }, fixture.serverId);
-      await grantPool(database, { user: fixture.userId }, fixture.poolId, days(-1));
       const { resourceId: containerId } = await service.create(owner, request(fixture, 'mounted'));
       const volumeId = await seedVolume(database, {
         ownerId: fixture.userId, poolId: fixture.poolId, serverId: fixture.serverId,
@@ -721,10 +743,7 @@ describePg('PostgreSQL container admission needs current coverage', () => {
         status: 403,
       });
       // Stopping is always allowed with server coverage; starting is not.
-      await database.updateTable('iam.storage_pool_grants')
-        .set({ expires_at: null })
-        .where('user_id', '=', fixture.userId)
-        .execute();
+      await grantPool(database, { user: fixture.userId }, fixture.poolId);
       await expect(service.action(owner, containerId, 'start')).resolves.toBeDefined();
     });
   });
@@ -790,13 +809,13 @@ async function enableGpu(
 function grant(options: GrantOptions): {
   cpuCores: number;
   memBytes: number;
-  diskBytes: number | null;
+  rootDiskBytes: number | null;
   gpuPciAddresses: string[];
 } {
   return {
     cpuCores: 10,
     memBytes: 10_000,
-    diskBytes: options.diskBytes,
+    rootDiskBytes: options.rootDiskBytes,
     gpuPciAddresses: options.gpuPciAddresses ?? [],
   };
 }
@@ -1014,9 +1033,10 @@ describePg('PostgreSQL running-memory and GPU admission', () => {
     );
   }
 
-  async function seed(database: Kysely<NyabaseDatabase>, memBytes: number | null, gpu: string[] = []) {
+  async function seed(database: Kysely<NyabaseDatabase>, memBytes: number | null) {
     const fixture = await seedFixture(database);
-    await grantServer(database, { user: fixture.userId }, fixture.serverId, { memBytes, gpu });
+    await observeGpus(database, fixture.serverId, [GPU]);
+    await grantServer(database, { user: fixture.userId }, fixture.serverId, { memBytes, gpuCount: 0 });
     return { fixture, service: quotaService(database), owner: testActor(fixture.userId) };
   }
 
@@ -1095,7 +1115,7 @@ describePg('PostgreSQL running-memory and GPU admission', () => {
       const userAdmin = testActor(userAdminId, Role.UserAdmin);
       const running = await service.create(owner, request(fixture, 'running', { memBytes: 800, ...RUNNING }));
       const stopped = await service.create(owner, request(fixture, 'stopped', { memBytes: 800 }));
-      await database.updateTable('iam.server_grants').set({ mem_bytes: 100 })
+      await database.updateTable('iam.server_grants').set({ overridden: ['mem'], mem_bytes: 100 })
         .where('user_id', '=', fixture.userId).execute();
       await database.updateTable('control.container_ssh_routes')
         .set({ instance_status: 'Running' }).where('container_id', '=', running.resourceId).execute();
@@ -1159,7 +1179,7 @@ describePg('PostgreSQL running-memory and GPU admission', () => {
         container_id: created.resourceId, server_id: fixture.serverId, pci_address: GPU,
       }).execute();
       await expectCode(service.action(owner, created.resourceId, 'start'), FailureCode.GpuNotGranted);
-      await database.updateTable('iam.server_grants').set({ gpu_pci_addresses: [GPU] })
+      await database.updateTable('iam.server_grants').set({ overridden: ['gpu'], gpu_count: 1 })
         .where('user_id', '=', fixture.userId).execute();
       await expect(service.action(owner, created.resourceId, 'start')).resolves.toBeDefined();
     });

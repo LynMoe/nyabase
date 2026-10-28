@@ -8,6 +8,7 @@ import {
   type EffectiveSharedBackendAccessDto,
   type SharedBackendDto,
   type StorageCapacityDto,
+  type StoragePoolDto,
   type UserServerDto,
 } from '@nyabase/common';
 import { api } from '../../lib/api.js';
@@ -22,6 +23,7 @@ import {
   TableRow,
 } from '../ui/table.js';
 import { UsageMeter } from '../performance/usage-meter.js';
+import { truncateId } from '../refs/technical-id.js';
 import { formatQuotaDimension, runningMemBytes } from '../../lib/grant-quota.js';
 import { sharedUnitPair } from '../../lib/container-usage.js';
 import { cpuGrantLabel } from '../../lib/cpu-set.js';
@@ -111,13 +113,14 @@ function QuotaBody({
       ) : null}
       {grants.length > 0 ? (
         <div data-testid="quota-servers">
-          <Table className="min-w-[720px]">
+          <Table className="min-w-[860px]">
             <TableHeader>
               <TableRow>
                 <TableHead>服务器</TableHead>
                 <TableHead>CPU</TableHead>
                 <TableHead>内存（运行中占用）</TableHead>
-                <TableHead>磁盘</TableHead>
+                <TableHead>系统盘</TableHead>
+                <TableHead>数据盘</TableHead>
                 <TableHead>GPU</TableHead>
               </TableRow>
             </TableHeader>
@@ -186,11 +189,10 @@ function ServerQuotaRow({
     refetchInterval: (query) => queryPollInterval(query.state, { activeIntervalMs: 30_000 }),
   });
   const memUsed = runningMemBytes(containers);
-  const diskUsed = capacityQuery.data
-    ? capacityQuery.data.usedByRootDisksBytes + capacityQuery.data.usedByLocalVolumesBytes
-    : 0;
+  const capacity = capacityQuery.data;
+  const rootUsed = capacity?.usedByRootDisksBytes ?? 0;
   const mem = formatQuotaDimension(grant.memBytes, memUsed);
-  const disk = formatQuotaDimension(grant.diskBytes, diskUsed);
+  const root = formatQuotaDimension(grant.rootDiskBytes, rootUsed);
   const gpu = formatGpuGrantSummary(grant.gpuPciAddresses);
   return (
     <TableRow>
@@ -202,16 +204,44 @@ function ServerQuotaRow({
         <QuotaCell used={mem.used} limit={mem.limit} remaining={mem.remaining} grant={grant.memBytes} consumed={memUsed} />
       </TableCell>
       <TableCell>
-        {capacityQuery.data ? (
-          <QuotaCell used={disk.used} limit={disk.limit} remaining={disk.remaining} grant={grant.diskBytes} consumed={diskUsed} />
+        {capacity ? (
+          <QuotaCell used={root.used} limit={root.limit} remaining={root.remaining} grant={grant.rootDiskBytes} consumed={rootUsed} />
         ) : (
-          <span className="text-muted-foreground">额度 {disk.limit}</span>
+          <span className="text-muted-foreground">额度 {root.limit}</span>
         )}
+      </TableCell>
+      <TableCell>
+        <DataDiskQuotas grant={grant} />
       </TableCell>
       <TableCell className="text-muted-foreground">
         {gpu ?? '无'}
       </TableCell>
     </TableRow>
+  );
+}
+
+/** One meter per pool the user holds a data-disk quota on. */
+function DataDiskQuotas({ grant }: { grant: LiveServerAccessDto }) {
+  const poolsQuery = useQuery({
+    queryKey: queryKeys.volumeForm.pools(grant.serverId),
+    queryFn: () => api.get<StoragePoolDto[]>(`/servers/${grant.serverId}/storage-pools`),
+    enabled: grant.storagePools.length > 0,
+  });
+  if (grant.storagePools.length === 0) return <span className="text-muted-foreground">无</span>;
+  return (
+    <div className="space-y-2" data-testid="quota-data-disks">
+      {grant.storagePools.map((pool) => {
+        const disk = formatQuotaDimension(pool.limitBytes, pool.usedBytes);
+        const row = poolsQuery.data?.find((item) => item.id === pool.poolId);
+        const name = row ? (row.displayName ?? row.incusName) : truncateId(pool.poolId);
+        return (
+          <div key={pool.poolId} className="space-y-0.5">
+            <p className="text-xs text-muted-foreground">{name}</p>
+            <QuotaCell used={disk.used} limit={disk.limit} remaining={disk.remaining} grant={pool.limitBytes} consumed={pool.usedBytes} />
+          </div>
+        );
+      })}
+    </div>
   );
 }
 

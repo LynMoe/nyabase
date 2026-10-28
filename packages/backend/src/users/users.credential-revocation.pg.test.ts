@@ -2,7 +2,7 @@ import { JwtService } from '@nestjs/jwt';
 import { Role, UserStatus } from '@nyabase/common';
 import type { Kysely } from 'kysely';
 import { describe, expect, it, vi } from 'vitest';
-import { AccessChangeNotifier, AccessResolverService } from '../iam/access-resolver.service.js';
+import { AccessChangeNotifier } from '../iam/access-resolver.service.js';
 import type { Actor } from '../iam/actor.js';
 import { testActor } from '../iam/actor.test-helper.js';
 import { AuthService } from '../iam/auth.service.js';
@@ -120,7 +120,6 @@ async function setup(database: Kysely<NyabaseDatabase>) {
     database,
     transactions,
     auth,
-    new AccessResolverService(database, transactions),
     { notify: async () => undefined } as never,
     config as never,
     audit as never,

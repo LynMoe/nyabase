@@ -28,11 +28,8 @@ function harness(options: { cookieSecure?: boolean } = {}) {
     logout: vi.fn(async () => 'user-1'),
     refreshCookieMaxAgeMs: vi.fn(() => 7 * 86_400_000),
   };
-  const access = {
-    getUserGroupSummaries: vi.fn(async () => []),
-  };
   const config = { get: vi.fn(() => options.cookieSecure ?? true) };
-  const controller = new AuthController(auth as never, access as never, config as never);
+  const controller = new AuthController(auth as never, config as never);
   const response = { cookie: vi.fn(), clearCookie: vi.fn(), setHeader: vi.fn() };
   return { auth, controller, response };
 }

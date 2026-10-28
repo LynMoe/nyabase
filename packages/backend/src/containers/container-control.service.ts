@@ -675,7 +675,7 @@ export class ContainerControlService {
         locked.server_id,
         locked.root_pool_id,
         committedDeltaBytes,
-        grant?.diskBytes ?? null,
+        grant?.rootDiskBytes ?? null,
       );
       return;
     }

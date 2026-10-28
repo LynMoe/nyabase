@@ -23,7 +23,7 @@ export const ACCESS = {
   httpProxyOps: Role.Admin,
   adminUsage: Role.UserAdmin,
   users: Role.UserAdmin,
-  groups: Role.UserAdmin,
+  grantBundles: Role.UserAdmin,
   audit: Role.UserAdmin,
   systemSettings: Role.Admin,
 } as const satisfies Record<string, AccessRule>;

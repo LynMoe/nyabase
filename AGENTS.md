@@ -27,7 +27,7 @@ Vite 通过 alias 将 `@nyabase/common` 指向 `src/index.ts`，但 `index.ts` �
 ## API 表面：每个资源只有一套路由
 
 - 同一资源不再有 `/x` 与 `/admin/x` 两套 controller。`/admin/` 前缀只留给没有用户版本的运维资源
-  （groups、ip-pools、firewall-rules、catalog、metrics、ssh-proxy、system-settings、agent-rejections）；
+  （grant-bundles、ip-pools、firewall-rules、catalog、metrics、ssh-proxy、system-settings、agent-rejections）；
   `http-api-duplicate-routes.contract.test.ts` 断言不存在同名资源同时挂在两处。
 - 鉴权在 service 里：`@CurrentActor()`（`iam/actor.ts`）给出 `{ userId, role, authKind, authVersion }`，
   `RolesGuard` 用 `JwtAuthGuard` 已加载的用户行（带 `role`）构造，不再额外查询。
@@ -49,22 +49,30 @@ Vite 通过 alias 将 `@nyabase/common` 指向 `src/index.ts`，但 `index.ts` �
 - intents 只有 `GET /intents`、`GET /intents/:id`、`POST /intents/:id/retry` 一个 controller；
   某个资源的操作历史用 `?resourceType=&resourceId=`（多个 id 用逗号分隔，例如镜像的所有分配）。
 
-## 授权模型（`iam/`、`groups/`、`access/`）
+## 授权模型（`iam/`、`grants/`、`access/`）
 
 - 角色（`user` / `user_admin` / `admin`）存在 `iam.users.role`（没有 operator，旧库里的 operator 已降成 user），每个请求从库里读，改角色立即生效（不 bump `auth_version`）。
-  没有系统组：组只用于批量发放资源授权。不存在系统用户。`users/iam-bootstrap.service.ts` 启动时只在**没有任何 active admin** 时补救：创建保留账号 `admin`，
-  或把已存在的 active `admin` 提升为 admin（审计归属 NULL）；已有 active admin 时什么都不做（不会撤销降级），`admin` 被禁用且无其他 admin 则报 `ADMIN_BOOTSTRAP_UNAVAILABLE`。资源授权（服务器、数据盘池、共享后端）可授给用户或组，
-  同一用户对同一资源可有多条；`iam.effective_*_access` 只合并**当前有效**（未过期）的授权，且只含 active 用户：
-  配额逐项取最大（NULL = 不限，**0 不是"不限"**，DB CHECK 要求 `> 0`）、GPU 并集、到期取最晚。
+  没有用户组（000003 已删除，连同旧授权一起清空，不做转换）。不存在系统用户。`users/iam-bootstrap.service.ts` 启动时只在**没有任何 active admin** 时补救：创建保留账号 `admin`，
+  或把已存在的 active `admin` 提升为 admin（审计归属 NULL）；已有 active admin 时什么都不做（不会撤销降级），`admin` 被禁用且无其他 admin 则报 `ADMIN_BOOTSTRAP_UNAVAILABLE`。
+  资源授权只授给用户，每个（用户, 资源）至多一条：
+  - **授权模板（bundle，`iam.grant_bundles`）** 绑定一台服务器，定义 CPU 核数、内存、**系统盘配额**（该用户在此服务器上所有容器系统盘之和，不含数据卷）、GPU 张数；一台服务器可有多个 bundle。
+  - **服务器授权（`iam.server_grants`）** = 用户在一台服务器上的唯一 bundle（复合外键保证 bundle 属于该服务器）+ 可选 override（`overridden` 列出覆盖的字段，值在同名列，NULL = 不限；未覆盖的列恒为 NULL，CHECK 保证）+ 到期。
+    未覆盖的字段**实时跟随** bundle：改 bundle 立即作用于所有未覆盖该字段的授权（视图读 bundle，没有同步写入）；`POST /admin/grant-bundles/:id/preview` 先列出会变的用户、被 override 挡住的用户和用量警告，`PATCH` 带 `expectedRevision`。
+    同一服务器已有授权时再分配（任何 bundle，含同一个）返回 409 `SERVER_GRANT_EXISTS`，带 `replace: true` 才在原行上替换：bundle、override 与到期都取自本次请求（未给即无 override、永久），数据盘授权保留，覆盖不中断。仍被授权引用的 bundle 不能删（409 `GRANT_BUNDLE_IN_USE`）。
+  - **数据盘授权（`iam.storage_pool_grants`）** 在服务器授权之下按池给额度（`limit_bytes`，该用户在此池上本地卷之和），只能给该服务器的本地池（复合外键），没有自己的到期：随服务器授权生效、到期、删除（级联）。没有服务器授权时 409 `SERVER_GRANT_REQUIRED`。
+  - **共享后端授权** 独立，不属于任何 bundle。
+  - GPU 不由管理员挑卡：视图按 `md5(用户 id, PCI 地址)` 从服务器最近观测到的卡（`infra.servers.observed_gpu_pci_addresses`，agent 连接与全量扫描时由 Incus resources 刷新）里取前 N 张（NULL = 全部）。
+    结果只取决于用户和卡列表：张数增加保留已有的卡，减少去掉排名最低的；卡消失只影响排到它的用户。`grants/grant-fields.ts` 的 `pickGrantGpus` 是预览用的同一规则（pg 测试固定两者一致）。
+  `iam.effective_*_access` 只含**当前有效**（未过期）的授权，且只含 active 用户；配额 NULL = 不限，**0 不是"不限"**（DB CHECK 要求 `> 0`，GPU 张数 0 = 无卡）。
   所有授权判断只读这些视图（`iam/effective-access.ts` 每类资源一个解析函数）；没有授权缓存、epoch 或 `authz_version`。
-- 用户管理员（user_admin）管人和人的资源：用户、组（含成员，组里有 admin 也一样）、所有授权（含给自己）、所有容器（含控制台）与数据卷、清除；
+- 用户管理员（user_admin）管人和人的资源：用户、授权模板、所有授权（含给自己）、所有容器（含控制台）与数据卷、清除；
   能看审计、容器 / 卷的 intents、全平台用量、SSH 连接历史；HTTP 绑定的 `scope=all`（列出 / 删除他人的绑定）也是 user_admin，但只经 API（HTTP 代理页仅 admin）。
   user_admin 改自己的记录一律走自助路径（改密码要当前密码），只有 admin 能以管理员身份改自己。服务器、镜像、共享后端、存储池、IP 池、防火墙、代理运维与系统设置（整页）仅 admin。
-- 管理规则只在 `iam/administration.ts`：用户 / 组 / 授权的增删改 user_admin；改角色（`PATCH /users/:id` 的 `role`、`POST /users` 带非 user 角色）仅 admin；
+- 管理规则只在 `iam/administration.ts`：用户 / 授权模板 / 授权的增删改 user_admin；改角色（`PATCH /users/:id` 的 `role`、`POST /users` 带非 user 角色）仅 admin；
   管理（改资料 / 重置密码 / 停用 / 删除 / 删 SSH 公钥）某个 admin 只能是 admin（`assertCanAdministerUser`，`ADMINISTRATOR_PROTECTED`）；
   "最后一个活跃管理员"保护（降级 / 禁用 / 删除 `role='admin' AND status='active'` 的最后一人被拒，`LAST_ACTIVE_ADMINISTRATOR`）。
   所有 IAM 写操作用 `lockIamPolicy`（advisory lock）串行化。
-- 撤销 = 立即到期：删除授权 / 移出组 / 删除组都不会被拒绝，IAM 写操作在 `afterCommit` 里通知 `AccessChangeNotifier`，
+- 撤销 = 立即到期：删除服务器授权（连带其数据盘授权）/ 删除数据盘授权 / 删除共享后端授权都不会被拒绝，IAM 写操作在 `afterCommit` 里通知 `AccessChangeNotifier`，
   `access/access-lapse.processor.ts` 按台账 `control.access_lapses` 走同一条 14 天宽限 → 处置 → 清除流程（租约 `access_lapse`，
   处置/清除复用 `UserServerResourcePurgeService` 的 `SYSTEM_ACTOR` 路径）。处置因资源而异：服务器 = 停止该用户在其上运行的容器
   （含仍在 provisioning 的），期满删容器 + 本地卷；数据盘池 / 共享后端 = 立即把该用户在其上的卷从容器强制卸载
@@ -89,7 +97,7 @@ Vite 通过 alias 将 `@nyabase/common` 指向 `src/index.ts`，但 `index.ts` �
   与 `detachRedriveDue` 共用 `volumes/detach-redrive.ts` 的 `containerRedriveDue`，扫描与 `enforceStop` 共用）；第一次停机清 attention，重新下发保留。
 - 禁用用户 = 失去覆盖，与撤销同一条流程：覆盖只认 `iam.effective_*_access`（active 用户 + 当前授权），禁用后其名下资源按检测时间开宽限、立即停机，
   14 天后清除；宽限内重新启用则删台账行（容器不自动启动）。用户状态变更在 `afterCommit` 里通知 `AccessChangeNotifier`。
-- 宽限中（无当前覆盖）的用户不能新建、启动、挂载、扩容；已停机的容器在覆盖恢复后不会自动启动。所有者扩容本地卷要同时有服务器和存储池的当前授权（在缩容预留内重新扩容、不占新额度也一样）。
+- 宽限中（无当前覆盖）的用户不能新建、启动、挂载、扩容；已停机的容器在覆盖恢复后不会自动启动。所有者扩容本地卷要同时有服务器授权和该池的数据盘授权（在缩容预留内重新扩容、不占新额度也一样）；本地卷按池计入数据盘额度，系统盘只计入服务器授权的系统盘配额，两者互不占用。
 - 重试耗尽的 40001 / 40P01 返回 409 `TRANSACTION_CONFLICT`（`PgTransactionConflictFilter`），不是 500。
   管理员 `scope=all` 的容器动作与管理员清除跑 read committed（不做配额准入），这样事务内 `assertActorRole` 能看到等锁期间提交的降级。
 - intent 重试归属重试者（`requested_by`，system 为 NULL）并记审计 `intent.retry`；重试 `volume.resize` 只能把 `size_bytes` 调小，不会绕过配额重新扩容。
@@ -171,7 +179,7 @@ Vite 通过 alias 将 `@nyabase/common` 指向 `src/index.ts`，但 `index.ts` �
     源文件 ≤ 800 行，单个函数 / 方法 ≤ 150 行（`api-types.ts`、`routeTree.gen.ts`、测试文件除外）。确有理由超出时，
     在文件内或函数上方写一行 `// size-exception: <原因>`。
 11. 数据访问每个模块只选一种风格，不在同一文件里混用裸 SQL 与 repository 调用同一批表：
-    - API service（volumes、storage-pools、containers 控制面、shared-backends、ip-pools、groups 等）通过本模块的
+    - API service（volumes、storage-pools、containers 控制面、shared-backends、ip-pools 等）通过本模块的
       `*.repository.ts` 访问自己拥有的表；跨模块的只读查询是专门的 read-model 文件里的 Kysely 查询。
     - reconciler 的全部 SQL 放在同目录的私有 `*.store.ts`（由 reconciler 构造函数内部创建，不是 DI provider），
       reconciler 只把 Kysely 句柄交给 store，自身和拆出的步骤函数文件里不写查询。
@@ -218,7 +226,7 @@ HTTP 代理按路由撤销：每个 hostname 有一个 incarnation，只在连�
 同步状态只在内存（`GET /admin/firewall-rules/status`：`offline | synced | pending | failed`，服务器 DTO `agent.firewall`），不轮询。
 `firewall/` 只依赖 platform / iam / incus，servers → firewall 单向（`FirewallSyncService.agentStatuses`）。预检不再检查「容器可达宿主」与出站网络。
 
-GPU 是平台内置功能（`gpu/` 模块、`common/src/gpu/`、agent 的 `gpu-collector`），不存在扩展框架。卡与 CPU 一样共享：同一张卡可同时绑定到多个容器，只按授权准入，`control.container_gpu_claims` 不按（服务器, 卡）唯一。
+GPU 是平台内置功能（`gpu/` 模块、`common/src/gpu/`、agent 的 `gpu-collector`），不存在扩展框架。卡与 CPU 一样共享：同一张卡可同时绑定到多个容器，只按授权准入（授权的卡由 GPU 张数按用户 hash 选出，见授权模型），`control.container_gpu_claims` 不按（服务器, 卡）唯一。
 
 ## Schema 规则（上线冻结）
 
@@ -229,6 +237,7 @@ schema 变更一律新增 `NNNNNN_name.sql`（只追加），随版本发布时�
 `000001_initial.sql` 随上线版本冻结；上线前用旧版 000001 建的库（试运行 / staging）必须重建。
 2026-10-26 把 000001–000007 压缩成了新的 `000001_initial.sql`（与旧的 7 个迁移依次应用后的 schema 逐字节相同，`pg_dump --schema-only` 比对过），
 正式库的 `system.schema_migrations` 已手工改写成只剩这一行；之后的 schema 变更照旧从 `000002_*.sql` 起只追加。
+`000003_grant-bundles.sql` 删除用户组并**清空**服务器 / 数据盘授权（不转换；共享后端授权保留，经组获得的展开给各成员并按旧规则合并）：上线后所有用户失去服务器与数据盘覆盖、进入 14 天宽限（立即停机、卸载卷），管理员须在宽限内按 bundle 重新分配。
 
 ## 本地开发后端
 

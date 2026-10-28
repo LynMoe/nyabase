@@ -76,7 +76,7 @@ describe('auth and sessions', () => {
     assert.equal(await api.status('POST', '/users', {
       username: 'nope-nope', password: 'password-123', displayName: 'x',
     }), 403);
-    assert.equal(await api.status('GET', '/admin/groups'), 403);
+    assert.equal(await api.status('GET', '/admin/grant-bundles'), 403);
     assert.equal(await api.status('GET', '/servers?scope=all'), 403);
   });
 
@@ -86,7 +86,7 @@ describe('auth and sessions', () => {
     assert.equal((await h.api.get<UserDto>(`/users/${userAdmin.id}`)).role, Role.UserAdmin);
     const api = userAdmin.session.api;
     assert.equal(await api.status('GET', '/users'), 200, 'user admins may list users');
-    assert.equal(await api.status('GET', '/admin/groups'), 200, 'user admins may view groups');
+    assert.equal(await api.status('GET', '/admin/grant-bundles'), 200, 'user admins may view bundles');
     assert.equal(await api.status('GET', '/admin/system-settings'), 403, 'system settings are admin-only');
     assert.equal(await api.status('POST', '/users', {
       username: 'nope-nope', password: 'password-123', displayName: 'x', role: Role.UserAdmin,

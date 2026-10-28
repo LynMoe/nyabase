@@ -10,7 +10,6 @@ import type { Actor } from '../iam/actor.js';
 import { AccessChangeNotifier } from '../iam/access-resolver.service.js';
 import { lockIamPolicy } from '../iam/administration.js';
 import {
-  addMember,
   days,
   grantBackend,
   grantPool,
@@ -18,8 +17,8 @@ import {
   seedAttachment,
   seedBackend,
   seedBackendPool,
+  seedBundle,
   seedContainer,
-  seedGroup,
   seedImage,
   seedPool,
   seedServer,
@@ -252,7 +251,7 @@ describePg('access lapse processor', () => {
       expect(await ledger(database, userId)).toHaveLength(1);
       actions.length = 0;
 
-      await grantServer(database, { group: await groupOf(database, userId) }, serverId);
+      await renewServerGrant(database, userId, serverId);
       await expect(processor.process()).resolves.toBe(1);
 
       expect(await ledger(database, userId)).toEqual([]);
@@ -262,26 +261,27 @@ describePg('access lapse processor', () => {
     });
   });
 
-  it('lapses when the user is removed from the covering group or the group is deleted, but not while another group covers', async () => {
+  it('keeps coverage when the bundle is replaced in place, and lapses when the grant is deleted', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const { processor } = await fixture(database);
       const { userId, serverId, poolId, imageId } = await world(database);
-      const groupA = await seedGroup(database);
-      const groupB = await seedGroup(database);
-      await addMember(database, groupA, userId);
-      await addMember(database, groupB, userId);
-      await grantServer(database, { group: groupA }, serverId);
-      await grantServer(database, { group: groupB }, serverId);
+      await grantServer(database, { user: userId }, serverId);
+      await grantPool(database, { user: userId }, poolId);
       await seedContainer(database, { ownerId: userId, serverId, poolId, imageId, running: true });
+      await seedVolume(database, { ownerId: userId, poolId, serverId });
 
-      await database.deleteFrom('iam.group_members').where('group_id', '=', groupA).execute();
+      await database.updateTable('iam.server_grants')
+        .set({ bundle_id: await seedBundle(database, serverId, { cpuCores: 1 }) })
+        .where('user_id', '=', userId)
+        .execute();
       await processor.process();
       expect(await ledger(database, userId)).toEqual([]);
 
-      // Deleting the group takes its members and grants with it (foreign keys cascade).
-      await database.deleteFrom('iam.groups').where('id', '=', groupB).execute();
-      await expect(processor.process()).resolves.toBe(1);
-      expect(await ledger(database, userId)).toHaveLength(1);
+      // Its data-disk grants go with it (foreign key cascade): both kinds lapse.
+      await database.deleteFrom('iam.server_grants').where('user_id', '=', userId).execute();
+      await expect(processor.process()).resolves.toBe(2);
+      expect((await ledger(database, userId)).map((row) => row.resource_kind).sort())
+        .toEqual(['server', 'storage_pool']);
     });
   });
 
@@ -359,19 +359,15 @@ describePg('access lapse processor', () => {
     });
   });
 
-  it('opens every kind at detection time and ignores old expired grants, direct or via a group', async () => {
+  it('opens every kind at detection time and ignores the old expiry of the grants', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const { processor } = await fixture(database);
       const { userId, serverId, poolId } = await world(database);
       const backendId = await seedBackend(database);
-      const group = await seedGroup(database);
-      await addMember(database, group, userId);
       await grantServer(database, { user: userId }, serverId, { expiresAt: days(-9) });
-      await grantServer(database, { group }, serverId, { expiresAt: days(-4) });
-      await grantPool(database, { group }, poolId, days(-9));
-      await grantPool(database, { user: userId }, poolId, days(-4));
+      // The data-disk grant expired with its server grant.
+      await grantPool(database, { user: userId }, poolId);
       await grantBackend(database, { user: userId }, backendId, null, days(-4));
-      await grantBackend(database, { group }, backendId, 5, days(-9));
       await seedBackendPool(database, serverId, backendId);
       await seedVolume(database, { ownerId: userId, poolId, serverId });
       await seedVolume(database, { ownerId: userId, poolId: null, serverId: null, sharedBackendId: backendId });
@@ -389,20 +385,19 @@ describePg('access lapse processor', () => {
     });
   });
 
-  it('does not backdate a group removal to an old unrelated expired direct grant', async () => {
+  it('does not backdate a lapse to a grant expiry set far in the past', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const { processor, actions } = await fixture(database);
       const { userId, serverId, poolId, imageId } = await world(database);
-      const group = await groupOf(database, userId);
-      // A direct grant that expired long ago, plus a current grant via the group.
-      await grantServer(database, { user: userId }, serverId, {
-        expiresAt: new Date(Date.now() - (GRANT_EXPIRY_GRACE_DAYS + 5) * DAY_MS),
-      });
-      await grantServer(database, { group }, serverId);
+      await grantServer(database, { user: userId }, serverId);
       await seedContainer(database, { ownerId: userId, serverId, poolId, imageId });
       await expect(processor.process()).resolves.toBe(0);
 
-      await database.deleteFrom('iam.group_members').where('group_id', '=', group).execute();
+      // An administrator moves the expiry to long before the grace would have ended.
+      await database.updateTable('iam.server_grants')
+        .set({ expires_at: new Date(Date.now() - (GRANT_EXPIRY_GRACE_DAYS + 5) * DAY_MS) })
+        .where('user_id', '=', userId)
+        .execute();
       const before = Date.now();
       await processor.process();
 
@@ -524,7 +519,6 @@ describePg('access lapse processor', () => {
       const lapsedPool = await seedPool(database, serverId);
       await grantServer(database, { user: userId }, serverId);
       await grantPool(database, { user: userId }, poolId);
-      await grantPool(database, { user: userId }, lapsedPool, days(-1));
       const usesLapsedPool = await seedContainer(database, {
         ownerId: userId, serverId, poolId, imageId, running: true,
       });
@@ -581,7 +575,6 @@ describePg('access lapse processor', () => {
       const lapsedPool = await seedPool(database, serverId);
       await grantServer(database, { user: userId }, serverId);
       await grantPool(database, { user: userId }, poolId);
-      await grantPool(database, { user: userId }, lapsedPool, days(-1));
       const container = await seedContainer(database, {
         ownerId: userId, serverId, poolId, imageId, running: true,
       });
@@ -620,7 +613,6 @@ describePg('access lapse processor', () => {
       const lapsedPool = await seedPool(database, serverId);
       await grantServer(database, { user: userId }, serverId);
       await grantPool(database, { user: userId }, poolId);
-      await grantPool(database, { user: userId }, lapsedPool, days(-1));
       const container = await seedContainer(database, {
         ownerId: userId, serverId, poolId, imageId, running: true,
       });
@@ -658,7 +650,6 @@ describePg('access lapse processor', () => {
       const lapsedPool = await seedPool(database, serverId);
       await grantServer(database, { user: userId }, serverId);
       await grantPool(database, { user: userId }, poolId);
-      await grantPool(database, { user: userId }, lapsedPool, days(-1));
       const container = await seedContainer(database, {
         ownerId: userId, serverId, poolId, imageId, running: true,
       });
@@ -712,7 +703,6 @@ describePg('access lapse processor', () => {
       const lapsedPool = await seedPool(database, serverId);
       await grantServer(database, { user: userId }, serverId);
       await grantPool(database, { user: userId }, poolId);
-      await grantPool(database, { user: userId }, lapsedPool, days(-1));
       const container = await seedContainer(database, {
         ownerId: userId, serverId, poolId, imageId, running: true,
       });
@@ -754,7 +744,6 @@ describePg('access lapse processor', () => {
       const lapsedPool = await seedPool(database, serverId);
       await grantServer(database, { user: userId }, serverId);
       await grantPool(database, { user: userId }, poolId);
-      await grantPool(database, { user: userId }, lapsedPool, days(-1));
       const container = await seedContainer(database, {
         ownerId: userId, serverId, poolId, imageId, running: true,
       });
@@ -802,7 +791,6 @@ describePg('access lapse processor', () => {
       const lapsedPool = await seedPool(database, serverId);
       await grantServer(database, { user: userId }, serverId);
       await grantPool(database, { user: userId }, poolId);
-      await grantPool(database, { user: userId }, lapsedPool, days(-1));
       const container = await seedContainer(database, {
         ownerId: userId, serverId, poolId, imageId, running: true,
       });
@@ -819,8 +807,7 @@ describePg('access lapse processor', () => {
 
       // Coverage returns: the row is cleared, the purge is not undone, and
       // the user attaches a new volume of the pool.
-      await database.updateTable('iam.storage_pool_grants').set({ expires_at: null })
-        .where('user_id', '=', userId).where('pool_id', '=', lapsedPool).execute();
+      await grantPool(database, { user: userId }, lapsedPool);
       await processor.process();
       expect(await ledger(database, userId)).toEqual([]);
       const fresh = await seedVolume(database, { ownerId: userId, poolId: lapsedPool, serverId });
@@ -851,7 +838,6 @@ describePg('access lapse processor', () => {
       const lapsedPool = await seedPool(database, serverId);
       await grantServer(database, { user: userId }, serverId);
       await grantPool(database, { user: userId }, poolId);
-      await grantPool(database, { user: userId }, lapsedPool, days(-1));
       const container = await seedContainer(database, {
         ownerId: userId, serverId, poolId, imageId, running: true,
       });
@@ -906,7 +892,6 @@ describePg('access lapse processor', () => {
       const lapsedPool = await seedPool(database, serverId);
       await grantServer(database, { user: userId }, serverId);
       await grantPool(database, { user: userId }, poolId);
-      await grantPool(database, { user: userId }, lapsedPool, days(-1));
       const container = await seedContainer(database, {
         ownerId: userId, serverId, poolId, imageId, running: true,
       });
@@ -925,8 +910,7 @@ describePg('access lapse processor', () => {
       const inspect = lapses.inspect.bind(lapses);
       vi.spyOn(lapses, 'inspect').mockImplementationOnce(async (key) => {
         const scanned = await inspect(key);
-        await database.updateTable('iam.storage_pool_grants').set({ expires_at: null })
-          .where('user_id', '=', userId).where('pool_id', '=', lapsedPool).execute();
+        await grantPool(database, { user: userId }, lapsedPool);
         return scanned;
       });
 
@@ -1428,12 +1412,6 @@ async function volumePhase(database: Kysely<NyabaseDatabase>, volumeId: string):
   const row = await database.selectFrom('control.volumes').select('lifecycle_phase')
     .where('id', '=', volumeId).executeTakeFirstOrThrow();
   return row.lifecycle_phase;
-}
-
-async function groupOf(database: Kysely<NyabaseDatabase>, userId: string): Promise<string> {
-  const group = await seedGroup(database);
-  await addMember(database, group, userId);
-  return group;
 }
 
 async function bindStates(database: Kysely<NyabaseDatabase>): Promise<Map<string, string>> {

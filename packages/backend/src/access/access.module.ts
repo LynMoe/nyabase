@@ -1,6 +1,6 @@
 import { Module } from '@nestjs/common';
 import { ContainersModule } from '../containers/containers.module.js';
-import { GroupsModule } from '../groups/groups.module.js';
+import { GrantsModule } from '../grants/grants.module.js';
 import { ProxySnapshotNotifierModule } from '../proxy-snapshots/proxy-snapshot-notifier.module.js';
 import { ReconcileModule } from '../reconcile/reconcile.module.js';
 import { VolumesModule } from '../volumes/volumes.module.js';
@@ -13,7 +13,7 @@ import { UserServerResourcePurgeService } from './user-server-resource-purge.ser
 
 /** Administration of access: the access-lapse processor, user-server purge and selector catalog. */
 @Module({
-  imports: [ContainersModule, GroupsModule, ProxySnapshotNotifierModule, ReconcileModule, VolumesModule],
+  imports: [ContainersModule, GrantsModule, ProxySnapshotNotifierModule, ReconcileModule, VolumesModule],
   controllers: [AdminUserServerPurgeController, AdminCatalogController],
   providers: [
     CatalogPersistence,

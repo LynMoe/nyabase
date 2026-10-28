@@ -237,7 +237,8 @@ describe('lane D product UI copy', () => {
     expect(inspect).not.toMatch(/强制/);
     expect(inspect).not.toMatch(/修复/);
     expect(inspect).not.toMatch(/mutate/);
-    expect(grants).toMatch(/磁盘（GiB，留空为不限，不含共享卷）/);
+    expect(read('lib/grant-bundle-form.ts')).toMatch(/系统盘（GiB，留空为不限，不含数据盘）/);
+    expect(grants).toMatch(/数据盘/);
     expect(backends).toMatch(/发现执行端/);
     expect(backends).toMatch(/执行端/);
     expect(backends).not.toMatch(/查看 catalog/);
@@ -262,24 +263,18 @@ describe('lane D product UI copy', () => {
     expect(read('pages/users-page.tsx')).not.toMatch(/CanonicalGrantPanel/);
     expect(read('pages/users-page.tsx')).not.toMatch(/setGrantUser/);
     expect(read('pages/user-detail-page.tsx')).toMatch(/user-detail-tabs/);
-    expect(read('pages/user-detail-page.tsx')).toMatch(/kind="users"/);
-    expect(read('pages/user-detail-page.tsx')).toMatch(/title="用户组"/);
+    expect(read('pages/user-detail-page.tsx')).toMatch(/<CanonicalGrantPanel user=\{user\} \/>/);
+    expect(read('pages/user-detail-page.tsx')).not.toMatch(/用户组/);
     expect(read('pages/user-detail-page.tsx')).not.toMatch(/title="能力"/);
-    expect(read('pages/groups-page.tsx')).toMatch(/to="\/groups\/\$id"/);
-    expect(read('pages/groups-page.tsx')).not.toMatch(/CanonicalGrantPanel/);
-    expect(read('pages/groups-page.tsx')).not.toMatch(/setGrantGroup/);
-    expect(read('pages/group-detail-page.tsx')).toMatch(/group-detail-tabs/);
-    expect(read('pages/group-detail-page.tsx')).toMatch(/kind="groups"/);
-    expect(read('pages/group-detail-page.tsx')).toMatch(/title="成员"/);
-    expect(read('pages/group-detail-page.tsx')).not.toMatch(/\btoolbar=/);
-    expect(read('pages/group-detail-page.tsx')).toMatch(/添加成员/);
+    expect(read('pages/grant-bundles-page.tsx')).toMatch(/BundleEditDialog/);
+    expect(read('pages/grant-bundles-page.tsx')).toMatch(/\/preview/);
+    expect(read('pages/grant-bundles-page.tsx')).toMatch(/expectedRevision/);
+    expect(read('pages/grant-bundles-page.tsx')).toMatch(/GrantBundleInUse/);
     expect(read('pages/profile-page.tsx')).toMatch(/ssh-key-add/);
     expect(read('pages/profile-page.tsx')).toMatch(/添加公钥/);
-    expect(read('pages/group-detail-page.tsx')).toMatch(/to="\/users\/\$id"/);
     expect(read('lib/detail-tabs.ts')).toMatch(/parseUserDetailTab/);
-    expect(read('lib/detail-tabs.ts')).toMatch(/parseGroupDetailTab/);
+    expect(read('lib/detail-tabs.ts')).not.toMatch(/Group/);
     expect(read('routes/users/$id.tsx')).toMatch(/parseUserDetailTab/);
-    expect(read('routes/groups/$id.tsx')).toMatch(/parseGroupDetailTab/);
     expect(read('components/servers/pools-card.tsx')).not.toMatch(/sharedBackendId:/);
     expect(read('components/servers/pools-card.tsx')).not.toMatch(/isLocalStoragePool/);
     expect(readDir('components/grants')).not.toMatch(/isLocalStoragePool/);
@@ -311,33 +306,36 @@ describe('lane D product UI copy', () => {
     expect(read('routes/servers/$id.tsx')).not.toMatch(/'overview'/);
   });
 
-  it('renders grant quotas as one scroll with nested pools and GPU summaries', () => {
+  it('renders the grants of a user as bundle cards with data disks and a check-to-override form', () => {
     const grants = readDir('components/grants');
     const quota = read('lib/grant-quota.ts');
     const coreGrant = [grants, quota].join('\n');
     expect(grants).not.toMatch(/\bTabs(Trigger|List|Content)?\b/);
     expect(grants).not.toMatch(/from '\.\.\/ui\/tabs/);
-    expect(grants).toMatch(/formatGrantQuotaLine/);
-    expect(grants).toMatch(/formatGpuGrantSummary/);
-    expect(grants).toMatch(/磁盘（GiB，留空为不限，不含共享卷）/);
     expect(grants).toMatch(/SectionCard/);
+    expect(grants).toMatch(/grant-assign/);
     expect(grants).toMatch(/grant-servers/);
-    expect(grants).toMatch(/grant-pools/);
+    expect(grants).toMatch(/grant-pools-/);
     expect(grants).toMatch(/grant-backends/);
-    expect(grants).toMatch(/grant-add-server/);
-    expect(grants).toMatch(/grant-add-pool/);
+    expect(grants).toMatch(/grant-add-pool-/);
     expect(grants).toMatch(/grant-add-backend/);
-    // One GrantDialog shell titles every add/edit dialog from its noun.
-    expect(grants).toMatch(/`添加\$\{noun\}`/);
-    expect(grants).toMatch(/noun="服务器授权"/);
-    expect(grants).toMatch(/noun="存储池授权"/);
-    expect(grants).toMatch(/noun="共享存储授权"/);
+    // The top form: pick a bundle, tick「修改」to override a field, replace on 409.
+    expect(grants).toMatch(/bundleOptionLabel/);
+    expect(grants).toMatch(/>修改</);
+    expect(grants).toMatch(/已覆盖/);
+    expect(grants).toMatch(/FailureCode\.ServerGrantExists/);
+    expect(grants).toMatch(/replace: true/);
+    expect(grants).toMatch(/替换后立即生效/);
+    expect(grants).toMatch(/\/server-grants\//);
+    expect(grants).toMatch(/\/storage-pool-grants\//);
+    // GPUs are a count now; no card picker in the grant editor.
+    expect(grants).not.toMatch(/GpuPicker|ServerGrantGpu/);
     expect(grants).not.toMatch(/\btoolbar=/);
     expect(grants).not.toMatch(/aria-expanded/);
     expect(grants).not.toMatch(/isLocalStoragePool/);
+    expect(grants).not.toMatch(/\/admin\/groups|kind: 'groups'/);
     expect(quota).toMatch(/formatConsumedQuotaParts/);
     expect(coreGrant).not.toMatch(/nvidia-gpu/);
-    expect(coreGrant).not.toMatch(/pciAddresses/);
     expect(coreGrant).not.toMatch(/GpuGrantMode/);
   });
 

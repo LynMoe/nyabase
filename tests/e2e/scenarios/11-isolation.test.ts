@@ -143,12 +143,12 @@ describe('cross-user isolation', () => {
       ['DELETE', `/users/${a.id}`, 403],
       ['GET', `/users/${a.id}/effective-access`, 403],
       ['PUT', `/users/${b.id}/server-grants/${h.server.id}`, 403, {
-        cpuCores: null, memBytes: null, diskBytes: null, gpuPciAddresses: [], expiresAt: null,
+        bundleId: '00000000-0000-4000-8000-000000000000',
       }],
       ['GET', `/servers/${h.server.id}?scope=all`, 403],
       ['GET', `/images/${h.state.image.id}?scope=all`, 403],
       ['GET', '/admin/ip-pools', 403],
-      ['GET', '/admin/groups', 403],
+      ['GET', '/admin/grant-bundles', 403],
       ['GET', '/audit', 403],
       ['GET', '/admin/system-settings', 403],
     ]);

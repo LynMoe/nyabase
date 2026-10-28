@@ -122,10 +122,7 @@ export function announceLogin(): void {
 
 function userAuthorizationFingerprint(user: UserDto | null): string {
   if (!user) return '';
-  const groups = [...user.groups]
-    .map((group) => `${group.id}:${group.name}`)
-    .sort();
-  return JSON.stringify([user.id, user.status, user.role, groups]);
+  return JSON.stringify([user.id, user.status, user.role]);
 }
 
 export function shouldClearPrincipalState(previous: UserDto | null, next: UserDto | null): boolean {
@@ -226,20 +223,15 @@ function isBoundedString(value: unknown, max: number, allowEmpty = false): value
 }
 
 export function isRuntimeUserDto(value: unknown): value is UserDto {
-  if (!isRecord(value)
-    || !isBoundedString(value.id, 128)
-    || !isBoundedString(value.username, 64)
-    || !isBoundedString(value.displayName, 128, true)
-    || !isBoundedString(value.createdAt, 64)
-    || typeof value.status !== 'string'
-    || !USER_STATUSES.has(value.status)
-    || typeof value.role !== 'string'
-    || !ROLES.has(value.role)
-    || !Array.isArray(value.groups)
-    || value.groups.length > 10_000) return false;
-  return value.groups.every((group) => isRecord(group)
-    && isBoundedString(group.id, 128)
-    && isBoundedString(group.name, 128));
+  return isRecord(value)
+    && isBoundedString(value.id, 128)
+    && isBoundedString(value.username, 64)
+    && isBoundedString(value.displayName, 128, true)
+    && isBoundedString(value.createdAt, 64)
+    && typeof value.status === 'string'
+    && USER_STATUSES.has(value.status)
+    && typeof value.role === 'string'
+    && ROLES.has(value.role);
 }
 
 const DISABLED_ACCOUNT_RE = /disabled|user_disabled|account_disabled|停用/i;

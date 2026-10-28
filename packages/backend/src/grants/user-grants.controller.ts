@@ -4,9 +4,11 @@ import {
   Delete,
   Get,
   Param,
+  Patch,
   Put,
 } from '@nestjs/common';
 import {
+  zPatchServerGrantRequest,
   zPutServerGrantRequest,
   zPutSharedBackendGrantRequest,
   zPutStoragePoolGrantRequest,
@@ -16,9 +18,7 @@ import {
 import { RequireRole, CurrentActor } from '../iam/decorators.js';
 import type { Actor } from '../iam/actor.js';
 import { AccessResolverService } from '../iam/access-resolver.service.js';
-import { GrantsService, type GrantSubject } from './grants.service.js';
-
-const subject = (id: string): GrantSubject => ({ kind: 'user', id });
+import { GrantsService } from './grants.service.js';
 
 @Controller('users/:userId')
 export class UserGrantsController {
@@ -30,18 +30,29 @@ export class UserGrantsController {
   @Get('server-grants')
   @RequireRole(Role.UserAdmin)
   listServerGrants(@Param('userId') userId: string) {
-    return this.grants.listServerGrants(subject(userId));
+    return this.grants.listServerGrants(userId);
   }
 
   @Put('server-grants/:serverId')
   @RequireRole(Role.UserAdmin)
-  upsertServerGrant(
+  putServerGrant(
     @Param('userId') userId: string,
     @Param('serverId') serverId: string,
     @Body() body: unknown,
     @CurrentActor() actor: Actor,
   ) {
-    return this.grants.putServerGrant(actor, subject(userId), serverId, zPutServerGrantRequest.parse(body));
+    return this.grants.putServerGrant(actor, userId, serverId, zPutServerGrantRequest.parse(body));
+  }
+
+  @Patch('server-grants/:serverId')
+  @RequireRole(Role.UserAdmin)
+  patchServerGrant(
+    @Param('userId') userId: string,
+    @Param('serverId') serverId: string,
+    @Body() body: unknown,
+    @CurrentActor() actor: Actor,
+  ) {
+    return this.grants.patchServerGrant(actor, userId, serverId, zPatchServerGrantRequest.parse(body));
   }
 
   @Delete('server-grants/:serverId')
@@ -51,18 +62,12 @@ export class UserGrantsController {
     @Param('serverId') serverId: string,
     @CurrentActor() actor: Actor,
   ) {
-    return this.grants.deleteServerGrant(actor, subject(userId), serverId);
-  }
-
-  @Get('storage-pool-grants')
-  @RequireRole(Role.UserAdmin)
-  listStoragePoolGrants(@Param('userId') userId: string) {
-    return this.grants.listStoragePoolGrants(subject(userId));
+    return this.grants.deleteServerGrant(actor, userId, serverId);
   }
 
   @Put('storage-pool-grants/:poolId')
   @RequireRole(Role.UserAdmin)
-  upsertStoragePoolGrant(
+  putStoragePoolGrant(
     @Param('userId') userId: string,
     @Param('poolId') poolId: string,
     @Body() body: unknown,
@@ -70,9 +75,9 @@ export class UserGrantsController {
   ) {
     return this.grants.putStoragePoolGrant(
       actor,
-      subject(userId),
+      userId,
       poolId,
-      zPutStoragePoolGrantRequest.parse(body).expiresAt,
+      zPutStoragePoolGrantRequest.parse(body).limitBytes,
     );
   }
 
@@ -83,18 +88,18 @@ export class UserGrantsController {
     @Param('poolId') poolId: string,
     @CurrentActor() actor: Actor,
   ) {
-    return this.grants.deleteStoragePoolGrant(actor, subject(userId), poolId);
+    return this.grants.deleteStoragePoolGrant(actor, userId, poolId);
   }
 
   @Get('shared-backend-grants')
   @RequireRole(Role.UserAdmin)
   listSharedBackendGrants(@Param('userId') userId: string) {
-    return this.grants.listSharedBackendGrants(subject(userId));
+    return this.grants.listSharedBackendGrants(userId);
   }
 
   @Put('shared-backend-grants/:backendId')
   @RequireRole(Role.UserAdmin)
-  upsertSharedBackendGrant(
+  putSharedBackendGrant(
     @Param('userId') userId: string,
     @Param('backendId') backendId: string,
     @Body() body: unknown,
@@ -102,7 +107,7 @@ export class UserGrantsController {
   ) {
     return this.grants.putSharedBackendGrant(
       actor,
-      subject(userId),
+      userId,
       backendId,
       zPutSharedBackendGrantRequest.parse(body),
     );
@@ -115,13 +120,13 @@ export class UserGrantsController {
     @Param('backendId') backendId: string,
     @CurrentActor() actor: Actor,
   ) {
-    return this.grants.deleteSharedBackendGrant(actor, subject(userId), backendId);
+    return this.grants.deleteSharedBackendGrant(actor, userId, backendId);
   }
 
   @Get('effective-access')
   @RequireRole(Role.UserAdmin)
   async effectiveAccess(@Param('userId') userId: string): Promise<EffectiveAccessDto> {
-    await this.grants.assertSubjectExists(subject(userId));
+    await this.grants.assertUserExists(userId);
     return {
       servers: await this.access.getEffectiveAccess(userId),
       sharedBackends: await this.access.getEffectiveSharedAccess(userId),

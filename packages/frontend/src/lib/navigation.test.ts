@@ -26,7 +26,7 @@ describe('sidebar navigation', () => {
 
   it('offers user admins people and their resources, but no infrastructure', () => {
     const items = visibleNavSections(Role.UserAdmin).flatMap((section) => section.items).map((item) => item.to);
-    for (const to of ['/users', '/groups', '/manage/containers', '/manage/volumes', '/ops', '/servers/usage',
+    for (const to of ['/users', '/grant-bundles', '/manage/containers', '/manage/volumes', '/ops', '/servers/usage',
       '/ssh-proxy', '/audit']) {
       expect(items).toContain(to);
     }
@@ -39,7 +39,7 @@ describe('sidebar navigation', () => {
     const items = visibleNavSections(Role.Admin).flatMap((section) => section.items).map((item) => item.to);
     expect(items).toContain('/network');
     expect(items).toContain('/shared-backends');
-    expect(items).toContain('/groups');
+    expect(items).toContain('/grant-bundles');
   });
 
   it('never repeats a label or an icon', () => {

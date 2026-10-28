@@ -143,12 +143,12 @@ describePg('PostgreSQL automated performance gates', () => {
             '00000000-0000-0000-0002-'
             || lpad(series.value::text, 12, '0')
           )::uuid,
-          'group.create',
+          'grant_bundle.create',
           CASE WHEN series.value <= 10
             THEN 'rare-target'
             ELSE 'common-target-' || series.value::text
           END,
-          'group',
+          'grant_bundle',
           '[]'::jsonb,
           clock_timestamp() - series.value * interval '1 second'
         FROM generate_series(1, 10000) AS series(value)

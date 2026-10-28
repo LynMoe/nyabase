@@ -16,7 +16,6 @@ import {
 } from './auth.service.js';
 import { CurrentUser, Public } from './decorators.js';
 import type { UserRecord } from './auth-persistence.js';
-import { AccessResolverService } from './access-resolver.service.js';
 import { NyabaseConfigService } from '../platform/config/nyabase-config.service.js';
 import {
   zLoginRequest,
@@ -110,7 +109,6 @@ export function clearRefreshCookie(response: CookieResponse, secure: boolean): v
 export class AuthController {
   constructor(
     private authService: AuthService,
-    private accessResolver: AccessResolverService,
     private config: NyabaseConfigService,
   ) {}
 
@@ -121,7 +119,6 @@ export class AuthController {
   private async userToDto(
     user: Pick<UserRecord, 'id' | 'username' | 'displayName' | 'status' | 'createdAt' | 'role'>,
   ): Promise<UserDto> {
-    const groups = await this.accessResolver.getUserGroupSummaries(user.id);
     return {
       id: user.id,
       username: user.username,
@@ -129,7 +126,6 @@ export class AuthController {
       status: user.status,
       createdAt: user.createdAt.toISOString(),
       role: user.role,
-      groups,
     };
   }
 

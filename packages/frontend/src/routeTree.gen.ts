@@ -26,7 +26,7 @@ import { Route as NetworkIndexRouteImport } from './routes/network/index'
 import { Route as ImagesIndexRouteImport } from './routes/images/index'
 import { Route as HttpProxyIndexRouteImport } from './routes/http-proxy/index'
 import { Route as HttpProxyOpsIndexRouteImport } from './routes/http-proxy-ops/index'
-import { Route as GroupsIndexRouteImport } from './routes/groups/index'
+import { Route as GrantBundlesIndexRouteImport } from './routes/grant-bundles/index'
 import { Route as ContainersIndexRouteImport } from './routes/containers/index'
 import { Route as AuditIndexRouteImport } from './routes/audit/index'
 import { Route as UsersIdRouteImport } from './routes/users/$id'
@@ -34,7 +34,6 @@ import { Route as SharedBackendsIdRouteImport } from './routes/shared-backends/$
 import { Route as ServersUsageRouteImport } from './routes/servers/usage'
 import { Route as ServersIdRouteImport } from './routes/servers/$id'
 import { Route as ImagesIdRouteImport } from './routes/images/$id'
-import { Route as GroupsIdRouteImport } from './routes/groups/$id'
 import { Route as ContainersContainerIdRouteImport } from './routes/containers/$containerId'
 import { Route as ManageVolumesIndexRouteImport } from './routes/manage/volumes/index'
 import { Route as ManageContainersIndexRouteImport } from './routes/manage/containers/index'
@@ -127,9 +126,9 @@ const HttpProxyOpsIndexRoute = HttpProxyOpsIndexRouteImport.update({
   path: '/http-proxy-ops/',
   getParentRoute: () => rootRouteImport,
 } as any)
-const GroupsIndexRoute = GroupsIndexRouteImport.update({
-  id: '/groups/',
-  path: '/groups/',
+const GrantBundlesIndexRoute = GrantBundlesIndexRouteImport.update({
+  id: '/grant-bundles/',
+  path: '/grant-bundles/',
   getParentRoute: () => rootRouteImport,
 } as any)
 const ContainersIndexRoute = ContainersIndexRouteImport.update({
@@ -165,11 +164,6 @@ const ServersIdRoute = ServersIdRouteImport.update({
 const ImagesIdRoute = ImagesIdRouteImport.update({
   id: '/images/$id',
   path: '/images/$id',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const GroupsIdRoute = GroupsIdRouteImport.update({
-  id: '/groups/$id',
-  path: '/groups/$id',
   getParentRoute: () => rootRouteImport,
 } as any)
 const ContainersContainerIdRoute = ContainersContainerIdRouteImport.update({
@@ -211,7 +205,6 @@ export interface FileRoutesByFullPath {
   '/login': typeof LoginRoute
   '/profile': typeof ProfileRoute
   '/containers/$containerId': typeof ContainersContainerIdRoute
-  '/groups/$id': typeof GroupsIdRoute
   '/images/$id': typeof ImagesIdRoute
   '/servers/$id': typeof ServersIdRoute
   '/servers/usage': typeof ServersUsageRoute
@@ -219,7 +212,7 @@ export interface FileRoutesByFullPath {
   '/users/$id': typeof UsersIdRoute
   '/audit/': typeof AuditIndexRoute
   '/containers/': typeof ContainersIndexRoute
-  '/groups/': typeof GroupsIndexRoute
+  '/grant-bundles/': typeof GrantBundlesIndexRoute
   '/http-proxy-ops/': typeof HttpProxyOpsIndexRoute
   '/http-proxy/': typeof HttpProxyIndexRoute
   '/images/': typeof ImagesIndexRoute
@@ -245,7 +238,6 @@ export interface FileRoutesByTo {
   '/login': typeof LoginRoute
   '/profile': typeof ProfileRoute
   '/containers/$containerId': typeof ContainersContainerIdRoute
-  '/groups/$id': typeof GroupsIdRoute
   '/images/$id': typeof ImagesIdRoute
   '/servers/$id': typeof ServersIdRoute
   '/servers/usage': typeof ServersUsageRoute
@@ -253,7 +245,7 @@ export interface FileRoutesByTo {
   '/users/$id': typeof UsersIdRoute
   '/audit': typeof AuditIndexRoute
   '/containers': typeof ContainersIndexRoute
-  '/groups': typeof GroupsIndexRoute
+  '/grant-bundles': typeof GrantBundlesIndexRoute
   '/http-proxy-ops': typeof HttpProxyOpsIndexRoute
   '/http-proxy': typeof HttpProxyIndexRoute
   '/images': typeof ImagesIndexRoute
@@ -280,7 +272,6 @@ export interface FileRoutesById {
   '/login': typeof LoginRoute
   '/profile': typeof ProfileRoute
   '/containers/$containerId': typeof ContainersContainerIdRoute
-  '/groups/$id': typeof GroupsIdRoute
   '/images/$id': typeof ImagesIdRoute
   '/servers/$id': typeof ServersIdRoute
   '/servers/usage': typeof ServersUsageRoute
@@ -288,7 +279,7 @@ export interface FileRoutesById {
   '/users/$id': typeof UsersIdRoute
   '/audit/': typeof AuditIndexRoute
   '/containers/': typeof ContainersIndexRoute
-  '/groups/': typeof GroupsIndexRoute
+  '/grant-bundles/': typeof GrantBundlesIndexRoute
   '/http-proxy-ops/': typeof HttpProxyOpsIndexRoute
   '/http-proxy/': typeof HttpProxyIndexRoute
   '/images/': typeof ImagesIndexRoute
@@ -316,7 +307,6 @@ export interface FileRouteTypes {
     | '/login'
     | '/profile'
     | '/containers/$containerId'
-    | '/groups/$id'
     | '/images/$id'
     | '/servers/$id'
     | '/servers/usage'
@@ -324,7 +314,7 @@ export interface FileRouteTypes {
     | '/users/$id'
     | '/audit/'
     | '/containers/'
-    | '/groups/'
+    | '/grant-bundles/'
     | '/http-proxy-ops/'
     | '/http-proxy/'
     | '/images/'
@@ -350,7 +340,6 @@ export interface FileRouteTypes {
     | '/login'
     | '/profile'
     | '/containers/$containerId'
-    | '/groups/$id'
     | '/images/$id'
     | '/servers/$id'
     | '/servers/usage'
@@ -358,7 +347,7 @@ export interface FileRouteTypes {
     | '/users/$id'
     | '/audit'
     | '/containers'
-    | '/groups'
+    | '/grant-bundles'
     | '/http-proxy-ops'
     | '/http-proxy'
     | '/images'
@@ -384,7 +373,6 @@ export interface FileRouteTypes {
     | '/login'
     | '/profile'
     | '/containers/$containerId'
-    | '/groups/$id'
     | '/images/$id'
     | '/servers/$id'
     | '/servers/usage'
@@ -392,7 +380,7 @@ export interface FileRouteTypes {
     | '/users/$id'
     | '/audit/'
     | '/containers/'
-    | '/groups/'
+    | '/grant-bundles/'
     | '/http-proxy-ops/'
     | '/http-proxy/'
     | '/images/'
@@ -419,7 +407,6 @@ export interface RootRouteChildren {
   LoginRoute: typeof LoginRoute
   ProfileRoute: typeof ProfileRoute
   ContainersContainerIdRoute: typeof ContainersContainerIdRoute
-  GroupsIdRoute: typeof GroupsIdRoute
   ImagesIdRoute: typeof ImagesIdRoute
   ServersIdRoute: typeof ServersIdRoute
   ServersUsageRoute: typeof ServersUsageRoute
@@ -427,7 +414,7 @@ export interface RootRouteChildren {
   UsersIdRoute: typeof UsersIdRoute
   AuditIndexRoute: typeof AuditIndexRoute
   ContainersIndexRoute: typeof ContainersIndexRoute
-  GroupsIndexRoute: typeof GroupsIndexRoute
+  GrantBundlesIndexRoute: typeof GrantBundlesIndexRoute
   HttpProxyOpsIndexRoute: typeof HttpProxyOpsIndexRoute
   HttpProxyIndexRoute: typeof HttpProxyIndexRoute
   ImagesIndexRoute: typeof ImagesIndexRoute
@@ -570,11 +557,11 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof HttpProxyOpsIndexRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/groups/': {
-      id: '/groups/'
-      path: '/groups'
-      fullPath: '/groups/'
-      preLoaderRoute: typeof GroupsIndexRouteImport
+    '/grant-bundles/': {
+      id: '/grant-bundles/'
+      path: '/grant-bundles'
+      fullPath: '/grant-bundles/'
+      preLoaderRoute: typeof GrantBundlesIndexRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/containers/': {
@@ -624,13 +611,6 @@ declare module '@tanstack/react-router' {
       path: '/images/$id'
       fullPath: '/images/$id'
       preLoaderRoute: typeof ImagesIdRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/groups/$id': {
-      id: '/groups/$id'
-      path: '/groups/$id'
-      fullPath: '/groups/$id'
-      preLoaderRoute: typeof GroupsIdRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/containers/$containerId': {
@@ -683,7 +663,6 @@ const rootRouteChildren: RootRouteChildren = {
   LoginRoute: LoginRoute,
   ProfileRoute: ProfileRoute,
   ContainersContainerIdRoute: ContainersContainerIdRoute,
-  GroupsIdRoute: GroupsIdRoute,
   ImagesIdRoute: ImagesIdRoute,
   ServersIdRoute: ServersIdRoute,
   ServersUsageRoute: ServersUsageRoute,
@@ -691,7 +670,7 @@ const rootRouteChildren: RootRouteChildren = {
   UsersIdRoute: UsersIdRoute,
   AuditIndexRoute: AuditIndexRoute,
   ContainersIndexRoute: ContainersIndexRoute,
-  GroupsIndexRoute: GroupsIndexRoute,
+  GrantBundlesIndexRoute: GrantBundlesIndexRoute,
   HttpProxyOpsIndexRoute: HttpProxyOpsIndexRoute,
   HttpProxyIndexRoute: HttpProxyIndexRoute,
   ImagesIndexRoute: ImagesIndexRoute,

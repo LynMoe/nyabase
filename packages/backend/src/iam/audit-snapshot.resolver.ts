@@ -15,7 +15,7 @@ export class AuditSnapshotResolver {
     try {
       switch (normalizeResourceType(rawType)) {
         case 'user': return this.user(executor, id);
-        case 'group': return this.group(executor, id);
+        case 'grant_bundle': return this.grantBundle(executor, id);
         case 'server': return this.server(executor, id);
         case 'image': return this.image(executor, id);
         case 'container': return this.container(executor, id);
@@ -42,14 +42,12 @@ export class AuditSnapshotResolver {
     }) : null;
   }
 
-  private async group(executor: AuditExecutor, id: string) {
-    const row = await executor.selectFrom('iam.groups')
-      .select(['name', 'description'])
+  private async grantBundle(executor: AuditExecutor, id: string) {
+    const row = await executor.selectFrom('iam.grant_bundles')
+      .select(['name', 'server_id'])
       .where('id', '=', id)
       .executeTakeFirst();
-    return row ? snapshot(id, 'group', row.name, {
-      description: row.description,
-    }) : null;
+    return row ? snapshot(id, 'grant_bundle', row.name, { serverId: row.server_id }) : null;
   }
 
   private async server(executor: AuditExecutor, id: string) {
@@ -138,7 +136,7 @@ export function normalizeResourceType(type: string | null | undefined): string |
   if (!type) return null;
   const normalized = type.trim().toLowerCase();
   if (normalized === 'users' || normalized === 'account') return 'user';
-  if (normalized === 'groups') return 'group';
+  if (normalized === 'grant-bundles') return 'grant_bundle';
   if (normalized === 'servers') return 'server';
   if (normalized === 'images') return 'image';
   if (normalized === 'containers') return 'container';

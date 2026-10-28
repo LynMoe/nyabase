@@ -64,12 +64,11 @@ export default function UsersPage() {
           const visibleUsers = users.filter((user) => matchesSearch(query, [
             user.username,
             user.displayName,
-            ...user.groups.map((group) => group.name),
           ]));
           return (
           <SectionCard
             flush
-            toolbar={<ListSearch value={query} onChange={setQuery} placeholder="搜索用户名、显示名、用户组" />}
+            toolbar={<ListSearch value={query} onChange={setQuery} placeholder="搜索用户名、显示名" />}
           >
             <UsersTable users={visibleUsers} allUsers={users} />
           </SectionCard>

@@ -1,5 +1,4 @@
 import { describe, expect, it } from 'vitest';
-import { GROUP_DETAIL_TABS, parseGroupDetailTab } from './detail-tabs.js';
 import { USER_DETAIL_TABS, parseUserDetailTab } from './detail-tabs.js';
 
 describe('IAM detail tabs', () => {
@@ -10,11 +9,4 @@ describe('IAM detail tabs', () => {
     expect(USER_DETAIL_TABS).toEqual(['overview', 'grants']);
   });
 
-  it('defaults group tabs to overview', () => {
-    expect(parseGroupDetailTab(undefined)).toBe('overview');
-    expect(parseGroupDetailTab('members')).toBe('members');
-    expect(parseGroupDetailTab('grants')).toBe('grants');
-    expect(parseGroupDetailTab('assignments')).toBe('overview');
-    expect(GROUP_DETAIL_TABS).toEqual(['overview', 'members', 'grants']);
-  });
 });

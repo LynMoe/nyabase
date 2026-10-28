@@ -3,11 +3,11 @@ import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.
 
 /**
  * Readers for `iam.effective_server_access`, `iam.effective_pool_access` and
- * `iam.effective_shared_backend_access`. Those views merge the *current* direct
- * and group-inherited grants per (user, resource) for active users; an absent
- * row means no coverage. Every authorization decision reads them through one of
- * the resolvers below, one per resource kind. Expired grants are not in the
- * views and are never merged by hand.
+ * `iam.effective_shared_backend_access`. Those views hold the *current* grants
+ * of active users, with a server grant's overrides applied over its bundle; an
+ * absent row means no coverage. Every authorization decision reads them through
+ * one of the resolvers below, one per resource kind. Expired grants are not in
+ * the views and are never resolved by hand.
  */
 export type AccessExecutor = Kysely<NyabaseDatabase> | Transaction<NyabaseDatabase>;
 
@@ -16,14 +16,20 @@ export interface ServerAccess {
   cpuCores: number | null;
   /** null = unlimited */
   memBytes: number | null;
-  /** null = unlimited */
-  diskBytes: number | null;
+  /** Sum of the user's system disks on the server; null = unlimited */
+  rootDiskBytes: number | null;
+  /** null = every observed card */
+  gpuCount: number | null;
+  /** The cards picked for the user from the server's observed GPUs. */
   gpuPciAddresses: string[];
   /** null = never expires */
   expiresAt: Date | null;
 }
 
+/** A data-disk quota on a pool; it expires with its server grant. */
 export interface PoolAccess {
+  /** null = unlimited */
+  limitBytes: number | null;
   expiresAt: Date | null;
 }
 
@@ -42,17 +48,23 @@ function bytes(value: string | number | null): number | null {
   return result;
 }
 
+const SERVER_ACCESS_COLUMNS = [
+  'cpu_cores', 'mem_bytes', 'root_disk_bytes', 'gpu_count', 'gpu_pci_addresses', 'expires_at',
+] as const;
+
 function serverAccess(row: {
   cpu_cores: number | null;
   mem_bytes: string | null;
-  disk_bytes: string | null;
+  root_disk_bytes: string | null;
+  gpu_count: number | null;
   gpu_pci_addresses: string[];
   expires_at: Date | null;
 }): ServerAccess {
   return {
     cpuCores: row.cpu_cores,
     memBytes: bytes(row.mem_bytes),
-    diskBytes: bytes(row.disk_bytes),
+    rootDiskBytes: bytes(row.root_disk_bytes),
+    gpuCount: row.gpu_count,
     gpuPciAddresses: [...row.gpu_pci_addresses],
     expiresAt: row.expires_at,
   };
@@ -64,7 +76,7 @@ export async function resolveServerAccess(
   serverId: string,
 ): Promise<ServerAccess | null> {
   const row = await executor.selectFrom('iam.effective_server_access')
-    .select(['cpu_cores', 'mem_bytes', 'disk_bytes', 'gpu_pci_addresses', 'expires_at'])
+    .select(SERVER_ACCESS_COLUMNS)
     .where('user_id', '=', userId)
     .where('server_id', '=', serverId)
     .executeTakeFirst();
@@ -77,11 +89,11 @@ export async function resolvePoolAccess(
   poolId: string,
 ): Promise<PoolAccess | null> {
   const row = await executor.selectFrom('iam.effective_pool_access')
-    .select('expires_at')
+    .select(['limit_bytes', 'expires_at'])
     .where('user_id', '=', userId)
     .where('pool_id', '=', poolId)
     .executeTakeFirst();
-  return row ? { expiresAt: row.expires_at } : null;
+  return row ? { limitBytes: bytes(row.limit_bytes), expiresAt: row.expires_at } : null;
 }
 
 export async function resolveSharedBackendAccess(
@@ -103,9 +115,7 @@ export async function listServerAccess(
   userId: string,
 ): Promise<Array<ServerAccess & { serverId: string }>> {
   const rows = await executor.selectFrom('iam.effective_server_access')
-    .select([
-      'server_id', 'cpu_cores', 'mem_bytes', 'disk_bytes', 'gpu_pci_addresses', 'expires_at',
-    ])
+    .select(['server_id', ...SERVER_ACCESS_COLUMNS])
     .where('user_id', '=', userId)
     .orderBy('server_id')
     .execute();
@@ -117,11 +127,15 @@ export async function listPoolAccess(
   userId: string,
 ): Promise<Array<PoolAccess & { poolId: string }>> {
   const rows = await executor.selectFrom('iam.effective_pool_access')
-    .select(['pool_id', 'expires_at'])
+    .select(['pool_id', 'limit_bytes', 'expires_at'])
     .where('user_id', '=', userId)
     .orderBy('pool_id')
     .execute();
-  return rows.map((row) => ({ poolId: row.pool_id, expiresAt: row.expires_at }));
+  return rows.map((row) => ({
+    poolId: row.pool_id,
+    limitBytes: bytes(row.limit_bytes),
+    expiresAt: row.expires_at,
+  }));
 }
 
 export async function listSharedBackendAccess(

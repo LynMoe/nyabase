@@ -100,7 +100,7 @@ describePg('Audit retention PostgreSQL boundaries', () => {
         await service.append(
           transaction,
           null,
-          AuditAction.CreateGroup,
+          AuditAction.CreateGrantBundle,
           null,
           null,
           { secret: 'rollback-secret' },
@@ -116,7 +116,7 @@ describePg('Audit retention PostgreSQL boundaries', () => {
       await transactions.run((transaction) => service.append(
         transaction,
         null,
-        AuditAction.CreateGroup,
+        AuditAction.CreateGrantBundle,
         null,
         null,
         { secret: 'committed-secret' },
@@ -153,7 +153,7 @@ describePg('Audit retention PostgreSQL boundaries', () => {
       await transactions.run((transaction) => service.append(
         transaction,
         null,
-        AuditAction.CreateGroup,
+        AuditAction.CreateGrantBundle,
         null,
         null,
       ));
@@ -176,7 +176,7 @@ describePg('Audit retention PostgreSQL boundaries', () => {
       );
       await service.log(
         null,
-        AuditAction.CreateGroup,
+        AuditAction.CreateGrantBundle,
         null,
         null,
         { token: 'log-secret' },
@@ -242,9 +242,9 @@ function auditEvent(id: string, targetId: string): AppendAuditEvent {
     actorName: null,
     actorUsername: null,
     actorSnapshot: null,
-    action: AuditAction.CreateGroup,
+    action: AuditAction.CreateGrantBundle,
     targetId,
-    targetType: 'group',
+    targetType: 'grant_bundle',
     targetName: targetId,
     targetSnapshot: null,
     related: [],

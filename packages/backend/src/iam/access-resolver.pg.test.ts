@@ -6,13 +6,13 @@ import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.
 import { withPostgresTestDatabase } from '../platform/persistence-pg/postgres-test-harness.js';
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
 import {
-  addMember,
   days,
   grantBackend,
   grantServer,
   seedBackend,
-  seedGroup,
+  grantPool,
   seedImage,
+  seedPool,
   seedServer,
   seedUser,
   seedVolume,
@@ -51,28 +51,24 @@ describePg('AccessResolverService', () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const access = resolver(database);
       const userId = await seedUser(database);
-      const group = await seedGroup(database);
-      await addMember(database, group, userId);
       const covered = await seedServer(database);
       const expired = await seedServer(database);
       const unrelated = await seedServer(database);
-      const viaGroup = await seedServer(database);
       const image = await seedImage(database);
       const onlyOnExpired = await seedImage(database);
       const inactiveAssignment = await seedImage(database);
-      for (const serverId of [covered, unrelated, viaGroup]) await assign(database, image, serverId);
+      for (const serverId of [covered, unrelated]) await assign(database, image, serverId);
       await assign(database, onlyOnExpired, expired);
       await assign(database, inactiveAssignment, covered, { phase: 'provisioning' });
       await grantServer(database, { user: userId }, covered);
       await grantServer(database, { user: userId }, expired, { expiresAt: days(-1) });
-      await grantServer(database, { group }, viaGroup);
 
       await expect(access.isImageAccessible(userId, image)).resolves.toBe(true);
       await expect(access.isImageAccessible(userId, onlyOnExpired)).resolves.toBe(false);
       await expect(access.isImageAccessible(userId, inactiveAssignment)).resolves.toBe(false);
 
-      // Dropping both the direct and the group coverage hides the image again.
-      await database.deleteFrom('iam.server_grants').where('server_id', 'in', [covered, viaGroup]).execute();
+      // Dropping the coverage hides the image again.
+      await database.deleteFrom('iam.server_grants').where('server_id', '=', covered).execute();
       await expect(access.isImageAccessible(userId, image)).resolves.toBe(false);
       const stranger = await seedUser(database);
       await expect(access.isImageAccessible(stranger, image)).resolves.toBe(false);
@@ -86,8 +82,13 @@ describePg('AccessResolverService', () => {
       const serverId = await seedServer(database);
       const otherServer = await seedServer(database);
       const image = await seedImage(database);
+      const poolId = await seedPool(database, serverId);
       await assign(database, image, serverId);
-      await grantServer(database, { user: userId }, serverId, { cpuCores: 4, memBytes: 8 });
+      await grantServer(database, { user: userId }, serverId, {
+        cpuCores: 4, memBytes: 8, rootDiskBytes: 300, gpuCount: 0,
+      });
+      await grantPool(database, { user: userId }, poolId, 500);
+      await seedVolume(database, { ownerId: userId, poolId, serverId });
       await grantServer(database, { user: await seedUser(database) }, otherServer);
       const topology = [0, 1, 2, 3].map((id) => ({ id, core: id, socket: 0, numa: 0 }));
       await database.updateTable('infra.servers')
@@ -100,8 +101,10 @@ describePg('AccessResolverService', () => {
         cpuCores: 4,
         serverCpuCores: 3,
         memBytes: 8,
-        diskBytes: null,
+        rootDiskBytes: 300,
+        gpuCount: 0,
         gpuPciAddresses: [],
+        storagePools: [{ poolId, limitBytes: 500, usedBytes: 100 }],
         expiresAt: null,
         accessPhase: 'live',
         allowedImageIds: [image],
@@ -167,23 +170,6 @@ describePg('AccessResolverService', () => {
         .toMatchObject({ limitBytes: 1_000, usedBytes: 500 });
       expect(shared.find((row) => row.sharedBackendId === unlimited))
         .toMatchObject({ limitBytes: null, usedBytes: 0 });
-    });
-  });
-
-  it('lists group summaries by name and only for active users', async () => {
-    await withPostgresTestDatabase(async ({ database }) => {
-      const access = resolver(database);
-      const userId = await seedUser(database);
-      const zed = await seedGroup(database, { name: 'zed' });
-      const abc = await seedGroup(database, { name: 'abc' });
-      await addMember(database, zed, userId);
-      await addMember(database, abc, userId);
-
-      const summaries = await access.getUserGroupSummaries(userId);
-      expect(summaries.map((group) => group.name)).toEqual(['abc', 'zed']);
-      expect(Object.keys(summaries[0]!).sort()).toEqual(['id', 'name']);
-      await database.updateTable('iam.users').set({ status: 'disabled' }).execute();
-      await expect(access.getUserGroupSummaries(userId)).resolves.toEqual([]);
     });
   });
 });

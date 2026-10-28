@@ -7,6 +7,7 @@ import { StoragePoolsRepository } from './storage-pools.repository.js';
 import { SharedBackendExecutorsService } from './shared-backend-executors.service.js';
 import { StoragePoolDiscoveryService } from './storage-pool-discovery.service.js';
 import { StoragePoolsService } from './storage-pools.service.js';
+import { grantPool, grantServer } from '../iam/access.pg-test-helper.js';
 
 const describePg = process.env.NYABASE_TEST_DATABASE_URL ? describe : describe.skip;
 
@@ -353,23 +354,8 @@ describePg('storage pool registration and shared mapping', () => {
       expect(registered.registered).toBe(true);
       expect(registered.displayName).toBe('系统盘');
 
-      await database.insertInto('iam.server_grants').values({
-        id: randomUUID(),
-        user_id: userId,
-        group_id: null,
-        server_id: serverId,
-        cpu_cores: null,
-        mem_bytes: null,
-        disk_bytes: null,
-        expires_at: null,
-      }).execute();
-      await database.insertInto('iam.storage_pool_grants').values({
-        id: randomUUID(),
-        user_id: userId,
-        group_id: null,
-        pool_id: dir!.id,
-        expires_at: null,
-      }).execute();
+      await grantServer(database, { user: userId }, serverId);
+      await grantPool(database, { user: userId }, dir!.id);
       const listed = await service.listVisible(userId, serverId);
       expect(listed.find((pool) => pool.id === dir!.id)?.source).toBeNull();
       const got = await service.getVisible(dir!.id, userId, serverId);

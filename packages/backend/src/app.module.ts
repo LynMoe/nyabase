@@ -4,7 +4,7 @@ import { AuditModule } from './audit/audit.module.js';
 import { ContainersModule } from './containers/containers.module.js';
 import { FirewallModule } from './firewall/firewall.module.js';
 import { GpuModule } from './gpu/gpu.module.js';
-import { GroupsModule } from './groups/groups.module.js';
+import { GrantsModule } from './grants/grants.module.js';
 import { HealthController } from './health/health.controller.js';
 import { RuntimeLifecycleService } from './health/runtime-lifecycle.service.js';
 import { HttpProxyModule } from './http-proxy/http-proxy.module.js';
@@ -33,7 +33,7 @@ import { VolumesModule } from './volumes/volumes.module.js';
     ContainersModule,
     FirewallModule,
     GpuModule,
-    GroupsModule,
+    GrantsModule,
     HttpProxyModule,
     ImagesModule,
     IpPoolsModule,
