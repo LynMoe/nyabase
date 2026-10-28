@@ -99,6 +99,31 @@ export function formatQuotaValue(
   return formatGrantBytes(value);
 }
 
+/**
+ * The four quotas of a grant on one line's worth of parts, each named:
+ * CPU 16 核 / 内存 32 GiB / 系统盘 100 GiB / 2 张 GPU.
+ */
+export function quotaSummaryParts(
+  quotas: GrantBundleQuotas,
+  server: { gpuEnabled?: boolean } = {},
+): string[] {
+  const gpu = formatQuotaValue('gpuCount', quotas.gpuCount, server);
+  return [
+    `CPU ${formatQuotaValue('cpuCores', quotas.cpuCores)}`,
+    `内存 ${formatQuotaValue('memBytes', quotas.memBytes)}`,
+    `系统盘 ${formatQuotaValue('rootDiskBytes', quotas.rootDiskBytes)}`,
+    gpu === '无' ? '无 GPU' : gpu,
+  ];
+}
+
+/** The data disks under a server grant, summed: 数据盘 2 个 · 共 500 GiB (不限 when any is). */
+export function dataDiskSummary(pools: ReadonlyArray<{ limitBytes: number | null }>): string {
+  if (pools.length === 0) return '无数据盘';
+  const unlimited = pools.some((pool) => pool.limitBytes === null);
+  const total = pools.reduce((sum, pool) => sum + (pool.limitBytes ?? 0), 0);
+  return `数据盘 ${pools.length} 个 · ${unlimited ? '不限' : `共 ${formatGrantBytes(total)}`}`;
+}
+
 export function quotasToTexts(quotas: GrantBundleQuotas): QuotaTexts {
   return {
     cpuCores: quotaToText('cpuCores', quotas.cpuCores),
@@ -222,9 +247,21 @@ export function parseOverrideDraft(
   return overrides;
 }
 
-/** "bundle 名 · 服务器名", how a bundle is named wherever it is picked. */
-export function bundleOptionLabel(bundle: Pick<GrantBundleDto, 'name'>, serverName: string): string {
-  return `${bundle.name} · ${serverName}`;
+/** Bundles to pick from, under their server's name; servers and bundles in name order. */
+export function bundleOptionGroups(
+  bundles: ReadonlyArray<Pick<GrantBundleDto, 'id' | 'name' | 'serverId'>>,
+  nameOfServer: (serverId: string) => string,
+): Array<{ key: string; label: string; options: Array<[string, string]> }> {
+  const groups = new Map<string, { key: string; label: string; options: Array<[string, string]> }>();
+  for (const bundle of bundles) {
+    const group = groups.get(bundle.serverId)
+      ?? { key: bundle.serverId, label: nameOfServer(bundle.serverId), options: [] };
+    group.options.push([bundle.id, bundle.name]);
+    groups.set(bundle.serverId, group);
+  }
+  const ordered = [...groups.values()].sort((a, b) => a.label.localeCompare(b.label, 'zh-CN'));
+  for (const group of ordered) group.options.sort((a, b) => a[1].localeCompare(b[1], 'zh-CN'));
+  return ordered;
 }
 
 function nullableCount(value: unknown): boolean {

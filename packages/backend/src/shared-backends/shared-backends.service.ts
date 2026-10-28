@@ -149,6 +149,8 @@ export class SharedBackendsService {
     identityKey: string;
     cephFsid: string;
     overcommitRatio: number;
+    note?: string | null;
+    maxVolumesPerUser?: number | null;
   }): Promise<SharedBackendDto> {
     const identityKey = normalizedIdentity(input.identityKey);
     const fsid = normalizedFsid(input.cephFsid);
@@ -192,12 +194,15 @@ export class SharedBackendsService {
             identityKey,
             cephFsid: fsid,
             overcommitRatio: input.overcommitRatio,
+            note: input.note ?? null,
+            maxVolumesPerUser: input.maxVolumesPerUser ?? null,
           }, transaction);
           await this.audit.append(transaction, actorId, AuditAction.CreateSharedBackend, row.id, 'shared_backend', {
             name: input.name,
             identityKey,
             cephFsid: fsid,
             overcommitRatio: input.overcommitRatio,
+            maxVolumesPerUser: input.maxVolumesPerUser ?? null,
           });
           return { row, created: true };
         },
@@ -231,6 +236,8 @@ export class SharedBackendsService {
       displayName?: string | null;
       cephFsid?: string;
       overcommitRatio?: number;
+      note?: string | null;
+      maxVolumesPerUser?: number | null;
     },
   ): Promise<SharedBackendDto> {
     const updated = await this.transactions.run(
@@ -268,12 +275,20 @@ export class SharedBackendsService {
           ...(input.overcommitRatio !== undefined
             ? { overcommit_ratio: input.overcommitRatio }
             : {}),
+          ...(input.note !== undefined ? { note: input.note } : {}),
+          ...(input.maxVolumesPerUser !== undefined
+            ? { max_volumes_per_user: input.maxVolumesPerUser }
+            : {}),
         }, transaction);
         if (!row) throw new ConflictException({ code: FailureCode.RevisionConflict });
         await this.audit.append(transaction, actorId, AuditAction.UpdateSharedBackend, id, 'shared_backend', {
           ...(input.displayName !== undefined ? { displayName: input.displayName } : {}),
           ...(input.cephFsid !== undefined ? { cephFsid: requestedFsid, previousCephFsid: current.ceph_fsid } : {}),
           ...(input.overcommitRatio !== undefined ? { overcommitRatio: input.overcommitRatio } : {}),
+          ...(input.note !== undefined && input.note !== current.note ? { noteChanged: true } : {}),
+          ...(input.maxVolumesPerUser !== undefined && input.maxVolumesPerUser !== current.max_volumes_per_user
+            ? { maxVolumesPerUser: input.maxVolumesPerUser, previousMaxVolumesPerUser: current.max_volumes_per_user }
+            : {}),
         });
         return row;
       },
@@ -340,6 +355,8 @@ export class SharedBackendsService {
     total_bytes: string | number | null;
     used_bytes: string | number | null;
     overcommit_ratio: string | number;
+    note: string | null;
+    max_volumes_per_user: number | null;
     revision: string | number;
     created_at: Date | string;
     updated_at: Date | string;
@@ -359,6 +376,8 @@ export class SharedBackendsService {
       totalBytes: row.total_bytes === null ? null : numberValue(row.total_bytes),
       usedBytes,
       overcommitRatio: numberValue(row.overcommit_ratio),
+      note: row.note,
+      maxVolumesPerUser: row.max_volumes_per_user,
       serverIds: row.server_ids ?? [],
       hasOnlineExecutor: row.has_online_executor === true,
       revision: numberValue(row.revision),

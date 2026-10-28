@@ -80,6 +80,15 @@ const zServerSlug = z.string().min(1).max(64).regex(SERVER_SLUG_RE);
 const zNetworkInterface = z.string().min(1).max(64).regex(NETWORK_INTERFACE_RE);
 const zOptionalText = (max: number) => z.string().max(max).nullable().optional();
 
+/** A free-text note: trimmed, and blank (or null) clears it. */
+const zOptionalNote = (max: number) => z.string().trim().max(max)
+  .transform((value) => (value === '' ? null : value))
+  .nullable()
+  .optional();
+
+export const MAX_USER_NOTE_LENGTH = 1_000;
+export const MAX_SHARED_BACKEND_NOTE_LENGTH = 500;
+
 function assertIpPoolNetworkFields(
   value: {
     cidr: string;
@@ -197,6 +206,7 @@ export const zCreateUserRequest = z.object({
   password: z.string().min(8).max(256),
   displayName: z.string().trim().min(1).max(128),
   role: zRole.optional(),
+  note: zOptionalNote(MAX_USER_NOTE_LENGTH),
 }).strict();
 
 export const zUpdateUserRequest = z.object({
@@ -205,11 +215,13 @@ export const zUpdateUserRequest = z.object({
   currentPassword: z.string().max(1024).optional(),
   status: z.enum([UserStatus.Active, UserStatus.Disabled]).optional(),
   role: zRole.optional(),
+  note: zOptionalNote(MAX_USER_NOTE_LENGTH),
 }).strict().refine(
   (value) => value.displayName !== undefined
     || value.password !== undefined
     || value.status !== undefined
-    || value.role !== undefined,
+    || value.role !== undefined
+    || value.note !== undefined,
   'At least one mutable user field is required',
 );
 
@@ -298,6 +310,9 @@ export const zCreateSharedBackendRequest = z.object({
   identityKey: z.string().trim().min(1).max(512),
   cephFsid: z.string().regex(/^[0-9a-f-]{36}$/i),
   overcommitRatio: z.number().finite().min(1).max(MAX_STORAGE_OVERCOMMIT_RATIO),
+  note: zOptionalNote(MAX_SHARED_BACKEND_NOTE_LENGTH),
+  /** Shared volumes one user may own on the backend; null = no cap. */
+  maxVolumesPerUser: z.number().int().positive().max(10_000).nullable().optional(),
 }).strict();
 
 export const zPatchSharedBackendRequest = z.object({
@@ -305,6 +320,8 @@ export const zPatchSharedBackendRequest = z.object({
   displayName: zOptionalText(128),
   cephFsid: z.string().regex(/^[0-9a-f-]{36}$/i).optional(),
   overcommitRatio: z.number().finite().min(1).max(MAX_STORAGE_OVERCOMMIT_RATIO).optional(),
+  note: zOptionalNote(MAX_SHARED_BACKEND_NOTE_LENGTH),
+  maxVolumesPerUser: z.number().int().positive().max(10_000).nullable().optional(),
 }).strict().refine(
   (value) => Object.keys(value).some((key) => key !== 'expectedRevision'),
   'At least one shared backend field is required',

@@ -1,6 +1,14 @@
 import * as React from 'react';
 import { Label } from '../ui/label.js';
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../ui/select.js';
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectLabel,
+  SelectTrigger,
+  SelectValue,
+} from '../ui/select.js';
 import { cn } from '../../lib/utils.js';
 
 export function FormField({
@@ -41,11 +49,24 @@ export function FormField({
   );
 }
 
+/** Options shown together under a heading in a `SelectField`. */
+export interface SelectOptionGroup {
+  /** Distinguishes groups that share a label; defaults to the label. */
+  key?: string;
+  label: string;
+  options: Array<[string, string]>;
+}
+
+function isGrouped(options: Array<[string, string]> | SelectOptionGroup[]): options is SelectOptionGroup[] {
+  return options.length > 0 && !Array.isArray(options[0]);
+}
+
 /**
  * Labelled single-choice select over `[value, label]` pairs. With `emptyText`,
  * a select that has nothing to offer (loaded, no options) is disabled and shows
  * `emptyText` as its placeholder and `emptyHint` (why) below, instead of
- * opening an empty dropdown; while `loading` it shows 加载中….
+ * opening an empty dropdown; while `loading` it shows 加载中…. `options` may
+ * be groups (`{ label, options }`), shown under their label.
  */
 export function SelectField({
   id,
@@ -65,7 +86,7 @@ export function SelectField({
   label: string;
   value: string;
   onChange: (value: string) => void;
-  options: Array<[string, string]>;
+  options: Array<[string, string]> | SelectOptionGroup[];
   placeholder?: string;
   disabled?: boolean;
   loading?: boolean;
@@ -74,7 +95,9 @@ export function SelectField({
   error?: string | null;
   hint?: React.ReactNode;
 }) {
-  const empty = !loading && emptyText !== undefined && options.length === 0;
+  const groups = isGrouped(options) ? options : null;
+  const flat = groups ? groups.flatMap((group) => group.options) : options as Array<[string, string]>;
+  const empty = !loading && emptyText !== undefined && flat.length === 0;
   const shownPlaceholder = loading ? '加载中…' : empty ? emptyText : placeholder;
   return (
     <FormField id={id} label={label} error={error} hint={empty && emptyHint ? emptyHint : hint}>
@@ -89,7 +112,14 @@ export function SelectField({
           <SelectValue placeholder={shownPlaceholder} />
         </SelectTrigger>
         <SelectContent>
-          {options.map(([optionValue, optionLabel]) => (
+          {groups ? groups.map((group) => (
+            <SelectGroup key={group.key ?? group.label}>
+              <SelectLabel className="pl-2 text-xs font-medium text-muted-foreground">{group.label}</SelectLabel>
+              {group.options.map(([optionValue, optionLabel]) => (
+                <SelectItem key={optionValue} value={optionValue}>{optionLabel}</SelectItem>
+              ))}
+            </SelectGroup>
+          )) : flat.map(([optionValue, optionLabel]) => (
             <SelectItem key={optionValue} value={optionValue}>{optionLabel}</SelectItem>
           ))}
         </SelectContent>

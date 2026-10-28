@@ -109,6 +109,7 @@ export class SharedVolumesService {
         await assertSharedGrant(transaction, ownerId, input.scope.sharedBackendId);
         await this.pools.lockSharedBackends([input.scope.sharedBackendId], transaction);
         await this.capacityRules.assertSharedCreateHealth(input.scope.sharedBackendId, transaction);
+        await this.capacityRules.assertSharedVolumeSlot(transaction, ownerId, input.scope.sharedBackendId);
         await this.capacityRules.assertSharedCapacityWithinGrants(
           transaction,
           ownerId,

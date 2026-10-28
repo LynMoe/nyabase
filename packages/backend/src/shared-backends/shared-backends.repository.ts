@@ -27,6 +27,8 @@ export class SharedBackendsRepository {
         'backend.total_bytes',
         'backend.used_bytes',
         'backend.overcommit_ratio',
+        'backend.note',
+        'backend.max_volumes_per_user',
         'backend.revision',
         'backend.created_at',
         'backend.updated_at',
@@ -54,6 +56,8 @@ export class SharedBackendsRepository {
         'backend.total_bytes',
         'backend.used_bytes',
         'backend.overcommit_ratio',
+        'backend.note',
+        'backend.max_volumes_per_user',
         'backend.revision',
         'backend.created_at',
         'backend.updated_at',
@@ -104,6 +108,8 @@ export class SharedBackendsRepository {
     identityKey: string;
     cephFsid: string;
     overcommitRatio: number;
+    note: string | null;
+    maxVolumesPerUser: number | null;
   }, executor: SharedBackendExecutor = this.database) {
     return executor
       .insertInto('infra.shared_backends')
@@ -116,6 +122,8 @@ export class SharedBackendsRepository {
         total_bytes: null,
         used_bytes: null,
         overcommit_ratio: input.overcommitRatio,
+        note: input.note,
+        max_volumes_per_user: input.maxVolumesPerUser,
         revision: 1,
       })
       .returningAll()
@@ -129,6 +137,8 @@ export class SharedBackendsRepository {
       display_name?: string | null;
       ceph_fsid?: string;
       overcommit_ratio?: number;
+      note?: string | null;
+      max_volumes_per_user?: number | null;
     },
     executor: SharedBackendExecutor = this.database,
   ) {

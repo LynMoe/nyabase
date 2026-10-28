@@ -98,6 +98,8 @@ export interface UserDto {
   status: UserStatus;
   createdAt: string;
   role: Role;
+  /** The administrators' note on the user; only in user-admin views, never in your own session. */
+  note?: string | null;
 }
 
 export interface SshPublicKeyDto {
@@ -390,6 +392,10 @@ export interface SharedBackendDto {
   totalBytes: number | null;
   usedBytes: number | null;
   overcommitRatio: number;
+  /** Shown to users when they create a shared volume; null = none. */
+  note: string | null;
+  /** Shared volumes one user may own on the backend; null = no cap. */
+  maxVolumesPerUser: number | null;
   serverIds: string[];
   /** True when any registered shareable cephfs pool's server is online. */
   hasOnlineExecutor: boolean;

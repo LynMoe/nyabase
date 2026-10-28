@@ -1,10 +1,8 @@
-import { useState } from 'react';
-import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { Link } from '@tanstack/react-router';
-import { Trash2 } from 'lucide-react';
-import { Role, type UserDto } from '@nyabase/common';
-import { Button } from '../../components/ui/button.js';
+import { Link, useNavigate } from '@tanstack/react-router';
+import type { ServerGrantDto, UserDto, UserServerDto } from '@nyabase/common';
 import { StatusBadge } from '../../components/layout/status-badge.js';
+import { Badge } from '../../components/ui/badge.js';
+import { Hint } from '../../components/ui/hint.js';
 import {
   Table,
   TableBody,
@@ -13,111 +11,113 @@ import {
   TableHeader,
   TableRow,
 } from '../../components/ui/table.js';
+import { expiryLabel, expiryPhase, serverName } from '../../components/grants/use-grant-panel-data.js';
+import { dataDiskSummary, quotaSummaryParts } from '../../lib/grant-bundle-form.js';
 import { roleLabel, userStatusLabel } from '../../lib/display-labels.js';
 import { userDeleting } from '../../lib/in-progress.js';
-import { ConfirmDialog } from '../../components/layout/confirm-dialog.js';
-import { api } from '../../lib/api.js';
-import { errorMessage } from '../../lib/api-error.js';
-import { queryKeys } from '../../lib/query-keys.js';
-import { toast } from '../../hooks/use-toast.js';
-import { useAuthStore } from '../../store/auth.js';
-import { useHasRole } from '../../lib/use-role.js';
-import { type ActionAvailability, userActionAvailability } from '../../lib/user-administration.js';
 
-function DeleteUserButton({ availability, onDelete }: { availability: ActionAvailability; onDelete: () => void }) {
+/** One server a user holds a grant on; hovering shows the bundle and its effective quotas. */
+function ServerGrantBadge({ grant, servers }: { grant: ServerGrantDto; servers: UserServerDto[] }) {
+  const server = servers.find((row) => row.id === grant.serverId);
+  const phase = expiryPhase(grant.expiresAt);
   return (
-    <Button
-      size="sm"
-      variant="ghost-destructive"
-      disabled={!availability.allowed}
-      title={availability.reason ?? undefined}
-      onClick={onDelete}
+    <Hint
+      content={(
+        <div className="space-y-0.5">
+          <p className="font-medium">{serverName(grant.serverId, servers)} · 模板 {grant.bundleName}</p>
+          {quotaSummaryParts(grant, server ?? {}).map((part) => <p key={part}>{part}</p>)}
+          <p>{dataDiskSummary(grant.storagePools)}</p>
+          <p className="text-muted-foreground">到期 {expiryLabel(grant.expiresAt)}</p>
+        </div>
+      )}
     >
-      <Trash2 className="h-4 w-4" />删除
-    </Button>
+      <Badge
+        variant={phase === 'live' ? 'outline' : 'warning'}
+        className="px-1.5 py-0 text-[11px] font-normal"
+        data-testid={`user-grant-${grant.userId}-${grant.serverId}`}
+      >
+        {serverName(grant.serverId, servers)}
+      </Badge>
+    </Hint>
   );
 }
 
-/** `users` are the rows to show; `allUsers` is the full list the last-admin rule is evaluated against. */
-export function UsersTable({ users: visibleUsers, allUsers }: { users: UserDto[]; allUsers: UserDto[] }) {
-  const viewer = useAuthStore((state) => state.user);
-  const canManage = useHasRole(Role.UserAdmin);
-  const queryClient = useQueryClient();
-  const [deleteUser, setDeleteUser] = useState<UserDto | null>(null);
-  const remove = useMutation({
-    mutationFn: (id: string) => api.delete<unknown>(`/users/${id}`),
-    onSuccess: () => {
-      toast({ title: '用户已删除' });
-      setDeleteUser(null);
-      void queryClient.invalidateQueries({ queryKey: queryKeys.users.admin });
-    },
-    onError: (error) => toast({ title: '删除用户失败', description: errorMessage(error), variant: 'destructive' }),
-  });
+/** Users, one compact row each: name, role, status, the servers granted, the administrators' note. */
+export function UsersTable({
+  users,
+  grants,
+  servers,
+}: {
+  users: UserDto[];
+  grants: ServerGrantDto[];
+  servers: UserServerDto[];
+}) {
+  const navigate = useNavigate();
+  const grantsOf = new Map<string, ServerGrantDto[]>();
+  for (const grant of grants) {
+    const list = grantsOf.get(grant.userId) ?? [];
+    list.push(grant);
+    grantsOf.set(grant.userId, list);
+  }
+  const byServerName = (a: ServerGrantDto, b: ServerGrantDto) => (
+    serverName(a.serverId, servers).localeCompare(serverName(b.serverId, servers), 'zh-CN')
+  );
   return (
-    <>
-      <Table className="min-w-[720px]">
-        <TableHeader>
+    <Table className="min-w-[760px]">
+      <TableHeader>
+        <TableRow>
+          <TableHead className="py-2">用户</TableHead>
+          <TableHead className="py-2">角色</TableHead>
+          <TableHead className="py-2">状态</TableHead>
+          <TableHead className="py-2">授权服务器</TableHead>
+          <TableHead className="py-2">备注</TableHead>
+        </TableRow>
+      </TableHeader>
+      <TableBody>
+        {users.length === 0 ? (
           <TableRow>
-            <TableHead>用户</TableHead>
-            <TableHead>角色</TableHead>
-            <TableHead>状态</TableHead>
-            {canManage ? <TableHead className="text-right">操作</TableHead> : null}
+            <TableCell colSpan={5} className="py-8 text-center text-muted-foreground">
+              没有符合条件的用户
+            </TableCell>
           </TableRow>
-        </TableHeader>
-        <TableBody>
-          {visibleUsers.length === 0 ? (
-            <TableRow>
-              <TableCell colSpan={canManage ? 4 : 3} className="py-8 text-center text-muted-foreground">
-                没有符合条件的用户
-              </TableCell>
-            </TableRow>
-          ) : null}
-          {visibleUsers.map((user) => (
-            <TableRow key={user.id}>
-              <TableCell className="whitespace-normal">
-                <Link
-                  to="/users/$id"
-                  params={{ id: user.id }}
-                  search={{ tab: 'overview' }}
-                  className="block min-w-0"
-                >
-                  <p className="font-medium">{user.displayName}</p>
-                  <p className="mt-0.5 font-mono text-xs text-muted-foreground">@{user.username}</p>
-                </Link>
-              </TableCell>
-              <TableCell>{roleLabel(user.role)}</TableCell>
-              <TableCell>
-                <StatusBadge
-                  label={userStatusLabel(user.status)}
-                  pending={userDeleting(user.status)}
-                  variant={user.status === 'active' ? 'success' : 'secondary'}
-                />
-              </TableCell>
-              {canManage ? (
-                <TableCell className="text-right">
-                  {user.id !== viewer?.id ? (
-                    <DeleteUserButton
-                      availability={userActionAvailability(viewer, user, allUsers).delete}
-                      onDelete={() => setDeleteUser(user)}
-                    />
-                  ) : null}
-                </TableCell>
-              ) : null}
-            </TableRow>
-          ))}
-        </TableBody>
-      </Table>
-
-      <ConfirmDialog
-        open={Boolean(deleteUser)}
-        title="删除用户？"
-        description={`将永久删除用户「${deleteUser?.displayName}」，不可恢复。`}
-        confirmLabel="确认删除"
-        pendingLabel="删除中..."
-        pending={remove.isPending}
-        onConfirm={() => { if (deleteUser) remove.mutate(deleteUser.id); }}
-        onOpenChange={(open) => { if (!open) setDeleteUser(null); }}
-      />
-    </>
+        ) : null}
+        {users.map((user) => (
+          <TableRow
+            key={user.id}
+            className="cursor-pointer"
+            onClick={(event) => {
+              // The name is a real link; a click elsewhere on the row opens the user too.
+              if ((event.target as HTMLElement).closest('a')) return;
+              void navigate({ to: '/users/$id', params: { id: user.id } });
+            }}
+          >
+            <TableCell className="py-2">
+              <Link to="/users/$id" params={{ id: user.id }} className="flex min-w-0 items-baseline gap-1.5">
+                <span className="truncate font-medium">{user.displayName}</span>
+                <span className="font-mono text-xs text-muted-foreground">@{user.username}</span>
+              </Link>
+            </TableCell>
+            <TableCell className="py-2">{roleLabel(user.role)}</TableCell>
+            <TableCell className="py-2">
+              <StatusBadge
+                label={userStatusLabel(user.status)}
+                pending={userDeleting(user.status)}
+                variant={user.status === 'active' ? 'success' : 'secondary'}
+              />
+            </TableCell>
+            <TableCell className="whitespace-normal py-2">
+              <div className="flex max-w-[22rem] flex-wrap gap-1">
+                {(grantsOf.get(user.id) ?? []).sort(byServerName).map((grant) => (
+                  <ServerGrantBadge key={grant.id} grant={grant} servers={servers} />
+                ))}
+              </div>
+            </TableCell>
+            <TableCell className="max-w-[18rem] py-2">
+              <p className="truncate text-muted-foreground" title={user.note ?? undefined}>{user.note ?? ''}</p>
+            </TableCell>
+          </TableRow>
+        ))}
+      </TableBody>
+    </Table>
   );
 }

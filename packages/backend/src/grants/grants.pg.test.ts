@@ -84,6 +84,27 @@ describePg('GrantsService', () => {
     });
   });
 
+  it('lists every live user\'s grants for the user list, leaving out deleted users', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const { grants } = services(database);
+      const actor = await manager(database);
+      const serverId = await seedServer(database);
+      const bundleId = await seedBundle(database, serverId, { name: 'Shared' });
+      const kept = await seedUser(database);
+      const disabled = await seedUser(database, undefined, UserStatus.Disabled);
+      const deleted = await seedUser(database);
+      for (const userId of [kept, disabled, deleted]) {
+        await grants.putServerGrant(actor, userId, serverId, assignment(bundleId));
+      }
+      await database.updateTable('iam.users').set({ status: UserStatus.Deleted }).where('id', '=', deleted).execute();
+
+      const all = await grants.listAllServerGrants(actor);
+      await expect(grants.listAllServerGrants(testActor(kept))).rejects.toThrow();
+      expect(all.map((grant) => grant.userId).sort()).toEqual([kept, disabled].sort());
+      expect(all.every((grant) => grant.bundleName === 'Shared')).toBe(true);
+    });
+  });
+
   it('refuses a second bundle on the same server unless replacing, which keeps the grant and its data disks', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const { grants, signals } = services(database);

@@ -54,6 +54,7 @@ const FAILURE_CODE_ZH: Partial<Record<string, string>> = {
   [FailureCode.FirewallTooLarge]: '超出单台服务器的防火墙规则上限',
   [FailureCode.SshProxyLineConflict]: '已有同名线路',
   [FailureCode.SharedBackendQuotaExceeded]: '共享后端配额不足',
+  [FailureCode.SharedBackendVolumeLimitReached]: '已达到该共享存储每用户的共享卷数量上限',
   [FailureCode.SharedBackendInUse]: '共享后端仍在使用中',
   [FailureCode.SharedBackendIdentityConflict]: '共享后端 FSID 冲突',
   [FailureCode.VolumeShrinkBelowUsage]: '目标容量小于已用量',

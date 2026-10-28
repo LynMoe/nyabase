@@ -33,6 +33,7 @@ export interface IamUserTable {
   status: string;
   auth_version: number;
   role: Generated<string>;
+  note: string | null;
   created_at: GeneratedTimestamp;
   updated_at: GeneratedTimestamp;
 }

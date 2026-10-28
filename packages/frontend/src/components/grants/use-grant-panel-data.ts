@@ -25,6 +25,15 @@ export function useServerGrants(userId: string) {
   });
 }
 
+/** Every user's server grants, for the user list. */
+export function useAllServerGrants(enabled = true) {
+  return useQuery({
+    queryKey: queryKeys.grants.allServers,
+    queryFn: () => api.get<ServerGrantDto[]>('/server-grants?scope=all'),
+    enabled,
+  });
+}
+
 export function useBackendGrants(userId: string) {
   return useQuery({
     queryKey: queryKeys.grants.userList(userId, 'backends'),
@@ -88,6 +97,7 @@ export function useInvalidateGrants(userId: string) {
   const queryClient = useQueryClient();
   return () => {
     void queryClient.invalidateQueries({ queryKey: queryKeys.grants.user(userId) });
+    void queryClient.invalidateQueries({ queryKey: queryKeys.grants.allServers });
     void queryClient.invalidateQueries({ queryKey: queryKeys.grantBundles.all });
     invalidateOwnAccess(queryClient);
   };

@@ -6,12 +6,13 @@ import { GrantBundlesService } from './grant-bundles.service.js';
 import { GrantServerProfileService } from './grant-server-profile.js';
 import { GrantsService } from './grants.service.js';
 import { MeAccessController } from './me-access.controller.js';
+import { ServerGrantsController } from './server-grants.controller.js';
 import { UserGrantsController } from './user-grants.controller.js';
 
 @Module({
   imports: [GpuModule, IncusModule],
   providers: [GrantBundlesService, GrantServerProfileService, GrantsService],
-  controllers: [GrantBundlesController, UserGrantsController, MeAccessController],
+  controllers: [GrantBundlesController, UserGrantsController, ServerGrantsController, MeAccessController],
   exports: [GrantsService],
 })
 export class GrantsModule {}

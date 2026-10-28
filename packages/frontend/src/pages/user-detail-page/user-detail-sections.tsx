@@ -1,13 +1,11 @@
 import { useState } from 'react';
-import { Copy, Gauge, KeyRound, Pencil, ShieldCheck, Trash2 } from 'lucide-react';
-import { Role, type UpdateUserRequest, type UserDto, UserStatus } from '@nyabase/common';
+import { Copy, KeyRound, Pencil, Trash2 } from 'lucide-react';
+import { MAX_USER_NOTE_LENGTH, Role, type UpdateUserRequest, type UserDto, UserStatus } from '@nyabase/common';
 import { useNavigate } from '@tanstack/react-router';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { Tabs, TabsContent, TabsList, TabsTrigger } from '../../components/ui/tabs.js';
 import { CanonicalGrantPanel } from '../../components/grants/canonical-grant-panel.js';
-import type { UserDetailTab } from '../../lib/detail-tabs.js';
 import { Button } from '../../components/ui/button.js';
-import { Field, FormField, SelectField } from '../../components/layout/form-field.js';
+import { Field, FieldGrid, FormField, SelectField } from '../../components/layout/form-field.js';
 import { SectionCard } from '../../components/layout/section-card.js';
 import { StatusBadge } from '../../components/layout/status-badge.js';
 import { ROLE_OPTIONS, roleLabel, userStatusLabel } from '../../lib/display-labels.js';
@@ -24,58 +22,29 @@ import {
   DialogTitle,
 } from '../../components/ui/dialog.js';
 import { Input } from '../../components/ui/input.js';
+import { Textarea } from '../../components/ui/textarea.js';
 import { ConfirmDialog } from '../../components/layout/confirm-dialog.js';
 import { MoreActions } from '../../components/layout/more-actions.js';
 import { api } from '../../lib/api.js';
 import { errorMessage } from '../../lib/api-error.js';
 import { queryKeys } from '../../lib/query-keys.js';
-import { copyOneTimeSecret } from '../../lib/one-time-secret.js';
+import { copyOneTimeSecret, generateOneTimePassword } from '../../lib/one-time-secret.js';
 import { toast } from '../../hooks/use-toast.js';
+import { useAuthStore } from '../../store/auth.js';
 
-const TAB_ITEMS = [
-  ['overview', '概览', Gauge],
-  ['grants', '授权', ShieldCheck],
-] as const;
-
-export function UserDetailTabs({
-  tab,
-  user,
-  onTab,
-}: {
-  tab: UserDetailTab;
-  user: UserDto;
-  onTab: (tab: UserDetailTab) => void;
-}) {
+/** One page: who the user is (with the administrators' note), then their grants. */
+export function UserDetailSections({ user }: { user: UserDto }) {
   const canManageGrants = useHasRole(Role.UserAdmin);
   return (
-    <Tabs
-      value={tab}
-      onValueChange={(value) => onTab(value as UserDetailTab)}
-      data-testid="user-detail-tabs"
-    >
-      <TabsList>
-        {TAB_ITEMS.map(([key, label, Icon]) => (
-          <TabsTrigger key={key} value={key} className="gap-1.5" data-testid={`user-tab-${key}`}>
-            <Icon className="h-4 w-4" />{label}
-          </TabsTrigger>
-        ))}
-      </TabsList>
-      <TabsContent value="overview" className="mt-4 space-y-6">
-        <UserOverviewTab user={user} />
-      </TabsContent>
-      <TabsContent value="grants" className="mt-4 space-y-6">
-        {canManageGrants ? (
-          <CanonicalGrantPanel user={user} />
-        ) : (
-          <p className="text-sm text-muted-foreground">查看与编辑授权需要用户管理员及以上角色。</p>
-        )}
-      </TabsContent>
-    </Tabs>
+    <div className="space-y-6" data-testid="user-detail-sections">
+      <UserIdentityCard user={user} />
+      {canManageGrants ? <CanonicalGrantPanel user={user} /> : null}
+    </div>
   );
 }
 
-/** Identity and role of a user. */
-function UserOverviewTab({ user }: { user: UserDto }) {
+/** Identity, role and the administrators' note on the user. */
+function UserIdentityCard({ user }: { user: UserDto }) {
   const canManageUsers = useUserAvailability(user).edit.allowed;
   const [identityOpen, setIdentityOpen] = useState(false);
   return (
@@ -88,21 +57,29 @@ function UserOverviewTab({ user }: { user: UserDto }) {
           </Button>
         ) : undefined}
       >
-        <div className="grid gap-3 text-sm sm:grid-cols-2">
-          <Field label="显示名称" value={user.displayName} />
-          <Field label="用户名" value={`@${user.username}`} mono />
-          <div>
-            <p className="text-xs text-muted-foreground">状态</p>
-            <div className="mt-1">
-              <StatusBadge
-                label={userStatusLabel(user.status)}
-                pending={userDeleting(user.status)}
-                variant={user.status === UserStatus.Active ? 'success' : 'secondary'}
-              />
-            </div>
-          </div>
-          <Field label="角色" value={roleLabel(user.role)} />
-          <Field label="创建时间" value={relativeTime(user.createdAt)} />
+        <div className="space-y-3 text-sm">
+          <FieldGrid>
+            <Field label="显示名称" value={user.displayName} />
+            <Field label="用户名" value={`@${user.username}`} mono />
+            <Field
+              label="状态"
+              value={(
+                <StatusBadge
+                  label={userStatusLabel(user.status)}
+                  pending={userDeleting(user.status)}
+                  variant={user.status === UserStatus.Active ? 'success' : 'secondary'}
+                />
+              )}
+            />
+            <Field label="角色" value={roleLabel(user.role)} />
+            <Field label="创建时间" value={relativeTime(user.createdAt)} />
+          </FieldGrid>
+          {user.note !== undefined ? (
+            <Field
+              label="备注（仅管理员可见）"
+              value={user.note ? <span className="whitespace-pre-wrap">{user.note}</span> : null}
+            />
+          ) : null}
         </div>
       </SectionCard>
       {identityOpen ? <UserIdentityDialog user={user} onClose={() => setIdentityOpen(false)} /> : null}
@@ -114,6 +91,10 @@ export function UserIdentityDialog({ user, onClose }: { user: UserDto; onClose: 
   const patchUser = useUserPatch(user.id);
   const roleAvailability = useUserAvailability(user).changeRole;
   const [role, setRole] = useState<Role>(user.role);
+  const [note, setNote] = useState(user.note ?? '');
+  // Your own record goes through self-service, which leaves the note alone; only an admin annotates themselves.
+  const viewer = useAuthStore((state) => state.user);
+  const canEditNote = user.id !== viewer?.id || viewer?.role === Role.Admin;
   const submit = (next: string) => {
     if (!next) {
       toast({ title: '显示名称不能为空', variant: 'destructive' });
@@ -122,6 +103,8 @@ export function UserIdentityDialog({ user, onClose }: { user: UserDto; onClose: 
     const body: UpdateUserRequest = {};
     if (next !== user.displayName) body.displayName = next;
     if (role !== user.role) body.role = role;
+    const nextNote = note.trim() || null;
+    if (canEditNote && nextNote !== (user.note ?? null)) body.note = nextNote;
     if (Object.keys(body).length === 0) {
       toast({ title: '没有需要保存的更改' });
       return;
@@ -153,6 +136,21 @@ export function UserIdentityDialog({ user, onClose }: { user: UserDto; onClose: 
           disabled={!roleAvailability.allowed}
           hint={roleAvailability.reason ?? undefined}
         />
+        {canEditNote ? (
+          <FormField
+            id="user-note"
+            label="备注"
+            hint={`仅管理员可见，最多 ${MAX_USER_NOTE_LENGTH} 字`}
+          >
+            <Textarea
+              id="user-note"
+              value={note}
+              rows={3}
+              maxLength={MAX_USER_NOTE_LENGTH}
+              onChange={(event) => setNote(event.target.value)}
+            />
+          </FormField>
+        ) : null}
         <DialogFooter>
           <Button variant="outline" onClick={() => onOpenChange(false)}>取消</Button>
           <Button onClick={() => submit(value.trim())} disabled={pending}>
@@ -162,13 +160,6 @@ export function UserIdentityDialog({ user, onClose }: { user: UserDto; onClose: 
       </DialogContent>
     </Dialog>
   );
-}
-
-function generateOneTimePassword(): string {
-  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789';
-  const bytes = new Uint8Array(16);
-  crypto.getRandomValues(bytes);
-  return Array.from(bytes, (byte) => alphabet[byte % alphabet.length]).join('');
 }
 
 /** Confirm a password reset, then show the new password exactly once. */
@@ -264,7 +255,7 @@ export function useUserPatch(id: string) {
       void queryClient.invalidateQueries({ queryKey: queryKeys.users.admin });
       if (body.status === UserStatus.Disabled) toast({ title: '用户已停用' });
       else if (body.status === UserStatus.Active) toast({ title: '用户已启用' });
-      else if (body.displayName || body.role) toast({ title: '用户已更新' });
+      else if (body.displayName || body.role || body.note !== undefined) toast({ title: '用户已更新' });
     },
     onError: (error) => toast({ title: '更新用户失败', description: errorMessage(error), variant: 'destructive' }),
   });

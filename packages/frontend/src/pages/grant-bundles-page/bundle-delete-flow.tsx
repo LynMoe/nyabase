@@ -62,7 +62,7 @@ export function BundleDeleteFlow({ bundle, onClose }: { bundle: GrantBundleDto |
           <ul className="max-h-64 space-y-1 overflow-y-auto text-sm" data-testid="grant-bundle-in-use">
             {(inUse?.users ?? []).map((user) => (
               <li key={user.userId}>
-                <Link to="/users/$id" params={{ id: user.userId }} search={{ tab: 'grants' }} className="font-mono underline">
+                <Link to="/users/$id" params={{ id: user.userId }} className="font-mono underline">
                   @{user.username}
                 </Link>
               </li>

@@ -161,6 +161,36 @@ describePg('shared volume quota reservations', () => {
     });
   });
 
+  it('caps live shared volumes per user at the backend\'s maxVolumesPerUser', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const { userId, backendId } = await seedSharedBackend(database);
+      await database.updateTable('infra.shared_backends')
+        .set({ max_volumes_per_user: 2 })
+        .where('id', '=', backendId)
+        .execute();
+      const service = makeService(database);
+      const create = (name: string) => service.createShared(testActor(userId), {
+        name,
+        sizeBytes: 100,
+        scope: { kind: 'shared', sharedBackendId: backendId },
+      });
+      const first = await create('cap-a');
+      await create('cap-b');
+      await expect(create('cap-c')).rejects.toMatchObject({
+        response: {
+          code: FailureCode.SharedBackendVolumeLimitReached,
+          details: { maxVolumesPerUser: 2, ownedVolumes: 2 },
+        },
+      });
+      // A volume on its way out frees its slot.
+      await database.updateTable('control.volumes')
+        .set({ lifecycle_phase: 'deleting' })
+        .where('id', '=', first.id)
+        .execute();
+      await expect(create('cap-c')).resolves.toMatchObject({ name: 'cap-c' });
+    });
+  });
+
   it('keeps local list/get from returning shared volumes', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const { userId, backendId } = await seedSharedBackend(database);

@@ -317,6 +317,22 @@ export class VolumesRepository {
     return numberValue(row.bytes);
   }
 
+  /** Live (not failed or deleting) shared volumes of one owner on one backend. */
+  async countLiveSharedVolumes(
+    ownerId: string,
+    sharedBackendId: string,
+    executor: VolumeExecutor = this.database,
+  ): Promise<number> {
+    const row = await executor
+      .selectFrom('control.volumes')
+      .select(sql<number>`count(*)::integer`.as('count'))
+      .where('owner_id', '=', ownerId)
+      .where('shared_backend_id', '=', sharedBackendId)
+      .where('lifecycle_phase', 'not in', ['failed', 'deleting'])
+      .executeTakeFirstOrThrow();
+    return row.count;
+  }
+
   listSharedBackendVolumes(backendId: string, executor: VolumeExecutor = this.database) {
     return executor
       .selectFrom('control.volumes')

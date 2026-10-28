@@ -4,6 +4,7 @@ import { Pencil, RefreshCw, Trash2 } from 'lucide-react';
 import {
   Role,
   FailureCode,
+  type PatchSharedBackendRequest,
   type SharedBackendDto,
   type SharedBackendExecutorDiscoverResult,
   type SharedBackendExecutorDto,
@@ -18,6 +19,8 @@ import { SectionCard } from '../../components/layout/section-card.js';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../../components/ui/table.js';
 import { SharedVolumeCatalogInspectDialog } from '../../components/storage/shared-volume-catalog-inspect.js';
 import { SharedVolumeTable } from '../../components/storage/shared-volume-table.js';
+import { SharedBackendPolicyFields } from '../../components/storage/shared-backend-policy-fields.js';
+import { maxVolumesPerUserLabel, parseMaxVolumesPerUser } from '../../lib/shared-backend-form.js';
 import { TechnicalId } from '../../components/refs/technical-id.js';
 import { toast } from '../../hooks/use-toast.js';
 import { api } from '../../lib/api.js';
@@ -70,7 +73,13 @@ export function BackendOverviewTab({
           <Field label="identity key" value={<TechnicalId label="identity key" value={backend.identityKey} />} />
           <Field label="Ceph FSID" value={<TechnicalId label="Ceph FSID" value={backend.cephFsid} />} />
           <Field label="超分比例" value={formatPercent(backend.overcommitRatio)} />
+          <Field label="每用户最多共享卷" value={maxVolumesPerUserLabel(backend.maxVolumesPerUser)} />
           <Field label="最近更新" value={relativeTime(backend.updatedAt)} />
+          <Field
+            label="备注（用户创建共享卷时可见）"
+            className="sm:col-span-2"
+            value={backend.note ? <span className="whitespace-pre-wrap">{backend.note}</span> : null}
+          />
         </div>
       </SectionCard>
       <Card>
@@ -272,9 +281,11 @@ export function EditBackendDialog({
 }) {
   const [displayName, setDisplayName] = useState(backend.displayName ?? '');
   const [overcommitRatio, setOvercommitRatio] = useState(String(backend.overcommitRatio));
+  const [note, setNote] = useState(backend.note ?? '');
+  const [maxVolumes, setMaxVolumes] = useState(backend.maxVolumesPerUser === null ? '' : String(backend.maxVolumesPerUser));
   const invalidate = useInvalidateBackend(backend.id);
   const patchBackend = useMutation({
-    mutationFn: (body: { expectedRevision: number; displayName?: string | null; overcommitRatio?: number }) =>
+    mutationFn: (body: PatchSharedBackendRequest) =>
       api.patch<SharedBackendDto>(`/shared-backends/${backend.id}`, body),
     onSuccess: () => {
       toast({ title: '共享后端已更新' });
@@ -287,11 +298,14 @@ export function EditBackendDialog({
     },
   });
   const pending = patchBackend.isPending;
+  const maxVolumesPerUser = parseMaxVolumesPerUser(maxVolumes);
   const save = () => {
     const parsed = zPatchSharedBackendRequest.safeParse({
       expectedRevision: backend.revision,
       displayName: displayName.trim() || null,
       overcommitRatio: Number(overcommitRatio),
+      note: note.trim() || null,
+      maxVolumesPerUser,
     });
     if (!parsed.success) {
       toast({
@@ -324,9 +338,16 @@ export function EditBackendDialog({
             onChange={(event) => setOvercommitRatio(event.target.value)}
           />
         </FormField>
+        <SharedBackendPolicyFields
+          idPrefix="shared-backend-edit"
+          note={note}
+          onNoteChange={setNote}
+          maxVolumes={maxVolumes}
+          onMaxVolumesChange={setMaxVolumes}
+        />
         <DialogFooter>
           <Button variant="outline" onClick={onClose} disabled={pending}>取消</Button>
-          <Button onClick={save} disabled={pending}>
+          <Button onClick={save} disabled={pending || maxVolumesPerUser === undefined}>
             {pending ? '保存中...' : '保存'}
           </Button>
         </DialogFooter>

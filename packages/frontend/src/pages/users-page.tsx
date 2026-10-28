@@ -15,6 +15,7 @@ import { useHasRole } from '../lib/use-role.js';
 import { isPermanentQueryError, refetchWhileInProgress } from '../lib/query-lifecycle.js';
 import { CreateUserDialog } from './users-page/create-user-dialog.js';
 import { UsersTable } from './users-page/users-table.js';
+import { useAllServerGrants, useGrantServers } from '../components/grants/use-grant-panel-data.js';
 
 export default function UsersPage() {
   const canManageUsers = useHasRole(Role.UserAdmin);
@@ -29,6 +30,8 @@ export default function UsersPage() {
       isSettled: (users) => users.every((user) => !userDeleting(user.status)),
     }),
   });
+  const grants = useAllServerGrants(canManageUsers).data ?? [];
+  const servers = useGrantServers().data ?? [];
   return (
     <Page testId="users-management">
       <PageHeader
@@ -64,13 +67,14 @@ export default function UsersPage() {
           const visibleUsers = users.filter((user) => matchesSearch(query, [
             user.username,
             user.displayName,
+            user.note ?? '',
           ]));
           return (
           <SectionCard
             flush
-            toolbar={<ListSearch value={query} onChange={setQuery} placeholder="搜索用户名、显示名" />}
+            toolbar={<ListSearch value={query} onChange={setQuery} placeholder="搜索用户名、显示名、备注" />}
           >
-            <UsersTable users={visibleUsers} allUsers={users} />
+            <UsersTable users={visibleUsers} grants={grants} servers={servers} />
           </SectionCard>
           );
         }}

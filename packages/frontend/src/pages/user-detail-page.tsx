@@ -1,12 +1,11 @@
 import { useQuery } from '@tanstack/react-query';
-import { getRouteApi, useNavigate } from '@tanstack/react-router';
+import { getRouteApi } from '@tanstack/react-router';
 import { Role, type UserDto } from '@nyabase/common';
 import { api } from '../lib/api.js';
 import { Page, PageHeader } from '../components/layout/page-header.js';
 import { QueryView } from '../components/layout/query-view.js';
 import { userDeleting } from '../lib/in-progress.js';
-import { UserHeaderActions } from './user-detail-page/user-detail-tabs.js';
-import { UserDetailTabs } from './user-detail-page/user-detail-tabs.js';
+import { UserDetailSections, UserHeaderActions } from './user-detail-page/user-detail-sections.js';
 import { queryKeys } from '../lib/query-keys.js';
 import { refetchWhileInProgress } from '../lib/query-lifecycle.js';
 import { useAuthStore } from '../store/auth.js';
@@ -16,8 +15,6 @@ const routeApi = getRouteApi('/users/$id');
 
 export default function UserDetailPage() {
   const { id } = routeApi.useParams();
-  const { tab } = routeApi.useSearch();
-  const navigate = useNavigate({ from: '/users/$id' });
   const currentUserId = useAuthStore((state) => state.user?.id);
   const canManageUsers = useHasRole(Role.UserAdmin);
   const userQuery = useQuery({
@@ -48,13 +45,7 @@ export default function UserDetailPage() {
         loadingLabel="加载用户..."
         onBack={() => window.history.back()}
       >
-        {(loaded) => (
-          <UserDetailTabs
-            tab={tab}
-            user={loaded}
-            onTab={(next) => { void navigate({ search: (prev) => ({ ...prev, tab: next }) }); }}
-          />
-        )}
+        {(loaded) => <UserDetailSections user={loaded} />}
       </QueryView>
     </Page>
   );

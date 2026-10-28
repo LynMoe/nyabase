@@ -262,7 +262,8 @@ describe('lane D product UI copy', () => {
     expect(read('pages/users-page.tsx')).toMatch(/to="\/users\/\$id"/);
     expect(read('pages/users-page.tsx')).not.toMatch(/CanonicalGrantPanel/);
     expect(read('pages/users-page.tsx')).not.toMatch(/setGrantUser/);
-    expect(read('pages/user-detail-page.tsx')).toMatch(/user-detail-tabs/);
+    expect(read('pages/user-detail-page.tsx')).toMatch(/user-detail-sections/);
+    expect(read('pages/user-detail-page.tsx')).not.toMatch(/TabsTrigger/);
     expect(read('pages/user-detail-page.tsx')).toMatch(/<CanonicalGrantPanel user=\{user\} \/>/);
     expect(read('pages/user-detail-page.tsx')).not.toMatch(/用户组/);
     expect(read('pages/user-detail-page.tsx')).not.toMatch(/title="能力"/);
@@ -272,9 +273,9 @@ describe('lane D product UI copy', () => {
     expect(read('pages/grant-bundles-page.tsx')).toMatch(/GrantBundleInUse/);
     expect(read('pages/profile-page.tsx')).toMatch(/ssh-key-add/);
     expect(read('pages/profile-page.tsx')).toMatch(/添加公钥/);
-    expect(read('lib/detail-tabs.ts')).toMatch(/parseUserDetailTab/);
+    expect(read('lib/detail-tabs.ts')).not.toMatch(/parseUserDetailTab/);
     expect(read('lib/detail-tabs.ts')).not.toMatch(/Group/);
-    expect(read('routes/users/$id.tsx')).toMatch(/parseUserDetailTab/);
+    expect(read('routes/users/$id.tsx')).not.toMatch(/validateSearch/);
     expect(read('components/servers/pools-card.tsx')).not.toMatch(/sharedBackendId:/);
     expect(read('components/servers/pools-card.tsx')).not.toMatch(/isLocalStoragePool/);
     expect(readDir('components/grants')).not.toMatch(/isLocalStoragePool/);
@@ -320,7 +321,7 @@ describe('lane D product UI copy', () => {
     expect(grants).toMatch(/grant-add-pool-/);
     expect(grants).toMatch(/grant-add-backend/);
     // The top form: pick a bundle, tick「修改」to override a field, replace on 409.
-    expect(grants).toMatch(/bundleOptionLabel/);
+    expect(grants).toMatch(/bundleOptionGroups/);
     expect(grants).toMatch(/>修改</);
     expect(grants).toMatch(/已覆盖/);
     expect(grants).toMatch(/FailureCode\.ServerGrantExists/);

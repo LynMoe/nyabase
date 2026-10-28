@@ -138,6 +138,8 @@ export const queryKeys = {
   grants: {
     user: (userId: string) => ['grants', 'users', userId] as const,
     userList: (userId: string, slice: GrantSlice) => ['grants', 'users', userId, slice] as const,
+    /** Every user's server grants (the user list's badges). */
+    allServers: ['grants', 'all-servers'] as const,
     targets: {
       servers: ['grant-targets', 'servers'] as const,
       backends: ['grant-targets', 'backends'] as const,

@@ -36,7 +36,7 @@ export function entryWarnings(entry: GrantBundlePreviewEntryDto): string[] {
 function UserCell({ entry }: { entry: GrantBundlePreviewEntryDto }) {
   return (
     <TableCell className="whitespace-normal">
-      <Link to="/users/$id" params={{ id: entry.userId }} search={{ tab: 'grants' }} className="block min-w-0">
+      <Link to="/users/$id" params={{ id: entry.userId }} className="block min-w-0">
         <p className="font-medium">{entry.displayName}</p>
         <p className="font-mono text-xs text-muted-foreground">@{entry.username}</p>
       </Link>

@@ -155,6 +155,7 @@ export enum FailureCode {
   FirewallTooLarge = 'FIREWALL_TOO_LARGE',
   SshProxyLineConflict = 'SSH_PROXY_LINE_CONFLICT',
   SharedBackendQuotaExceeded = 'SHARED_BACKEND_QUOTA_EXCEEDED',
+  SharedBackendVolumeLimitReached = 'SHARED_BACKEND_VOLUME_LIMIT_REACHED',
   SharedBackendInUse = 'SHARED_BACKEND_IN_USE',
   SharedBackendIdentityConflict = 'SHARED_BACKEND_IDENTITY_CONFLICT',
   VolumeShrinkBelowUsage = 'VOLUME_SHRINK_BELOW_USAGE',

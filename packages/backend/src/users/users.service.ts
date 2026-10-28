@@ -62,6 +62,7 @@ export interface IamUser {
   status: UserStatus;
   authVersion: number;
   role: Role;
+  note: string | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -102,7 +103,7 @@ export class UsersService {
   ) {}
 
   async createUser(
-    dto: { username: string; password: string; displayName: string; role?: Role },
+    dto: { username: string; password: string; displayName: string; role?: Role; note?: string | null },
     options: CreateUserOptions = {},
   ): Promise<IamUser> {
     if (dto.username.length < 2 || dto.username.length > 64
@@ -168,6 +169,7 @@ export class UsersService {
         status: UserStatus.Active,
         auth_version: 0,
         role: dto.role ?? Role.User,
+        note: dto.note ?? null,
         created_at: now,
         updated_at: now,
       }).returningAll().executeTakeFirstOrThrow();
@@ -183,6 +185,7 @@ export class UsersService {
             username: user.username,
             displayName: user.displayName,
             role: user.role,
+            noteSet: user.note !== null,
           },
         );
       }
@@ -212,11 +215,11 @@ export class UsersService {
   }
 
   /**
-   * Administrative collection projection: one query per table, never a per-user lookup.
+   * Administrative collection projection (with the note): one query per table, never a per-user lookup.
    */
   async listDtos(): Promise<UserDto[]> {
     const users = await this.database.selectFrom('iam.users')
-      .select(['id', 'username', 'display_name', 'status', 'role', 'created_at'])
+      .select(['id', 'username', 'display_name', 'status', 'role', 'note', 'created_at'])
       .where('status', '!=', UserStatus.Deleted)
       .orderBy('username')
       .orderBy('id')
@@ -228,6 +231,7 @@ export class UsersService {
       status: user.status as UserStatus,
       createdAt: user.created_at.toISOString(),
       role: user.role as Role,
+      note: user.note,
     }));
   }
 
@@ -242,7 +246,7 @@ export class UsersService {
 
   async updateUser(
     id: string,
-    dto: { displayName?: string; password?: string; status?: UserStatus; role?: Role },
+    dto: { displayName?: string; password?: string; status?: UserStatus; role?: Role; note?: string | null },
     actorId?: string,
   ): Promise<IamUser> {
     const displayName = dto.displayName === undefined
@@ -311,6 +315,7 @@ export class UsersService {
         ...(passwordHash !== undefined ? { password_hash: passwordHash } : {}),
         ...(dto.status !== undefined ? { status: dto.status } : {}),
         ...(dto.role !== undefined ? { role: dto.role } : {}),
+        ...(dto.note !== undefined ? { note: dto.note } : {}),
         ...(securityChanged ? { auth_version: user.auth_version + 1 } : {}),
         updated_at: new Date(),
       }).where('id', '=', id).returningAll().executeTakeFirstOrThrow();
@@ -328,6 +333,7 @@ export class UsersService {
           {
             displayNameChanged: dto.displayName !== undefined,
             passwordChanged: dto.password !== undefined,
+            noteChanged: dto.note !== undefined,
             status: dto.status,
             role: dto.role,
           },
@@ -553,7 +559,8 @@ export class UsersService {
     });
   }
 
-  async toDto(user: IamUser): Promise<UserDto> {
+  /** `withNote` only for user-admin views: the note is the administrators', not the user's. */
+  async toDto(user: IamUser, options: { withNote?: boolean } = {}): Promise<UserDto> {
     return {
       id: user.id,
       username: user.username,
@@ -561,6 +568,7 @@ export class UsersService {
       status: user.status,
       createdAt: user.createdAt.toISOString(),
       role: user.role,
+      ...(options.withNote ? { note: user.note } : {}),
     };
   }
 
@@ -595,6 +603,7 @@ export class UsersService {
     status: string;
     auth_version: number;
     role: string;
+    note: string | null;
     created_at: Date;
     updated_at: Date;
   }): IamUser {
@@ -607,6 +616,7 @@ export class UsersService {
       status: row.status as UserStatus,
       authVersion: row.auth_version,
       role: row.role as Role,
+      note: row.note,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     };

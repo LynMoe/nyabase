@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { copyOneTimeSecret } from './one-time-secret.js';
+import { copyOneTimeSecret, generateOneTimePassword } from './one-time-secret.js';
 
 describe('one-time secret copy', () => {
   it('acknowledges only an awaited successful clipboard write', async () => {
@@ -13,5 +13,13 @@ describe('one-time secret copy', () => {
     await expect(copyOneTimeSecret('secret', {
       writeText: vi.fn(async () => { throw new Error('denied'); }),
     })).resolves.toBe(false);
+  });
+});
+
+describe('generated one-time passwords', () => {
+  it('are 16 characters without look-alikes, and differ', () => {
+    const first = generateOneTimePassword();
+    expect(first).toMatch(/^[A-HJ-NP-Za-km-z2-9]{16}$/);
+    expect(generateOneTimePassword()).not.toBe(first);
   });
 });

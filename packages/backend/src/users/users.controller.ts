@@ -50,14 +50,14 @@ export class UsersController {
       throw new ForbiddenException();
     }
     const user = await this.usersService.createUser(dto, { actorId: actor.userId });
-    return this.usersService.toDto(user);
+    return this.usersService.toDto(user, { withNote: true });
   }
 
   @Get(':id')
   async getUser(@Param('id') id: string, @CurrentActor() actor: Actor) {
     this.assertSelfOr(actor, id, Role.UserAdmin);
     const user = await this.usersService.findById(id);
-    return this.usersService.toDto(user);
+    return this.usersService.toDto(user, { withNote: hasRole(actor, Role.UserAdmin) });
   }
 
   @Patch(':id')
@@ -69,18 +69,19 @@ export class UsersController {
     this.assertSelfOr(actor, id, Role.UserAdmin);
     const dto = zUpdateUserRequest.parse(body);
     if (dto.role !== undefined && !hasRole(actor, Role.Admin)) throw new ForbiddenException();
+    const withNote = hasRole(actor, Role.UserAdmin);
     if (this.isSelfService(actor, id, dto)) {
-      if (dto.status !== undefined || dto.role !== undefined) {
-        throw new BadRequestException('status and role cannot be changed through the self-service route');
+      if (dto.status !== undefined || dto.role !== undefined || dto.note !== undefined) {
+        throw new BadRequestException('status, role and note cannot be changed through the self-service route');
       }
       const user = await this.usersService.updateSelf(id, dto, dto.currentPassword);
-      return this.usersService.toDto(user);
+      return this.usersService.toDto(user, { withNote });
     }
     if (dto.currentPassword !== undefined) {
       throw new BadRequestException('currentPassword is only valid for self-service updates');
     }
     const user = await this.usersService.updateUser(id, dto, requireUserId(actor));
-    return this.usersService.toDto(user);
+    return this.usersService.toDto(user, { withNote });
   }
 
   @Delete(':id')
@@ -138,18 +139,20 @@ export class UsersController {
 
   /**
    * Your own record follows the self-service rules (password changes need the
-   * current password; status and role are not yours to change). An admin who
-   * sends an administrator-shaped change to their own record (status, role, or
-   * a password without the current one) is handled as an administrator. A user
+   * current password; status, role and the administrators' note are not yours
+   * to change). An admin who sends an administrator-shaped change to their own
+   * record (status, role, note, or a password without the current one) is
+   * handled as an administrator. A user
    * admin is not: a stolen session must not reset its own password.
    */
   private isSelfService(
     actor: Actor,
     id: string,
-    dto: { status?: unknown; role?: unknown; password?: unknown; currentPassword?: unknown },
+    dto: { status?: unknown; role?: unknown; note?: unknown; password?: unknown; currentPassword?: unknown },
   ): boolean {
     if (actor.userId !== id) return false;
     const administratorShaped = dto.role !== undefined
+      || dto.note !== undefined
       || (dto.currentPassword === undefined
         && (dto.status !== undefined || dto.password !== undefined));
     return !(administratorShaped && hasRole(actor, Role.Admin));

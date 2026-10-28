@@ -3,13 +3,15 @@ import type { GrantBundleDto } from '@nyabase/common';
 import {
   bundleChanges,
   bundleInUseUsers,
-  bundleOptionLabel,
+  bundleOptionGroups,
+  dataDiskSummary,
   formatQuotaValue,
   isGrantBundleDto,
   overrideDraftFrom,
   overriddenFields,
   parseOverrideDraft,
   parseQuotaText,
+  quotaSummaryParts,
   parseQuotaTexts,
   quotasToTexts,
   rebaseBundleDraft,
@@ -151,7 +153,30 @@ describe('bundle conflict payloads', () => {
     expect(bundleInUseUsers(null)).toEqual([]);
   });
 
-  it('labels a bundle with its server', () => {
-    expect(bundleOptionLabel(bundle, 'gpu-1')).toBe('标准 · gpu-1');
+  it('groups bundles under their server, by name', () => {
+    const names: Record<string, string> = { s1: 'gpu-2', s2: 'gpu-1' };
+    expect(bundleOptionGroups([
+      { id: 'b1', name: '大', serverId: 's1' },
+      { id: 'b2', name: '标准', serverId: 's2' },
+      { id: 'b3', name: '小', serverId: 's1' },
+    ], (id) => names[id]!)).toEqual([
+      { key: 's2', label: 'gpu-1', options: [['b2', '标准']] },
+      { key: 's1', label: 'gpu-2', options: [['b1', '大'], ['b3', '小']] },
+    ]);
+  });
+});
+
+describe('grant summaries', () => {
+  it('names each quota on one line', () => {
+    expect(quotaSummaryParts({ cpuCores: 16, memBytes: 32 * GIB, rootDiskBytes: null, gpuCount: 2 }))
+      .toEqual(['CPU 16 核', '内存 32 GiB', '系统盘 不限', '2 张 GPU']);
+    expect(quotaSummaryParts({ cpuCores: null, memBytes: null, rootDiskBytes: null, gpuCount: null }, { gpuEnabled: false }))
+      .toEqual(['CPU 不限', '内存 不限', '系统盘 不限', '无 GPU']);
+  });
+
+  it('sums the data disks, unlimited when any is', () => {
+    expect(dataDiskSummary([])).toBe('无数据盘');
+    expect(dataDiskSummary([{ limitBytes: 100 * GIB }, { limitBytes: 400 * GIB }])).toBe('数据盘 2 个 · 共 500 GiB');
+    expect(dataDiskSummary([{ limitBytes: 100 * GIB }, { limitBytes: null }])).toBe('数据盘 2 个 · 不限');
   });
 });

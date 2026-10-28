@@ -9,6 +9,7 @@ import {
   formatGrantQuotaParts,
   formatQuotaDimension,
   formatRemainingBytes,
+  grantedGpuIndexLabel,
   runningMemBytes,
 } from './grant-quota.js';
 
@@ -115,5 +116,23 @@ describe('runningMemBytes', () => {
       row(GIB, ContainerPowerIntent.Running, ContainerPhase.Failed),
       row(GIB, ContainerPowerIntent.Running, ContainerPhase.Deleting),
     ])).toBe(2 * GIB);
+  });
+});
+
+describe('grantedGpuIndexLabel', () => {
+  const inventory = [
+    { index: 0, pciAddress: '0000:41:00.0' },
+    { index: 1, pciAddress: '0000:81:00.0' },
+    { index: 2, pciAddress: '0000:c1:00.0' },
+  ];
+
+  it('names the picked cards by index, never by PCI address', () => {
+    expect(grantedGpuIndexLabel(['0000:C1:00.0', '0000:41:00.0'], inventory)).toBe('GPU 0, 2');
+    expect(grantedGpuIndexLabel([], inventory)).toBe('无');
+  });
+
+  it('falls back to the count while an index is unknown', () => {
+    expect(grantedGpuIndexLabel(['0000:41:00.0', '0000:e1:00.0'], inventory)).toBe('2 张');
+    expect(grantedGpuIndexLabel(['0000:41:00.0'], [])).toBe('1 张');
   });
 });

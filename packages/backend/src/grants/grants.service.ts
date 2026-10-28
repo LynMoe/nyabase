@@ -1,5 +1,6 @@
 import {
   ConflictException,
+  ForbiddenException,
   Inject,
   Injectable,
   NotFoundException,
@@ -27,7 +28,7 @@ import { AuditService } from '../iam/audit.service.js';
 import { GpuClaimsRepository } from '../gpu/gpu-claims.repository.js';
 import { isLocalPoolRow } from '../storage-pools/storage-pool-capability.js';
 import { assertActorRole } from '../iam/administration.js';
-import { requireUserId } from '../iam/actor.js';
+import { hasRole, requireUserId } from '../iam/actor.js';
 import {
   effectiveQuotas,
   overrideColumns,
@@ -99,6 +100,12 @@ export class GrantsService {
   async listServerGrants(userId: string): Promise<ServerGrantDto[]> {
     await this.requireUser(this.database, userId);
     return this.serverGrantDtos(this.database, { userId });
+  }
+
+  /** Every grant of every user who is not deleted (or being deleted); user admins. */
+  async listAllServerGrants(actor: Actor): Promise<ServerGrantDto[]> {
+    if (!hasRole(actor, Role.UserAdmin)) throw new ForbiddenException();
+    return this.serverGrantDtos(this.database, { all: true });
   }
 
   async putServerGrant(
@@ -420,7 +427,7 @@ export class GrantsService {
 
   private async serverGrantDtos(
     executor: Executor,
-    filter: { userId: string } | { grantId: string },
+    filter: { userId: string } | { grantId: string } | { all: true },
   ): Promise<ServerGrantDto[]> {
     let query = executor.selectFrom('iam.server_grants as grant')
       .innerJoin('iam.grant_bundles as bundle', 'bundle.id', 'grant.bundle_id')
@@ -443,10 +450,15 @@ export class GrantsService {
         'bundle.root_disk_bytes as bundle_root_disk_bytes',
         'bundle.gpu_count as bundle_gpu_count',
       ]);
-    query = 'userId' in filter
-      ? query.where('grant.user_id', '=', filter.userId)
-      : query.where('grant.id', '=', filter.grantId);
-    const rows = await query.orderBy('grant.server_id').execute();
+    if ('userId' in filter) query = query.where('grant.user_id', '=', filter.userId);
+    else if ('grantId' in filter) query = query.where('grant.id', '=', filter.grantId);
+    else {
+      query = query.where((eb) => eb.exists(eb.selectFrom('iam.users as user')
+        .select('user.id')
+        .whereRef('user.id', '=', 'grant.user_id')
+        .where('user.status', 'in', [UserStatus.Active, UserStatus.Disabled])));
+    }
+    const rows = await query.orderBy('grant.user_id').orderBy('grant.server_id').execute();
     if (rows.length === 0) return [];
     const pools = await executor.selectFrom('iam.storage_pool_grants')
       .selectAll()

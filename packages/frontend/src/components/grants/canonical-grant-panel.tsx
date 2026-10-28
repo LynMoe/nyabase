@@ -11,7 +11,7 @@ import { QueryErrorState, QueryLoadingState } from '../query-state.js';
 import { ResourceRef } from '../refs/resource-ref.js';
 import { AssignBundleCard } from './assign-bundle-form.js';
 import { BackendGrantsCard } from './backend-grants-card.js';
-import { ServerGrantCard } from './server-grant-card.js';
+import { ServerGrantList } from './server-grant-list.js';
 import {
   expiryLabel,
   serverName,
@@ -109,24 +109,13 @@ export function CanonicalGrantPanel({ user }: { user: UserDto }) {
     <div className="space-y-6" data-testid="canonical-grants">
       <GraceCard userId={user.id} />
       <AssignBundleCard userId={user.id} grants={grants} />
-      <div className="space-y-4" data-testid="grant-servers">
-        {grants.length === 0 ? (
-          <p className="text-sm text-muted-foreground">暂无服务器授权。</p>
-        ) : grants.map((grant) => (
-          <ServerGrantCard
-            key={grant.id}
-            userId={user.id}
-            grant={grant}
-            bundle={bundles.find((row) => row.id === grant.bundleId)}
-            onDelete={() => setDeleteTarget({
-              kind: 'server',
-              id: grant.serverId,
-              label: `${grant.bundleName} · ${serverName(grant.serverId, servers)}`,
-            })}
-            onDeleteDisk={({ poolId, label }) => setDeleteTarget({ kind: 'pool', id: poolId, label: `数据盘 ${label}` })}
-          />
-        ))}
-      </div>
+      <ServerGrantList
+        userId={user.id}
+        grants={grants}
+        bundles={bundles}
+        onDelete={({ serverId, label }) => setDeleteTarget({ kind: 'server', id: serverId, label })}
+        onDeleteDisk={({ poolId, label }) => setDeleteTarget({ kind: 'pool', id: poolId, label: `数据盘 ${label}` })}
+      />
       <BackendGrantsCard
         userId={user.id}
         onDelete={({ backendId, label }) => setDeleteTarget({ kind: 'backend', id: backendId, label })}

@@ -46,6 +46,9 @@ Vite 通过 alias 将 `@nyabase/common` 指向 `src/index.ts`，但 `index.ts` �
   `http-api-roles.contract.test.ts` 固定每条路由的最低角色。`/admin/*` 路由没有声明时 `RolesGuard` 返回 403。
   角色严格嵌套（admin ⊇ user_admin ⊇ user）；service 里用 `hasRole(actor, min)`（system actor 恒为 true）。
   事务内复核用 `iam/administration.ts` 的 `assertActorRole(transaction, actorId, min)`。
+- `GET /server-grants?scope=all`（user_admin，没有 `scope=mine`）列出所有未删除用户的服务器授权，供用户列表显示授权服务器 badge；增删改仍走 `/users/:userId/server-grants`。
+- 用户备注（`iam.users.note`）是管理员对用户的备注：`UserDto.note` 只在 user_admin 及以上请求的 `GET /users`、`GET` / `PATCH` / `POST /users[/:id]` 里出现，
+  登录 / 会话里的 `UserDto` 不带；自助路径不能改备注（user_admin 改不了自己的，admin 走管理员路径）。
 - intents 只有 `GET /intents`、`GET /intents/:id`、`POST /intents/:id/retry` 一个 controller；
   某个资源的操作历史用 `?resourceType=&resourceId=`（多个 id 用逗号分隔，例如镜像的所有分配）。
 
@@ -60,7 +63,8 @@ Vite 通过 alias 将 `@nyabase/common` 指向 `src/index.ts`，但 `index.ts` �
     未覆盖的字段**实时跟随** bundle：改 bundle 立即作用于所有未覆盖该字段的授权（视图读 bundle，没有同步写入）；`POST /admin/grant-bundles/:id/preview` 先列出会变的用户、被 override 挡住的用户和用量警告，`PATCH` 带 `expectedRevision`。
     同一服务器已有授权时再分配（任何 bundle，含同一个）返回 409 `SERVER_GRANT_EXISTS`，带 `replace: true` 才在原行上替换：bundle、override 与到期都取自本次请求（未给即无 override、永久），数据盘授权保留，覆盖不中断。仍被授权引用的 bundle 不能删（409 `GRANT_BUNDLE_IN_USE`）。
   - **数据盘授权（`iam.storage_pool_grants`）** 在服务器授权之下按池给额度（`limit_bytes`，该用户在此池上本地卷之和），只能给该服务器的本地池（复合外键），没有自己的到期：随服务器授权生效、到期、删除（级联）。没有服务器授权时 409 `SERVER_GRANT_REQUIRED`。
-  - **共享后端授权** 独立，不属于任何 bundle。
+  - **共享后端授权** 独立，不属于任何 bundle。共享后端自带 `note`（用户新建共享卷时显示）与 `max_volumes_per_user`（每用户在该后端上 live 共享卷数上限，NULL = 不限；
+    新建时在 serializable 的创建事务（`VOLUME_TX`）里准入（并发抢最后一个名额由 40001 重试解决），超出 409 `SHARED_BACKEND_VOLUME_LIMIT_REACHED`；`failed` / `deleting` 的卷不计；调低不影响已有的卷）。
   - GPU 不由管理员挑卡：视图按 `md5(用户 id, PCI 地址)` 从服务器最近观测到的卡（`infra.servers.observed_gpu_pci_addresses`，agent 连接与全量扫描时由 Incus resources 刷新）里取前 N 张（NULL = 全部）。
     结果只取决于用户和卡列表：张数增加保留已有的卡，减少去掉排名最低的；卡消失只影响排到它的用户。`grants/grant-fields.ts` 的 `pickGrantGpus` 是预览用的同一规则（pg 测试固定两者一致）。
   `iam.effective_*_access` 只含**当前有效**（未过期）的授权，且只含 active 用户；配额 NULL = 不限，**0 不是"不限"**（DB CHECK 要求 `> 0`，GPU 张数 0 = 无卡）。

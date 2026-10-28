@@ -1,24 +1,83 @@
 import { useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { Copy } from 'lucide-react';
-import { Role, zCreateUserRequest, type CreateUserRequest, type UserDto } from '@nyabase/common';
+import { Copy, Dices, Eye, EyeOff } from 'lucide-react';
+import {
+  MAX_USER_NOTE_LENGTH,
+  Role,
+  zCreateUserRequest,
+  type CreateUserRequest,
+  type UserDto,
+} from '@nyabase/common';
 import { api } from '../../lib/api.js';
 import { errorMessage } from '../../lib/api-error.js';
 import { Button } from '../../components/ui/button.js';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '../../components/ui/dialog.js';
 import { Input } from '../../components/ui/input.js';
+import { Textarea } from '../../components/ui/textarea.js';
 import { FormField, SelectField } from '../../components/layout/form-field.js';
 import { ROLE_OPTIONS } from '../../lib/display-labels.js';
 import { queryKeys } from '../../lib/query-keys.js';
 import { toast } from '../../hooks/use-toast.js';
-import { copyOneTimeSecret } from '../../lib/one-time-secret.js';
+import { copyOneTimeSecret, generateOneTimePassword } from '../../lib/one-time-secret.js';
 import { useHasRole } from '../../lib/use-role.js';
+
+const EMPTY_FORM = { username: '', displayName: '', password: '', note: '', role: Role.User as Role };
+
+/** The initial password: typed, or generated (and then shown so it can be checked). */
+function InitialPasswordField({
+  value,
+  onChange,
+  shown,
+  onShownChange,
+}: {
+  value: string;
+  onChange: (value: string) => void;
+  shown: boolean;
+  onShownChange: (shown: boolean) => void;
+}) {
+  return (
+    <FormField id="new-user-password" label="初始密码" hint="创建后显示一次，请转交用户。">
+      <div className="flex gap-2">
+        <Input
+          id="new-user-password"
+          type={shown ? 'text' : 'password'}
+          className={shown ? 'font-mono' : undefined}
+          autoComplete="new-password"
+          value={value}
+          onChange={(event) => onChange(event.target.value)}
+        />
+        <Button
+          type="button"
+          variant="outline"
+          size="icon"
+          aria-label={shown ? '隐藏密码' : '显示密码'}
+          onClick={() => onShownChange(!shown)}
+        >
+          {shown ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+        </Button>
+        <Button
+          type="button"
+          variant="outline"
+          className="shrink-0"
+          data-testid="new-user-random-password"
+          onClick={() => {
+            onChange(generateOneTimePassword());
+            onShownChange(true);
+          }}
+        >
+          <Dices className="h-4 w-4" />随机
+        </Button>
+      </div>
+    </FormField>
+  );
+}
 
 export function CreateUserDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (open: boolean) => void }) {
   const queryClient = useQueryClient();
   // Only an admin hands out a role above user; user admins create plain users.
   const canChooseRole = useHasRole(Role.Admin);
-  const [form, setForm] = useState({ username: '', displayName: '', password: '', role: Role.User as Role });
+  const [form, setForm] = useState(EMPTY_FORM);
+  const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [createdCreds, setCreatedCreds] = useState<{ username: string; password: string } | null>(null);
   const create = useMutation({
@@ -27,23 +86,29 @@ export function CreateUserDialog({ open, onOpenChange }: { open: boolean; onOpen
       toast({ title: '用户已创建' });
       void queryClient.invalidateQueries({ queryKey: queryKeys.users.admin });
       setCreatedCreds({ username: variables.username, password: variables.password });
-      setForm({ username: '', displayName: '', password: '', role: Role.User });
+      setForm(EMPTY_FORM);
+      setShowPassword(false);
       setError(null);
     },
     onError: (mutationError) => setError(errorMessage(mutationError)),
   });
   const submit = () => {
-    const parsed = zCreateUserRequest.safeParse(form);
+    const parsed = zCreateUserRequest.safeParse({ ...form, note: form.note || null });
     if (!parsed.success) {
       setError(parsed.error.issues[0]?.message ?? '请检查用户信息');
       return;
     }
     create.mutate(parsed.data);
   };
+  const update = (key: 'username' | 'displayName' | 'password' | 'note', value: string) => {
+    setForm((current) => ({ ...current, [key]: value }));
+    setError(null);
+  };
   const handleOpenChange = (next: boolean) => {
     if (!next) {
       setCreatedCreds(null);
-      setForm({ username: '', displayName: '', password: '', role: Role.User });
+      setForm(EMPTY_FORM);
+      setShowPassword(false);
       setError(null);
     }
     onOpenChange(next);
@@ -91,23 +156,33 @@ export function CreateUserDialog({ open, onOpenChange }: { open: boolean; onOpen
               <DialogTitle>新建用户</DialogTitle>
             </DialogHeader>
             <div className="space-y-3">
-              {(['username', 'displayName', 'password'] as const).map((key) => {
-                const labels = { username: '用户名', displayName: '显示名称', password: '初始密码' } as const;
+              {(['username', 'displayName'] as const).map((key) => {
+                const labels = { username: '用户名', displayName: '显示名称' } as const;
                 return (
                   <FormField key={key} id={`new-user-${key}`} label={labels[key]}>
                     <Input
                       id={`new-user-${key}`}
-                      type={key === 'password' ? 'password' : 'text'}
                       value={form[key]}
-                      onChange={(event) => {
-                        const value = event.target.value;
-                        setForm((current) => ({ ...current, [key]: value }));
-                        setError(null);
-                      }}
+                      onChange={(event) => update(key, event.target.value)}
                     />
                   </FormField>
                 );
               })}
+              <InitialPasswordField
+                value={form.password}
+                onChange={(value) => update('password', value)}
+                shown={showPassword}
+                onShownChange={setShowPassword}
+              />
+              <FormField id="new-user-note" label="备注（可选）" hint="仅管理员可见">
+                <Textarea
+                  id="new-user-note"
+                  rows={2}
+                  maxLength={MAX_USER_NOTE_LENGTH}
+                  value={form.note}
+                  onChange={(event) => update('note', event.target.value)}
+                />
+              </FormField>
               {canChooseRole ? (
                 <SelectField
                   id="new-user-role"

@@ -88,15 +88,35 @@ function SidebarNav({
   );
 }
 
+/** The user center, pinned under the navigation rather than inside the account menu. */
+function ProfileLink({ pathname, onNavigate }: { pathname: string; onNavigate?: () => void }) {
+  const isActive = pathname === '/profile' || pathname.startsWith('/profile/');
+  return (
+    <Link
+      to="/profile"
+      onClick={onNavigate}
+      aria-current={isActive ? 'page' : undefined}
+      data-testid="nav-profile"
+      className={cn(
+        'flex items-center gap-3 rounded-md px-3 py-2 text-sm transition-colors md:py-1',
+        isActive
+          ? 'bg-accent font-medium text-accent-foreground'
+          : 'text-muted-foreground hover:bg-accent/60 hover:text-accent-foreground',
+      )}
+    >
+      <UserCircle className="h-4 w-4 shrink-0" />
+      <span className="truncate">用户中心</span>
+    </Link>
+  );
+}
+
 /** Account, theme and sign-out live together at the bottom, always in view. */
 function AccountMenu({
   displayName,
   username,
-  onNavigate,
 }: {
   displayName?: string;
   username?: string;
-  onNavigate?: () => void;
 }) {
   const mode = useThemeStore((state) => state.mode);
   const setMode = useThemeStore((state) => state.setMode);
@@ -120,12 +140,6 @@ function AccountMenu({
         </button>
       </DropdownMenuTrigger>
       <DropdownMenuContent side="top" align="start" className="w-[var(--radix-dropdown-menu-trigger-width)] min-w-52">
-        <DropdownMenuItem asChild>
-          <Link to="/profile" onClick={onNavigate}>
-            <UserCircle className="mr-2 h-4 w-4" />用户中心
-          </Link>
-        </DropdownMenuItem>
-        <DropdownMenuSeparator />
         <DropdownMenuLabel className="text-xs font-normal text-muted-foreground">主题</DropdownMenuLabel>
         <DropdownMenuRadioGroup
           value={mode}
@@ -175,8 +189,9 @@ function SidebarPanel({
       <ScrollArea className="min-h-0 flex-1">
         <SidebarNav sections={sections} pathname={pathname} onNavigate={onNavigate} />
       </ScrollArea>
-      <div className="shrink-0 border-t p-2 pb-[max(0.5rem,env(safe-area-inset-bottom))]">
-        <AccountMenu displayName={displayName} username={username} onNavigate={onNavigate} />
+      <div className="shrink-0 space-y-1 border-t p-2 pb-[max(0.5rem,env(safe-area-inset-bottom))]">
+        <ProfileLink pathname={pathname} onNavigate={onNavigate} />
+        <AccountMenu displayName={displayName} username={username} />
       </div>
     </div>
   );

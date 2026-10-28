@@ -18,6 +18,7 @@ const USER_ADMIN_ROUTES = [
   'GET admin/catalog/grant-servers',
   'GET admin/catalog/metric-servers',
   'GET admin/catalog/users',
+  'GET server-grants',
   'GET admin/grant-bundles',
   'GET admin/grant-bundles/:param',
   'GET admin/grant-bundles/server-profiles/:param',

@@ -130,6 +130,8 @@ export interface InfrastructureSharedBackendTable {
   total_bytes: InfrastructureBigInt | null;
   used_bytes: InfrastructureBigInt | null;
   overcommit_ratio: InfrastructureNumeric;
+  note: string | null;
+  max_volumes_per_user: number | null;
   revision: InfrastructureBigInt;
   created_at: InfrastructureGeneratedTimestamp;
   updated_at: InfrastructureGeneratedTimestamp;

@@ -5,7 +5,7 @@ import { FailureCode, type GrantBundleDto, type PutServerGrantRequest, type Serv
 import { ApiError, apiErrorDetails, errorMessage } from '../../lib/api-error.js';
 import { api } from '../../lib/api.js';
 import {
-  bundleOptionLabel,
+  bundleOptionGroups,
   type OverrideDraft,
   overrideDraftFrom,
   parseOverrideDraft,
@@ -32,7 +32,7 @@ interface ReplacePrompt {
 }
 
 /**
- * Give the user a bundle: pick it (labelled with its server), keep or
+ * Give the user a bundle: pick it (grouped by server), keep or
  * override each of its quotas, set the expiry. A user holds one bundle per
  * server, so assigning onto a server they already have asks before replacing.
  */
@@ -44,10 +44,7 @@ export function AssignBundleCard({ userId, grants }: { userId: string; grants: S
   const [draft, setDraft] = useState<OverrideDraft>(() => overrideDraftFrom());
   const [expiresAt, setExpiresAt] = useState('');
   const [replacePrompt, setReplacePrompt] = useState<ReplacePrompt | null>(null);
-  const bundles = [...(bundlesQuery.data ?? [])].sort((a, b) => (
-    serverName(a.serverId, servers).localeCompare(serverName(b.serverId, servers), 'zh-CN')
-    || a.name.localeCompare(b.name, 'zh-CN')
-  ));
+  const bundles = bundlesQuery.data ?? [];
   const bundle = bundles.find((row) => row.id === bundleId);
   const existing = bundle ? grants.find((grant) => grant.serverId === bundle.serverId) : undefined;
   const overrides = parseOverrideDraft(draft, { bundle });
@@ -100,7 +97,7 @@ export function AssignBundleCard({ userId, grants }: { userId: string; grants: S
   return (
     <SectionCard
       title="分配授权模板"
-      description="每台服务器上一个用户只能有一个授权模板；数据盘在下方的服务器授权里添加。"
+      description="每台服务器上一个用户只能有一个授权模板；数据盘在下方服务器授权的详情里添加。"
       testId="grant-assign"
     >
       {noBundles ? (
@@ -116,12 +113,12 @@ export function AssignBundleCard({ userId, grants }: { userId: string; grants: S
             label="授权模板"
             value={bundleId}
             onChange={pickBundle}
-            options={bundles.map((row) => [row.id, bundleOptionLabel(row, serverName(row.serverId, servers))])}
+            options={bundleOptionGroups(bundles, (id) => serverName(id, servers))}
             placeholder="选择授权模板"
             loading={bundlesQuery.isLoading}
             hint={existing
               ? `该用户在 ${serverName(existing.serverId, servers)} 上已有授权模板「${existing.bundleName}」，提交时将确认是否替换。`
-              : undefined}
+              : bundle ? `服务器：${serverName(bundle.serverId, servers)}` : undefined}
           />
           {bundle ? (
             <>

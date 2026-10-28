@@ -262,6 +262,26 @@ export class VolumeCapacityService {
     await this.assertSharedBackendCapacityWithinGrants(transaction, ownerId, sharedBackendId, delta);
   }
 
+  /**
+   * The backend's per-user cap on shared volumes, for a create. Runs in the
+   * create's SERIALIZABLE transaction (`VOLUME_TX`): two creates of the same
+   * owner racing for the last slot read and insert the same predicate, so one
+   * aborts with 40001 and its retry sees the other's volume.
+   */
+  async assertSharedVolumeSlot(transaction: Tx, ownerId: string, sharedBackendId: string): Promise<void> {
+    const backend = await loadBackend(transaction, sharedBackendId);
+    const limit = backend.max_volumes_per_user;
+    if (limit === null) return;
+    const owned = await this.repository.countLiveSharedVolumes(ownerId, sharedBackendId, transaction);
+    if (owned >= limit) {
+      throw new ConflictException({
+        code: FailureCode.SharedBackendVolumeLimitReached,
+        message: `At most ${limit} shared volumes per user on this backend`,
+        details: { sharedBackendId, maxVolumesPerUser: limit, ownedVolumes: owned },
+      });
+    }
+  }
+
   async assertSharedCapacityPhysical(
     transaction: Tx,
     sharedBackendId: string,

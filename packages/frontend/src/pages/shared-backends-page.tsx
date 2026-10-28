@@ -26,6 +26,8 @@ import { QueryView } from '../components/layout/query-view.js';
 import { SectionCard } from '../components/layout/section-card.js';
 import { TechnicalId } from '../components/refs/technical-id.js';
 import { FsidConflictAlert } from '../components/storage/fsid-conflict-alert.js';
+import { SharedBackendPolicyFields } from '../components/storage/shared-backend-policy-fields.js';
+import { maxVolumesPerUserLabel, parseMaxVolumesPerUser } from '../lib/shared-backend-form.js';
 import { formatGib, formatPercent, sharedBackendAvailableBytes } from '../lib/utils.js';
 import { toast } from '../hooks/use-toast.js';
 import { queryKeys } from '../lib/query-keys.js';
@@ -84,6 +86,7 @@ export default function SharedBackendsPage() {
                   <TableHead>已用</TableHead>
                   <TableHead>可用</TableHead>
                   <TableHead>超分</TableHead>
+                  <TableHead>每用户卷数</TableHead>
                   <TableHead>在线执行端</TableHead>
                   <TableHead>服务器</TableHead>
                 </TableRow>
@@ -128,12 +131,14 @@ function BackendRow({ backend }: { backend: SharedBackendDto }) {
         >
           {backend.displayName ?? backend.name}
         </Link>
+        {backend.note ? <p className="mt-0.5 max-w-[22rem] truncate text-xs text-muted-foreground" title={backend.note}>{backend.note}</p> : null}
         <TechnicalId label="Identity key" value={backend.identityKey} kind="opaque" />
       </TableCell>
       <TableCell>{formatGib(backend.totalBytes)}</TableCell>
       <TableCell>{formatGib(backend.usedBytes)}</TableCell>
       <TableCell>{formatGib(available)}</TableCell>
       <TableCell>{formatPercent(backend.overcommitRatio)}</TableCell>
+      <TableCell>{maxVolumesPerUserLabel(backend.maxVolumesPerUser)}</TableCell>
       <TableCell>{backend.hasOnlineExecutor ? '有' : '无'}</TableCell>
       <TableCell>{backend.serverIds.length} 台</TableCell>
     </TableRow>
@@ -158,6 +163,8 @@ function CreateSharedBackendDialog({
     cephFsid: '',
     overcommitRatio: '1',
   });
+  const [note, setNote] = useState('');
+  const [maxVolumes, setMaxVolumes] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [conflict, setConflict] = useState<SharedBackendFsidConflict | null>(null);
   const create = useMutation({
@@ -180,10 +187,16 @@ function CreateSharedBackendDialog({
     },
   });
   const submit = () => {
+    if (parseMaxVolumesPerUser(maxVolumes) === undefined) {
+      setError('每用户最多共享卷须为 1 到 10000 的整数');
+      return;
+    }
     const parsed = zCreateSharedBackendRequest.safeParse({
       ...form,
       displayName: form.displayName || null,
       overcommitRatio: Number(form.overcommitRatio),
+      note: note.trim() || null,
+      maxVolumesPerUser: parseMaxVolumesPerUser(maxVolumes),
     });
     if (!parsed.success) {
       setError(parsed.error.issues[0]?.message ?? '请检查共享后端参数');
@@ -231,6 +244,13 @@ function CreateSharedBackendDialog({
               />
             </FormField>
           ))}
+          <SharedBackendPolicyFields
+            idPrefix="shared-backend"
+            note={note}
+            onNoteChange={setNote}
+            maxVolumes={maxVolumes}
+            onMaxVolumesChange={setMaxVolumes}
+          />
           {conflict && <FsidConflictAlert conflict={conflict} />}
           {error && <p className="text-sm text-destructive">{error}</p>}
         </div>

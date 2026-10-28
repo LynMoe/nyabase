@@ -268,6 +268,14 @@ function SharedVolumeFormBody({ sharedVolume: editing, open, onOpenChange }: Sha
               emptyText="没有可用的共享后端"
             />
           )}
+          {!editing && selectedBackend && (selectedBackend.note || selectedBackend.maxVolumesPerUser !== null) ? (
+            <div className="space-y-1 rounded-md border bg-muted/30 px-3 py-2 text-xs" data-testid="shared-volume-backend-note">
+              {selectedBackend.note ? <p className="whitespace-pre-wrap">{selectedBackend.note}</p> : null}
+              {selectedBackend.maxVolumesPerUser !== null ? (
+                <p className="text-muted-foreground">每位用户在此共享存储上最多 {selectedBackend.maxVolumesPerUser} 个共享卷</p>
+              ) : null}
+            </div>
+          ) : null}
           {editing ? (
             <EditSizeField
               sizeBytes={editing.sizeBytes}

@@ -24,7 +24,7 @@ describe('user update controller boundaries', () => {
 
     await expect(controller.updateUser('user-a', {
       status: UserStatus.Disabled,
-    }, testActor('user-a'))).rejects.toThrow('status and role cannot be changed through the self-service route');
+    }, testActor('user-a'))).rejects.toThrow('status, role and note cannot be changed through the self-service route');
     expect(updateSelf).not.toHaveBeenCalled();
   });
 
@@ -117,6 +117,32 @@ describe('user routes: self, administrator, everyone else', () => {
     await controller.updateUser('admin-a', { password: 'new-password-1', currentPassword: 'old' }, manager);
     await controller.updateUser('admin-a', { displayName: 'Me' }, manager);
     expect(updateSelf).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('administrators\' note on a user', () => {
+  it('shows the note only to user admins, and only they write it (never on themselves)', async () => {
+    const toDtoSpy = vi.fn((user: unknown, options?: { withNote?: boolean }) => ({ user, withNote: options?.withNote }));
+    const findById = vi.fn().mockResolvedValue({ id: 'user-b' });
+    const updateUser = vi.fn().mockResolvedValue({ id: 'user-b' });
+    const updateSelf = vi.fn();
+    const controller = controllerWith({ toDto: toDtoSpy, findById, updateUser, updateSelf });
+    const userAdmin = testActor('ua-a', Role.UserAdmin);
+
+    await expect(controller.getUser('user-b', userAdmin)).resolves.toMatchObject({ withNote: true });
+    await expect(controller.getUser('user-a', testActor('user-a'))).resolves.toMatchObject({ withNote: false });
+    await controller.updateUser('user-b', { note: '  lab member  ' }, userAdmin);
+    expect(updateUser).toHaveBeenLastCalledWith('user-b', { note: 'lab member' }, 'ua-a');
+    await controller.updateUser('user-b', { note: '' }, userAdmin);
+    expect(updateUser).toHaveBeenLastCalledWith('user-b', { note: null }, 'ua-a');
+
+    await expect(controller.updateUser('ua-a', { note: 'me' }, userAdmin))
+      .rejects.toBeInstanceOf(BadRequestException);
+    await expect(controller.updateUser('user-a', { note: 'me' }, testActor('user-a')))
+      .rejects.toBeInstanceOf(BadRequestException);
+    expect(updateSelf).not.toHaveBeenCalled();
+    await controller.updateUser('admin-a', { note: 'me' }, testActor('admin-a', Role.Admin));
+    expect(updateUser).toHaveBeenLastCalledWith('admin-a', { note: 'me' }, 'admin-a');
   });
 });
 
