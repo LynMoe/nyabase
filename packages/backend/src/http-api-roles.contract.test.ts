@@ -20,6 +20,7 @@ const USER_ADMIN_ROUTES = [
   'GET admin/catalog/users',
   'GET admin/grant-bundles',
   'GET admin/grant-bundles/:param',
+  'GET admin/grant-bundles/server-profiles/:param',
   'GET audit',
   'GET audit/:param',
   'GET users',

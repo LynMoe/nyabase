@@ -18,11 +18,15 @@ import {
 import { CurrentActor, RequireRole } from '../iam/decorators.js';
 import type { Actor } from '../iam/actor.js';
 import { GrantBundlesService } from './grant-bundles.service.js';
+import { GrantServerProfileService } from './grant-server-profile.js';
 
 @Controller('admin/grant-bundles')
 @RequireRole(Role.UserAdmin)
 export class GrantBundlesController {
-  constructor(private readonly bundles: GrantBundlesService) {}
+  constructor(
+    private readonly bundles: GrantBundlesService,
+    private readonly profiles: GrantServerProfileService,
+  ) {}
 
   @Get()
   list(@Query('serverId') serverId?: string) {
@@ -32,6 +36,12 @@ export class GrantBundlesController {
   @Post()
   create(@Body() body: unknown, @CurrentActor() actor: Actor) {
     return this.bundles.create(actor, zCreateGrantBundleRequest.parse(body));
+  }
+
+  /** The server's hardware and pools, for reference while editing its bundles. */
+  @Get('server-profiles/:serverId')
+  serverProfile(@Param('serverId') serverId: string) {
+    return this.profiles.profile(zResourceIdentity.parse(serverId));
   }
 
   @Get(':id')

@@ -102,3 +102,40 @@ export interface GrantBundlePreviewDto {
   /** Grants with at least one change or one shielding override, ordered by username. */
   entries: GrantBundlePreviewEntryDto[];
 }
+
+/**
+ * The hardware and storage of a bundle's server, for reference while editing a
+ * bundle. Hardware is read live from the server's Incus (`live`); while the
+ * server is unreachable only what the database keeps is filled in.
+ */
+export interface GrantServerProfileDto {
+  serverId: string;
+  /** True when the hardware fields come from a live Incus read just now. */
+  live: boolean;
+  cpu: {
+    /** Socket product names, one entry per distinct model with its count. */
+    models: Array<{ name: string; sockets: number }>;
+    /** Logical CPUs (threads) of the last reported topology; null until reported. */
+    logical: number | null;
+    /** Logical CPUs no container is pinned to. */
+    reserved: number;
+    /** What a bundle can pin: logical minus reserved; null until reported. */
+    allocatable: number | null;
+  };
+  /** Physical memory in bytes; null when not read live. */
+  memoryBytes: number | null;
+  /** Registered local pools of the server; `system` marks the one system disks live on. */
+  pools: Array<{
+    poolId: string;
+    name: string;
+    driver: string;
+    system: boolean;
+    totalBytes: number | null;
+    usedBytes: number | null;
+  }>;
+  gpu: {
+    enabled: boolean;
+    /** NVIDIA cards: live with their model, else the last observed list without one. */
+    cards: Array<{ pciAddress: string; model: string | null }>;
+  };
+}

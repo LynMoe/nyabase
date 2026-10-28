@@ -56,6 +56,7 @@ export const queryKeys = {
   grantBundles: {
     all: ['grant-bundles'] as const,
     list: ['grant-bundles', 'list'] as const,
+    serverProfile: (serverId: string) => ['grant-bundles', 'server-profile', serverId] as const,
   },
   containers: {
     adminList: ['containers', 'admin'] as const,

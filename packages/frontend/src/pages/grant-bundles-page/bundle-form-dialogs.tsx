@@ -30,6 +30,7 @@ import {
 import { queryKeys } from '../../lib/query-keys.js';
 import { failureCodeLabel } from '../../lib/status-labels.js';
 import { BundlePreview } from './bundle-preview.js';
+import { ServerProfilePanel } from './server-profile-panel.js';
 
 /** Bundle errors the page explains in its own words; anything else keeps the server's message. */
 export function bundleErrorText(error: unknown): string {
@@ -104,6 +105,7 @@ export function BundleCreateDialog({ defaultServerId, onClose }: { defaultServer
             emptyText="还没有服务器"
           />
           <NameField id="grant-bundle-name" value={name} onChange={(value) => { setName(value); setError(null); }} />
+          <ServerProfilePanel serverId={serverId} />
           <BundleQuotaFields
             idPrefix="grant-bundle"
             texts={shownTexts}
@@ -194,6 +196,7 @@ export function BundleEditDialog({ bundle, onClose }: { bundle: GrantBundleDto; 
         ) : (
           <div className="space-y-3">
             <NameField id={`grant-bundle-${base.id}-name`} value={name} onChange={setName} />
+            <ServerProfilePanel serverId={base.serverId} />
             <BundleQuotaFields
               idPrefix={`grant-bundle-${base.id}`}
               texts={texts}
