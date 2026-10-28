@@ -14,6 +14,7 @@ import { UsersService } from './users.service.js';
 import { UserSshKeysService } from './user-ssh-keys.service.js';
 import { SshClientConfigService } from './ssh-client-config.service.js';
 import { RequireRole, CurrentActor } from '../iam/decorators.js';
+import { RefuseImpersonation } from '../iam/decorators.js';
 import { hasRole, type Actor, requireUserId } from '../iam/actor.js';
 import {
   Role,
@@ -61,6 +62,7 @@ export class UsersController {
   }
 
   @Patch(':id')
+  @RefuseImpersonation()
   async updateUser(
     @Param('id') id: string,
     @Body() body: unknown,
@@ -112,6 +114,7 @@ export class UsersController {
   }
 
   @Post(':id/ssh-keys')
+  @RefuseImpersonation()
   async addSshKey(
     @Param('id') id: string,
     @Body() body: unknown,
@@ -123,6 +126,7 @@ export class UsersController {
   }
 
   @Delete(':id/ssh-keys/:keyId')
+  @RefuseImpersonation()
   @HttpCode(204)
   async deleteSshKey(
     @Param('id') id: string,

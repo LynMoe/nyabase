@@ -1,5 +1,5 @@
 import { Global, Module } from '@nestjs/common';
-import { APP_GUARD } from '@nestjs/core';
+import { APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
 import { JwtModule, type JwtSignOptions } from '@nestjs/jwt';
 import { NyabaseConfigService } from '../platform/config/nyabase-config.service.js';
 import { AccessChangeNotifier, AccessResolverService } from './access-resolver.service.js';
@@ -8,7 +8,7 @@ import { AuditService } from './audit.service.js';
 import { AuditSnapshotResolver } from './audit-snapshot.resolver.js';
 import { AuthController } from './auth.controller.js';
 import { AuthService } from './auth.service.js';
-import { RolesGuard, JwtAuthGuard } from './guards.js';
+import { ImpersonationInterceptor, JwtAuthGuard, RolesGuard } from './guards.js';
 import { IamAuthRepository } from './iam-auth.repository.js';
 import { SessionRevocationService } from './session-revocation.service.js';
 
@@ -44,6 +44,7 @@ import { SessionRevocationService } from './session-revocation.service.js';
     // Registration order is execution order: authenticate, then authorize.
     { provide: APP_GUARD, useFactory: (guard: JwtAuthGuard) => guard, inject: [JwtAuthGuard] },
     { provide: APP_GUARD, useFactory: (guard: RolesGuard) => guard, inject: [RolesGuard] },
+    { provide: APP_INTERCEPTOR, useClass: ImpersonationInterceptor },
   ],
   controllers: [AuthController],
   exports: [

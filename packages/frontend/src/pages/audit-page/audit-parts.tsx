@@ -133,6 +133,9 @@ export function AuditDetailDialog({
               <Field label="操作" value={auditActionLabel(log.action)} />
               <Field label="操作者" value={actorLabel(log)} />
               <Field label="操作者 ID" value={log.actorId ?? '系统'} mono />
+              {log.impersonatorId && (
+                <Field label="代操作的管理员" value={`${impersonatorLabel(log)}（${log.impersonatorId}）`} />
+              )}
               <Field label="目标" value={targetLabel(log)} />
               <Field label="目标 ID" value={log.targetId ?? '无'} mono />
             </section>
@@ -245,7 +248,15 @@ function SnapshotPanel({
 }
 
 export function actorLabel(log: AuditLogDto): string {
-  return log.actorName ?? log.actorUsername ?? (log.actorId ? `用户 ${shortId(log.actorId)}` : '系统');
+  const actor = log.actorName ?? log.actorUsername ?? (log.actorId ? `用户 ${shortId(log.actorId)}` : '系统');
+  const impersonator = impersonatorLabel(log);
+  return impersonator ? `${actor}（${impersonator} 代操作）` : actor;
+}
+
+/** The administrator who acted as the actor, or null for an ordinary row. */
+function impersonatorLabel(log: AuditLogDto): string | null {
+  if (!log.impersonatorId) return null;
+  return log.impersonatorName ?? log.impersonatorUsername ?? `用户 ${shortId(log.impersonatorId)}`;
 }
 
 export function targetLabel(log: AuditLogDto): string {

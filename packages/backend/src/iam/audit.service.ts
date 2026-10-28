@@ -21,6 +21,7 @@ import {
 } from './audit-snapshot.resolver.js';
 import { isRecord } from '../platform/domain-utils.js';
 import { afterCommit } from '../platform/post-commit.js';
+import { currentImpersonation } from '../platform/request-context.js';
 
 const CLEANUP_INTERVAL_MS = 60_000;
 /** Upper bound on back-to-back cleanup batches in one pass. */
@@ -104,8 +105,15 @@ export class AuditService {
     if (targetId && targetType) {
       relatedRefs.unshift({ type: targetType, id: targetId });
     }
+    // Only the impersonated user's own rows: other actors (the system, or a
+    // row about someone else) were not acting for the administrator.
+    const impersonation = currentImpersonation();
+    const impersonatorId = actorId !== null && impersonation?.userId === actorId
+      ? impersonation.impersonatorId
+      : null;
     const requestedRefs = [
       ...(actorId ? [{ type: 'user', id: actorId }] : []),
+      ...(impersonatorId ? [{ type: 'user', id: impersonatorId }] : []),
       ...(targetId ? [{ type: targetType, id: targetId }] : []),
       ...relatedRefs,
     ];
@@ -127,6 +135,9 @@ export class AuditService {
     const actorSnapshot = actorId
       ? resolvedByRef.get(snapshotRefKey('user', actorId)) ?? null
       : null;
+    const impersonatorSnapshot = impersonatorId
+      ? resolvedByRef.get(snapshotRefKey('user', impersonatorId)) ?? null
+      : null;
     const targetSnapshot = targetId
       ? resolvedByRef.get(snapshotRefKey(targetType, targetId)) ?? null
       : null;
@@ -144,6 +155,9 @@ export class AuditService {
       actorName: actorSnapshot?.name ?? null,
       actorUsername: labelString(actorSnapshot, 'username'),
       actorSnapshot,
+      impersonatorId,
+      impersonatorName: impersonatorSnapshot?.name ?? null,
+      impersonatorUsername: labelString(impersonatorSnapshot, 'username'),
       action,
       targetId,
       targetType,

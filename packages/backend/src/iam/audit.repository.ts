@@ -26,6 +26,9 @@ export interface AuditEvent {
   actorName: string | null;
   actorUsername: string | null;
   actorSnapshot: AuditResourceSnapshotDto | null;
+  impersonatorId: string | null;
+  impersonatorName: string | null;
+  impersonatorUsername: string | null;
   action: string;
   targetId: string | null;
   targetType: string | null;
@@ -42,6 +45,9 @@ export interface AppendAuditEvent {
   actorName: string | null;
   actorUsername: string | null;
   actorSnapshot: AuditResourceSnapshotDto | null;
+  impersonatorId: string | null;
+  impersonatorName: string | null;
+  impersonatorUsername: string | null;
   action: AuditAction;
   targetId: string | null;
   targetType: string | null;
@@ -90,6 +96,9 @@ export class AuditRepository {
         actor_name: event.actorName,
         actor_username: event.actorUsername,
         actor_snapshot: json(event.actorSnapshot),
+        impersonator_id: event.impersonatorId,
+        impersonator_name: event.impersonatorName,
+        impersonator_username: event.impersonatorUsername,
         action: event.action,
         target_id: event.targetId,
         target_type: event.targetType,
@@ -121,7 +130,19 @@ export class AuditRepository {
 
     for (const [key, value] of Object.entries(filter)) {
       if (value === undefined) continue;
-      const column = filterColumn(key as keyof AuditListFilter);
+      if (key === 'actorId') {
+        // Someone's actions include those they took acting as another user.
+        itemsQuery = itemsQuery.where((expression) => expression.or([
+          expression('actor_id', '=', value),
+          expression('impersonator_id', '=', value),
+        ]));
+        countQuery = countQuery.where((expression) => expression.or([
+          expression('actor_id', '=', value),
+          expression('impersonator_id', '=', value),
+        ]));
+        continue;
+      }
+      const column = filterColumn(key as Exclude<keyof AuditListFilter, 'actorId'>);
       itemsQuery = itemsQuery.where(column, '=', value);
       countQuery = countQuery.where(column, '=', value);
     }
@@ -236,11 +257,10 @@ export class AuditRepository {
 }
 
 function filterColumn(
-  key: keyof AuditListFilter,
-): 'action' | 'actor_id' | 'target_id' | 'target_type' {
+  key: Exclude<keyof AuditListFilter, 'actorId'>,
+): 'action' | 'target_id' | 'target_type' {
   switch (key) {
     case 'action': return 'action';
-    case 'actorId': return 'actor_id';
     case 'targetId': return 'target_id';
     case 'targetType': return 'target_type';
   }
@@ -253,6 +273,9 @@ function toAuditEvent(row: Selectable<AuditEventTable>): AuditEvent {
     actorName: row.actor_name,
     actorUsername: row.actor_username,
     actorSnapshot: snapshot(row.actor_snapshot),
+    impersonatorId: row.impersonator_id,
+    impersonatorName: row.impersonator_name,
+    impersonatorUsername: row.impersonator_username,
     action: row.action,
     targetId: row.target_id,
     targetType: row.target_type,

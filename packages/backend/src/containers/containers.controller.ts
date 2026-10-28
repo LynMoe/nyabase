@@ -18,6 +18,7 @@ import {
   zPatchContainerRootSizeRequest,
 } from '@nyabase/common';
 import { CurrentActor } from '../iam/decorators.js';
+import { RefuseImpersonation } from '../iam/decorators.js';
 import type { Actor } from '../iam/actor.js';
 import { ContainerControlService } from './container-control.service.js';
 
@@ -161,6 +162,7 @@ export class ContainersController {
   }
 
   @Post(':containerId/exec-sessions')
+  @RefuseImpersonation()
   execSession(
     @Param('containerId') id: string,
     @Body() body: unknown,

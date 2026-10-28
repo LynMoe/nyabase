@@ -21,6 +21,14 @@ export const CurrentActor = createParamDecorator(
   },
 );
 
+export const REFUSE_IMPERSONATION_KEY = 'refuse_impersonation';
+
+/**
+ * The route acts on the caller's own credentials or browser session (password,
+ * SSH keys, console), so an administrator acting as someone may not call it.
+ */
+export const RefuseImpersonation = () => SetMetadata(REFUSE_IMPERSONATION_KEY, true);
+
 export const CurrentUser = createParamDecorator(
   (_data: unknown, ctx: ExecutionContext): UserRecord => {
     const request = ctx.switchToHttp().getRequest();

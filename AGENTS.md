@@ -46,6 +46,12 @@ Vite 通过 alias 将 `@nyabase/common` 指向 `src/index.ts`，但 `index.ts` �
   `http-api-roles.contract.test.ts` 固定每条路由的最低角色。`/admin/*` 路由没有声明时 `RolesGuard` 返回 403。
   角色严格嵌套（admin ⊇ user_admin ⊇ user）；service 里用 `hasRole(actor, min)`（system actor 恒为 true）。
   事务内复核用 `iam/administration.ts` 的 `assertActorRole(transaction, actorId, min)`。
+- 代操作（impersonation）：admin 的请求带 `X-Nyabase-Act-As: <userId>`（common `ACT_AS_HEADER`）即以该用户身份执行，仍用 admin 自己的 access JWT，不是新凭据。
+  `JwtAuthGuard` 经 `iam/guards.ts` 的 `resolveImpersonation` 把 `request.user` 换成目标，actor 是目标用户（角色、所有权、授权、配额都按他）加 `impersonatorId`；
+  只有 admin 能代操作，目标只能是 active 的 `user` 角色（否则 403 `IMPERSONATION_DENIED`，头格式不对 400），每个请求都重新校验，`@Public()` 路由忽略此头。
+  作用于本人凭据 / 浏览器会话的路由标 `@RefuseImpersonation()`（改资料 / 密码、增删 SSH 公钥、控制台 exec session），`http-api-impersonation.contract.test.ts` 固定这份清单。
+  审计归属：`ImpersonationInterceptor` 让处理器跑在 `platform/request-context.ts` 的 AsyncLocalStorage 里，`AuditService` 只给 `actorId` 等于目标的行写 `impersonator_*`（000005）；
+  请求结束即失效（`active`），`ReconcileWakeService.wake` 在上下文之外调用监听器，所以被请求唤醒的 worker 与请求留下的定时器都不会继承它。`GET /audit?actorId=` 同时匹配 `impersonator_id`。intent 的 `requested_by` 仍是目标用户，所以 worker 执行这些 intent 时写的行（`incus.mutate`、`container.drift_corrected`）只记目标用户，代操作者看请求本身的那一行（如 `container.create`）。
 - `GET /server-grants?scope=all`（user_admin，没有 `scope=mine`）列出所有未删除用户的服务器授权，供用户列表显示授权服务器 badge；增删改仍走 `/users/:userId/server-grants`。
 - 用户备注（`iam.users.note`）是管理员对用户的备注：`UserDto.note` 只在 user_admin 及以上请求的 `GET /users`、`GET` / `PATCH` / `POST /users[/:id]` 里出现，
   登录 / 会话里的 `UserDto` 不带；自助路径不能改备注（user_admin 改不了自己的，admin 走管理员路径）。

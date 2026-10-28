@@ -3,6 +3,7 @@ import { METHOD_METADATA, PATH_METADATA } from '@nestjs/common/constants';
 import { readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { REFUSE_IMPERSONATION_KEY } from './iam/decorators.js';
 
 const METHOD_NAMES: Record<number, string> = {
   [RequestMethod.GET]: 'GET',
@@ -43,6 +44,8 @@ export interface DeclaredRoute {
   owner: string;
   /** Minimum role declared by the method- or class-level @RequireRole; null = none. */
   minRole: string | null;
+  /** Declares @RefuseImpersonation() (method or class). */
+  refusesImpersonation: boolean;
 }
 
 export async function declaredRoutes(): Promise<DeclaredRoute[]> {
@@ -76,6 +79,8 @@ export async function declaredRoutes(): Promise<DeclaredRoute[]> {
                 owner: `${file}:${exportName}.${methodName}`,
                 minRole: Reflect.getMetadata('required_role', handler)
                   ?? Reflect.getMetadata('required_role', value) ?? null,
+                refusesImpersonation: Boolean(Reflect.getMetadata(REFUSE_IMPERSONATION_KEY, handler)
+                  ?? Reflect.getMetadata(REFUSE_IMPERSONATION_KEY, value)),
               });
             }
           }

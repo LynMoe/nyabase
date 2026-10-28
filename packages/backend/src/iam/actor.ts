@@ -10,6 +10,8 @@ export interface UserActor {
   readonly role: Role;
   readonly authKind: UserActorAuthKind;
   readonly authVersion: number;
+  /** The administrator acting as this user (`X-Nyabase-Act-As`); absent otherwise. */
+  readonly impersonatorId?: string;
 }
 
 /**

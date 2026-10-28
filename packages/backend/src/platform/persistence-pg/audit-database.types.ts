@@ -13,6 +13,9 @@ export interface AuditEventTable {
   actor_name: string | null;
   actor_username: string | null;
   actor_snapshot: AuditJson | null;
+  impersonator_id: string | null;
+  impersonator_name: string | null;
+  impersonator_username: string | null;
   action: string;
   target_id: string | null;
   target_type: string | null;

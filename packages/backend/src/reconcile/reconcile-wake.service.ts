@@ -1,4 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { outsideRequestContext } from '../platform/request-context.js';
 import type { IntentResource } from './intent.repository.js';
 
 export interface ReconcileWakePayload {
@@ -20,7 +21,8 @@ export class ReconcileWakeService {
   wake(payload: ReconcileWakePayload): void {
     for (const listener of this.listeners) {
       try {
-        listener(payload);
+        // Timers the worker arms here must not carry the waking request's context.
+        outsideRequestContext(() => listener(payload));
       } catch (error) {
         this.logger.warn(`Reconcile wake listener failed: ${String(error)}`);
       }

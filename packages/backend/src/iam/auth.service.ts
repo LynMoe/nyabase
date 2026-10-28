@@ -339,6 +339,11 @@ export class AuthService {
     return ended.userId;
   }
 
+  /** The user row an administrator asks to act as (`X-Nyabase-Act-As`). */
+  findUserById(id: string): Promise<AuthUser | null> {
+    return this.persistence.findUserById(id);
+  }
+
   async validateJwtPayload(payload: JwtPayload): Promise<AuthUser> {
     if (
       typeof payload.sub !== 'string'

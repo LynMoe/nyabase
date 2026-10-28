@@ -144,6 +144,12 @@ export interface SystemSettingsDto {
   publicSettings: PublicSettingsDto;
 }
 
+/**
+ * An administrator's request acts as the user with this id: same session,
+ * the target's permissions, audited as done by the administrator for them.
+ */
+export const ACT_AS_HEADER = 'x-nyabase-act-as';
+
 export interface AuditResourceSnapshotDto {
   id: string | null;
   type: string | null;
@@ -157,6 +163,10 @@ export interface AuditLogDto {
   actorName: string | null;
   actorUsername: string | null;
   actorSnapshot: AuditResourceSnapshotDto | null;
+  /** The administrator who acted as `actor` (`X-Nyabase-Act-As`); null otherwise. */
+  impersonatorId: string | null;
+  impersonatorName: string | null;
+  impersonatorUsername: string | null;
   action: string;
   targetId: string | null;
   targetType: string | null;
