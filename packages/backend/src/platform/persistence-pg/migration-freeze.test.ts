@@ -20,6 +20,8 @@ const RELEASED_MIGRATION_CHECKSUMS: Readonly<Record<string, string>> = {
   '000004_notes-and-shared-volume-limit': '4921afb78f6ebcc08dba84592af229e59152d310a62cce1315cb3e487f6acd82',
   // Deployed to production on 2026-10-28 with bd78409.
   '000005_audit-impersonator': '0650632c377fb1947ba17d8211202b369078b626da6f0844882ddf25af1d49ab',
+  // Deployed to production on 2026-10-29 with 54e9a32.
+  '000006_must-change-password': 'baf48e9d04cbdad207b15bf6d11cb374360339aaeba3f26b3c1c2db603cf4f55',
 };
 
 describe('released SQL migrations', () => {
