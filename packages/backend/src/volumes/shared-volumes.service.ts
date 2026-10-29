@@ -294,6 +294,7 @@ export class SharedVolumesService {
       if (access === 'admin') {
         await this.capacityRules.assertSharedCapacityPhysical(
           transaction,
+          locked.owner_id,
           locked.shared_backend_id!,
           reservation.committedDeltaBytes,
         );

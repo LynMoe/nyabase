@@ -191,6 +191,35 @@ describePg('shared volume quota reservations', () => {
     });
   });
 
+  it('overcommits a shared backend across owners, never for one owner', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const { userId, backendId } = await seedSharedBackend(database);
+      await database.updateTable('infra.shared_backends').set({ overcommit_ratio: 100 })
+        .where('id', '=', backendId).execute();
+      const otherId = randomUUID();
+      await database.insertInto('iam.users').values({ ...userValues(otherId), numeric_id: 2 }).execute();
+      await database.insertInto('iam.shared_backend_grants').values({
+        id: randomUUID(), user_id: otherId, shared_backend_id: backendId, limit_bytes: null, expires_at: null,
+      }).execute();
+      const service = makeService(database);
+      const create = (owner: string, name: string, sizeBytes: number) => service.createShared(testActor(owner), {
+        name, sizeBytes, scope: { kind: 'shared', sharedBackendId: backendId },
+      });
+
+      // The 10_000-byte backend at 100×: unlimited grants, yet each owner stops at 10_000.
+      await expect(create(userId, 'huge', 10_001)).rejects.toMatchObject({
+        response: { code: FailureCode.SharedBackendQuotaExceeded, details: { availableBytes: 10_000 } },
+      });
+      const mine = await create(userId, 'mine', 6_000);
+      await expect(create(userId, 'more', 4_001)).rejects.toMatchObject({
+        response: { code: FailureCode.SharedBackendQuotaExceeded, details: { availableBytes: 4_000 } },
+      });
+      await expect(create(otherId, 'theirs', 10_000)).resolves.toMatchObject({ sizeBytes: 10_000 });
+      await expect(service.patchShared(testActor(userId), mine.id, { expectedRevision: mine.revision, sizeBytes: 10_001 }))
+        .rejects.toMatchObject({ response: { code: FailureCode.SharedBackendQuotaExceeded } });
+    });
+  });
+
   it('keeps local list/get from returning shared volumes', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const { userId, backendId } = await seedSharedBackend(database);

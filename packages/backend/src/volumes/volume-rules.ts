@@ -351,3 +351,18 @@ export function normalizeObservedVolumeUsage(input: {
   }
   return input.usedBytes;
 }
+
+/**
+ * What can still be committed under overcommit: all owners together up to
+ * total × ratio, and (given `ownerCommitted`) one owner up to the physical total.
+ */
+export function overcommitAvailableBytes(
+  total: number,
+  ratio: number,
+  committed: number,
+  ownerCommitted: number | null,
+): number {
+  const shared = total * ratio - committed;
+  const own = ownerCommitted === null ? shared : total - ownerCommitted;
+  return Math.max(0, Math.min(shared, own));
+}

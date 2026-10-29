@@ -163,6 +163,13 @@ describe('maxDefault', () => {
   it('defaults to all that is left, as the slider would clamp it', () => {
     expect(maxDefault(sizeScale('disk', 500), 20, 123.456)).toBe(123.45);
   });
+  it('never defaults above 1 TiB memory or 20 TiB disk, however large the range', () => {
+    // An unlimited grant on a 100x overcommitted CephFS backend: a ~26735 TiB range.
+    expect(maxDefault(sizeScale('volume', 26735.31 * 1024), 10, null)).toBe(20 * 1024);
+    expect(maxDefault(sizeScale('disk', 64 * 1024), 20, null)).toBe(20 * 1024);
+    expect(maxDefault(sizeScale('memory', 2048), 2, null)).toBe(1024);
+    expect(maxDefault(sizeScale('volume', 26735.31 * 1024), 10, 300)).toBe(300);
+  });
   it('keeps the fitted fallback when the range has no real bound', () => {
     expect(sizeScale('disk', null).bounded).toBe(false);
     expect(maxDefault(sizeScale('disk', null), 20, null)).toBe(20);

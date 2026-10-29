@@ -7,7 +7,7 @@ describe('storageOvercommitLabel', () => {
   });
 
   it('spells out the multiplier above 1', () => {
-    expect(storageOvercommitLabel('1.5')).toBe('1.5×（最多分配物理容量的 1.5 倍）');
+    expect(storageOvercommitLabel('1.5')).toBe('1.5×（所有用户合计最多分配物理容量的 1.5 倍，单个用户不超过物理容量）');
   });
 
   it('passes through values it cannot read', () => {

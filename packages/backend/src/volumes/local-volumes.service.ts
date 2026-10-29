@@ -312,6 +312,7 @@ export class LocalVolumesService {
       if (access === 'admin') {
         await this.capacityRules.assertCapacityPhysical(
           transaction,
+          locked.owner_id,
           locked.server_id,
           representativePoolId,
           locked.shared_backend_id,

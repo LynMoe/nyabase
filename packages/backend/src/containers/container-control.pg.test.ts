@@ -226,6 +226,15 @@ describePg('PostgreSQL container create admission and capacity', () => {
         })),
         FailureCode.StoragePoolExhausted,
       );
+      // Overcommit is shared across owners: one owner still stops at the pool's physical size.
+      await database.updateTable('infra.servers').set({ storage_overcommit_ratio: 4 })
+        .where('id', '=', fixture.serverId).execute();
+      await expectCode(
+        service.service.create(testActor(fixture.userId), request(fixture, 'pool-overcommit', {
+          rootSizeBytes: 60 * DISK_UNIT,
+        })),
+        FailureCode.StoragePoolExhausted,
+      );
     });
   });
 

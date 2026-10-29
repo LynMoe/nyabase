@@ -202,7 +202,7 @@ function SharedVolumeFormBody({ sharedVolume: editing, open, onOpenChange }: Sha
   const createLimits = quotaSliderLimits(
     'volume',
     createQuota,
-    selectedBackend ? sharedBackendAvailableBytes(selectedBackend) : null,
+    selectedBackend ? sharedBackendAvailableBytes(selectedBackend, liveSharedAccess?.usedBytes ?? 0) : null,
     Number.isFinite(nextSize) && nextSize > 0 ? nextSize : null,
   );
   const createOver = !editing && createLimits.over;

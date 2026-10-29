@@ -109,6 +109,9 @@ Vite 通过 alias 将 `@nyabase/common` 指向 `src/index.ts`，但 `index.ts` �
   与 `detachRedriveDue` 共用 `volumes/detach-redrive.ts` 的 `containerRedriveDue`，扫描与 `enforceStop` 共用）；第一次停机清 attention，重新下发保留。
 - 禁用用户 = 失去覆盖，与撤销同一条流程：覆盖只认 `iam.effective_*_access`（active 用户 + 当前授权），禁用后其名下资源按检测时间开宽限、立即停机，
   14 天后清除；宽限内重新启用则删台账行（容器不自动启动）。用户状态变更在 `afterCommit` 里通知 `AccessChangeNotifier`。
+- 存储超分（服务器 `storage_overcommit_ratio` 作用于其本地池，共享后端 `overcommit_ratio`）只在用户之间生效：池 / 后端上所有承诺量合计 ≤ 物理总量 × 比例，
+  单个用户在其上的承诺量（本地池 = 他的系统盘 + 本地卷，共享后端 = 他的共享卷）≤ 物理总量，不论授权是否不限、是否管理员 `scope=all` 操作
+  （`volumes/volume-rules.ts` 的 `overcommitAvailableBytes`，准入与 `scope=mine` 容量报告共用；前端 `sharedBackendAvailableBytes` 带上用户已用量算同一规则）。
 - 宽限中（无当前覆盖）的用户不能新建、启动、挂载、扩容；已停机的容器在覆盖恢复后不会自动启动。所有者扩容本地卷要同时有服务器授权和该池的数据盘授权（在缩容预留内重新扩容、不占新额度也一样）；本地卷按池计入数据盘额度，系统盘只计入服务器授权的系统盘配额，两者互不占用。
 - 重试耗尽的 40001 / 40P01 返回 409 `TRANSACTION_CONFLICT`（`PgTransactionConflictFilter`），不是 500。
   管理员 `scope=all` 的容器动作与管理员清除跑 read committed（不做配额准入），这样事务内 `assertActorRole` 能看到等锁期间提交的降级。

@@ -31,6 +31,7 @@ import {
   type VolumeExecutor,
   VolumesRepository,
 } from './volumes.repository.js';
+import { overcommitAvailableBytes } from './volume-rules.js';
 
 type Tx = Transaction<NyabaseDatabase>;
 
@@ -165,59 +166,70 @@ export class VolumeCapacityService {
     return server ? numberValue(server.storage_overcommit_ratio) : 1;
   }
 
+  /**
+   * Overcommit lets the backend's volumes together reach total × ratio; one
+   * owner's volumes on it never exceed the physical total.
+   */
   private async assertSharedBackendPhysicalCapacity(
     backend: { total_bytes: string | number | null; overcommit_ratio: string | number },
     sharedBackendId: string,
+    ownerId: string,
     delta: number,
     transaction: Tx,
   ): Promise<void> {
-    const committed = await this.repository.sumLiveSizeBytes(
-      { kind: 'shared', sharedBackendId },
-      transaction,
-    );
-    if (
-      backend.total_bytes !== null
-      && committed + delta
-        > numberValue(backend.total_bytes) * numberValue(backend.overcommit_ratio)
-    ) {
+    if (backend.total_bytes === null) return;
+    const [committed, ownerCommitted] = await Promise.all([
+      this.repository.sumLiveSizeBytes({ kind: 'shared', sharedBackendId }, transaction),
+      this.repository.sumLiveSizeBytes({ kind: 'shared', ownerId, sharedBackendId }, transaction),
+    ]);
+    const total = numberValue(backend.total_bytes);
+    const ratio = numberValue(backend.overcommit_ratio);
+    const available = overcommitAvailableBytes(total, ratio, committed, ownerCommitted);
+    if (delta > available) {
       throw new ConflictException({
         code: FailureCode.SharedBackendQuotaExceeded,
         message: 'Shared backend capacity exhausted',
-        details: {
-          sharedBackendId,
-          requestedBytes: delta,
-          availableBytes: Math.max(
-            0,
-            numberValue(backend.total_bytes) * numberValue(backend.overcommit_ratio) - committed,
-          ),
-          overcommitRatio: numberValue(backend.overcommit_ratio),
-        },
+        details: { sharedBackendId, requestedBytes: delta, availableBytes: available, overcommitRatio: ratio },
       });
     }
   }
 
+  /** As for shared backends: the pool's commitments together reach total × ratio, one owner's stay within total. */
   private async assertLocalPoolPhysicalCapacity(
     pool: { total_bytes: string | number | null },
     poolId: string,
     serverId: string,
+    ownerId: string,
     delta: number,
     transaction: Tx,
   ): Promise<void> {
-    const committed = await this.committedPoolBytes(poolId, transaction);
-    const total = pool.total_bytes === null ? null : numberValue(pool.total_bytes);
-    const ratio = await this.serverOvercommit(serverId, transaction);
-    if (total !== null && committed + delta > total * ratio) {
+    if (pool.total_bytes === null) return;
+    const [committed, ownerCommitted, ratio] = await Promise.all([
+      this.committedPoolBytes(poolId, transaction),
+      this.ownerPoolPhysicalBytes(ownerId, poolId, transaction),
+      this.serverOvercommit(serverId, transaction),
+    ]);
+    const available = overcommitAvailableBytes(numberValue(pool.total_bytes), ratio, committed, ownerCommitted);
+    if (delta > available) {
       throw new ConflictException({
         code: FailureCode.StoragePoolExhausted,
         message: 'Storage pool overcommit capacity exceeded',
-        details: {
-          poolId,
-          requestedBytes: delta,
-          availableBytes: Math.max(0, total * ratio - committed),
-          overcommitRatio: ratio,
-        },
+        details: { poolId, requestedBytes: delta, availableBytes: available, overcommitRatio: ratio },
       });
     }
+  }
+
+  /** Everything the owner commits on a pool: root disks and local volumes (unlike the data-disk quota, which counts volumes only). */
+  async ownerPoolPhysicalBytes(
+    ownerId: string,
+    poolId: string,
+    executor: VolumeExecutor = this.database,
+  ): Promise<number> {
+    const [volumes, roots] = await Promise.all([
+      this.ownerPoolCommittedBytes(ownerId, poolId, executor),
+      committedRootBytes(executor, { ownerId, poolId }),
+    ]);
+    return volumes + roots;
   }
 
   /** Grant quota and physical capacity of a shared backend, with the backend scope already locked. */
@@ -248,7 +260,7 @@ export class VolumeCapacityService {
         },
       });
     }
-    await this.assertSharedBackendPhysicalCapacity(backend, sharedBackendId, delta, transaction);
+    await this.assertSharedBackendPhysicalCapacity(backend, sharedBackendId, ownerId, delta, transaction);
   }
 
   async assertSharedCapacityWithinGrants(
@@ -284,13 +296,14 @@ export class VolumeCapacityService {
 
   async assertSharedCapacityPhysical(
     transaction: Tx,
+    ownerId: string,
     sharedBackendId: string,
     delta: number,
   ): Promise<void> {
     if (delta <= 0) return;
     await this.pools.lockSharedBackends([sharedBackendId], transaction);
     const backend = await loadBackend(transaction, sharedBackendId);
-    await this.assertSharedBackendPhysicalCapacity(backend, sharedBackendId, delta, transaction);
+    await this.assertSharedBackendPhysicalCapacity(backend, sharedBackendId, ownerId, delta, transaction);
   }
 
   /**
@@ -333,7 +346,7 @@ export class VolumeCapacityService {
         },
       });
     }
-    await this.assertLocalPoolPhysicalCapacity(pool, poolId, serverId, delta, transaction);
+    await this.assertLocalPoolPhysicalCapacity(pool, poolId, serverId, ownerId, delta, transaction);
   }
 
   /**
@@ -352,9 +365,10 @@ export class VolumeCapacityService {
     return { server, pool };
   }
 
-  /** Physical capacity only, for administrators who bypass per-user grant limits. */
+  /** Physical capacity only (the owner's share included), for administrators who bypass per-user grant limits. */
   async assertCapacityPhysical(
     transaction: Tx,
+    ownerId: string,
     serverId: string | null,
     poolId: string,
     sharedBackendId: string | null,
@@ -364,13 +378,13 @@ export class VolumeCapacityService {
     await this.pools.lockCapacityScope(poolId, serverId, [sharedBackendId], transaction);
     if (sharedBackendId) {
       const backend = await loadBackend(transaction, sharedBackendId);
-      await this.assertSharedBackendPhysicalCapacity(backend, sharedBackendId, delta, transaction);
+      await this.assertSharedBackendPhysicalCapacity(backend, sharedBackendId, ownerId, delta, transaction);
       return;
     }
     if (!serverId) throw new BadRequestException('Local capacity requires a server');
     const pool = await transaction.selectFrom('infra.storage_pools')
       .selectAll().where('id', '=', poolId).executeTakeFirstOrThrow();
-    await this.assertLocalPoolPhysicalCapacity(pool, poolId, serverId, delta, transaction);
+    await this.assertLocalPoolPhysicalCapacity(pool, poolId, serverId, ownerId, delta, transaction);
   }
 
   /** A shared volume can only be created once some server has a quota-capable CephFS pool for the backend. */
@@ -413,6 +427,9 @@ export class VolumeCapacityService {
       const committed = await this.committedPoolBytes(pool.id);
       const grant = grants.get(pool.id);
       const used = grant && ownerId !== undefined ? await this.ownerPoolCommittedBytes(ownerId, pool.id) : 0;
+      const total = pool.total_bytes === null ? null : numberValue(pool.total_bytes);
+      // The owner view also stops at the owner's physical share; the server-wide view shows the pool's.
+      const ownerPhysical = ownerId === undefined ? null : await this.ownerPoolPhysicalBytes(ownerId, pool.id);
       result.push({
         poolId: pool.id,
         displayName: pool.display_name,
@@ -420,9 +437,9 @@ export class VolumeCapacityService {
         shareable: pool.shareable,
         totalBytes: pool.total_bytes === null ? null : numberValue(pool.total_bytes),
         committedBytes: committed,
-        availableBytes: pool.total_bytes === null
+        availableBytes: total === null
           ? null
-          : Math.max(0, numberValue(pool.total_bytes) * overcommitRatio - committed),
+          : overcommitAvailableBytes(total, overcommitRatio, committed, ownerPhysical),
         quotaEffective: pool.quota_effective,
         overcommitRatio,
         capability: storagePoolCapability(

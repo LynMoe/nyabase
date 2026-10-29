@@ -52,15 +52,24 @@ export function grantAvailableLabel(
   return approxGibHint(availableBytes).replace(/^约 /, '');
 }
 
-/** Shared-backend available bytes: total × overcommit − used when computable. */
-export function sharedBackendAvailableBytes(backend: {
-  totalBytes: number | null;
-  usedBytes: number | null;
-  overcommitRatio: number;
-}): number | null {
+/**
+ * Shared-backend available bytes: total × overcommit − used when computable.
+ * With `ownerUsedBytes`, what that owner can still add: overcommit is shared
+ * across owners, one owner's volumes never exceed the physical total.
+ */
+export function sharedBackendAvailableBytes(
+  backend: {
+    totalBytes: number | null;
+    usedBytes: number | null;
+    overcommitRatio: number;
+  },
+  ownerUsedBytes?: number,
+): number | null {
   if (backend.totalBytes === null || backend.usedBytes === null) return null;
   if (!Number.isFinite(backend.overcommitRatio) || backend.overcommitRatio < 1) return null;
-  return Math.max(0, backend.totalBytes * backend.overcommitRatio - backend.usedBytes);
+  const shared = backend.totalBytes * backend.overcommitRatio - backend.usedBytes;
+  const own = ownerUsedBytes === undefined ? shared : backend.totalBytes - ownerUsedBytes;
+  return Math.max(0, Math.min(shared, own));
 }
 
 /** used / total display; 「未知」 only when values are truly missing. */

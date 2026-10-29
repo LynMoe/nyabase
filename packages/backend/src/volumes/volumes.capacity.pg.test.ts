@@ -325,20 +325,30 @@ describePg('volume capacity locking and scope exclusions', () => {
   it('keeps existing resources when overcommit is lowered below committed and rejects new growth', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const userId = randomUUID();
+      const otherId = randomUUID();
       const serverId = randomUUID();
       await database.insertInto('iam.users').values(userValues(userId)).execute();
+      await database.insertInto('iam.users').values({ ...userValues(otherId), numeric_id: 2 }).execute();
       await database.insertInto('infra.servers').values({
         ...serverValues(serverId),
         storage_overcommit_ratio: 2,
       }).execute();
       const poolId = await insertLocalPool(database, serverId, 1_000);
-      await grantServer(database, { user: userId }, serverId);
-      await grantPool(database, { user: userId }, poolId);
+      for (const id of [userId, otherId]) {
+        await grantServer(database, { user: id }, serverId);
+        await grantPool(database, { user: id }, poolId);
+      }
 
       const service = makeService(database);
+      // Together 1500 bytes of a 1000-byte pool, each owner within it.
       const existing = await service.create(testActor(userId), {
         name: 'overcommit-existing',
-        sizeBytes: 1_500,
+        sizeBytes: 800,
+        scope: { kind: 'local', serverId, poolId },
+      });
+      await service.create(testActor(otherId), {
+        name: 'overcommit-other',
+        sizeBytes: 700,
         scope: { kind: 'local', serverId, poolId },
       });
 
@@ -353,7 +363,7 @@ describePg('volume capacity locking and scope exclusions', () => {
         .executeTakeFirstOrThrow();
       expect(retained).toMatchObject({
         id: existing.resourceId,
-        size_bytes: '1500',
+        size_bytes: '800',
         lifecycle_phase: 'provisioning',
       });
 
@@ -366,7 +376,7 @@ describePg('volume capacity locking and scope exclusions', () => {
       });
       await expect(service.patch(testActor(userId), existing.resourceId, {
         expectedRevision: 1,
-        sizeBytes: 1_600,
+        sizeBytes: 900,
       })).rejects.toMatchObject({
         response: { code: FailureCode.StoragePoolExhausted },
       });
@@ -374,14 +384,53 @@ describePg('volume capacity locking and scope exclusions', () => {
       expect(await database.selectFrom('control.volumes')
         .select('id')
         .where('pool_id', '=', poolId)
-        .execute()).toHaveLength(1);
+        .execute()).toHaveLength(2);
       expect(await database.selectFrom('control.volumes')
         .select(['size_bytes', 'revision'])
         .where('id', '=', existing.resourceId)
         .executeTakeFirstOrThrow()).toMatchObject({
-        size_bytes: '1500',
+        size_bytes: '800',
         revision: 1,
       });
+    });
+  });
+
+  it('overcommits a pool across owners, never for one owner (system disks included)', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const ownerId = await seedUser(database);
+      const otherId = await seedUser(database);
+      const adminId = await seedUser(database, undefined, UserStatus.Active, Role.Admin);
+      const serverId = await seedServer(database);
+      await database.updateTable('infra.servers').set({ storage_overcommit_ratio: 3 })
+        .where('id', '=', serverId).execute();
+      const poolId = await insertLocalPool(database, serverId, 1_000);
+      for (const id of [ownerId, otherId]) {
+        await grantServer(database, { user: id }, serverId);
+        await grantPool(database, { user: id }, poolId);
+      }
+      // A 100-byte system disk of the owner on the pool counts toward their physical share.
+      await seedContainer(database, { ownerId, serverId, poolId, imageId: await seedImage(database) });
+      const service = makeService(database);
+      const create = (userId: string, name: string, sizeBytes: number) => service.create(testActor(userId), {
+        name, sizeBytes, scope: { kind: 'local', serverId, poolId },
+      });
+
+      await expect(create(ownerId, 'too-big', 901)).rejects.toMatchObject({
+        response: { code: FailureCode.StoragePoolExhausted, details: { availableBytes: 900 } },
+      });
+      const mine = await create(ownerId, 'mine', 900);
+      await expect(create(otherId, 'theirs', 1_000)).resolves.toMatchObject({ resourceId: expect.any(String) });
+
+      const capacity = await service.capacity(testActor(ownerId), serverId);
+      expect(capacity.pools.find((pool) => pool.poolId === poolId)).toMatchObject({ committedBytes: 2_000, availableBytes: 0 });
+      const otherView = await service.capacity(testActor(otherId), serverId);
+      expect(otherView.pools.find((pool) => pool.poolId === poolId)).toMatchObject({ availableBytes: 0 });
+
+      // The administrator override skips grants, not the owner's physical share.
+      await expect(service.patch(testActor(adminId, Role.Admin), mine.resourceId, {
+        expectedRevision: 1,
+        sizeBytes: 901,
+      }, 'all')).rejects.toMatchObject({ response: { code: FailureCode.StoragePoolExhausted } });
     });
   });
 

@@ -121,7 +121,7 @@ export function storageOvercommitLabel(ratio: number | string): string {
   const value = Number(ratio);
   if (!Number.isFinite(value) || value <= 0) return String(ratio);
   if (value <= 1) return `${value}×（不超分，按物理容量分配）`;
-  return `${value}×（最多分配物理容量的 ${value} 倍）`;
+  return `${value}×（所有用户合计最多分配物理容量的 ${value} 倍，单个用户不超过物理容量）`;
 }
 
 // One vocabulary for lifecycle and server status across the app.

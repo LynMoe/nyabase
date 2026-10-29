@@ -21,6 +21,7 @@ import { IntentRepository } from '../reconcile/intent.repository.js';
 import { lockOwnerServerQuota } from '../platform/persistence-pg/advisory-locks.js';
 import { committedVolumeBytesSql } from '../platform/persistence-pg/committed-bytes.js';
 import { VolumeAttachmentsService } from '../volumes/volume-attachments.service.js';
+import { overcommitAvailableBytes } from '../volumes/volume-rules.js';
 import {
   ContainerControlRepository,
   type ImageRow,
@@ -43,7 +44,8 @@ type CreateAccess = NonNullable<
 /**
  * Admission check for growing root-disk commitments: the owner's system-disk
  * quota on the server (system disks only; data volumes have their own quota
- * per pool), then the pool's overcommitted capacity. Locks the server and
+ * per pool), then the pool's overcommitted capacity (the owner's own
+ * commitments on the pool stay within its physical size). Locks the server and
  * pool rows so concurrent admissions serialise.
  */
 export async function assertRootCapacity(
@@ -62,11 +64,14 @@ export async function assertRootCapacity(
     .forUpdate()
     .executeTakeFirstOrThrow();
   // Custom volumes belong to the volumes module; only their committed size on the pool is read here.
-  const sumPoolVolumes = async () => numberValue((await transaction.selectFrom('control.volumes')
-    .select(sql<string>`coalesce(sum(${committedVolumeBytesSql()}), 0)`.as('bytes'))
-    .where('lifecycle_phase', 'not in', ['failed', 'deleting'])
-    .where('pool_id', '=', poolId)
-    .executeTakeFirstOrThrow()).bytes);
+  const sumPoolVolumes = async (owner?: string) => {
+    let query = transaction.selectFrom('control.volumes')
+      .select(sql<string>`coalesce(sum(${committedVolumeBytesSql()}), 0)`.as('bytes'))
+      .where('lifecycle_phase', 'not in', ['failed', 'deleting'])
+      .where('pool_id', '=', poolId);
+    if (owner !== undefined) query = query.where('owner_id', '=', owner);
+    return numberValue((await query.executeTakeFirstOrThrow()).bytes);
+  };
   const used = await repository.sumLiveRootBytes({ ownerId, serverId }, transaction);
   if (grantLimit !== null && used + delta > grantLimit) {
     throw new ConflictException({
@@ -87,21 +92,19 @@ export async function assertRootCapacity(
   if (pool.total_bytes === null) return;
   const committed = await repository.sumLiveRootBytes({ poolId }, transaction)
     + await sumPoolVolumes();
+  const ownerCommitted = await repository.sumLiveRootBytes({ ownerId, poolId }, transaction)
+    + await sumPoolVolumes(ownerId);
   const server = await transaction.selectFrom('infra.servers')
     .select('storage_overcommit_ratio')
     .where('id', '=', serverId)
     .executeTakeFirstOrThrow();
-  const capacity = numberValue(pool.total_bytes) * numberValue(server.storage_overcommit_ratio);
-  if (committed + delta > capacity) {
+  const ratio = numberValue(server.storage_overcommit_ratio);
+  const available = overcommitAvailableBytes(numberValue(pool.total_bytes), ratio, committed, ownerCommitted);
+  if (delta > available) {
     throw new ConflictException({
       code: FailureCode.StoragePoolExhausted,
       message: 'Storage pool capacity exceeded',
-      details: {
-        poolId,
-        requestedBytes: delta,
-        availableBytes: Math.max(0, capacity - committed),
-        overcommitRatio: numberValue(server.storage_overcommit_ratio),
-      },
+      details: { poolId, requestedBytes: delta, availableBytes: available, overcommitRatio: ratio },
     });
   }
 }
