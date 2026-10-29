@@ -19,7 +19,7 @@ export interface NftRunner {
   apply(ruleset: string): Promise<void>;
   /** `nft -c -f -`: would `apply` accept this? Changes nothing. */
   check(ruleset: string): Promise<void>;
-  /** `nft list table bridge <table>`, undefined when it does not exist (or nft fails). */
+  /** `nft -t list table bridge <table>` (set elements omitted), undefined when it does not exist (or nft fails). */
   listTable(table: string): Promise<string | undefined>;
   /**
    * Follow ruleset changes (`nft monitor`): `onChange` for every burst of
@@ -42,7 +42,8 @@ export class SystemNftRunner implements NftRunner {
   async listTable(table: string): Promise<string | undefined> {
     const binary = await this.resolve();
     try {
-      const result = await execFile(binary, ['list', 'table', 'bridge', table], {
+      // Terse: without set elements, which the firewall's dynamic sets change with traffic.
+      const result = await execFile(binary, ['-t', 'list', 'table', 'bridge', table], {
         timeout: NFT_TIMEOUT_MS,
         maxBuffer: NFT_LIST_MAX_BYTES,
       });

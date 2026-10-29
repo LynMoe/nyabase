@@ -228,7 +228,10 @@ HTTP 代理按路由撤销：每个 hostname 有一个 incarnation，只在连�
 
 出站防火墙（`firewall/`、`common/src/protocol/firewall.ts`、agent 的 `firewall*`）：只管容器出站（`nyh*` 进桥的帧）、无状态，
 规则（名称、全局唯一优先级、`accept | drop | reject`、`all | tcp | udp` + 端口、IPv4 网段、0..n 台关联服务器）在每台服务器上按优先级第一条命中生效，
-都不命中放行，不自动放行任何地址。规则只有 admin 能改（`/admin/firewall-rules`，`expectedRevision` CAS，写操作持 `lockFirewallPolicy`，
+都不命中放行，不自动放行任何地址。管理员规则之前有 agent 写死的二层防护（`firewall-render.ts` 的 `GUARD_RULES`，不可配置、规则放行不了）：
+广播只放行 ARP（每网卡限速）、其他广播与全部组播丢弃、DHCP（UDP 67/68）丢弃、发往未学到 MAC 的单播每网卡限速（防未知单播泛洪；
+MAC 在 forward / output 钩子、Incus MAC 过滤之后从发往 `nyh*` 的帧学到，5 分钟）；
+限速状态在表内动态集合里，所以 agent 校验表用 `nft -t list`（不列集合元素），改这里时 `firewall-nft.test.ts` 用真实网桥发帧验证。规则只有 admin 能改（`/admin/firewall-rules`，`expectedRevision` CAS，写操作持 `lockFirewallPolicy`，
 关联服务器行 `FOR KEY SHARE` 防止与删除服务器竞态；名称 / 优先级冲突 409 `FIREWALL_RULE_CONFLICT`，每台服务器 ≤ 256 条规则、网段合计 ≤ 4096，
 超出 400 `FIREWALL_TOO_LARGE`）；网段 / 端口在 common 规范化后存储。`firewall-sync.service.ts` 按服务器生成文档（按优先级排序，摘要 =
 `sha256(firewallDigestInput(rules))`，只在 Backend 计算；没有规则也有空文档，用来解除 agent 的 fail-closed 表），经 `firewall.apply` 下发：

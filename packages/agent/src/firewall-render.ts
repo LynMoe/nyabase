@@ -10,9 +10,11 @@ import {
 
 /*
  * The guest egress firewall as nft sees it: one bridge-family table whose
- * only chain sits on prerouting, the one bridge hook where `reject` works. It
+ * filtering chain sits on prerouting, the one bridge hook where `reject` works
+ * (the guards' MAC learning adds forward / output chains that never drop). It
  * sees every frame a guest sends on its `nyh*` veth, whether it goes to the
- * host itself, another guest on the bridge or the LAN beyond. Stateless: the
+ * host itself, another guest on the bridge or the LAN beyond. Fixed L2 guards
+ * (GUARD_RULES) come first; the Backend's rules after them are stateless: the
  * first rule that matches decides, and no match accepts (only this table: the
  * IPv6 guard and Incus's own filters still run after it).
  */
@@ -47,6 +49,70 @@ export function firewallOwnerOf(serverId: string | undefined): FirewallOwner {
 }
 
 const GUESTS = `"${MANAGED_NIC_HOST_NAME_PREFIX}*"`;
+
+/** Per-NIC budget for ARP broadcasts (resolving neighbours needs a few per minute). */
+export const ARP_BROADCAST_LIMIT = { perSecond: 20, burst: 100 } as const;
+/** Per-NIC budget for unicast frames to a MAC that is not in `learned_macs`. */
+export const UNLEARNED_DESTINATION_LIMIT = { perSecond: 20, burst: 200 } as const;
+/** A MAC stays learned this long after it was learned or last sent ARP to a guest (a switch's usual ageing time). */
+const LEARNED_MEMORY = '5m';
+/** How long a NIC's budget is kept after the last frame that counted against it. */
+const BUDGET_MEMORY = '1m';
+/** Guest NICs on one host (budgets) and stations talking to its guests (learned MACs). */
+const GUARD_SET_SIZE = 65_536;
+
+const limitOver = ({ perSecond, burst }: { perSecond: number; burst: number }): string =>
+  `limit rate over ${perSecond}/second burst ${burst} packets`;
+
+function dynamicSet(name: string, key: string, timeout: string): string[] {
+  return [`set ${name} {`, `  typeof ${key}`, `  size ${GUARD_SET_SIZE}`, '  flags dynamic,timeout', `  timeout ${timeout}`, '}'];
+}
+
+/*
+ * Fixed guards ahead of the Backend's rules on every server, so no rule
+ * accepts past them: what a guest could otherwise put on the whole L2 segment
+ * at its full egress rate. Nothing a guest normally sends hits them.
+ * - Broadcast carries ARP only, within a per-NIC budget; every other
+ *   broadcast and all multicast are dropped (IPv4 multicast, STP / LLDP /
+ *   LACP group addresses), and so is IPv4 multicast, limited broadcast and
+ *   class E inside unicast frames.
+ * - Guests have static addresses: no DHCP in any role (a server answering
+ *   for other machines on the segment, a client, a relay).
+ * - Unicast to a MAC no switch knows floods every port. A MAC is learned
+ *   when it sends a frame to a guest here (the gateway, the host, LAN peers
+ *   and other guests all answer the guest's ARP and its traffic), so frames
+ *   to learned MACs pass unlimited and the rest share a per-NIC budget.
+ *   Learning runs on forward / output after Incus's MAC filters (priority
+ *   -200), so a guest cannot get a spoofed source MAC learned. A rewrite
+ *   empties the sets; the next frame from each station relearns it.
+ * The sets change with traffic, so the agent lists the table tersely (without
+ * set elements) when it verifies it.
+ */
+const GUARD_SETS = [
+  ...dynamicSet('arp_broadcast_budget', 'iifname', BUDGET_MEMORY),
+  ...dynamicSet('unlearned_budget', 'iifname', BUDGET_MEMORY),
+  ...dynamicSet('learned_macs', 'ether saddr', LEARNED_MEMORY),
+];
+
+const GUARD_RULES = [
+  `ether daddr ff:ff:ff:ff:ff:ff ether type arp update @arp_broadcast_budget { iifname ${limitOver(ARP_BROADCAST_LIMIT)} } drop`,
+  'ether daddr ff:ff:ff:ff:ff:ff ether type arp accept',
+  'ether daddr & 01:00:00:00:00:00 == 01:00:00:00:00:00 drop',
+  'ip daddr 224.0.0.0/3 drop',
+  'meta l4proto udp udp dport { 67, 68 } drop',
+  `ether daddr != @learned_macs update @unlearned_budget { iifname ${limitOver(UNLEARNED_DESTINATION_LIMIT)} } drop`,
+];
+
+// ARP (the guest's neighbour probes keep it coming every minute or so) refreshes
+// a station; any other frame only adds a missing one, a read-only lookup on the
+// hot path otherwise.
+const LEARNING_CHAINS = (['forward', 'output'] as const).flatMap((hook) => [
+  `chain learn_${hook} {`,
+  `  type filter hook ${hook} priority 100; policy accept;`,
+  `  oifname ${GUESTS} ether type arp update @learned_macs { ether saddr }`,
+  `  oifname ${GUESTS} add @learned_macs { ether saddr }`,
+  '}',
+]);
 
 function addressSet(cidrs: readonly string[]): string {
   const elements = firewallAddressIntervals(cidrs)
@@ -98,6 +164,7 @@ export function renderFirewallRuleset(owner: FirewallOwner, document: FirewallDo
       `iifname != ${GUESTS} accept`,
       // VLAN / QinQ / PPPoE / MPLS / IPv6 would carry IPv4 past `ip daddr`: none of it leaves a guest.
       `iifname ${GUESTS} ether type != { ip, arp } drop`,
+      ...GUARD_RULES,
       ...document.rules.flatMap(renderFirewallRule),
     ]
     : [`iifname ${GUESTS} drop`];
@@ -106,10 +173,12 @@ export function renderFirewallRuleset(owner: FirewallOwner, document: FirewallDo
     `delete table bridge ${AGENT_FIREWALL_TABLE}`,
     `table bridge ${AGENT_FIREWALL_TABLE} {`,
     `  comment "${firewallComment(owner, document?.digest ?? FAIL_CLOSED_KEY)}"`,
+    ...(document ? GUARD_SETS.map((line) => `  ${line}`) : []),
     '  chain egress {',
     '    type filter hook prerouting priority -190; policy accept;',
     ...body.map((line) => `    ${line}`),
     '  }',
+    ...(document ? LEARNING_CHAINS.map((line) => `  ${line}`) : []),
     '}',
     '',
   ].join('\n');

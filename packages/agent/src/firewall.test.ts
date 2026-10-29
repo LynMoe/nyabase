@@ -42,10 +42,34 @@ const SAMPLE_RULESET = `table bridge nyabase_firewall
 delete table bridge nyabase_firewall
 table bridge nyabase_firewall {
   comment "nyabase egress server=${SERVER_HEX} digest=${'a'.repeat(64)}"
+  set arp_broadcast_budget {
+    typeof iifname
+    size 65536
+    flags dynamic,timeout
+    timeout 1m
+  }
+  set unlearned_budget {
+    typeof iifname
+    size 65536
+    flags dynamic,timeout
+    timeout 1m
+  }
+  set learned_macs {
+    typeof ether saddr
+    size 65536
+    flags dynamic,timeout
+    timeout 5m
+  }
   chain egress {
     type filter hook prerouting priority -190; policy accept;
     iifname != "nyh*" accept
     iifname "nyh*" ether type != { ip, arp } drop
+    ether daddr ff:ff:ff:ff:ff:ff ether type arp update @arp_broadcast_budget { iifname limit rate over 20/second burst 100 packets } drop
+    ether daddr ff:ff:ff:ff:ff:ff ether type arp accept
+    ether daddr & 01:00:00:00:00:00 == 01:00:00:00:00:00 drop
+    ip daddr 224.0.0.0/3 drop
+    meta l4proto udp udp dport { 67, 68 } drop
+    ether daddr != @learned_macs update @unlearned_budget { iifname limit rate over 20/second burst 200 packets } drop
     ip daddr { 10.0.0.0-10.255.255.255, 192.168.1.5 } accept
     ip daddr { 10.0.0.0-10.255.255.255 } meta l4proto tcp tcp dport { 22, 8000-9000 } reject with tcp reset
     ip daddr { 0.0.0.0-255.255.255.255 } meta l4proto udp udp dport { 53 } reject with icmp type port-unreachable
@@ -53,6 +77,16 @@ table bridge nyabase_firewall {
     ip daddr { 1.2.3.4 } reject with icmp type admin-prohibited
     ip daddr { 1.2.3.0-1.2.3.255 } meta l4proto udp drop
     ip daddr { 1.2.3.0-1.2.3.255 } drop
+  }
+  chain learn_forward {
+    type filter hook forward priority 100; policy accept;
+    oifname "nyh*" ether type arp update @learned_macs { ether saddr }
+    oifname "nyh*" add @learned_macs { ether saddr }
+  }
+  chain learn_output {
+    type filter hook output priority 100; policy accept;
+    oifname "nyh*" ether type arp update @learned_macs { ether saddr }
+    oifname "nyh*" add @learned_macs { ether saddr }
   }
 }
 `;
@@ -87,10 +121,13 @@ describe('firewall rendering', () => {
       .toEqual(['ip daddr { 8.8.8.8 } meta l4proto udp udp dport { 53 } drop']);
   });
 
-  it('keeps an empty document open but fails closed without one', () => {
+  it('keeps an empty document open behind the fixed guards but fails closed without one', () => {
     const empty = renderFirewallRuleset(SERVER_HEX, firewallDocument('b'));
-    expect(empty).toContain('iifname != "nyh*" accept\n    iifname "nyh*" ether type != { ip, arp } drop\n  }');
+    expect(empty).toContain('iifname != "nyh*" accept\n    iifname "nyh*" ether type != { ip, arp } drop\n    ether daddr ff:ff:ff:ff:ff:ff');
+    expect(empty).toContain('update @unlearned_budget { iifname limit rate over 20/second burst 200 packets } drop\n  }\n  chain learn_forward');
     const closed = renderFirewallRuleset('unknown', null);
+    expect(closed).not.toContain('set ');
+    expect(closed).not.toContain('chain learn_');
     expect(closed).toContain('comment "nyabase egress server=unknown digest=fail-closed"');
     expect(closed).toContain('    type filter hook prerouting priority -190; policy accept;\n    iifname "nyh*" drop\n  }');
     expect(closed).not.toContain('accept\n    iifname');

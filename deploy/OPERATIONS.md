@@ -1810,12 +1810,32 @@ Backend **不直连** Incus，也不主动连接任何主机。每台 Incus 主�
   规则无状态（被禁网段主动连入时，容器的回包同样被拦），按优先级第一条命中生效，都不命中放行；
   不自动放行任何地址（DNS、网关、宿主本机都不例外）。IPv4 与 ARP 以外的帧（VLAN / QinQ、PPPoE、
   MPLS、IPv6 等）一律丢弃，不依赖 `nyabase_guard`。`reject` 对 TCP 回 RST，UDP 回端口不可达，
-  协议为全部时其余回 ICMP admin-prohibited。同样由 agent 自己执行：
+  协议为全部时其余回 ICMP admin-prohibited。
+  管理员规则之前还有一组写死在 agent 里的二层防护（每台服务器都有、不可配置，任何规则都放行不了它们拦的帧；
+  fail-closed 表本来就全丢）：
+  - 广播只放行 ARP，每块网卡每秒 20 个（突发 100），超出丢弃；其他广播与全部组播帧丢弃
+    （mDNS / LLMNR / SSDP / NetBIOS 广播 / VRRP / STP / LLDP 等），单播帧里的 `224.0.0.0/3`
+    （组播、255.255.255.255、E 类）也丢弃。容器里依赖组播或广播的服务发现不可用，需改成单播 / 静态地址。
+  - DHCP（UDP 目标端口 67 / 68，服务端、客户端、中继）一律丢弃：容器地址是静态的，这只防冒充 DHCP 服务器。
+  - 未知单播：发往交换机不认识的 MAC 的单播会泛洪到整个网段。agent 在 bridge 的 forward / output 钩子上
+    （排在 Incus MAC 过滤之后，所以容器伪造的源 MAC 学不进来）从发往容器的帧学习源 MAC：网关、宿主、同网段主机、
+    同机容器只要回过 ARP 或流量就被学到。学到的 MAC 保留 5 分钟：ARP 帧每次都顺延，其他帧只在不存在时加入
+    （热路径上只查不写），过期后该站的下一帧即重新加入。容器发往学到的 MAC 的帧不限；发往其余 MAC 的帧
+    每块网卡每秒 20 个（突发 200），超出丢弃。容器总是先 ARP 再发，对端的应答就让它被学到，容器的邻居探测
+    （约每分钟一次单播 ARP）也让单向 UDP 的对端保持学到，所以正常通信不受影响；只有向从不给本机容器发帧、
+    也不应答 ARP 的 MAC 发包（例如容器里写死的静态邻居）会被限速。
+    表被重写（规则变更、agent 重启、被篡改后补回）时记录清空，对端下一帧（入站流量、TCP 应答、ARP）即重新学到，
+    之间发往它的帧占用上述额度：以单向 UDP 为主的容器最多要等到下一次邻居探测（数十秒）。
+  这些额度与学到的 MAC 存在表内的动态集合里，随流量变化，所以下面的校验用 `nft -t`（不列集合元素）。
+  这些写法需要 nftables ≥ 1.0（`typeof` 动态集合、集合内 `limit`、`nft -t`）：已在 nft 1.0.2 + 内核 6.8
+  （Ubuntu 22.04 HWE，生产各主机）与 nft 1.1.3 + 内核 6.12（Debian 13）上验证。更老的 nft 加载不了任何文档，
+  agent 会退回 fail-closed 表、容器出站全断，所以新主机先确认 `nft --version`。
+  同样由 agent 自己执行：
   - 下发：Backend 经控制连接的 `firewall.apply` 发来该服务器的规则文档（带摘要）。agent 校验格式后
     先 `nft -c` 预检，通过才原子写入 `/var/lib/nyabase-agent/firewall.json`（0600，同时记 server id），
     再在一个 nft 事务里整表替换；格式错误或预检不过回 `bad_request`，旧表与旧文档保持不变。
     多个 `firewall.apply` 按到达顺序逐个处理。
-  - 校验：agent 记住当前文档最近一次成功应用后的 `nft list table` 输出，之后逐字比较，不一致或缺失就
+  - 校验：agent 记住当前文档最近一次成功应用后的 `nft -t list table` 输出，之后逐字比较，不一致或缺失就
     重新应用。时机与 `nyabase_guard` 相同（启动、每 10 秒、`nft monitor` 报告变化后；两张表共用一个
     monitor 进程，但各自去抖、各自退避，一张补不回来不会拖慢另一张）。宿主上 `nft flush ruleset`
     （例如 Debian 默认 `/etc/nftables.conf` 的 `systemctl reload nftables`）会同时删掉两张表，补回前
@@ -1920,6 +1940,10 @@ Backend 与 agent 只在 **agent 协议号**（`AGENT_PROTOCOL_VERSION`，`@nyab
   这次改写本身也会撞上同一个 Incus 缺陷而失败，停掉该容器后它会在停机状态下完成；
   已因 `Invalid block device "tmpfs"` 被搁置（needs attention / failed）的容器全量扫描会跳过，
   停机后在面板重试它的 intent。
+- **出站二层防护（协议仍为 3，只改 agent）**：逐台升级 agent 即可，不用重装 unit、不碰 Backend。
+  新 agent 启动时重写 `nyabase_firewall`（加上广播 / 组播 / DHCP / 未知单播防护，见上文），容器出站不中断
+  （发往尚未重新学到的 MAC 的帧在最初片刻占用未知单播额度）；
+  尚未升级的主机保持旧表。升级后容器里依赖组播或广播的服务发现（mDNS、SSDP、组播集群发现等）不再可用。
 - **协议号变化的升级**（发布说明会写明）：在同一个维护窗口里升级 Backend 和全部 agent。
   先升级 Backend 时，未升级的服务器显示上面的协议错误；先升级 agent 时，旧 Backend 只会以
   1008 关闭新 agent 的连接（agent 日志 `control connection closed (1008 expected hello)`）。
