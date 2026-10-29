@@ -208,8 +208,8 @@ function SharedVolumeFormBody({ sharedVolume: editing, open, onOpenChange }: Sha
   const createOver = !editing && createLimits.over;
   const sizeDefault = useFittedDefaultSize({
     enabled: open && !editing,
-    defaultGib: 10,
-    stops: createLimits.scale.stops,
+    fallbackGib: 10,
+    scale: createLimits.scale,
     availableGib: createLimits.availableGib,
     setText: setSizeGiB,
   });

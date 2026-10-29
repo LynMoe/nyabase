@@ -12,6 +12,8 @@ export interface SizeScale {
   stops: number[];
   /** Stop values that may carry a tick label. */
   majors: ReadonlySet<number>;
+  /** Whether the max is a real bound (a grant, the host, free space) rather than the kind's fallback. */
+  bounded: boolean;
 }
 
 const TIB = 1024;
@@ -47,12 +49,13 @@ function tidy(gib: number): number {
  */
 export function sizeScale(kind: SizeScaleKind, maxGib: number | null): SizeScale {
   const { ladder, majors, fallbackMax } = LADDERS[kind];
-  const max = maxGib !== null && Number.isFinite(maxGib) && maxGib > 0 ? tidy(maxGib) : fallbackMax;
+  const bounded = maxGib !== null && Number.isFinite(maxGib) && maxGib > 0;
+  const max = bounded ? tidy(maxGib) : fallbackMax;
   const stops = ladder.filter((value) => value < max);
   stops.push(max);
   // A range smaller than the first rung still needs two stops to slide between.
   if (stops.length === 1) stops.unshift(tidy(max / 2));
-  return { stops, majors: new Set([...majors, max]) };
+  return { stops, majors: new Set([...majors, max]), bounded };
 }
 
 /** Fractional stop index of `value`, interpolated between neighbouring stops and clamped to the track. */
@@ -110,6 +113,16 @@ export function fitDefault(stops: readonly number[], defaultGib: number, availab
   if (availableGib === null || defaultGib <= availableGib) return defaultGib;
   const fitting = stops.filter((stop) => stop <= availableGib);
   return fitting.length > 0 ? fitting[fitting.length - 1]! : clampToAvailable(defaultGib, availableGib);
+}
+
+/**
+ * A create form's default size: the most it can choose (the range max, within
+ * what is left) when the range is bounded, otherwise `fallbackGib` fitted to
+ * what is left, so an unknown or unbounded range never defaults to its ladder end.
+ */
+export function maxDefault(scale: SizeScale, fallbackGib: number, availableGib: number | null): number {
+  if (!scale.bounded) return fitDefault(scale.stops, fallbackGib, availableGib);
+  return clampToAvailable(scale.stops[scale.stops.length - 1]!, availableGib);
 }
 
 /**

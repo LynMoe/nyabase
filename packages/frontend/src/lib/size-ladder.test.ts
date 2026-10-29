@@ -3,6 +3,7 @@ import {
   clampToAvailable,
   fallbackMaxGib,
   fitDefault,
+  maxDefault,
   formatSizeValue,
   formatTickLabel,
   gibInputText,
@@ -151,5 +152,20 @@ describe('fitDefault', () => {
   });
   it('clamps when no stop fits', () => {
     expect(fitDefault(stops, 2, 0.3)).toBe(0.3);
+  });
+});
+
+describe('maxDefault', () => {
+  it('defaults to the range max when nothing smaller is left', () => {
+    expect(maxDefault(sizeScale('memory', 64), 2, null)).toBe(64);
+    expect(maxDefault(sizeScale('memory', 64), 2, 80)).toBe(64);
+  });
+  it('defaults to all that is left, as the slider would clamp it', () => {
+    expect(maxDefault(sizeScale('disk', 500), 20, 123.456)).toBe(123.45);
+  });
+  it('keeps the fitted fallback when the range has no real bound', () => {
+    expect(sizeScale('disk', null).bounded).toBe(false);
+    expect(maxDefault(sizeScale('disk', null), 20, null)).toBe(20);
+    expect(maxDefault(sizeScale('volume', 0), 10, 6)).toBe(5);
   });
 });

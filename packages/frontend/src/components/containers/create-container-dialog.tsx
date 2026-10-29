@@ -286,7 +286,7 @@ function useCreateContainerForm({
   const overQuota = memOver || diskOver;
   const limits = specLimits(data, memLeft);
 
-  // Until the user moves a slider, its default shrinks to fit what is left.
+  // Until the user moves a slider, it defaults to the most that can be chosen.
   const setMemText = useCallback((memGib: string) => {
     setForm((current) => (current.memGib === memGib ? current : { ...current, memGib }));
   }, []);
@@ -295,16 +295,16 @@ function useCreateContainerForm({
   }, []);
   const memDefault = useFittedDefaultSize({
     enabled: open,
-    defaultGib: Number(emptyForm.memGib),
-    stops: limits.memScale.stops,
+    fallbackGib: Number(emptyForm.memGib),
+    scale: limits.memScale,
     availableGib: form.startAfterCreate && memLeft !== null ? memLeft / GIB : null,
     setText: setMemText,
   });
   const rootDefault = useFittedDefaultSize({
     enabled: open,
-    defaultGib: Number(emptyForm.rootSizeGib),
+    fallbackGib: Number(emptyForm.rootSizeGib),
     minGib: rootMinBytes / GIB,
-    stops: limits.diskScale.stops,
+    scale: limits.diskScale,
     availableGib: diskLeft === null ? null : diskLeft / GIB,
     setText: setRootText,
   });
