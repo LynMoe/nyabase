@@ -62,14 +62,27 @@ pub(crate) enum RequestMode {
     },
 }
 
-/// Request headers that describe the client hop. The proxy is the public
-/// edge, so whatever the client sent here is untrusted and is replaced.
+/// Request headers that describe the client hop, including the CDN and load
+/// balancer spellings apps commonly trust for the client address. The proxy
+/// is the public edge, so whatever the client sent here is untrusted: it is
+/// dropped, and `forwarding_headers` writes the proxy's own view.
 /// `_` and `.` count as `-`: CGI/WSGI-style servers fold `-` and `_` into one
 /// key (`HTTP_X_FORWARDED_FOR`) and PHP turns `.` into `_` as well, so
 /// `X_Forwarded_For` or `X.Forwarded.For` would spoof the address.
 pub(crate) fn is_forwarding_header(name: &str) -> bool {
     let name = fold_header_name(name);
-    name == "forwarded" || name == "x-real-ip" || name.starts_with("x-forwarded-")
+    name.starts_with("x-forwarded-")
+        || matches!(
+            name.as_str(),
+            "forwarded"
+                | "x-real-ip"
+                | "true-client-ip"
+                | "cf-connecting-ip"
+                | "x-client-ip"
+                | "client-ip"
+                | "fastly-client-ip"
+                | "x-cluster-client-ip"
+        )
 }
 
 /// An `_` or `.` spelling of a header the proxy itself interprets or
@@ -108,14 +121,7 @@ pub(crate) fn request_plan(header: &[u8], client: &ClientContext) -> Result<Requ
         .next()
         .filter(|line| !line.is_empty())
         .context("missing request line")?;
-    let request_parts = request_line.split_whitespace().collect::<Vec<_>>();
-    if request_parts.len() != 3
-        || !is_http_token(request_parts[0])
-        || !(request_parts[1].starts_with('/') || request_parts[1] == "*")
-        || !matches!(request_parts[2], "HTTP/1.0" | "HTTP/1.1")
-    {
-        return Err(anyhow!("malformed or unsupported HTTP request line"));
-    }
+    let request_parts = parse_request_line(request_line)?;
     if request_parts[0].eq_ignore_ascii_case("CONNECT") {
         return Err(anyhow!("CONNECT tunneling is disabled"));
     }
@@ -342,6 +348,26 @@ pub(crate) fn header_has_token(value: &str, expected: &str) -> Result<bool> {
         found |= token.eq_ignore_ascii_case(expected);
     }
     Ok(found)
+}
+
+/// `method SP request-target SP HTTP-version` exactly (RFC 9112 §3): single
+/// spaces, an origin-form or `*` target of visible ASCII only. The line is
+/// forwarded verbatim, so any other whitespace (a bare LF, VT, NUL, U+00A0)
+/// that the upstream might split differently is rejected instead.
+fn parse_request_line(line: &str) -> Result<[&str; 3]> {
+    let mut parts = line.split(' ');
+    let parts = [parts.next(), parts.next(), parts.next(), parts.next()];
+    let [Some(method), Some(target), Some(version), None] = parts else {
+        return Err(anyhow!("malformed or unsupported HTTP request line"));
+    };
+    if !is_http_token(method)
+        || !target.bytes().all(|byte| byte.is_ascii_graphic())
+        || !(target.starts_with('/') || target == "*")
+        || !matches!(version, "HTTP/1.0" | "HTTP/1.1")
+    {
+        return Err(anyhow!("malformed or unsupported HTTP request line"));
+    }
+    Ok([method, target, version])
 }
 
 pub(crate) fn invalid_header_value(value: &str) -> bool {

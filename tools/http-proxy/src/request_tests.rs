@@ -105,6 +105,38 @@ fn client_forwarding_headers_are_replaced_with_the_proxy_view() {
 }
 
 #[test]
+fn cdn_client_address_headers_are_dropped_in_every_spelling() {
+    let names = [
+        "True-Client-IP",
+        "CF-Connecting-IP",
+        "X-Client-IP",
+        "Client-IP",
+        "Fastly-Client-IP",
+        "X-Cluster-Client-IP",
+        "true_client_ip",
+        "Cf.Connecting.Ip",
+        "X_Client.IP",
+        "CLIENT_IP",
+        "Fastly_Client_IP",
+        "X.Cluster.Client.IP",
+    ];
+    let mut head = "GET / HTTP/1.1\r\nHost: app.example.test\r\n".to_string();
+    for name in names {
+        head.push_str(&format!("{name}: 6.6.6.6\r\n"));
+    }
+    head.push_str("X-Client-Name: kept\r\n\r\n");
+    let header = String::from_utf8(
+        request_plan(head.as_bytes(), &test_client())
+            .unwrap()
+            .header,
+    )
+    .unwrap();
+    assert!(!header.contains("6.6.6.6"), "{header}");
+    assert!(header.contains("X-Client-Name: kept\r\n"), "{header}");
+    assert!(header.contains("X-Real-IP: 192.0.2.10\r\n"), "{header}");
+}
+
+#[test]
 fn underscore_spellings_of_proxy_headers_are_dropped() {
     // CGI/WSGI-style servers read `X_Forwarded_For` as X-Forwarded-For.
     let head = b"POST / HTTP/1.1\r\nHost: app.example.test\r\nX_Forwarded_For: 6.6.6.6\r\nX-Real_IP: 6.6.6.6\r\nx_forwarded_proto: https\r\nX-Forwarded_Host: evil.test\r\nContent-Length: 0\r\nContent_Length: 4\r\nTransfer_Encoding: chunked\r\nKeep_Alive: 1\r\nProxy_Connection: keep-alive\r\nSec_WebSocket_Key: x\r\nX_Api_Key: kept\r\n\r\n";
@@ -217,5 +249,41 @@ fn expect_100_continue_is_answered_locally_and_stripped() {
         b"POST / HTTP/1.1\r\nHost: app.example.test\r\nContent-Length: 4\r\nExpect: 100-continue\r\nExpect: 100-continue\r\n\r\n".as_slice(),
     ] {
         assert!(request_plan(invalid, &test_client()).is_err());
+    }
+}
+
+#[test]
+fn request_line_is_exactly_three_fields_separated_by_single_spaces() {
+    for valid in [
+        b"GET /x?q=1 HTTP/1.1\r\nHost: app.example.test\r\n\r\n".as_slice(),
+        b"OPTIONS * HTTP/1.0\r\nHost: app.example.test\r\n\r\n".as_slice(),
+        b"GET /%7Euser/~!$&'()*+,;=:@ HTTP/1.1\r\nHost: app.example.test\r\n\r\n".as_slice(),
+    ] {
+        let plan = request_plan(valid, &test_client()).unwrap();
+        let line = valid.split(|byte| *byte == b'\r').next().unwrap();
+        assert!(plan.header.starts_with(line));
+    }
+    for invalid in [
+        b"GET /x\nHTTP/1.1\r\nHost: app.example.test\r\n\r\n".as_slice(),
+        b"GET\t/x HTTP/1.1\r\nHost: app.example.test\r\n\r\n".as_slice(),
+        b"GET /x\x0bHTTP/1.1\r\nHost: app.example.test\r\n\r\n".as_slice(),
+        b"GET /x\x0c HTTP/1.1\r\nHost: app.example.test\r\n\r\n".as_slice(),
+        b"GET /x\0 HTTP/1.1\r\nHost: app.example.test\r\n\r\n".as_slice(),
+        "GET /x\u{a0}HTTP/1.1\r\nHost: app.example.test\r\n\r\n".as_bytes(),
+        "GET /caf\u{e9} HTTP/1.1\r\nHost: app.example.test\r\n\r\n".as_bytes(),
+        b"GET  /x HTTP/1.1\r\nHost: app.example.test\r\n\r\n".as_slice(),
+        b"GET /x  HTTP/1.1\r\nHost: app.example.test\r\n\r\n".as_slice(),
+        b" GET /x HTTP/1.1\r\nHost: app.example.test\r\n\r\n".as_slice(),
+        b"GET /x HTTP/1.1 \r\nHost: app.example.test\r\n\r\n".as_slice(),
+        b"GET /x y HTTP/1.1\r\nHost: app.example.test\r\n\r\n".as_slice(),
+        b"GET /x\x7f HTTP/1.1\r\nHost: app.example.test\r\n\r\n".as_slice(),
+        b"GET /x HTTP/2.0\r\nHost: app.example.test\r\n\r\n".as_slice(),
+        b"GET x HTTP/1.1\r\nHost: app.example.test\r\n\r\n".as_slice(),
+    ] {
+        assert!(
+            request_plan(invalid, &test_client()).is_err(),
+            "{:?}",
+            String::from_utf8_lossy(invalid)
+        );
     }
 }

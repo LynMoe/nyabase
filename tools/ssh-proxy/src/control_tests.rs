@@ -469,7 +469,7 @@ fn unknown_backend_kind_is_ignored_without_pause_or_revoke() {
 }
 
 #[test]
-fn direct_tcpip_on_held_snapshot_ignores_freshness_while_paused() {
+fn paused_session_holds_its_snapshot_but_admits_nothing_new() {
     let config = test_config();
     let store = Arc::new(SnapshotStore::default());
     let control = paused_plane(store.as_ref());
@@ -508,8 +508,47 @@ fn direct_tcpip_on_held_snapshot_ignores_freshness_while_paused() {
     assert!(session.latest_snapshot().is_none());
 }
 
+#[test]
+fn channels_are_not_authorized_from_a_held_snapshot_past_its_lease() {
+    let config = test_config();
+    let store = Arc::new(SnapshotStore::default());
+    let control = Arc::new(ControlPlane::new());
+    control.begin_epoch();
+    let mut snapshot = fixture_proxy_snapshot(7);
+    snapshot.valid_until = now_ms() + 100;
+    assert!(store.store(snapshot, control.epoch()).unwrap());
+    control.resume_authoritative();
+    let public_key = parse_authorized_key(ALICE_KEY).unwrap();
+    let route = resolve_owned_route(&store.load().unwrap(), "alice.solo").unwrap();
+    let (connection, _) = ConnectionState::new(3, "127.0.0.1:2310".parse().unwrap());
+    connection.set_authenticated(
+        "alice.solo",
+        &public_key,
+        &route.user_id,
+        &route.username,
+        Some(&route),
+    );
+    let (tx, _rx) = mpsc::channel(8);
+    let mut session = ProxySshSession::new(
+        store.clone(),
+        control,
+        config,
+        "127.0.0.1:2310".parse().unwrap(),
+        tx,
+        Arc::new(connection),
+        false,
+    );
+    session.authenticated_public_key = Some(public_key);
+    assert!(session.authorized_route_for_target("solo").is_ok());
+    std::thread::sleep(Duration::from_millis(150));
+    // The expiry timer has not run, so the snapshot is still installed.
+    assert!(session.held_snapshot().is_some());
+    assert!(session.authorized_user_id().is_err());
+    assert!(session.authorized_route_for_target("solo").is_err());
+}
+
 #[tokio::test]
-async fn control_timers_retarget_on_pause_before_snapshot_deadline() {
+async fn paused_hold_never_outlives_the_snapshot_lease() {
     let mut config = test_config();
     config.control_hold = Duration::from_secs(30);
     let store = Arc::new(SnapshotStore::default());
@@ -517,7 +556,7 @@ async fn control_timers_retarget_on_pause_before_snapshot_deadline() {
     let control = Arc::new(ControlPlane::new());
     control.begin_epoch();
     let mut snapshot = fixture_proxy_snapshot(7);
-    snapshot.valid_until = now_ms() + 80;
+    snapshot.valid_until = now_ms() + 500;
     assert!(store.store(snapshot, control.epoch()).unwrap());
     control.resume_authoritative();
     let snapshot = store.load().unwrap();
@@ -538,14 +577,52 @@ async fn control_timers_retarget_on_pause_before_snapshot_deadline() {
         control.clone(),
     ));
     pause_control_plane(&control, &runtime, config.control_hold, "pause").await;
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    assert!(store.load().is_some());
-    assert!(!connection.revoked.load(Ordering::Acquire));
+    let hold = control.hold_deadline().expect("hold armed");
+    assert!(snapshot.deadline < hold);
+    assert_eq!(control.next_deadline(&store), Some(snapshot.deadline));
     assert_eq!(control.mode(), ControlMode::Paused);
-    task.abort();
+    assert!(!connection.revoked.load(Ordering::Acquire));
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while store.load().is_some() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("held snapshot outlived its lease");
+    assert!(Instant::now() >= snapshot.deadline);
+    assert!(Instant::now() < hold);
+    assert_eq!(control.mode(), ControlMode::Empty);
+    assert!(tokio::time::timeout(Duration::from_millis(100), task)
+        .await
+        .expect("held session outlived the snapshot lease")
+        .expect("join")
+        .is_err());
     timers.abort();
-    let _ = task.await;
     let _ = timers.await;
+}
+
+#[test]
+fn paused_deadline_is_the_earlier_of_hold_and_lease() {
+    let store = SnapshotStore::default();
+    let control = ControlPlane::new();
+    control.begin_epoch();
+    assert!(store
+        .store(fixture_proxy_snapshot(7), control.epoch())
+        .unwrap());
+    control.resume_authoritative();
+    assert!(control.pause(Duration::from_secs(10)));
+    let hold = control.hold_deadline().expect("hold armed");
+    // A lease beyond the hold leaves the hold in charge.
+    assert!(store.load().unwrap().deadline > hold);
+    assert_eq!(control.next_deadline(&store), Some(hold));
+
+    let mut short = fixture_proxy_snapshot(8);
+    short.valid_until = now_ms() + 1_000;
+    assert!(store.store(short, control.epoch()).unwrap());
+    let lease = store.load().unwrap().deadline;
+    assert!(lease < hold);
+    assert_eq!(control.next_deadline(&store), Some(lease));
 }
 
 #[tokio::test]

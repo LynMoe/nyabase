@@ -221,8 +221,9 @@ server {
     }
 
     # Unauthenticated probes; readiness queries PostgreSQL. Monitoring on this
-    # host uses http://127.0.0.1:3001/api/health/* directly.
-    location /api/health/ {
+    # host uses http://127.0.0.1:3001/api/health/* directly. Case-insensitive,
+    # because the Backend routes /API/Health/ready like /api/health/ready.
+    location ~* ^/api/health(/|$) {
         # allow 192.0.2.10;   # an external monitoring host, if there is one
         deny all;
         proxy_pass http://127.0.0.1:3001;
@@ -470,8 +471,10 @@ other bridges stay. A route bound by a jump-format login (`user.container`)
 still ends the whole connection when revoked.
 
 **HTTP request handling.** The HTTP proxy is the public edge, so it never
-trusts client forwarding headers: incoming `Forwarded`, `X-Real-IP` and every
-`X-Forwarded-*` header are removed, with `_` and `.` treated as `-` (so
+trusts client forwarding headers: incoming `Forwarded`, `X-Real-IP`, every
+`X-Forwarded-*` header and the CDN client-address headers (`True-Client-IP`,
+`CF-Connecting-IP`, `X-Client-IP`, `Client-IP`, `Fastly-Client-IP`,
+`X-Cluster-Client-IP`) are removed, with `_` and `.` treated as `-` (so
 `X_Forwarded_For`, `X.Forwarded.For` and `X-Real_IP` are removed too, as are
 such spellings of `Content-Length`, `Transfer-Encoding`, `Keep-Alive`,
 `Proxy-Connection` and `Sec-WebSocket-*`; other names with `_` or `.` pass
@@ -480,7 +483,9 @@ unchanged), and the upstream receives
 IPv6 shown as IPv4), `X-Forwarded-Proto` (`http` or `https` by listener) and
 `X-Forwarded-Host` (the client's `Host`). Do not put another proxy in front of
 it unless that hop is changed to pass the client address some other way;
-behind one, every request would appear to come from it. Each connection
+behind one, every request would appear to come from it. The request line must
+be exactly `method SP target SP HTTP/1.x` with single spaces and a visible-ASCII
+target (`/…` or `*`; non-ASCII must be percent-encoded), otherwise `400`. Each connection
 carries exactly one request (`Connection: close` upstream, no upstream reuse).
 Request bodies are capped at 16 MiB. `Expect: 100-continue` is answered by the
 proxy itself (after the route resolves and the upstream connects) and is not
@@ -556,7 +561,8 @@ Recreating only the Compose `backend` service
 (`docker compose --env-file .env up -d backend`) does not drop
 established `ssh -J` sessions; new Jump connections fail closed until the
 Backend is ready again. If the Backend stays down longer than
-`NYABASE_SSH_CONTROL_HOLD_MS`, Jump fail-closes. Replacing a proxy binary is
+`NYABASE_SSH_CONTROL_HOLD_MS`, or past the last snapshot's own lease
+(whichever comes first), Jump fail-closes and established sessions are dropped. Replacing a proxy binary is
 copy then restart: `install -m 0755` the new binary to `/usr/local/bin/`, then
 `systemctl restart nyabase-ssh-proxy` (or `nyabase-http-proxy`). Restart alone
 does not install the file, and restarting the SSH proxy drops every Jump
@@ -710,9 +716,9 @@ rebuilding vmbr.
   credentials are stored (as digests) in PostgreSQL.
 - Login rate limits are per Backend process and reset on restart. Failed
   sign-ins are counted per (client address, username) — 10 per 5 minutes —
-  and per client address — 30 per 5 minutes, IPv6 bucketed per `/64`. There is
+  and per client address — 30 per 5 minutes, IPv6 bucketed per `/48`. There is
   no account-wide lockout, so nobody can lock a user out by guessing from
-  elsewhere. Wrong current-password entries by a signed-in user (password
+  another address (an IPv6 `/48` counts as one address). Wrong current-password entries by a signed-in user (password
   change, adding an SSH key) are limited to 10 per 5 minutes per user. Client
   addresses come from `server.trustedProxies` (see **TLS edge**).
 - Volume destroy and purge wait while the executing server is offline (normal
@@ -741,7 +747,7 @@ rebuilding vmbr.
   16 MiB or 4096 frames before the Backend reads it is closed with 1009 and
   shows up as an event-stream reconnect or a failed exec.
 - `POST /api/agent/enroll` allows 30 attempts per 10 minutes per client (one
-  IPv4 address or one IPv6 `/64`, from `server.trustedProxies`); past 4096
+  IPv4 address or one IPv6 `/48`, from `server.trustedProxies`); past 4096
   tracked clients the least recently seen are forgotten instead of refusing
   everyone.
 - Browser sessions: each refresh extends a session by
@@ -1255,7 +1261,10 @@ one address.
    lists every refused agent at the top of the servers page (服务器; `GET
    /api/admin/agent-rejections`, admin), with the server id its credential
    claims, the client address it dialed from, the reason and how often it
-   tried, and logs a warning once per server id. The list is kept in memory:
+   tried, and logs a warning once per server id. One client address (IPv4
+   address / IPv6 `/48`) holds at most 16 entries, since anyone can present a
+   credential naming any id; past that, refused agents behind the same NAT
+   appear as the listed ones are fixed. The list is kept in memory:
    it shows the agents that dialed in since the Backend started (a refused
    agent retries about once a minute) and drops one that authenticates or
    stays silent for an hour.
@@ -1631,6 +1640,8 @@ from the product SLO and measured baseline, not from this example deployment.
   JWT (refreshed through the `HttpOnly` refresh cookie). Changing a password,
   an administrator resetting it, or disabling the user deletes their refresh
   sessions in the same transaction and invalidates outstanding access tokens.
+  An access token is also checked against its session on every request, so
+  signing out (or a detected refresh-token reuse) ends it at once.
   SSH public keys are kept across a password change; adding one requires the
   current password, and removing unknown keys is up to the user.
 - Open browser consoles (`/ws/console`) are bound to the browser session that
@@ -1642,9 +1653,9 @@ from the product SLO and measured baseline, not from this example deployment.
   session, otherwise it closes with `4408`.
 - Login throttling is deliberately not per account, so nobody can lock a known
   user (or `admin`) out: failures are limited only per (client address,
-  username) and per client address (IPv4 address or IPv6 /64, 10 and 30 per
-  5 minutes), plus the global Argon2 concurrency gate shared out per IPv4
-  address or IPv6 /48 (`iam/login-throttling.ts`). A distributed set of source
+  username) and per client address (IPv4 address or IPv6 /48, 10 and 30 per
+  5 minutes), plus the global Argon2 concurrency gate shared out by the same
+  buckets (`iam/login-throttling.ts`). A distributed set of source
   addresses can therefore still make many guesses per second against a known
   username, and can saturate the gate so that legitimate logins get `429`.
   Give every admin and user-admin account a long random password (a password

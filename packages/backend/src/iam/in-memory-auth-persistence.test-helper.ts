@@ -87,6 +87,10 @@ export class InMemoryAuthPersistenceTestAdapter implements AuthPersistence {
     return this.users.get(id) ?? null;
   }
 
+  async findSessionUser(userId: string, sessionId: string): Promise<AuthUser | null> {
+    return await this.findLiveRefreshSession(userId, sessionId) ? this.findUserById(userId) : null;
+  }
+
   issueRefreshSession(
     userId: string,
     session: NewRefreshSession,

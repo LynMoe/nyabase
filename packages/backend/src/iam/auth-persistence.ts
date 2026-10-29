@@ -95,6 +95,8 @@ export type RefreshRotationResult =
 export interface AuthPersistence {
   findUserByUsername(username: string): Promise<AuthUser | null>;
   findUserById(id: string): Promise<AuthUser | null>;
+  /** The user, only while their session `sessionId` is live (see `findLiveRefreshSession`). */
+  findSessionUser(userId: string, sessionId: string): Promise<AuthUser | null>;
   issueRefreshSession(
     userId: string,
     session: NewRefreshSession,

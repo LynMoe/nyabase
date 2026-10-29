@@ -16,6 +16,7 @@ import {
   RefreshSupersededException,
   RefreshThrottledException,
 } from './auth.service.js';
+import { accessJwtOptions } from './iam.module.js';
 import { InMemoryAuthPersistenceTestAdapter } from './in-memory-auth-persistence.test-helper.js';
 import { SessionRevocationService } from './session-revocation.service.js';
 import {
@@ -84,22 +85,22 @@ describe('AuthService login limiter', () => {
     expect(() => consume(service, '10.0.0.4', 'fresh-user')).not.toThrow();
   });
 
-  it('buckets IPv6 clients by /64 and IPv4-mapped clients by IPv4 address', () => {
+  it('buckets IPv6 clients by /48 and IPv4-mapped clients by IPv4 address', () => {
     expect(clientAddressBucket('2001:db8:1:2::1')).toBe(clientAddressBucket('2001:db8:1:2:ffff::9'));
-    expect(clientAddressBucket('2001:db8:1:2::1')).not.toBe(clientAddressBucket('2001:db8:1:3::1'));
+    expect(clientAddressBucket('2001:db8:1:2::1')).toBe(clientAddressBucket('2001:db8:1:3::1'));
+    expect(clientAddressBucket('2001:db8:1:2::1')).not.toBe(clientAddressBucket('2001:db8:2:2::1'));
     expect(clientAddressBucket('::ffff:192.0.2.1')).toBe('192.0.2.1');
     expect(clientAddressBucket('192.0.2.1')).toBe('192.0.2.1');
     expect(clientAddressBucket('not-an-ip')).toBe('unknown');
-    expect(clientAddressBucket('2001:db8:1:2::1', 48)).toBe('2001:db8:1::/48');
-    expect(clientAddressBucket('2001:db8:1:ffff::1', 48)).toBe(clientAddressBucket('2001:db8:1:2::1', 48));
-    expect(clientAddressBucket('192.0.2.1', 48)).toBe('192.0.2.1');
+    expect(clientAddressBucket('2001:db8:1:2::1')).toBe('2001:db8:1::/48');
 
     const service = createAuth();
     for (let i = 0; i < MAX_LOGIN_FAILURES_PER_IP_USERNAME; i += 1) {
       consume(service, `2001:db8:1:2::${(i + 1).toString(16)}`, 'admin');
     }
     expect(() => consume(service, '2001:db8:1:2::ffff', 'admin')).toThrow(rateLimited);
-    expect(() => consume(service, '2001:db8:1:3::1', 'admin')).not.toThrow();
+    expect(() => consume(service, '2001:db8:1:3::1', 'admin')).toThrow(rateLimited);
+    expect(() => consume(service, '2001:db8:2::1', 'admin')).not.toThrow();
   });
 
   it('opens a fresh window after the fixed window elapses', () => {
@@ -456,6 +457,23 @@ describe('AuthService browser-session binding', () => {
     await expect(service.logout(login.refreshToken)).resolves.toBe(user.id);
     expect(ended).toEqual([[user.id, sessionId]]);
     await expect(service.browserSessionDeadline(credential)).resolves.toBeNull();
+  });
+
+  it('stops accepting a session\'s access tokens once the session ends', async () => {
+    const { service, login } = await boundSession();
+    await expect(service.validateAccessToken(login.accessToken)).resolves.toBeDefined();
+    await service.logout(login.refreshToken);
+    await expect(service.validateAccessToken(login.accessToken)).rejects.toBeInstanceOf(UnauthorizedException);
+  });
+
+  it('verifies access tokens as HS256 only', async () => {
+    const options = accessJwtOptions({ get: ((key: string) => (key === 'auth.jwtSecret' ? secret : '15m')) as never });
+    const { persistence, user, sessionId } = await boundSession();
+    const pinned = createAuth({ persistence, jwtService: new JwtService(options) });
+    const claims = { sub: user.id, username: 'alice', ver: 0, sid: sessionId };
+    await expect(pinned.validateAccessToken(new JwtService(options).sign(claims))).resolves.toBeDefined();
+    const hs512 = new JwtService({ secret }).sign(claims, { algorithm: 'HS512', expiresIn: '15m' });
+    await expect(pinned.validateAccessToken(hs512)).rejects.toBeInstanceOf(UnauthorizedException);
   });
 
   it('refuses a token of another session of the same user', async () => {

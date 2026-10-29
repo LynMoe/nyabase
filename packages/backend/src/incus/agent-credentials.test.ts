@@ -74,6 +74,27 @@ describe('rejected agent credentials', () => {
     expect(rejections.list().map((entry) => entry.serverId)).toEqual([C, A]);
   });
 
+  it('keeps one client to its share without evicting the entries of others or its own', () => {
+    let now = 0;
+    const rejections = new AgentCredentialRejections(() => now, 4, 2);
+    rejections.record(A, 'bad_secret', '192.0.2.1');
+    for (let index = 0; index < 10; index += 1) {
+      now += 1;
+      rejections.record(`00000000-0000-4000-8000-${index.toString(16).padStart(12, '0')}`, 'unknown_server',
+        `2001:db8:1:${index.toString(16)}::1`);
+    }
+    now += 1;
+    rejections.record(B, 'unknown_server', '192.0.2.2');
+    now += 1;
+    rejections.record('00000000-0000-4000-8000-000000000000', 'unknown_server', '2001:db8:1:ffff::1');
+    expect(rejections.list().map((entry) => [entry.serverId, entry.attempts])).toEqual([
+      ['00000000-0000-4000-8000-000000000000', 2],
+      [B, 1],
+      ['00000000-0000-4000-8000-000000000001', 1],
+      [A, 1],
+    ]);
+  });
+
   it('drops an entry once its agent authenticates or stops trying', () => {
     let now = 0;
     const rejections = new AgentCredentialRejections(() => now);

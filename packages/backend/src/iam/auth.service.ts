@@ -218,7 +218,7 @@ export class AuthService {
     const reservations = this.consumeLoginAttempt(bucket, username);
     let snapshot: AuthUser;
     try {
-      snapshot = await this.validateUser(username, password, `ip:${clientAddressBucket(clientIp, 48)}`);
+      snapshot = await this.validateUser(username, password, `ip:${bucket}`);
     } catch (error) {
       // A busy Argon2 gate is not a failed guess.
       if (error instanceof HttpException && error.getStatus() === HttpStatus.TOO_MANY_REQUESTS) {
@@ -355,7 +355,8 @@ export class AuthService {
     ) {
       throw new UnauthorizedException();
     }
-    const user = await this.persistence.findUserById(payload.sub);
+    // Bound to its session: logout or refresh-token reuse ends it at once.
+    const user = await this.persistence.findSessionUser(payload.sub, payload.sid);
     if (
       !user
       || user.status !== UserStatus.Active

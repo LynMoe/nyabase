@@ -117,7 +117,7 @@ Vite 通过 alias 将 `@nyabase/common` 指向 `src/index.ts`，但 `index.ts` �
   （超出 429 `AUTH_RATE_LIMITED` + `Retry-After`，保留 cookie；前端在锁外按 Retry-After 退避、最多 3 次，之后只让该请求失败 / 冷加载显示「会话刷新繁忙」，
   不自动登出、不进入「无法验证会话」，但该页与「无法验证会话」一样提供「退出登录」按钮），所以访问令牌有效期 ≤ 60 分钟时，一个有效期（+2 分钟）内退役的 token 必然能被识别为重放；
   更长的有效期窗口仍封顶 62 分钟（否则 24h 有效期下日常使用就会被限流数小时），超出部分的重放识别只是尽力而为；更老的只是无效。登出接受当前或任一保留的退役 token。
-- access JWT 带 `sid`（签发它的 refresh 会话 id，`iam.refresh_tokens.id`），没有 `sid` 的 token 一律 401。容器控制台（`/ws/console`）绑定到授权它的浏览器会话：
+- access JWT 带 `sid`（签发它的 refresh 会话 id，`iam.refresh_tokens.id`），没有 `sid` 的 token 一律 401；每个请求都复核该会话仍 live（`findSessionUser`），所以登出 / 重放 / 被挤掉 / 过期后该会话的 access token 立即失效，不等 `exp`。只认 HS256（`accessJwtOptions`）。容器控制台（`/ws/console`）绑定到授权它的浏览器会话：
   登出 / refresh 重放删掉该会话后 `SessionRevocationService.endSession` 立即关闭它（4401，禁用 / 改角色 / 改密等 `revoke(userId)` 关闭该用户全部控制台）；
   控制台的授权只到 min(当前 access token 到期, 会话空闲到期, 登录 + 绝对上限)（`AuthService.browserSessionDeadline`，复核会话行），
   到期前后端发 `reauthenticate`，前端用**同一会话**的新 access token 再发 `auth`（`freshAccessToken`，必要时强制轮换；拿不到——网络抖动、429 退避用尽——时由 `freshAccessTokenWithRetry` 按退避重试，直到拿到、socket 关闭或截止时间必然已过），复核通过才顺延；
@@ -163,7 +163,7 @@ Vite 通过 alias 将 `@nyabase/common` 指向 `src/index.ts`，但 `index.ts` �
    在解析前拒绝没有在等回复时的大帧，未请求过的 response id 与过量 status 帧都按协议违规断开。
    认证前的 agent 升级只经 `incus/agent-credentials.ts` 的 `AgentUpgradeAdmissions` 限制在途查库数（满了回 503 + `Retry-After`）；
    不要按客户端地址计失败或封禁：同一 NAT / 未配 `trustedProxies` 时所有 agent 共用一个地址，一台凭据过期的 agent 或一次 PG 故障
-   不能把健康 agent 的控制 / stream 连接挡在外面。被拒的凭据只记进给运维看的 `AgentCredentialRejections`，不限流。
+   不能把健康 agent 的控制 / stream 连接挡在外面。被拒的凭据只记进给运维看的 `AgentCredentialRejections`，不限流（每个来源 IPv4 地址 / IPv6 /48 至多 16 条，超出的新 id 直接丢弃、不记日志，已列出的照常计数）。
    agent 端 `policy.ts` 是安全边界（只许 `nyc-*`/`nyv-*`、配置白名单、禁 raw/特权/宿主路径/profiles、
    必须 idmap.isolated、网卡 `nyh*` + IPv4/MAC 过滤，volatile 改回当前值；更新时与 Incus 当前值相同的配置键原样放行，白名单只管新增 / 改值的键，例如池 `volume.*` 默认值复制进卷的 `zfs.*`）；
    backend 生成的规格必须过得了它：`backend/src/agent-policy.contract.test.ts` 用真实的规格构建与 Incus 操作

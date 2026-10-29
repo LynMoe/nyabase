@@ -266,7 +266,8 @@ export function sanitizeInternalRedirect(value: unknown, fallback = '/'): string
     for (let index = 0; index < 2; index += 1) decoded = decodeURIComponent(decoded);
     if (decoded.startsWith('//') || decoded.includes('\\')) return fallback;
     const parsed = new URL(candidate, INTERNAL_ORIGIN);
-    if (parsed.origin !== INTERNAL_ORIGIN) return fallback;
+    // Dot segments can collapse `/.//host` into the protocol-relative `//host`.
+    if (parsed.origin !== INTERNAL_ORIGIN || parsed.pathname.startsWith('//')) return fallback;
     return `${parsed.pathname}${parsed.search}${parsed.hash}`;
   } catch {
     return fallback;

@@ -3,6 +3,7 @@ import type * as http from 'node:http';
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import type { Kysely } from 'kysely';
 import { parseAgentSecret, type RejectedAgentCredentialDto } from '@nyabase/common';
+import { clientAddressBucket } from '../iam/login-throttling.js';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
 
@@ -26,12 +27,20 @@ function bearerCredential(authorization: string | undefined): { credential: stri
 }
 
 export const MAX_REJECTED_AGENT_CREDENTIALS = 256;
+/**
+ * Anyone can present a well-formed credential naming any server id, so one
+ * client (IPv4 address / IPv6 /48) holds at most this many entries; past it,
+ * further ids from that client are dropped silently, so its listed entries
+ * (and other clients') keep their counts.
+ */
+export const MAX_REJECTED_AGENT_CREDENTIALS_PER_CLIENT = 16;
 /** Agents retry a rejected credential about once a minute; an hour of silence means it stopped. */
 export const REJECTED_AGENT_CREDENTIAL_TTL_MS = 60 * 60_000;
 
 interface Rejection {
   readonly reason: RejectedAgentCredentialDto['reason'];
   readonly clientAddress: string | null;
+  readonly clientBucket: string;
   readonly firstSeenAt: number;
   readonly lastSeenAt: number;
   readonly attempts: number;
@@ -51,12 +60,15 @@ export class AgentCredentialRejections {
   constructor(
     private readonly now: () => number = Date.now,
     private readonly capacity = MAX_REJECTED_AGENT_CREDENTIALS,
+    private readonly perClient = MAX_REJECTED_AGENT_CREDENTIALS_PER_CLIENT,
   ) {}
 
   record(serverId: string, reason: Rejection['reason'], clientAddress: string | undefined): void {
     const now = this.now();
     this.prune(now);
+    const clientBucket = clientAddressBucket(clientAddress);
     const previous = this.entries.get(serverId);
+    if (!previous && this.heldBy(clientBucket) >= this.perClient) return;
     this.entries.delete(serverId);
     if (!previous) {
       const from = clientAddress ?? 'an unknown address';
@@ -74,6 +86,7 @@ export class AgentCredentialRejections {
     this.entries.set(serverId, {
       reason,
       clientAddress: clientAddress ?? null,
+      clientBucket,
       firstSeenAt: previous?.firstSeenAt ?? now,
       lastSeenAt: now,
       attempts: (previous?.attempts ?? 0) + 1,
@@ -96,6 +109,12 @@ export class AgentCredentialRejections {
       lastSeenAt: new Date(entry.lastSeenAt).toISOString(),
       attempts: entry.attempts,
     }));
+  }
+
+  private heldBy(clientBucket: string): number {
+    let held = 0;
+    for (const entry of this.entries.values()) if (entry.clientBucket === clientBucket) held += 1;
+    return held;
   }
 
   /** Entries are kept in last-seen order, so the stale ones are at the front. */

@@ -13,7 +13,8 @@ use proxy_common::conn_limit::{
     wait_evicted, ConnectionLimiter, ConnectionPermit, LimitRejection, PendingEviction,
     PendingPermit,
 };
-use russh::{MethodKind, MethodSet};
+use russh::{kex, MethodKind, MethodSet};
+use std::borrow::Cow;
 use std::future::Future;
 use std::net::{IpAddr, Shutdown, SocketAddr};
 use std::sync::atomic::Ordering;
@@ -390,6 +391,10 @@ pub(crate) async fn handle_ssh_connection(
         inactivity_timeout: Some(Duration::from_secs(600)),
         keepalive_interval: Some(Duration::from_secs(30)),
         keepalive_max: 3,
+        preferred: russh::Preferred {
+            kex: Cow::Borrowed(SERVER_KEX),
+            ..Default::default()
+        },
         ..Default::default()
     });
     let handler = ProxySshSession::new(
@@ -406,6 +411,28 @@ pub(crate) async fn handle_ssh_connection(
     socket_guard.shutdown();
     Ok(())
 }
+
+/// Key exchanges offered to clients. russh's default list also carries
+/// finite-field Diffie-Hellman (group exchange, groups 14-18), and a client
+/// offering only group18 costs two 8192-bit modpows (about half a second of a
+/// worker) per unauthenticated handshake. OpenSSH has offered curve25519
+/// since 6.5; the NIST ECDH curves (about a millisecond each) keep clients
+/// without it connecting: FIPS-mode RHEL, paramiko < 2.7, the original JSch.
+/// The ext-info and strict-kex markers are kept as in russh's
+/// default list: the server only enables strict kex (the Terrapin
+/// countermeasure) when its own list carries the server marker.
+const SERVER_KEX: &[kex::Name] = &[
+    kex::MLKEM768X25519_SHA256,
+    kex::CURVE25519,
+    kex::CURVE25519_PRE_RFC_8731,
+    kex::ECDH_SHA2_NISTP256,
+    kex::ECDH_SHA2_NISTP384,
+    kex::ECDH_SHA2_NISTP521,
+    kex::EXTENSION_SUPPORT_AS_CLIENT,
+    kex::EXTENSION_SUPPORT_AS_SERVER,
+    kex::EXTENSION_OPENSSH_STRICT_KEX_AS_CLIENT,
+    kex::EXTENSION_OPENSSH_STRICT_KEX_AS_SERVER,
+];
 
 pub(crate) struct SessionSocketGuard(pub(crate) std::net::TcpStream);
 

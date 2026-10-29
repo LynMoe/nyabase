@@ -186,9 +186,21 @@ impl ControlPlane {
             ControlMode::Authoritative if self.admitting.load(Ordering::Relaxed) => {
                 store.load().map(|snapshot| snapshot.deadline)
             }
-            ControlMode::Paused => self.hold_deadline(),
+            ControlMode::Paused => self.paused_deadline(store),
             ControlMode::Authoritative | ControlMode::Empty => None,
         }
+    }
+
+    /// While paused, held sessions keep the last snapshot for at most the
+    /// hold, and never past that snapshot's own lease: the lease is the upper
+    /// bound on revocation.
+    pub(crate) fn paused_deadline(&self, store: &SnapshotStore) -> Option<Instant> {
+        let hold = self.hold_deadline()?;
+        Some(
+            store
+                .load()
+                .map_or(hold, |snapshot| hold.min(snapshot.deadline)),
+        )
     }
 }
 
@@ -250,16 +262,19 @@ pub(crate) async fn run_control_timers(
                         }
                     }
                     ControlMode::Paused => {
-                        if control.hold_deadline().is_some_and(|deadline| Instant::now() >= deadline)
+                        if control
+                            .paused_deadline(&store)
+                            .is_some_and(|deadline| Instant::now() >= deadline)
                         {
-                            revoke_control_plane(
-                                &store,
-                                &runtime,
-                                &control,
-                                "SSH proxy control-plane hold expired",
-                            )
-                            .await;
-                            warn!("SSH proxy control-plane hold expired");
+                            let lease_expired =
+                                store.load().is_some_and(|snapshot| !snapshot.is_fresh());
+                            let reason = if lease_expired {
+                                "SSH proxy held snapshot lease expired"
+                            } else {
+                                "SSH proxy control-plane hold expired"
+                            };
+                            revoke_control_plane(&store, &runtime, &control, reason).await;
+                            warn!("{reason}");
                         }
                     }
                     ControlMode::Authoritative | ControlMode::Empty => {}

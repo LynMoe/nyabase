@@ -76,6 +76,23 @@ export class IamAuthRepository implements AuthPersistence {
     return row ? this.toUser(row as UserRow) : null;
   }
 
+  async findSessionUser(userId: string, sessionId: string): Promise<AuthUser | null> {
+    const row = await this.database
+      .selectFrom('iam.users')
+      .selectAll()
+      .where('id', '=', userId)
+      .where(({ exists, selectFrom }) => exists(
+        selectFrom('iam.refresh_tokens')
+          .select('id')
+          .where('id', '=', sessionId)
+          .where('user_id', '=', userId)
+          .where('revoked', '=', false)
+          .where('expires_at', '>', sql<Date>`clock_timestamp()`),
+      ))
+      .executeTakeFirst();
+    return row ? this.toUser(row as UserRow) : null;
+  }
+
   issueRefreshSession(
     userId: string,
     session: NewRefreshSession,

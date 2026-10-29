@@ -12,7 +12,7 @@ export const MAX_TRACKED_ENROLL_ADDRESSES = 4_096;
 @Controller('agent')
 export class AgentEnrollController {
   /**
-   * Every attempt counts against its client bucket (IPv6 by /64, so one host
+   * Every attempt counts against its client bucket (IPv6 by /48, so one site
    * cannot rotate addresses). A full table evicts its least recently used
    * bucket instead of refusing new ones, so many addresses cannot lock
    * enrollment for everybody.

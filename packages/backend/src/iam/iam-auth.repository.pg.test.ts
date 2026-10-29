@@ -277,4 +277,24 @@ describePg('IamAuthRepository bounded ancestors', () => {
       await expect(repository.findLiveRefreshSession(other.userId, other.sessionId)).resolves.toBeNull();
     });
   });
+
+  it('loads the user behind an access token only while its session is live', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const { repository, userId, sessionId } = await sessionWithToken(database, hex('1'));
+      await expect(repository.findSessionUser(userId, sessionId)).resolves.toMatchObject({ id: userId });
+      await repository.rotateRefreshSession(rotation(hex('1'), hex('a'), hex('3')));
+      await expect(repository.findSessionUser(userId, sessionId)).resolves.toMatchObject({ id: userId });
+
+      const other = await sessionWithToken(database, hex('2'));
+      await expect(repository.findSessionUser(other.userId, sessionId)).resolves.toBeNull();
+      await expect(repository.findSessionUser(userId, other.sessionId)).resolves.toBeNull();
+      await expect(repository.findSessionUser(userId, randomUUID())).resolves.toBeNull();
+
+      await database.updateTable('iam.refresh_tokens')
+        .set({ expires_at: new Date(Date.now() - 1_000) })
+        .where('id', '=', sessionId)
+        .execute();
+      await expect(repository.findSessionUser(userId, sessionId)).resolves.toBeNull();
+    });
+  });
 });

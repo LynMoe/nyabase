@@ -248,6 +248,66 @@ async fn silent_pre_auth_clients_are_closed_by_the_auth_deadline() {
     listener.task.abort();
 }
 
+async fn client_with_kex(
+    address: std::net::SocketAddr,
+    kex: &[russh::kex::Name],
+) -> Result<russh::client::Handle<TrustAllClient>, russh::Error> {
+    let config = russh::client::Config {
+        preferred: russh::Preferred {
+            kex: kex.to_vec().into(),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    russh::client::connect(Arc::new(config), address, TrustAllClient).await
+}
+
+#[tokio::test]
+async fn finite_field_diffie_hellman_is_not_offered_before_authentication() {
+    let listener = start_public_listener(test_config()).await;
+    for group in [
+        russh::kex::DH_G18_SHA512,
+        russh::kex::DH_G14_SHA256,
+        russh::kex::DH_GEX_SHA256,
+    ] {
+        let kex = [
+            group,
+            russh::kex::EXTENSION_SUPPORT_AS_CLIENT,
+            russh::kex::EXTENSION_OPENSSH_STRICT_KEX_AS_CLIENT,
+        ];
+        let result = client_with_kex(listener.address, &kex).await;
+        assert!(result.is_err(), "{group:?} was negotiated");
+    }
+
+    // Curve25519-only clients (and the default list) still connect, with
+    // strict kex offered as OpenSSH does.
+    let curve25519_only = [
+        russh::kex::CURVE25519,
+        russh::kex::EXTENSION_SUPPORT_AS_CLIENT,
+        russh::kex::EXTENSION_OPENSSH_STRICT_KEX_AS_CLIENT,
+    ];
+    client_with_kex(listener.address, &curve25519_only)
+        .await
+        .expect("curve25519 client connects");
+    // Clients without curve25519 (FIPS-mode OpenSSH, old paramiko) use NIST ECDH.
+    let nistp256_only = [
+        russh::kex::ECDH_SHA2_NISTP256,
+        russh::kex::EXTENSION_SUPPORT_AS_CLIENT,
+        russh::kex::EXTENSION_OPENSSH_STRICT_KEX_AS_CLIENT,
+    ];
+    client_with_kex(listener.address, &nistp256_only)
+        .await
+        .expect("nistp256 client connects");
+    russh::client::connect(
+        Arc::new(russh::client::Config::default()),
+        listener.address,
+        TrustAllClient,
+    )
+    .await
+    .expect("default client connects");
+    listener.task.abort();
+}
+
 #[tokio::test]
 async fn one_client_ip_cannot_exhaust_pre_auth_slots() {
     let mut config = test_config();

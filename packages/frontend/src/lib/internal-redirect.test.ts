@@ -11,6 +11,9 @@ describe('sanitizeInternalRedirect', () => {
     '//evil.example/steal',
     '/\\evil.example/steal',
     '/%2f%2fevil.example/steal',
+    '/.//evil.example/steal',
+    '/a/..//evil.example/steal',
+    '/%2e%2e//evil.example/steal',
     'javascript:alert(1)',
     '/ok\nLocation:https://evil.example',
   ])('rejects an external or ambiguous redirect: %s', (candidate) => {

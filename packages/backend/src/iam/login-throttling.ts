@@ -92,11 +92,11 @@ export class LoginAttemptLimiter {
 /**
  * Rate-limit bucket for a client address (Express `req.ip`, which already
  * honours `server.trustedProxies`). IPv4 (and IPv4-mapped IPv6) is one bucket
- * per address; IPv6 is bucketed by its /64 because a single client usually
- * controls a whole /64 and could otherwise rotate addresses for free. The
- * Argon2 concurrency gate uses the coarser /48 a single site is delegated.
+ * per address; IPv6 is bucketed by its /48, the prefix a single site (or a
+ * free tunnel broker) is delegated, so one client cannot rotate addresses or
+ * /64s for free.
  */
-export function clientAddressBucket(raw: string | undefined, ipv6Prefix: 48 | 64 = 64): string {
+export function clientAddressBucket(raw: string | undefined): string {
   const address = (raw ?? '').trim().replace(/^\[|\]$/g, '').split('%')[0];
   const mapped = /^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/i.exec(address);
   if (mapped && isIP(mapped[1]) === 4) return mapped[1];
@@ -105,7 +105,7 @@ export function clientAddressBucket(raw: string | undefined, ipv6Prefix: 48 | 64
   if (family !== 6) return 'unknown';
   const groups = expandIpv6(address);
   return groups
-    ? `${groups.slice(0, ipv6Prefix / 16).map((group) => group.toString(16)).join(':')}::/${ipv6Prefix}`
+    ? `${groups.slice(0, 3).map((group) => group.toString(16)).join(':')}::/48`
     : 'unknown';
 }
 

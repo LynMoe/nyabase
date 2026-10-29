@@ -122,6 +122,14 @@ impl ProxySshSession {
         self.store.load()
     }
 
+    /// What channels authorize from: the held snapshot, only within its lease
+    /// (a pause never holds it longer, but the expiry timer may lag).
+    fn authorizing_snapshot(&self) -> Result<Arc<RoutingSnapshot>> {
+        self.held_snapshot()
+            .filter(|snapshot| snapshot.is_fresh())
+            .context("no fresh SSH proxy snapshot is installed")
+    }
+
     pub(crate) fn pause_rejecting(&self) -> bool {
         self.reject_paused || !self.control.admit() && self.held_snapshot().is_some()
     }
@@ -134,9 +142,7 @@ impl ProxySshSession {
         let expected_user_id = lock(&self.connection.authenticated_user_id)
             .clone()
             .context("SSH proxy session has no authenticated user")?;
-        let snapshot = self
-            .held_snapshot()
-            .context("no SSH proxy snapshot is installed")?;
+        let snapshot = self.authorizing_snapshot()?;
         let user = snapshot
             .find_active_user_by_public_key(public_key)
             .map_err(|reason| anyhow::anyhow!(reason.to_string()))?;
@@ -149,9 +155,7 @@ impl ProxySshSession {
     /// `target` is the `direct-tcpip` host: a routed IP or a container name.
     pub(crate) fn authorized_route_for_target(&self, target: &str) -> Result<OwnedResolvedRoute> {
         let user_id = self.authorized_user_id()?;
-        let snapshot = self
-            .held_snapshot()
-            .context("no SSH proxy snapshot is installed")?;
+        let snapshot = self.authorizing_snapshot()?;
         snapshot
             .resolve_owned_route_for_user_target(&user_id, target)
             .map_err(|reason| anyhow::anyhow!(reason.to_string()))
