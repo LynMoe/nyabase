@@ -118,6 +118,26 @@ export function destroyRetryFromError(error: unknown, serverId: string): Reconci
   );
 }
 
+/**
+ * The size a catalog holds. A shared catalog `incus admin recover` imported
+ * has none: its directory holds what the volume committed (a pending shrink's
+ * reservation included, `committed-bytes.ts`), so that shrink still meets the
+ * usage check.
+ */
+export function catalogSize(
+  size: unknown,
+  row: {
+    readonly shared_backend_id: string | null;
+    readonly size_bytes: string;
+    readonly shrink_reserved_bytes: string | null;
+  },
+): bigint | null {
+  if (size !== undefined || row.shared_backend_id === null) return asBytes(size);
+  const committed = BigInt(row.size_bytes);
+  const reserved = row.shrink_reserved_bytes === null ? null : BigInt(row.shrink_reserved_bytes);
+  return reserved !== null && reserved > committed ? reserved : committed;
+}
+
 export function scanNeedsEnsure(
   row: {
     readonly lifecycle_phase: string;

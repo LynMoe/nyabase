@@ -26,7 +26,12 @@ import { listEligibleDestroyExecutors, VolumesRepository } from './volumes.repos
 /** Attempts after which a volume adoption that keeps failing is given up on. */
 export const VOLUME_ADOPT_FAIL_AFTER_ATTEMPTS = 8;
 
-export type SharedCatalogEnsureResult = 'present' | 'posted' | 'missing';
+/**
+ * `unshifted`: the catalog exists without `security.shifted` (one that
+ * `incus admin recover` imported); a volume pass must shape it before any
+ * container mounts it, or Incus would map the directory to that one instance.
+ */
+export type SharedCatalogEnsureResult = 'present' | 'unshifted' | 'posted' | 'missing';
 
 export async function ensureSharedCatalogOnServer(
   client: IncusClientPort,
@@ -39,8 +44,8 @@ export async function ensureSharedCatalogOnServer(
   },
 ): Promise<SharedCatalogEnsureResult> {
   try {
-    await client.getStorageVolume(input.poolName, 'custom', input.incusName);
-    return 'present';
+    const current = (await client.getStorageVolume(input.poolName, 'custom', input.incusName)).metadata;
+    return current?.config?.['security.shifted'] === 'true' ? 'present' : 'unshifted';
   } catch (error) {
     if (!isNotFound(error)) throw error;
   }

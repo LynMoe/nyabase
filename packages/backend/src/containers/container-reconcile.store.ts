@@ -411,6 +411,32 @@ export class ContainerReconcileStore {
     });
   }
 
+  /**
+   * The shared catalog on this server lacks `security.shifted` (`incus admin
+   * recover` imported it): queue and wake the volume pass that shapes it, so
+   * the waiting container pass can mount it on a retry.
+   */
+  async requeueEnsureForUnshiftedCatalog(volumeId: string, serverId: string): Promise<void> {
+    const volume = await this.database
+      .selectFrom('control.volumes as v')
+      .innerJoin('control.volume_placements as pl', 'pl.volume_id', 'v.id')
+      .select('v.revision')
+      .where('v.id', '=', volumeId)
+      .where('pl.server_id', '=', serverId)
+      .where('v.lifecycle_phase', '!=', 'deleting')
+      .executeTakeFirst();
+    if (!volume) return;
+    await this.intents.ensurePending({
+      kind: 'volume.ensure',
+      resourceType: 'volume',
+      resourceId: volumeId,
+      serverId,
+      targetRevision: volume.revision,
+      reuseSettled: false,
+      request: { source: 'catalog_unshifted', operation: 'ensure_attachment', idempotencyKey: 'ensure:catalog_unshifted' },
+    });
+  }
+
   // --- observation -------------------------------------------------------------
 
   /**

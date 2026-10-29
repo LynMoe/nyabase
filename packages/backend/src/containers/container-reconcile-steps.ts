@@ -312,7 +312,7 @@ const NOT_READY_FAILURES: Readonly<Record<string, { code: string; message: strin
 export interface AttachmentDeps {
   readonly store: Pick<
     ContainerReconcileStore,
-    'rereadDesired' | 'markCatalogPresent' | 'requeueResizeAfterCatalogPost'
+    'rereadDesired' | 'markCatalogPresent' | 'requeueResizeAfterCatalogPost' | 'requeueEnsureForUnshiftedCatalog'
   >;
   readonly logger: Pick<Logger, 'log'>;
   readonly notReady: NotReadyPasses;
@@ -400,7 +400,8 @@ async function ensureDesiredCatalogs(
         sizeBytes: attachment.size_bytes,
         ownerScope: attachment.shared_backend_id ?? null,
       });
-      if (result === 'missing') {
+      if (result === 'unshifted') await deps.store.requeueEnsureForUnshiftedCatalog(attachment.volume_id, serverId);
+      if (result === 'missing' || result === 'unshifted') {
         throw new IncusError('VOLUME_CATALOG_ADOPT_PENDING', 'retry', {
           volumeId: attachment.volume_id,
           serverId,

@@ -153,6 +153,10 @@ Vite 通过 alias 将 `@nyabase/common` 指向 `src/index.ts`，但 `index.ts` �
    worker 按资源排队（`reconcile/resource-chains.ts`）：同一资源的 intent 严格按序、绝不并发（claim 按 worker 记，
    同 worker 重入会续租，所以这道进程内互斥不能去掉），不同资源并发（全局 12、每服务器 4），一个慢操作不再拖住整个队列。
    全量扫描先列 Incus 再读库；库里不认识的带本安装标签的实例 / 卷进 `control.orphan_sightings`，实例立即停机，7 天后才删。
+   库里认识、但本服务器没有 placement 的共享卷 catalog（执行器经 `incus admin recover` 接入共享后端会导入已有目录：无标签、无 size、无 `security.shifted`）
+   由扫描补一条 `ensuring` placement（`adoptListedCatalog`）并排卷校正（没有 size 按承诺尺寸、含缩容预留计，`catalogSize`），删除时随其他 catalog 一起清掉；
+   容器只挂 `security.shifted=true` 的共享 catalog，遇到未 shift 的先排卷 ensure 再重试（`ensureSharedCatalogOnServer` 的 `unshifted`）。
+   卷校正改写 `security.shifted` 只看 Incus `used_by`，不看库里的挂载行（等 catalog 的挂载不算在用）。
    删除服务器：仍有容器 / 本机卷，或它是某个仍有卷的共享后端的最后一台执行器（不论在线与否）时，非 `force` 删除返回 `SERVER_NOT_EMPTY`；
    共享卷绝不因失去 placement 而被丢弃，`force` 只结束最后执行器上已在 `deleting` 的卷（`destroy_executor_gone`），活卷保留到有新执行器。系统设置只用 revision CAS
    （冲突返回 409 + 当前值），没有内容 token 和定时轮询。

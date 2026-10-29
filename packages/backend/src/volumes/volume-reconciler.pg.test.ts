@@ -302,7 +302,7 @@ describePg('volume reconciler equal-node destroy', () => {
     });
   });
 
-  it('scan does not orphan-delete a pool_id-null volume and does not insert missing placements', async () => {
+  it('scan does not orphan-delete a pool_id-null volume and places its catalog listed on another executor', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const fixture = await seedSharedVolume(database, {
         aState: 'present',
@@ -337,13 +337,107 @@ describePg('volume reconciler equal-node destroy', () => {
 
       expect(deleteStorageVolume).not.toHaveBeenCalled();
       const placements = await database.selectFrom('control.volume_placements')
-        .select('server_id')
+        .select(['server_id', 'pool_id', 'catalog_state', 'observed_revision'])
         .where('volume_id', '=', fixture.volumeId)
+        .orderBy('server_id')
         .execute();
-      expect(placements.map((row) => row.server_id)).toEqual([fixture.serverA]);
+      expect(placements).toEqual([
+        { server_id: fixture.serverB, pool_id: fixture.poolB, catalog_state: 'ensuring', observed_revision: null },
+        { server_id: fixture.serverA, pool_id: fixture.poolA, catalog_state: 'present', observed_revision: 2 },
+      ]);
+      expect(ensurePending).toHaveBeenCalledWith(expect.objectContaining({
+        kind: 'volume.resize',
+        resourceId: fixture.volumeId,
+        serverId: fixture.serverB,
+      }));
       expect(ensurePending).not.toHaveBeenCalledWith(expect.objectContaining({
         kind: 'volume.destroy',
       }));
+    });
+  });
+});
+
+describePg('volume reconciler catalogs imported by incus admin recover', () => {
+  it('a scan places the imported catalog so destroy purges it with the others', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const fixture = await seedSharedVolume(database, { aState: 'present', bState: 'present', lifecyclePhase: 'deleting' });
+      await database.deleteFrom('control.volume_placements')
+        .where('volume_id', '=', fixture.volumeId)
+        .where('server_id', '=', fixture.serverB)
+        .execute();
+      const present = new Set([fixture.serverA, fixture.serverB]);
+      const clientA = catalogClient(fixture.serverA, present, fixture.incusName);
+      const clientB = catalogClient(fixture.serverB, present, fixture.incusName);
+      const reconciler = new VolumeReconciler(new VolumeReconcileStore(database, new IntentRepository(database, noopWake())),
+        { log: vi.fn().mockResolvedValue(undefined) } as never,
+        { get: vi.fn(async (id: string) => (id === fixture.serverA ? clientA : clientB)) } as never,
+        { register: vi.fn() } as never,
+      );
+
+      await reconciler.scan(fixture.serverB, {
+        listStorageVolumes: vi.fn().mockResolvedValue({ metadata: [{ name: fixture.incusName, config: {} }] }),
+        deleteStorageVolume: vi.fn(),
+      } as never, new AbortController().signal);
+      const outcome = await reconciler.reconcile({
+        intent: destroyIntent(fixture.volumeId) as never,
+        claim: {} as never,
+        lease: { assertOwned: vi.fn() } as never,
+        signal: new AbortController().signal,
+      });
+
+      expect(outcome).toMatchObject({ outcome: 'succeeded' });
+      // RemoveAll on one executor, then the other catalog is purged: none is left behind.
+      expect(clientA.deleteStorageVolume.mock.calls.length + clientB.deleteStorageVolume.mock.calls.length).toBe(2);
+      expect(present.size).toBe(0);
+      expect(await database.selectFrom('control.volumes').select('id')
+        .where('id', '=', fixture.volumeId).execute()).toHaveLength(0);
+    });
+  });
+
+  it('a container pass waits for the volume pass to shift an imported catalog', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const fixture = await seedSharedVolume(database, { aState: 'present', bState: 'ensuring', lifecyclePhase: 'active' });
+      const containerId = await seedContainer(database, {
+        ownerId: fixture.ownerId,
+        serverId: fixture.serverB,
+        poolId: await seedPool(database, fixture.serverB),
+        imageId: await seedImage(database),
+      });
+      await database.insertInto('control.volume_attachments').values({
+        id: randomUUID(),
+        container_id: containerId,
+        volume_id: fixture.volumeId,
+        device_name: `nyd-${randomUUID().replaceAll('-', '')}`,
+        container_path: '/data',
+        read_only: false,
+        bind_state: 'attaching',
+      }).execute();
+      const containerStore = new ContainerReconcileStore(database, new IntentRepository(database, noopWake()));
+      let config: Record<string, string> = {};
+      const client = {
+        getStorageVolume: vi.fn(async () => ({ metadata: { name: fixture.incusName, config } })),
+        createStorageVolume: vi.fn(),
+      };
+      const pass = () => prepareAttachments(
+        { store: containerStore, logger: { log: vi.fn() }, notReady: new NotReadyPasses() },
+        { intent: { id: randomUUID(), kind: 'container.update', request: {}, resourceId: containerId, targetRevision: 1 } } as never,
+        client as never,
+        { id: containerId, server_id: fixture.serverB } as never,
+      );
+
+      await expect(pass()).rejects.toMatchObject({ code: 'VOLUME_CATALOG_ADOPT_PENDING' });
+      expect(client.createStorageVolume).not.toHaveBeenCalled();
+      const placement = await database.selectFrom('control.volume_placements').select('catalog_state')
+        .where('volume_id', '=', fixture.volumeId).where('server_id', '=', fixture.serverB)
+        .executeTakeFirstOrThrow();
+      expect(placement.catalog_state).toBe('ensuring');
+      expect(await database.selectFrom('control.intents').select(['kind', 'server_id', 'status'])
+        .where('resource_id', '=', fixture.volumeId).execute())
+        .toEqual([{ kind: 'volume.ensure', server_id: fixture.serverB, status: 'pending' }]);
+
+      // The volume pass shifted it: the container pass mounts it now.
+      config = { size: '100', 'security.shifted': 'true' };
+      await expect(pass()).resolves.toHaveProperty('attachments');
     });
   });
 });

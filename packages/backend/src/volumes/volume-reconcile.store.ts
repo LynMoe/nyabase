@@ -20,6 +20,7 @@ export interface VolumeRecord {
   shared_backend_id: string | null;
   incus_name: string;
   size_bytes: string;
+  shrink_reserved_bytes: string | null;
   used_bytes: string | null;
   revision: number;
   lifecycle_phase: 'provisioning' | 'active' | 'deleting' | 'failed';
@@ -204,6 +205,36 @@ export class VolumeReconcileStore {
       .execute();
   }
 
+  /**
+   * Places a shared volume whose catalog the scan found on this server without
+   * a placement, on the server's pool of the volume's backend. It starts
+   * `ensuring`, like an attach's; nothing is inserted when the volume is gone
+   * or someone placed it meanwhile.
+   */
+  adoptListedCatalog(volumeId: string, serverId: string) {
+    return this.database
+      .insertInto('control.volume_placements')
+      .columns(['volume_id', 'server_id', 'pool_id', 'catalog_state', 'observed_revision'])
+      .expression(this.database
+        .selectFrom('control.volumes as v')
+        .innerJoin('infra.storage_pools as p', 'p.shared_backend_id', 'v.shared_backend_id')
+        .select([
+          'v.id',
+          'p.server_id',
+          'p.id',
+          sql<'ensuring'>`'ensuring'`.as('catalog_state'),
+          sql<null>`null::integer`.as('observed_revision'),
+        ])
+        .where('v.id', '=', volumeId)
+        .where('p.server_id', '=', serverId)
+        .where('p.registered', '=', true)
+        .orderBy('p.id')
+        .limit(1))
+      .onConflict((conflict) => conflict.columns(['volume_id', 'server_id']).doNothing())
+      .returningAll()
+      .executeTakeFirst();
+  }
+
   async recordObservedUsage(volumeId: string, usedBytes: bigint | null): Promise<void> {
     await this.database
       .updateTable('control.volumes')
@@ -264,6 +295,7 @@ export class VolumeReconcileStore {
         'shared_backend_id',
         'incus_name',
         'size_bytes',
+        'shrink_reserved_bytes',
         'used_bytes',
         'revision',
         'lifecycle_phase',
@@ -278,6 +310,7 @@ export class VolumeReconcileStore {
     return {
       ...volume,
       size_bytes: String(volume.size_bytes),
+      shrink_reserved_bytes: volume.shrink_reserved_bytes === null ? null : String(volume.shrink_reserved_bytes),
       used_bytes: volume.used_bytes === null || volume.used_bytes === undefined
         ? null
         : String(volume.used_bytes),

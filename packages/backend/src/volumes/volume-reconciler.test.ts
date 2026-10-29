@@ -354,7 +354,7 @@ describe('volume reconciler scan and shifted policy', () => {
     expect(client.deleteStorageVolume).not.toHaveBeenCalled();
   });
 
-  it('does not upsert a placement when the backend is visible but no catalog row exists', async () => {
+  it('places a shared catalog listed without a placement and queues the pass that shapes it', async () => {
     const backendId = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
     const ensurePending = vi.fn().mockResolvedValue({ id: 'intent' });
     const listedName = `nyv-${'a'.repeat(32)}`;
@@ -388,6 +388,16 @@ describe('volume reconciler scan and shifted policy', () => {
       { get: vi.fn().mockResolvedValue(undefined), listServerIds: vi.fn() } as never,
       { register: vi.fn() } as never,
     );
+    const adopt = vi.spyOn(
+      storeOf(reconciler) as unknown as { adoptListedCatalog: () => Promise<unknown> },
+      'adoptListedCatalog',
+    ).mockResolvedValue({
+      volume_id: volumeId,
+      server_id: serverId,
+      pool_id: 'pool-s',
+      catalog_state: 'ensuring',
+      observed_revision: null,
+    });
 
     await reconciler.scan(serverId, {
       listStorageVolumes: vi.fn().mockResolvedValue({
@@ -396,8 +406,13 @@ describe('volume reconciler scan and shifted policy', () => {
       deleteStorageVolume,
     } as never, new AbortController().signal);
 
-    expect(db.insertInto).not.toHaveBeenCalled();
-    expect(ensurePending).not.toHaveBeenCalled();
+    // `incus admin recover` imported the directory into this daemon's catalog.
+    expect(adopt).toHaveBeenCalledWith(volumeId, serverId);
+    expect(ensurePending).toHaveBeenCalledWith(expect.objectContaining({
+      kind: 'volume.resize',
+      resourceId: volumeId,
+      serverId,
+    }));
     expect(deleteStorageVolume).not.toHaveBeenCalled();
   });
 
@@ -691,6 +706,7 @@ describe('volume reconciler scan and shifted policy', () => {
           metadata: {
             config: { size: '10', 'security.shifted': 'false' },
             content_type: 'filesystem',
+            used_by: ['/1.0/instances/nyc-1'],
           },
         }),
         getStorageVolumeState: vi.fn().mockResolvedValue({
@@ -705,6 +721,84 @@ describe('volume reconciler scan and shifted policy', () => {
       failure: { code: 'VOLUME_SECURITY_SHIFTED_MISMATCH' },
     });
     expect(updateStorageVolume).not.toHaveBeenCalled();
+  });
+
+  it('shifts a catalog no instance uses while an attachment waits for it', async () => {
+    const reconciler = new VolumeReconciler(new VolumeReconcileStore(volumeExistsDb() as never, {} as never),
+      { log: vi.fn().mockResolvedValue(undefined) } as never,
+      { get: vi.fn().mockResolvedValue(undefined), listServerIds: vi.fn() } as never,
+      { register: vi.fn() } as never,
+    );
+    vi.spyOn(storeOf(reconciler) as unknown as { readVolume: () => Promise<unknown> }, 'readVolume')
+      .mockResolvedValue(ensureRow());
+    vi.spyOn(storeOf(reconciler) as unknown as { readAttachments: () => Promise<unknown> }, 'readAttachments')
+      .mockResolvedValue([{ id: 'att-1', container_id: 'ctr-1', power_intent: 'running' }]);
+    const client = statefulVolumeClient({ config: { size: '10' }, content_type: 'filesystem', used_by: [] });
+
+    const outcome = await reconciler.reconcile(runContext({ client }));
+
+    expect(outcome).toMatchObject({ outcome: 'succeeded' });
+    expect(client.updateStorageVolume.mock.calls[0]?.[3]).toMatchObject({
+      config: { size: '10', 'security.shifted': 'true' },
+    });
+  });
+
+  describe('a shared catalog `incus admin recover` imported (no size, labels or shift)', () => {
+    const backendId = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+
+    function recoveredPass(row: { size_bytes: string; shrink_reserved_bytes: string | null }, usedBytes: string) {
+      const db = volumeExistsDb();
+      const reconciler = new VolumeReconciler(new VolumeReconcileStore(db as never, {} as never),
+        { log: vi.fn().mockResolvedValue(undefined) } as never,
+        { get: vi.fn().mockResolvedValue(undefined), listServerIds: vi.fn() } as never,
+        { register: vi.fn() } as never,
+      );
+      vi.spyOn(storeOf(reconciler) as unknown as { readVolume: () => Promise<unknown> }, 'readVolume')
+        .mockResolvedValue({
+          ...ensureRow(),
+          ...row,
+          driver: 'cephfs',
+          shared_backend_id: backendId,
+          server_id: null,
+          catalog_state: 'ensuring',
+        });
+      vi.spyOn(storeOf(reconciler) as unknown as { readAttachments: () => Promise<unknown[]> }, 'readAttachments')
+        .mockResolvedValue([]);
+      const client = statefulVolumeClient(
+        { config: {}, content_type: 'filesystem', used_by: [] },
+        { used: usedBytes, total: '0', nyabase_used_source: 'ceph.dir.rbytes' },
+      );
+      return { db, client, run: () => reconciler.reconcile(runContext({ kind: 'volume.resize', client })) };
+    }
+
+    it('writes the managed shape at the committed size', async () => {
+      const { client, run } = recoveredPass({ size_bytes: '10', shrink_reserved_bytes: null }, '3');
+
+      await expect(run()).resolves.toMatchObject({ outcome: 'succeeded' });
+      expect(client.updateStorageVolume.mock.calls[0]?.[3]).toMatchObject({
+        config: {
+          size: '10',
+          'security.shifted': 'true',
+          'user.nyabase.managed': 'true',
+          'user.nyabase.scope': backendId,
+        },
+      });
+    });
+
+    it('puts a pending shrink through the usage check against the reserved size', async () => {
+      const { db, client, run } = recoveredPass({ size_bytes: '10', shrink_reserved_bytes: '20' }, '15');
+
+      await expect(run()).resolves.toMatchObject({
+        outcome: 'failed',
+        failure: { code: 'VOLUME_SHRINK_BELOW_USAGE' },
+      });
+      expect(client.updateStorageVolume).not.toHaveBeenCalled();
+      const sets = (db.updateTable as ReturnType<typeof vi.fn>).mock.results.flatMap((result) => {
+        const query = result.value as { set: ReturnType<typeof vi.fn> };
+        return query.set.mock.calls.map((call) => call[0] as Record<string, unknown>);
+      });
+      expect(sets).toEqual(expect.arrayContaining([expect.objectContaining({ size_bytes: '20' })]));
+    });
   });
 
   it('reverts desired size and fails when shrink is below observed usage', async () => {
@@ -1567,6 +1661,25 @@ function destroyContext(lease?: { assertOwned: ReturnType<typeof vi.fn> }): Reco
     client: undefined,
     lease: lease ?? { assertOwned: vi.fn() },
   });
+}
+
+/** An Incus custom volume whose GETs return what the last PUT wrote. */
+function statefulVolumeClient(initial: Record<string, unknown>, usage: Record<string, unknown> = {}) {
+  let current = initial;
+  const updateStorageVolume = vi.fn(async (
+    _pool: string,
+    _type: string,
+    _name: string,
+    body: { config: Record<string, string> },
+  ) => {
+    current = { ...current, config: body.config };
+    return { status: 200, envelope: { type: 'sync' } };
+  });
+  return {
+    getStorageVolume: vi.fn(async () => ({ metadata: current })),
+    getStorageVolumeState: vi.fn().mockResolvedValue({ metadata: { usage } }),
+    updateStorageVolume,
+  };
 }
 
 function ensureRow() {

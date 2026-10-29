@@ -18,10 +18,10 @@ import {
   ensureSharedCatalogOnServer,
 } from './shared-volume-catalog.service.js';
 import {
-  asBytes,
   blockedResizeFailure,
   catalogChangedRetry,
   classifyCatalogGet,
+  catalogSize,
   createCustomVolume,
   deleteCatalog,
   deleteOrphanVolume,
@@ -219,7 +219,8 @@ export class VolumeReconciler implements ManagedReconciler, OnModuleInit {
     const config = { ...(actual.config ?? {}) };
     const attached = attachments.length > 0;
     if (config['security.shifted'] !== 'true') {
-      if (attached) {
+      // Only an instance using it pins the idmap, not an attachment awaiting its catalog.
+      if ((actual.used_by ?? []).length > 0) {
         return failedOutcome(
             'VOLUME_SECURITY_SHIFTED_MISMATCH',
             'An in-use volume is missing security.shifted and cannot be rewritten',
@@ -235,7 +236,7 @@ export class VolumeReconciler implements ManagedReconciler, OnModuleInit {
     const labels = volumeLabels(volumeOwnerScope(row));
     const unlabelled = Object.entries(labels).some(([key, value]) => config[key] !== value);
     Object.assign(config, labels);
-    const currentSize = asBytes(config.size);
+    const currentSize = catalogSize(config.size, row);
     const desiredSize = BigInt(row.size_bytes);
     if (currentSize === null) {
       return failedOutcome(
@@ -675,14 +676,19 @@ export class VolumeReconciler implements ManagedReconciler, OnModuleInit {
   ): Promise<void> {
     const { store, logger } = this;
     for (const row of inventory.rows) {
+      const listed = inventory.listedByName.get(row.incus_name);
+      const shared = row.shared_backend_id !== null;
+      // A shared catalog listed here without a placement (`incus admin recover`
+      // imports every directory): placed, a volume pass shapes it and destroy purges it.
+      const adopted = shared && listed !== undefined && !inventory.placementByVolume.has(row.id)
+        ? await store.adoptListedCatalog(row.id, serverId) : undefined;
+      if (adopted) inventory.placementByVolume.set(row.id, adopted);
       if (row.lifecycle_phase === 'deleting') {
         await store.enqueueDestroy(row);
         continue;
       }
       const placement = inventory.placementByVolume.get(row.id);
       if (!placement) continue;
-      const listed = inventory.listedByName.get(row.incus_name);
-      const shared = row.shared_backend_id !== null;
       // A placement that has not caught up keeps a shrink reserved; a pass
       // verifies it or records its catalog missing (`recordCatalogMissing`).
       const holdsReservation = row.shrink_reserved_bytes !== null
@@ -705,7 +711,7 @@ export class VolumeReconciler implements ManagedReconciler, OnModuleInit {
         continue;
       }
       if (shared) {
-        if (listed !== undefined && (holdsReservation || scanNeedsEnsure(row, listed))) {
+        if (listed !== undefined && (adopted || holdsReservation || scanNeedsEnsure(row, listed))) {
           await store.enqueueResize(row, serverId);
         }
         continue;
