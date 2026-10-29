@@ -63,6 +63,7 @@ export interface IamUser {
   authVersion: number;
   role: Role;
   note: string | null;
+  mustChangePassword: boolean;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -170,6 +171,8 @@ export class UsersService {
         auth_version: 0,
         role: dto.role ?? Role.User,
         note: dto.note ?? null,
+        // The administrator chose this password; the user replaces it on first sign-in.
+        must_change_password: typeof options.actorId === 'string',
         created_at: now,
         updated_at: now,
       }).returningAll().executeTakeFirstOrThrow();
@@ -312,7 +315,11 @@ export class UsersService {
       }
       const updated = await transaction.updateTable('iam.users').set({
         ...(displayName !== undefined ? { display_name: displayName } : {}),
-        ...(passwordHash !== undefined ? { password_hash: passwordHash } : {}),
+        ...(passwordHash !== undefined ? {
+          password_hash: passwordHash,
+          // A reset by someone else is replaced on the next sign-in.
+          must_change_password: actorId !== undefined && actorId !== id,
+        } : {}),
         ...(dto.status !== undefined ? { status: dto.status } : {}),
         ...(dto.role !== undefined ? { role: dto.role } : {}),
         ...(dto.note !== undefined ? { note: dto.note } : {}),
@@ -456,6 +463,7 @@ export class UsersService {
         ...(displayName !== undefined ? { display_name: displayName } : {}),
         ...(passwordHash !== undefined ? {
           password_hash: passwordHash,
+          must_change_password: false,
           auth_version: user.auth_version + 1,
         } : {}),
         updated_at: new Date(),
@@ -604,6 +612,7 @@ export class UsersService {
     auth_version: number;
     role: string;
     note: string | null;
+    must_change_password: boolean;
     created_at: Date;
     updated_at: Date;
   }): IamUser {
@@ -617,6 +626,7 @@ export class UsersService {
       authVersion: row.auth_version,
       role: row.role as Role,
       note: row.note,
+      mustChangePassword: row.must_change_password,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     };

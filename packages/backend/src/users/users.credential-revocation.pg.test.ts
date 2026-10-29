@@ -46,6 +46,32 @@ describePg('credential revocation on password change, reset and account changes'
     });
   });
 
+  it('requires a new password after an administrator chose it, until the user changes it', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const context = await setup(database);
+      const mustChange = async (id: string) => (await context.auth.findUserById(id))?.mustChangePassword;
+      // Created without an acting administrator (the bootstrap path): nothing to replace.
+      expect(await mustChange(context.user.id)).toBe(false);
+
+      const bob = await context.users.createUser(
+        { username: 'bob', password: 'bob-password-1', displayName: 'Bob' },
+        { actorId: context.admin.id },
+      );
+      expect(bob.mustChangePassword).toBe(true);
+      await context.users.updateSelf(bob.id, { password: 'bob-password-2' }, 'bob-password-1');
+      expect(await mustChange(bob.id)).toBe(false);
+
+      await context.users.updateUser(bob.id, { displayName: 'Bobby' }, context.admin.id);
+      expect(await mustChange(bob.id)).toBe(false);
+      await context.users.updateUser(bob.id, { password: 'reset-password-1' }, context.admin.id);
+      expect(await mustChange(bob.id)).toBe(true);
+
+      // An administrator resetting their own password chose it themselves.
+      await context.users.updateUser(context.admin.id, { password: 'admin-password-2' }, context.admin.id);
+      expect(await mustChange(context.admin.id)).toBe(false);
+    });
+  });
+
   it('adds an SSH key only after proving the current password', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const context = await setup(database);

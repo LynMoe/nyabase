@@ -21,6 +21,7 @@ import {
   Sheet, SheetContent, SheetDescription, SheetTitle,
 } from '../ui/sheet.js';
 import { TooltipProvider } from '../ui/tooltip.js';
+import { ChangePasswordDialog } from '../account/change-password-dialog.js';
 import { usePublicSettings } from '../../hooks/use-public-settings.js';
 import { terminateBrowserSession } from '../../lib/auth-session.js';
 import { activeNavPath, visibleNavSections, type NavSection } from '../../lib/navigation.js';
@@ -251,6 +252,8 @@ export function AppLayout({ children }: { children: ReactNode }) {
           </main>
         </div>
       </div>
+      {/* An administrator chose the password: nothing else until the user replaces it. */}
+      {user?.mustChangePassword ? <ChangePasswordDialog userId={user.id} forced /> : null}
     </TooltipProvider>
   );
 }

@@ -43,6 +43,7 @@ export class InMemoryAuthPersistenceTestAdapter implements AuthPersistence {
       status: UserStatus.Active,
       authVersion: 0,
       role: Role.User,
+      mustChangePassword: false,
       createdAt: now,
       updatedAt: now,
       ...input,

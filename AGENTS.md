@@ -55,6 +55,8 @@ Vite 通过 alias 将 `@nyabase/common` 指向 `src/index.ts`，但 `index.ts` �
 - `GET /server-grants?scope=all`（user_admin，没有 `scope=mine`）列出所有未删除用户的服务器授权，供用户列表显示授权服务器 badge；增删改仍走 `/users/:userId/server-grants`。
 - 用户备注（`iam.users.note`）是管理员对用户的备注：`UserDto.note` 只在 user_admin 及以上请求的 `GET /users`、`GET` / `PATCH` / `POST /users[/:id]` 里出现，
   登录 / 会话里的 `UserDto` 不带；自助路径不能改备注（user_admin 改不了自己的，admin 走管理员路径）。
+- 强制改密（`iam.users.must_change_password`，000006）：管理员新建用户、或重置别人的密码时置位（启动补救的 `admin`、管理员改自己的密码不置位），用户自助改密时清除。
+  只在会话里的 `UserDto.mustChangePassword`（login / refresh / `GET /auth/me`）出现；前端 `AppLayout` 据此弹出不可关闭的改密对话框（只能改密或退出登录）。后端不据此拦截其他 API。
 - intents 只有 `GET /intents`、`GET /intents/:id`、`POST /intents/:id/retry` 一个 controller；
   某个资源的操作历史用 `?resourceType=&resourceId=`（多个 id 用逗号分隔，例如镜像的所有分配）。
 

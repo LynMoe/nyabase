@@ -27,6 +27,7 @@ function user(id: string, role: Role, status = UserStatus.Active): AuthUser {
     status,
     authVersion: 4,
     role,
+    mustChangePassword: false,
     createdAt: new Date(0),
     updatedAt: new Date(0),
   };

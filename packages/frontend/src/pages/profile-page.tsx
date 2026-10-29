@@ -1,7 +1,8 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
 import { KeyRound, Plus, RefreshCw, ShieldCheck, Trash2, UserCircle } from 'lucide-react';
-import { type SshPublicKeyDto, zAddSshKeyRequest, zUpdateUserRequest } from '@nyabase/common';
+import { type SshPublicKeyDto, zAddSshKeyRequest } from '@nyabase/common';
+import { ChangePasswordDialog } from '../components/account/change-password-dialog.js';
 import { SshSessionList } from '../components/ssh-sessions/ssh-session-list.js';
 import { api } from '../lib/api.js';
 import { ApiError } from '../lib/api-error.js';
@@ -22,9 +23,7 @@ import { FormField } from '../components/layout/form-field.js';
 import { Page, PageHeader } from '../components/layout/page-header.js';
 import { TechnicalId } from '../components/refs/technical-id.js';
 import { toast } from '../hooks/use-toast.js';
-import { setPendingLoginReason, terminateBrowserSession } from '../lib/auth-session.js';
 
-type PasswordErrors = Partial<Record<'currentPassword' | 'newPassword' | 'confirmPassword', string>>;
 type SshKeyErrors = Partial<Record<'name' | 'keyText' | 'currentPassword', string>>;
 
 export default function ProfilePage() {
@@ -84,108 +83,6 @@ function PasswordPanel({ userId }: { userId: string }) {
         />
       ) : null}
     </section>
-  );
-}
-
-function ChangePasswordDialog({
-  userId,
-  onOpenChange,
-}: {
-  userId: string;
-  onOpenChange: (open: boolean) => void;
-}) {
-  const curId = 'profile-current-password';
-  const newId = 'profile-new-password';
-  const confirmId = 'profile-confirm-password';
-  const [form, setForm] = useState({ currentPassword: '', newPassword: '', confirmPassword: '' });
-  const [errors, setErrors] = useState<PasswordErrors>({});
-
-  const validate = () => {
-    const errs: PasswordErrors = {};
-    if (!form.currentPassword) errs.currentPassword = '请输入当前密码';
-    const parsed = zUpdateUserRequest.safeParse({
-      password: form.newPassword,
-      currentPassword: form.currentPassword,
-    });
-    if (!parsed.success) {
-      for (const issue of parsed.error.issues) {
-        if (issue.path[0] === 'password' && !errs.newPassword) errs.newPassword = issue.message;
-      }
-    }
-    if (form.newPassword !== form.confirmPassword) errs.confirmPassword = '两次输入的密码不一致';
-    setErrors(errs);
-    return Object.keys(errs).length === 0;
-  };
-
-  const { mutate, isPending } = useMutation({
-    mutationFn: () => api.patch(`/users/${userId}`, {
-      password: form.newPassword,
-      currentPassword: form.currentPassword,
-    }),
-    onSuccess: () => {
-      toast({ title: '密码已修改，请使用新密码重新登录' });
-      setForm({ currentPassword: '', newPassword: '', confirmPassword: '' });
-      setErrors({});
-      setPendingLoginReason('password-changed');
-      void terminateBrowserSession().finally(() => {
-        window.location.replace('/login?reason=password-changed');
-      });
-    },
-    onError: (e) => {
-      if (e instanceof ApiError && e.code === 'CURRENT_PASSWORD_INCORRECT') {
-        setErrors({ currentPassword: '当前密码不正确' });
-        return;
-      }
-      toast({ title: '修改失败', description: e.message, variant: 'destructive' });
-    },
-  });
-
-  return (
-    <Dialog open onOpenChange={onOpenChange}>
-      <DialogContent>
-        <DialogHeader>
-          <DialogTitle>修改密码</DialogTitle>
-        </DialogHeader>
-        <div className="space-y-3">
-          <FormField id={curId} label="当前密码" error={errors.currentPassword}>
-            <Input
-              id={curId}
-              type="password"
-              value={form.currentPassword}
-              onChange={(e) => setForm((f) => ({ ...f, currentPassword: e.target.value }))}
-              aria-invalid={!!errors.currentPassword}
-              autoComplete="current-password"
-            />
-          </FormField>
-          <FormField id={newId} label="新密码" error={errors.newPassword}>
-            <Input
-              id={newId}
-              type="password"
-              value={form.newPassword}
-              onChange={(e) => setForm((f) => ({ ...f, newPassword: e.target.value }))}
-              aria-invalid={!!errors.newPassword}
-              autoComplete="new-password"
-            />
-          </FormField>
-          <FormField id={confirmId} label="确认新密码" error={errors.confirmPassword}>
-            <Input
-              id={confirmId}
-              type="password"
-              value={form.confirmPassword}
-              onChange={(e) => setForm((f) => ({ ...f, confirmPassword: e.target.value }))}
-              aria-invalid={!!errors.confirmPassword}
-              autoComplete="new-password"
-            />
-          </FormField>
-        </div>
-        <DialogFooter>
-          <Button variant="outline" onClick={() => onOpenChange(false)}>取消</Button>
-          <Button onClick={() => { if (validate()) mutate(); }} disabled={isPending}>
-            {isPending ? '修改中...' : '确认修改'}
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
   );
 }
 

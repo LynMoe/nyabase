@@ -117,7 +117,10 @@ export class AuthController {
   }
 
   private async userToDto(
-    user: Pick<UserRecord, 'id' | 'username' | 'displayName' | 'status' | 'createdAt' | 'role'>,
+    user: Pick<
+      UserRecord,
+      'id' | 'username' | 'displayName' | 'status' | 'createdAt' | 'role' | 'mustChangePassword'
+    >,
   ): Promise<UserDto> {
     return {
       id: user.id,
@@ -126,6 +129,7 @@ export class AuthController {
       status: user.status,
       createdAt: user.createdAt.toISOString(),
       role: user.role,
+      mustChangePassword: user.mustChangePassword,
     };
   }
 

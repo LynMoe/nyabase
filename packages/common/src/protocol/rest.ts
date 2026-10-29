@@ -100,6 +100,11 @@ export interface UserDto {
   role: Role;
   /** The administrators' note on the user; only in user-admin views, never in your own session. */
   note?: string | null;
+  /**
+   * Only in your own session (login / refresh / `GET /auth/me`): an administrator
+   * created the account or reset its password, and the UI requires a new one.
+   */
+  mustChangePassword?: boolean;
 }
 
 export interface SshPublicKeyDto {

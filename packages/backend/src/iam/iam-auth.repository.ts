@@ -33,6 +33,7 @@ const SESSION_USER_COLUMNS = [
   'user.status',
   'user.auth_version',
   'user.role',
+  'user.must_change_password',
   'user.created_at',
   'user.updated_at',
 ] as const;
@@ -46,6 +47,7 @@ interface UserRow {
   status: string;
   auth_version: number;
   role: string;
+  must_change_password: boolean;
   created_at: Date;
   updated_at: Date;
 }
@@ -464,6 +466,7 @@ export class IamAuthRepository implements AuthPersistence {
       status: row.status as UserStatus,
       authVersion: row.auth_version,
       role: row.role as Role,
+      mustChangePassword: row.must_change_password,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     };

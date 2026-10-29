@@ -11,6 +11,8 @@ export interface AuthUser {
   status: UserStatus;
   authVersion: number;
   role: Role;
+  /** Set by an administrator's create / reset; the web UI blocks until the user changes it. */
+  mustChangePassword: boolean;
   createdAt: Date;
   updatedAt: Date;
 }
