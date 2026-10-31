@@ -56,7 +56,11 @@ type MountDisk = {
   name: string;
   kind: 'local' | 'shared';
   sizeBytes: number;
+  /** The shared backend's default mount point. */
+  defaultMountPath?: string | null;
 };
+
+const DEFAULT_MOUNT_PATH = '/data';
 
 type VolumeUsage = {
   id: string;
@@ -162,6 +166,7 @@ export function StoragePanel({ container, scope }: { container: ContainerDto; sc
               container={container}
               scope={scope}
               disks={disks}
+              usedPaths={new Set(attachments.map((attachment) => attachment.containerPath))}
               onCreateVolume={!admin && canMutateLocal ? () => setCreateVolumeOpen(true) : undefined}
               onOpenChange={(open) => { if (!open) setMountOpen(false); }}
             />
@@ -295,12 +300,15 @@ function MountDialog({
   container,
   scope,
   disks,
+  usedPaths,
   onCreateVolume,
   onOpenChange,
 }: {
   container: ContainerDto;
   scope: ListScope;
   disks: MountDisk[];
+  /** Mount points already taken in this container. */
+  usedPaths: ReadonlySet<string>;
   onCreateVolume?: () => void;
   onOpenChange: (open: boolean) => void;
 }) {
@@ -318,10 +326,13 @@ function MountDialog({
   const pending = attach.isPending;
   const serverName = container.serverName;
   const [selectedKey, setSelectedKey] = useState('');
-  const [containerPath, setContainerPath] = useState('/data');
+  const [typedPath, setTypedPath] = useState<string | null>(null);
   const [readOnly, setReadOnly] = useState(false);
   const selected = disks.find((disk) => diskKey(disk) === selectedKey);
-  const canSubmit = Boolean(selected) && containerPath.startsWith('/') && containerPath.length > 1;
+  // Follows the chosen disk until the user types their own.
+  const containerPath = typedPath ?? (selected?.defaultMountPath || DEFAULT_MOUNT_PATH);
+  const pathTaken = usedPaths.has(containerPath.trim());
+  const canSubmit = Boolean(selected) && containerPath.startsWith('/') && containerPath.length > 1 && !pathTaken;
 
   return (
     <Dialog open onOpenChange={onOpenChange}>
@@ -366,11 +377,11 @@ function MountDialog({
                 })}
               </div>
             </fieldset>
-            <FormField id="attach-volume-path" label="挂载点">
+            <FormField id="attach-volume-path" label="挂载点" error={pathTaken ? '这个挂载点已被此容器的其他卷占用' : null}>
               <Input
                 id="attach-volume-path"
                 value={containerPath}
-                onChange={(event) => setContainerPath(event.target.value)}
+                onChange={(event) => setTypedPath(event.target.value)}
                 disabled={pending}
               />
             </FormField>

@@ -165,6 +165,7 @@ function CreateSharedBackendDialog({
   });
   const [note, setNote] = useState('');
   const [maxVolumes, setMaxVolumes] = useState('');
+  const [defaultMountPath, setDefaultMountPath] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [conflict, setConflict] = useState<SharedBackendFsidConflict | null>(null);
   const create = useMutation({
@@ -197,6 +198,7 @@ function CreateSharedBackendDialog({
       overcommitRatio: Number(form.overcommitRatio),
       note: note.trim() || null,
       maxVolumesPerUser: parseMaxVolumesPerUser(maxVolumes),
+      defaultMountPath: defaultMountPath.trim() || null,
     });
     if (!parsed.success) {
       setError(parsed.error.issues[0]?.message ?? '请检查共享后端参数');
@@ -250,6 +252,8 @@ function CreateSharedBackendDialog({
             onNoteChange={setNote}
             maxVolumes={maxVolumes}
             onMaxVolumesChange={setMaxVolumes}
+            defaultMountPath={defaultMountPath}
+            onDefaultMountPathChange={setDefaultMountPath}
           />
           {conflict && <FsidConflictAlert conflict={conflict} />}
           {error && <p className="text-sm text-destructive">{error}</p>}

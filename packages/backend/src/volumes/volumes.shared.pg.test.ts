@@ -161,6 +161,21 @@ describePg('shared volume quota reservations', () => {
     });
   });
 
+  it('tells a shared volume its backend\'s default mount point', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const { userId, backendId } = await seedSharedBackend(database);
+      const service = makeService(database);
+      const actor = testActor(userId);
+      await service.createShared(actor, { name: 'one', sizeBytes: 100, scope: { kind: 'shared', sharedBackendId: backendId } });
+      expect((await service.listShared(actor))[0]?.defaultMountPath).toBeNull();
+      await database.updateTable('infra.shared_backends')
+        .set({ default_mount_path: '/meowfs' })
+        .where('id', '=', backendId)
+        .execute();
+      expect((await service.listShared(actor))[0]?.defaultMountPath).toBe('/meowfs');
+    });
+  });
+
   it('caps live shared volumes per user at the backend\'s maxVolumesPerUser', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const { userId, backendId } = await seedSharedBackend(database);

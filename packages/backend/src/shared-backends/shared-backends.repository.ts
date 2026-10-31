@@ -29,6 +29,7 @@ export class SharedBackendsRepository {
         'backend.overcommit_ratio',
         'backend.note',
         'backend.max_volumes_per_user',
+        'backend.default_mount_path',
         'backend.revision',
         'backend.created_at',
         'backend.updated_at',
@@ -58,6 +59,7 @@ export class SharedBackendsRepository {
         'backend.overcommit_ratio',
         'backend.note',
         'backend.max_volumes_per_user',
+        'backend.default_mount_path',
         'backend.revision',
         'backend.created_at',
         'backend.updated_at',
@@ -110,6 +112,7 @@ export class SharedBackendsRepository {
     overcommitRatio: number;
     note: string | null;
     maxVolumesPerUser: number | null;
+    defaultMountPath: string | null;
   }, executor: SharedBackendExecutor = this.database) {
     return executor
       .insertInto('infra.shared_backends')
@@ -124,6 +127,7 @@ export class SharedBackendsRepository {
         overcommit_ratio: input.overcommitRatio,
         note: input.note,
         max_volumes_per_user: input.maxVolumesPerUser,
+        default_mount_path: input.defaultMountPath,
         revision: 1,
       })
       .returningAll()
@@ -139,6 +143,7 @@ export class SharedBackendsRepository {
       overcommit_ratio?: number;
       note?: string | null;
       max_volumes_per_user?: number | null;
+      default_mount_path?: string | null;
     },
     executor: SharedBackendExecutor = this.database,
   ) {

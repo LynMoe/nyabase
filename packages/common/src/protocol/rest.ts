@@ -412,6 +412,8 @@ export interface SharedBackendDto {
   note: string | null;
   /** Shared volumes one user may own on the backend; null = no cap. */
   maxVolumesPerUser: number | null;
+  /** Filled into the mount form for this backend's volumes; null = `/data`. */
+  defaultMountPath: string | null;
   serverIds: string[];
   /** True when any registered shareable cephfs pool's server is online. */
   hasOnlineExecutor: boolean;
@@ -471,6 +473,8 @@ export interface SharedVolumeDto {
   ownerId: string;
   sharedBackendId: string;
   sharedBackendName: string;
+  /** The backend's default mount point; null = `/data`. */
+  defaultMountPath: string | null;
   name: string;
   incusName: string;
   sizeBytes: number;

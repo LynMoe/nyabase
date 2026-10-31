@@ -15,6 +15,7 @@ import {
   zConsoleToBrowser,
   zCreateContainerRequest,
   zAttachVolumeRequest,
+  zPatchSharedBackendRequest,
   isForbiddenContainerMountPath,
   zAddCatalogImageRequest,
   zCreateImageRequest,
@@ -175,6 +176,16 @@ describe('canonical container and volume contracts', () => {
       expect(attach(path), path).toBe(true);
     }
     expect(isForbiddenContainerMountPath('/./proc')).toBe(true);
+  });
+
+  it('holds a shared backend default mount point to the same rules as a mount', () => {
+    const patch = (defaultMountPath: string | null) => zPatchSharedBackendRequest.safeParse({
+      expectedRevision: 1,
+      defaultMountPath,
+    }).success;
+    expect(patch('/meowfs')).toBe(true);
+    expect(patch(null)).toBe(true);
+    for (const path of ['meowfs', '/', '/proc/x', '/a/../b']) expect(patch(path), path).toBe(false);
   });
 
   it('rejects old physical identity and address fields', () => {

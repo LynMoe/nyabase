@@ -71,6 +71,14 @@ export const zIpv4Cidr = z.string().superRefine((value, context) => {
 }).transform(canonicalIpv4Cidr);
 
 const zName = z.string().trim().min(1).max(128);
+/** Where a volume mounts inside a container. */
+const zContainerPath = z.string().trim().min(2).max(4_096)
+  .startsWith('/')
+  .refine((value) => value !== '/', 'Container path must not be root')
+  .refine((value) => !value.split('/').some((part) => part === '.' || part === '..'),
+    'Container path must not contain dot segments')
+  .refine((value) => !/[\0\r\n]/.test(value), 'Container path contains invalid control characters')
+  .refine((value) => !isForbiddenContainerMountPath(value), 'Container path must not be under /proc, /sys or /dev');
 const zContainerName = z.string().min(1).max(CONTAINER_NAME_MAX_LENGTH).regex(CONTAINER_NAME_RE);
 const zServerName = z.string().trim().max(128).transform((value) => value.normalize('NFC')).superRefine((value, context) => {
   const problem = serverNameProblem(value);
@@ -313,6 +321,8 @@ export const zCreateSharedBackendRequest = z.object({
   note: zOptionalNote(MAX_SHARED_BACKEND_NOTE_LENGTH),
   /** Shared volumes one user may own on the backend; null = no cap. */
   maxVolumesPerUser: z.number().int().positive().max(10_000).nullable().optional(),
+  /** Filled into the mount form for this backend's volumes; null = `/data`. */
+  defaultMountPath: zContainerPath.nullable().optional(),
 }).strict();
 
 export const zPatchSharedBackendRequest = z.object({
@@ -322,6 +332,7 @@ export const zPatchSharedBackendRequest = z.object({
   overcommitRatio: z.number().finite().min(1).max(MAX_STORAGE_OVERCOMMIT_RATIO).optional(),
   note: zOptionalNote(MAX_SHARED_BACKEND_NOTE_LENGTH),
   maxVolumesPerUser: z.number().int().positive().max(10_000).nullable().optional(),
+  defaultMountPath: zContainerPath.nullable().optional(),
 }).strict().refine(
   (value) => Object.keys(value).some((key) => key !== 'expectedRevision'),
   'At least one shared backend field is required',
@@ -457,13 +468,7 @@ export function isForbiddenContainerMountPath(path: string): boolean {
 
 export const zAttachVolumeRequest = z.object({
   volumeId: zResourceIdentity,
-  containerPath: z.string().trim().min(2).max(4_096)
-    .startsWith('/')
-    .refine((value) => value !== '/', 'Container path must not be root')
-    .refine((value) => !value.split('/').some((part) => part === '.' || part === '..'),
-      'Container path must not contain dot segments')
-    .refine((value) => !/[\0\r\n]/.test(value), 'Container path contains invalid control characters')
-    .refine((value) => !isForbiddenContainerMountPath(value), 'Container path must not be under /proc, /sys or /dev'),
+  containerPath: zContainerPath,
   readOnly: z.boolean(),
 }).strict();
 

@@ -74,6 +74,7 @@ export function BackendOverviewTab({
           <Field label="Ceph FSID" value={<TechnicalId label="Ceph FSID" value={backend.cephFsid} />} />
           <Field label="超分比例" value={formatPercent(backend.overcommitRatio)} />
           <Field label="每用户最多共享卷" value={maxVolumesPerUserLabel(backend.maxVolumesPerUser)} />
+          <Field label="默认挂载点" value={backend.defaultMountPath ?? '/data'} />
           <Field label="最近更新" value={relativeTime(backend.updatedAt)} />
           <Field
             label="备注（用户创建共享卷时可见）"
@@ -283,6 +284,7 @@ export function EditBackendDialog({
   const [overcommitRatio, setOvercommitRatio] = useState(String(backend.overcommitRatio));
   const [note, setNote] = useState(backend.note ?? '');
   const [maxVolumes, setMaxVolumes] = useState(backend.maxVolumesPerUser === null ? '' : String(backend.maxVolumesPerUser));
+  const [defaultMountPath, setDefaultMountPath] = useState(backend.defaultMountPath ?? '');
   const invalidate = useInvalidateBackend(backend.id);
   const patchBackend = useMutation({
     mutationFn: (body: PatchSharedBackendRequest) =>
@@ -306,6 +308,7 @@ export function EditBackendDialog({
       overcommitRatio: Number(overcommitRatio),
       note: note.trim() || null,
       maxVolumesPerUser,
+      defaultMountPath: defaultMountPath.trim() || null,
     });
     if (!parsed.success) {
       toast({
@@ -344,6 +347,8 @@ export function EditBackendDialog({
           onNoteChange={setNote}
           maxVolumes={maxVolumes}
           onMaxVolumesChange={setMaxVolumes}
+          defaultMountPath={defaultMountPath}
+          onDefaultMountPathChange={setDefaultMountPath}
         />
         <DialogFooter>
           <Button variant="outline" onClick={onClose} disabled={pending}>取消</Button>

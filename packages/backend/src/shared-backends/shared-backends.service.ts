@@ -151,6 +151,7 @@ export class SharedBackendsService {
     overcommitRatio: number;
     note?: string | null;
     maxVolumesPerUser?: number | null;
+    defaultMountPath?: string | null;
   }): Promise<SharedBackendDto> {
     const identityKey = normalizedIdentity(input.identityKey);
     const fsid = normalizedFsid(input.cephFsid);
@@ -196,6 +197,7 @@ export class SharedBackendsService {
             overcommitRatio: input.overcommitRatio,
             note: input.note ?? null,
             maxVolumesPerUser: input.maxVolumesPerUser ?? null,
+            defaultMountPath: input.defaultMountPath ?? null,
           }, transaction);
           await this.audit.append(transaction, actorId, AuditAction.CreateSharedBackend, row.id, 'shared_backend', {
             name: input.name,
@@ -203,6 +205,7 @@ export class SharedBackendsService {
             cephFsid: fsid,
             overcommitRatio: input.overcommitRatio,
             maxVolumesPerUser: input.maxVolumesPerUser ?? null,
+            defaultMountPath: input.defaultMountPath ?? null,
           });
           return { row, created: true };
         },
@@ -238,6 +241,7 @@ export class SharedBackendsService {
       overcommitRatio?: number;
       note?: string | null;
       maxVolumesPerUser?: number | null;
+      defaultMountPath?: string | null;
     },
   ): Promise<SharedBackendDto> {
     const updated = await this.transactions.run(
@@ -279,6 +283,7 @@ export class SharedBackendsService {
           ...(input.maxVolumesPerUser !== undefined
             ? { max_volumes_per_user: input.maxVolumesPerUser }
             : {}),
+          ...(input.defaultMountPath !== undefined ? { default_mount_path: input.defaultMountPath } : {}),
         }, transaction);
         if (!row) throw new ConflictException({ code: FailureCode.RevisionConflict });
         await this.audit.append(transaction, actorId, AuditAction.UpdateSharedBackend, id, 'shared_backend', {
@@ -288,6 +293,9 @@ export class SharedBackendsService {
           ...(input.note !== undefined && input.note !== current.note ? { noteChanged: true } : {}),
           ...(input.maxVolumesPerUser !== undefined && input.maxVolumesPerUser !== current.max_volumes_per_user
             ? { maxVolumesPerUser: input.maxVolumesPerUser, previousMaxVolumesPerUser: current.max_volumes_per_user }
+            : {}),
+          ...(input.defaultMountPath !== undefined && input.defaultMountPath !== current.default_mount_path
+            ? { defaultMountPath: input.defaultMountPath, previousDefaultMountPath: current.default_mount_path }
             : {}),
         });
         return row;
@@ -357,6 +365,7 @@ export class SharedBackendsService {
     overcommit_ratio: string | number;
     note: string | null;
     max_volumes_per_user: number | null;
+    default_mount_path: string | null;
     revision: string | number;
     created_at: Date | string;
     updated_at: Date | string;
@@ -378,6 +387,7 @@ export class SharedBackendsService {
       overcommitRatio: numberValue(row.overcommit_ratio),
       note: row.note,
       maxVolumesPerUser: row.max_volumes_per_user,
+      defaultMountPath: row.default_mount_path,
       serverIds: row.server_ids ?? [],
       hasOnlineExecutor: row.has_online_executor === true,
       revision: numberValue(row.revision),

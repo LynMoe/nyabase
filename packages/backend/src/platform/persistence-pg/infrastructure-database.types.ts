@@ -132,6 +132,7 @@ export interface InfrastructureSharedBackendTable {
   overcommit_ratio: InfrastructureNumeric;
   note: string | null;
   max_volumes_per_user: number | null;
+  default_mount_path: string | null;
   revision: InfrastructureBigInt;
   created_at: InfrastructureGeneratedTimestamp;
   updated_at: InfrastructureGeneratedTimestamp;

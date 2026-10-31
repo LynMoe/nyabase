@@ -59,6 +59,7 @@ describe('filterAttachableSharedVolumes', () => {
     const shared = (overrides: Partial<SharedVolumeDto> & Pick<SharedVolumeDto, 'id' | 'ownerId'>): SharedVolumeDto => ({
       sharedBackendId: 'backend',
       sharedBackendName: 'ceph',
+      defaultMountPath: null,
       name: overrides.id,
       incusName: overrides.id,
       sizeBytes: 10,

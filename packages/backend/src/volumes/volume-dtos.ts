@@ -45,11 +45,11 @@ export function isIntentAccepted(
 }
 
 export type LocalVolumeDescriptor = { capability: VolumeDto['capability']; poolName: string };
-export type SharedVolumeDescriptor = { name: string; capability: SharedVolumeDto['capability'] };
+export type SharedVolumeDescriptor = { name: string; defaultMountPath: string | null; capability: SharedVolumeDto['capability'] };
 
 export function toSharedDto(
   row: VolumeRow,
-  descriptor: { name: string; capability: SharedVolumeDto['capability'] } | undefined,
+  descriptor: SharedVolumeDescriptor | undefined,
   attachments: VolumeAttachmentSummaryDto[],
 ): SharedVolumeDto {
   return {
@@ -57,6 +57,7 @@ export function toSharedDto(
     ownerId: row.owner_id,
     sharedBackendId: row.shared_backend_id!,
     sharedBackendName: descriptor?.name ?? row.shared_backend_id ?? row.name,
+    defaultMountPath: descriptor?.defaultMountPath ?? null,
     name: row.name,
     incusName: row.incus_name,
     sizeBytes: numberValue(row.size_bytes),
@@ -213,7 +214,7 @@ export class VolumeDtoAssembler {
     if (ids.length === 0) return result;
     const backends = await this.database
       .selectFrom('infra.shared_backends')
-      .select(['id', 'name', 'display_name'])
+      .select(['id', 'name', 'display_name', 'default_mount_path'])
       .where('id', 'in', ids)
       .execute();
     const pools = await this.pools.listRegisteredSharedPools({ backendIds: ids });
@@ -230,6 +231,7 @@ export class VolumeDtoAssembler {
       const quotaEffective = hasPool ? quotaByBackend.get(backend.id) === true : true;
       result.set(backend.id, {
         name: poolLabel(backend.display_name, backend.name),
+        defaultMountPath: backend.default_mount_path,
         capability: storagePoolCapability(StoragePoolResizeFamily.QuotaOnline, quotaEffective),
       });
     }

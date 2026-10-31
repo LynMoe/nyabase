@@ -4,19 +4,23 @@ import { FormField } from '../layout/form-field.js';
 import { Input } from '../ui/input.js';
 import { Textarea } from '../ui/textarea.js';
 
-/** What users see and may hold on a shared backend: the note shown when they create a volume, the per-user cap. */
+/** What users see and may hold on a shared backend: the note shown when they create a volume, the per-user cap, the default mount point. */
 export function SharedBackendPolicyFields({
   idPrefix,
   note,
   onNoteChange,
   maxVolumes,
   onMaxVolumesChange,
+  defaultMountPath,
+  onDefaultMountPathChange,
 }: {
   idPrefix: string;
   note: string;
   onNoteChange: (value: string) => void;
   maxVolumes: string;
   onMaxVolumesChange: (value: string) => void;
+  defaultMountPath: string;
+  onDefaultMountPathChange: (value: string) => void;
 }) {
   const invalid = parseMaxVolumesPerUser(maxVolumes) === undefined;
   return (
@@ -45,6 +49,18 @@ export function SharedBackendPolicyFields({
           value={maxVolumes}
           aria-invalid={invalid ? true : undefined}
           onChange={(event) => onMaxVolumesChange(event.target.value)}
+        />
+      </FormField>
+      <FormField
+        id={`${idPrefix}-default-mount-path`}
+        label="默认挂载点"
+        hint="用户挂载此存储上的共享卷时预填，可以修改；留空为 /data。只影响之后的挂载"
+      >
+        <Input
+          id={`${idPrefix}-default-mount-path`}
+          placeholder="/data"
+          value={defaultMountPath}
+          onChange={(event) => onDefaultMountPathChange(event.target.value)}
         />
       </FormField>
     </>
