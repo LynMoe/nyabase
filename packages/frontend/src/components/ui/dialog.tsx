@@ -92,10 +92,10 @@ const DialogContent = React.forwardRef<
           <div className="shrink-0 px-6 pb-2 pt-6 pr-12">{header}</div>
         )}
         {body.length > 0 ? (
-          <div className="relative min-h-0 flex-1 overflow-hidden">
+          <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden">
             <div
               ref={bodyRef}
-              className="h-full min-h-0 space-y-4 overflow-y-auto overscroll-contain px-6 py-4"
+              className="min-h-0 flex-1 space-y-4 overflow-y-auto overscroll-contain px-6 py-4"
             >
               {body}
             </div>
