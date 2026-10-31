@@ -181,13 +181,13 @@ impl ConnectionRouteInfo {
             .is_ok_and(|current| self.matches(&current))
     }
 
+    /// The container's name is a label: renaming it does not change who may reach what.
     pub(crate) fn matches(&self, route: &OwnedResolvedRoute) -> bool {
         self.user_id == route.user_id
             && self.username == route.username
             && self.server_id == route.server_id
             && self.server_slug == route.server_slug
             && self.container_id == route.container_id
-            && self.container_name == route.container_name
             && self.instance_name == route.instance_name
             && self.routed_ip == route.routed_ip
     }

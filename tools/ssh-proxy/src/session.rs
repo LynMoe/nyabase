@@ -57,13 +57,13 @@ pub(crate) struct OwnedResolvedRoute {
 }
 
 impl OwnedResolvedRoute {
+    /// The container's name is a label: renaming it does not change who may reach what.
     pub(crate) fn same_authority(&self, other: &Self) -> bool {
         self.user_id == other.user_id
             && self.username == other.username
             && self.server_id == other.server_id
             && self.server_slug == other.server_slug
             && self.container_id == other.container_id
-            && self.container_name == other.container_name
             && self.instance_name == other.instance_name
             && self.routed_ip == other.routed_ip
     }

@@ -86,6 +86,18 @@ fn authenticated_connection_revalidation_is_semantic_and_fail_closed() {
     let same_authorization = RoutingSnapshot::from_snapshot(fixture_proxy_snapshot(8)).unwrap();
     assert!(connection.authorization_matches(Some(&same_authorization)));
 
+    // Renaming the container keeps the session: same container, same address.
+    let mut renamed = fixture_proxy_snapshot(8);
+    renamed
+        .containers
+        .iter_mut()
+        .find(|container| container.id == "container-c")
+        .unwrap()
+        .name = "renamed".to_string();
+    assert!(connection.authorization_matches(Some(
+        &RoutingSnapshot::from_snapshot(renamed).unwrap(),
+    )));
+
     let mut rotated = fixture_proxy_snapshot(9);
     rotated
         .routes

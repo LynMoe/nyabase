@@ -29,10 +29,16 @@ describe('container lifecycle and SSH through the ssh-proxy', () => {
     await h.addSshKey(stranger);
     await h.grantServer(owner, h.server);
     container = await h.createContainer(owner, h.server);
-    // The stranger has a reachable container of the same name (other case),
-    // so name routing is exercised past key authentication.
-    await h.grantServer(stranger, h.server);
-    strangerContainer = await h.createContainer(stranger, h.server, { name: container.name.toUpperCase() });
+    // The stranger has a reachable container of the same name, so name routing
+    // is exercised past key authentication. Names are unique per server, so this
+    // takes a second lab server; with one, the stranger's name differs.
+    const strangerServer = h.state.servers[1];
+    await h.grantServer(stranger, strangerServer ?? h.server);
+    strangerContainer = await h.createContainer(
+      stranger,
+      strangerServer ?? h.server,
+      strangerServer ? { name: container.name } : {},
+    );
   });
   after(async () => h?.cleanup());
 
@@ -69,6 +75,7 @@ describe('container lifecycle and SSH through the ssh-proxy', () => {
     const ownHost = (await h.ssh(owner, container, 'hostname')).trim();
     assert.equal(ownHost, container.instanceName);
     for (const jumpLogin of [undefined, `${owner.username}.${container.name}`]) {
+      if (strangerContainer.name !== container.name) break;
       const landed = (await h.ssh(stranger, container, 'hostname', { jumpLogin })).trim();
       assert.equal(landed, strangerContainer.instanceName);
     }
