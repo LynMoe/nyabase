@@ -22,6 +22,11 @@ const RELEASED_MIGRATION_CHECKSUMS: Readonly<Record<string, string>> = {
   '000005_audit-impersonator': '0650632c377fb1947ba17d8211202b369078b626da6f0844882ddf25af1d49ab',
   // Deployed to production on 2026-10-29 with 54e9a32.
   '000006_must-change-password': 'baf48e9d04cbdad207b15bf6d11cb374360339aaeba3f26b3c1c2db603cf4f55',
+  // Deployed to production on 2026-11-01 with 0d09162.
+  '000007_lowercase-container-names': 'a2fa4e7367cc5d757d93ecbe2b3d07b63fe79d047c50871cc8676f9d02f32813',
+  '000008_image-version': '490f7b16631f5d11018d116f3f8d241b8978a92f7b56ace3365f03ea4d594e24',
+  '000009_shared-backend-default-mount': 'a0c4c6f941282ec1bcafec8a05e15ef52b05983648cbb412bef1829ac2183889',
+  '000010_user-last-login': 'f99dac29eda0a074cdd1b335219a4f72c1a239089dcef3a7abbacb6d16dc43eb',
 };
 
 describe('released SQL migrations', () => {
