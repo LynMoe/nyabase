@@ -94,9 +94,9 @@ fn authenticated_connection_revalidation_is_semantic_and_fail_closed() {
         .find(|container| container.id == "container-c")
         .unwrap()
         .name = "renamed".to_string();
-    assert!(connection.authorization_matches(Some(
-        &RoutingSnapshot::from_snapshot(renamed).unwrap(),
-    )));
+    assert!(
+        connection.authorization_matches(Some(&RoutingSnapshot::from_snapshot(renamed).unwrap(),))
+    );
 
     let mut rotated = fixture_proxy_snapshot(9);
     rotated
