@@ -45,6 +45,7 @@ export type {
   LoginRequest,
   PatchContainerLimitsRequest,
   PatchContainerRootSizeRequest,
+  PatchContainerNameRequest,
   PatchImageRequest,
   PatchIpPoolRequest,
   PatchServerRequest,

@@ -1,4 +1,4 @@
-import { BadRequestException, ForbiddenException, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, NotFoundException } from '@nestjs/common';
 import {
   ContainerPhase,
   ContainerPowerIntent,
@@ -191,6 +191,16 @@ export function assertCanAccess(
   throw new NotFoundException('Container not found');
 }
 
+
+export function containerNameConflict(conflict: 'server' | 'owner', serverId: string | null, name: string): ConflictException {
+  return new ConflictException({
+    code: FailureCode.InvalidInput,
+    message: conflict === 'server'
+      ? 'A container with this name already exists on the server'
+      : 'You already have a container with this name (names are unique per user, ignoring case)',
+    details: { serverId, name },
+  });
+}
 
 // --- root shrink (reconciler guard) -------------------------------------------
 

@@ -70,6 +70,7 @@ describe('container names', () => {
     expect(zCreateContainerRequest.safeParse(request('a'.repeat(CONTAINER_NAME_MAX_LENGTH))).success).toBe(true);
     expect(zCreateContainerRequest.safeParse(request('a'.repeat(CONTAINER_NAME_MAX_LENGTH + 1))).success).toBe(false);
     expect(zCreateContainerRequest.safeParse(request('-web')).success).toBe(false);
+    expect(zCreateContainerRequest.safeParse(request('Web-01')).success).toBe(false);
     expect(zCreateContainerRequest.safeParse(request('网站')).success).toBe(false);
   });
 });

@@ -8,6 +8,7 @@ import {
   UserStatus,
   type CreateContainerRequest,
   Role,
+  IntentKind,
 } from '@nyabase/common';
 import { describe, expect, it, vi } from 'vitest';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
@@ -1220,15 +1221,43 @@ describePg('Container names and the SSH proxy snapshot', () => {
       const fixture = await seedFixture(database);
       await grantServer(database, { user: fixture.userId }, fixture.serverId, {});
       const owner = testActor(fixture.userId);
-      await service(database).create(owner, request(fixture, 'Work'));
+      await service(database).create(owner, request(fixture, 'work'));
       await expect(service(database).create(owner, request(fixture, 'work'))).rejects.toMatchObject({
-        response: { message: expect.stringContaining('names are unique per user') },
+        response: { message: expect.stringContaining('already exists on the server') },
       });
       const beta = await service(database).create(owner, request(fixture, 'beta'));
-      // The index holds across servers too, where the admission check cannot see a race.
-      await expect(database.updateTable('control.containers').set({ name: 'WORK' })
+      // The database refuses what the schema would: names are lower case.
+      await expect(database.updateTable('control.containers').set({ name: 'BETA' })
         .where('id', '=', beta.resourceId).execute())
-        .rejects.toMatchObject({ code: '23505', constraint: 'containers_owner_name_key' });
+        .rejects.toMatchObject({ code: '23514', constraint: 'containers_name_check' });
+    });
+  });
+
+  it('renames a container: new revision and intent; taken names and strangers refused', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const fixture = await seedFixture(database);
+      await grantServer(database, { user: fixture.userId }, fixture.serverId, {});
+      const owner = testActor(fixture.userId);
+      const work = await service(database).create(owner, request(fixture, 'work'));
+      await service(database).create(owner, request(fixture, 'beta'));
+
+      await expect(service(database).rename(owner, work.resourceId, { name: 'beta' })).rejects.toMatchObject({
+        response: { message: expect.stringContaining('already exists on the server') },
+      });
+      await expect(service(database).rename(testActor(randomUUID()), work.resourceId, { name: 'gamma' }))
+        .rejects.toThrow('Container not found');
+
+      const before = await database.selectFrom('control.containers').select(['revision']).where('id', '=', work.resourceId).executeTakeFirstOrThrow();
+      const accepted = await service(database).rename(owner, work.resourceId, { name: 'gamma' });
+      const row = await database.selectFrom('control.containers').select(['name', 'revision']).where('id', '=', work.resourceId).executeTakeFirstOrThrow();
+      expect(row.name).toBe('gamma');
+      expect(Number(row.revision)).toBe(Number(before.revision) + 1);
+      const intent = await database.selectFrom('control.intents').select(['kind', 'target_revision']).where('id', '=', accepted.intentId).executeTakeFirstOrThrow();
+      expect(intent.kind).toBe(IntentKind.ContainerUpdate);
+      expect(Number(intent.target_revision)).toBe(Number(row.revision));
+
+      // Its own name again is not a conflict.
+      await expect(service(database).rename(owner, work.resourceId, { name: 'gamma' })).resolves.toBeDefined();
     });
   });
 

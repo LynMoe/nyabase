@@ -492,6 +492,10 @@ export const zPatchContainerRootSizeRequest = z.object({
   sizeBytes: zPositiveBytes,
 }).strict();
 
+export const zPatchContainerNameRequest = z.object({
+  name: zContainerName,
+}).strict();
+
 export const zCreateExecSessionRequest = z.object({
   command: z.array(z.string().min(1).max(MAX_CONSOLE_COMMAND_ARGUMENT_BYTES))
     .max(MAX_CONSOLE_COMMAND_ARGUMENTS)
@@ -717,6 +721,7 @@ export type AttachVolumeRequest = z.infer<typeof zAttachVolumeRequest>;
 export type CreateContainerRequest = z.infer<typeof zCreateContainerRequest>;
 export type PatchContainerLimitsRequest = z.infer<typeof zPatchContainerLimitsRequest>;
 export type PatchContainerRootSizeRequest = z.infer<typeof zPatchContainerRootSizeRequest>;
+export type PatchContainerNameRequest = z.infer<typeof zPatchContainerNameRequest>;
 export type CreateExecSessionRequest = z.infer<typeof zCreateExecSessionRequest>;
 export type AddCatalogImageRequest = z.infer<typeof zAddCatalogImageRequest>;
 export type CreateImageRequest = z.infer<typeof zCreateImageRequest>;

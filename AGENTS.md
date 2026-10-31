@@ -317,7 +317,7 @@ lab 场景 API 测试，不在 CI 里跑；CI 只跑 `pnpm e2e:check`（e2e 包 
   镜像的 `/usr/lib/nyabase/prompt.sh`（nyabase-images 仓库）每次开交互 shell 经 `/dev/incus` 读取，显示 `root@<容器名> [<服务器名>] ~#`；
   实例名与 guest 主机名保持 `nyc-<id>`。改服务器名唤醒全量扫描改写这两个键（被搁置 / failed 的容器扫描跳过，等下一个 intent），不记 `container.drift_corrected`（`isDisplayConfigKey`）。
   控制台默认命令是 `bash -l`（没有 bash 才 `sh -l`）：dash 登录 shell 不读 `~/.bashrc`，提示符只在 bash 里生效。
-  容器名仍只许 `[A-Za-z0-9-]`（SSH 按名路由）、≤ 16 个字符；服务器名任意可见字符与空格、≤ 32 列（中文 2 列，common 的 `displayWidth`）。
+  容器名只许 `[a-z0-9-]`（SSH 按名路由，000007 把旧名转成了小写）、≤ 48 个字符，默认 `<用户名>-<服务器名>`（前端 `defaultContainerName`），可改名（`PATCH /containers/:id/name`：实例名不变，下发 intent 改写提示符标签与主机证书，代理快照立即失效）；服务器名任意可见字符与空格、≤ 32 列（中文 2 列，common 的 `displayWidth`）。
 - 镜像版本（`infra.image_versions`、`images/image-versions.service.ts`）：repull 只切镜像的当前指纹，已有容器保持创建时的
   `image_fingerprint`，ensure 绝不删除旧版副本（容器重建只从本机按指纹找镜像，catalog 只留最新版），`recordEnsured` 也不改写已有的当前指纹。
   旧版只能由 admin 删除，且只在不是当前版本、没有任何容器（不分阶段）引用时；删除只写 `deleted_at`，副本由镜像 reconciler 的全量扫描

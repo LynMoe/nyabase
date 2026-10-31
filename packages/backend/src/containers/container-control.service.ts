@@ -21,6 +21,7 @@ import {
   type ListScope,
   type IntentAcceptedDto,
   type PatchContainerLimitsRequest,
+  type PatchContainerNameRequest,
   type PatchContainerRootSizeRequest,
   type VolumeAttachmentDto,
   Role,
@@ -57,9 +58,12 @@ import {
   createContainerIntent,
   rootShrinkReservation,
   rootSizeMinimum,
+  containerNameConflict,
   type ContainerAccess,
 } from './container-rules.js';
 import { assertActorRole } from '../iam/administration.js';
+import { ProxySnapshotNotifierService } from '../proxy-snapshots/proxy-snapshot-notifier.service.js';
+import { isUniqueViolation } from '../volumes/volume-rules.js';
 
 type ContainerAction = 'start' | 'stop' | 'restart' | 'delete';
 type DesiredValues = Parameters<ContainerControlRepository['updateDesired']>[2];
@@ -95,6 +99,7 @@ export class ContainerControlService {
     private readonly gpuClaims: GpuClaimsRepository,
     private readonly dtos: ContainerDtoAssembler,
     private readonly creator: ContainerCreateService,
+    private readonly proxySnapshots: ProxySnapshotNotifierService,
   ) {}
 
   async list(
@@ -144,6 +149,46 @@ export class ContainerControlService {
       });
     }
     return this.sshConvergence.repairContainer(containerId);
+  }
+
+  /**
+   * The instance stays `nyc-<id>`: the name is what SSH routes on, what the host
+   * certificate names and what the guest prompt shows. The intent rewrites the
+   * last two, the proxies route on the new name from their next snapshot.
+   */
+  async rename(
+    actor: Actor,
+    containerId: string,
+    input: PatchContainerNameRequest,
+    scope: ListScope = 'mine',
+  ): Promise<IntentAcceptedDto> {
+    let accepted: IntentAcceptedDto;
+    try {
+      accepted = await this.updateDesired(
+        actor,
+        scope,
+        containerId,
+        { name: input.name },
+        { operation: 'rename', name: input.name },
+        AuditAction.RenameContainer,
+        async (transaction, current) => {
+          const conflict = await this.repository.nameConflict(
+            current.server_id,
+            current.owner_id,
+            input.name,
+            transaction,
+            containerId,
+          );
+          if (conflict) throw containerNameConflict(conflict, current.server_id, input.name);
+        },
+      );
+    } catch (error) {
+      // Two renames racing to one name: the unique indexes decide.
+      if (!isUniqueViolation(error)) throw error;
+      throw containerNameConflict('owner', null, input.name);
+    }
+    this.proxySnapshots.invalidate('container_renamed');
+    return accepted;
   }
 
   async updateLimits(

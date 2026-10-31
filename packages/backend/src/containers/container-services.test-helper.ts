@@ -3,6 +3,7 @@ import type { AccessResolverService } from '../iam/access-resolver.service.js';
 import type { AuditService } from '../iam/audit.service.js';
 import type { GpuClaimsRepository } from '../gpu/gpu-claims.repository.js';
 import type { IpPoolsRepository } from '../ip-pools/ip-pools.repository.js';
+import type { ProxySnapshotNotifierService } from '../proxy-snapshots/proxy-snapshot-notifier.service.js';
 import type { NyabaseConfigService } from '../platform/config/nyabase-config.service.js';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 import type { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
@@ -42,5 +43,6 @@ export function makeContainerControlService(
     gpuClaims,
     new ContainerDtoAssembler(database, repository, config),
     new ContainerCreateService(repository, access, intents, audit, ipPools, volumes, gpuClaims),
+    { invalidate: () => undefined } as unknown as ProxySnapshotNotifierService,
   );
 }

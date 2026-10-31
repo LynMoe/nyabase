@@ -23,6 +23,7 @@ import { StatusBadge } from '../components/layout/status-badge.js';
 import { ContainerActionBar } from '../components/containers/container-action-bar.js';
 import { ContainerConsole } from '../components/containers/container-console.js';
 import { IntentsPanel } from '../components/containers/intents-panel.js';
+import { RenameContainerButton } from '../components/containers/rename-container-button.js';
 import { OverviewPanel } from '../components/containers/overview-panel.js';
 import { StoragePanel } from '../components/containers/storage-panel.js';
 import { SshSessionList } from '../components/ssh-sessions/ssh-session-list.js';
@@ -179,6 +180,7 @@ function ContainerDetailHeader({ container: c, scope }: { container: ContainerDt
             <span className="inline-flex items-center gap-1.5">
               <span>{c.name}</span>
               <InstanceNameHint instanceName={c.instanceName} />
+              <RenameContainerButton container={c} scope={scope} />
             </span>
             <StatusBadge
               label={containerStatusLabel(c.actual.status)}

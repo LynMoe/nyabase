@@ -15,6 +15,7 @@ import {
   zListContainersQuery,
   zListScope,
   zPatchContainerLimitsRequest,
+  zPatchContainerNameRequest,
   zPatchContainerRootSizeRequest,
 } from '@nyabase/common';
 import { CurrentActor } from '../iam/decorators.js';
@@ -99,6 +100,17 @@ export class ContainersController {
     @Query('scope') scope?: string,
   ) {
     return this.containers.action(actor, id, 'delete', zListScope.parse(scope));
+  }
+
+  @Patch(':containerId/name')
+  @HttpCode(HttpStatus.ACCEPTED)
+  rename(
+    @Param('containerId') id: string,
+    @CurrentActor() actor: Actor,
+    @Body() body: unknown,
+    @Query('scope') scope?: string,
+  ) {
+    return this.containers.rename(actor, id, zPatchContainerNameRequest.parse(body), zListScope.parse(scope));
   }
 
   @Patch(':containerId/limits')

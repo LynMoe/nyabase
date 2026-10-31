@@ -27,6 +27,7 @@ const AUDIT_ACTION_LABELS: Record<string, string> = {
   [AuditAction.StopContainer]: '停止容器',
   [AuditAction.RestartContainer]: '重启容器',
   [AuditAction.DeleteContainer]: '删除容器',
+  [AuditAction.RenameContainer]: '重命名容器',
   [AuditAction.UpdateContainerLimits]: '更新容器限额',
   [AuditAction.ResizeContainerRoot]: '调整系统盘',
   [AuditAction.UpdateContainerGpu]: '更新容器 GPU',

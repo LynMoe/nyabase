@@ -38,7 +38,8 @@ import { QuotaLine, type QuotaLineQuota, quotaFrom } from '../quota/quota-line.j
 import { sizeScale } from '../../lib/size-ladder.js';
 import { useFittedDefaultSize } from '../../hooks/use-fitted-default-size.js';
 import { cpuGrantLabel } from '../../lib/cpu-set.js';
-import { defaultResourceName } from '../../lib/default-names.js';
+import { defaultContainerName } from '../../lib/default-names.js';
+import { useAuthStore } from '../../store/auth.js';
 import { api } from '../../lib/api.js';
 import { errorMessage } from '../../lib/api-error.js';
 import { queryKeys } from '../../lib/query-keys.js';
@@ -75,13 +76,13 @@ function CreateContainerBody({ open, onOpenChange, defaultServerId }: CreateCont
             form.submit();
           }}
         >
-          <FormField id="container-name" label="名称" error={form.errors.name} hint={`字母、数字、连字符，最多 ${CONTAINER_NAME_MAX_LENGTH} 个字符`}>
+          <FormField id="container-name" label="名称" error={form.errors.name} hint={`小写字母、数字、连字符，最多 ${CONTAINER_NAME_MAX_LENGTH} 个字符`}>
             <Input
               id="container-name"
               value={form.name}
               autoFocus
               autoComplete="off"
-              onChange={(event) => form.setName(event.target.value)}
+              onChange={(event) => form.setName(event.target.value.toLowerCase())}
               placeholder={form.defaultName}
             />
           </FormField>
@@ -246,9 +247,10 @@ function useCreateContainerForm({
   const { servers, images, selectedAccess } = data;
   const selected = servers.find((server) => server.id === form.serverId);
   // Names are unique per owner, ignoring case: skip every name the user already has.
+  const username = useAuthStore((state) => state.user?.username ?? '');
   const defaultName = useMemo(
-    () => defaultResourceName('ins', (data.containersQuery.data ?? []).map((container) => container.name)),
-    [data.containersQuery.data],
+    () => defaultContainerName(username, selected?.name ?? '', (data.containersQuery.data ?? []).map((container) => container.name)),
+    [username, selected?.name, data.containersQuery.data],
   );
   const name = nameTouched ? form.name : defaultName;
 
@@ -504,7 +506,7 @@ function validateForm(form: FormState): FieldErrors {
   const name = form.name.trim();
   if (!name) next.name = '请输入容器名称';
   else if (name.length > CONTAINER_NAME_MAX_LENGTH) next.name = `名称最长 ${CONTAINER_NAME_MAX_LENGTH} 个字符`;
-  else if (!CONTAINER_NAME_RE.test(name)) next.name = '只能使用字母、数字和连字符，且不能以连字符开头';
+  else if (!CONTAINER_NAME_RE.test(name)) next.name = '只能使用小写字母、数字和连字符，且不能以连字符开头';
   if (!form.serverId) next.serverId = '请选择服务器';
   if (!form.imageId) next.imageId = '请选择镜像';
   if (parsePositiveGib(form.rootSizeGib) === null) next.rootSizeGib = '请输入大于 0 的容量';

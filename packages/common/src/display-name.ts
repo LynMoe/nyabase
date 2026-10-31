@@ -4,9 +4,10 @@
  * any visible characters. Both are bounded in terminal columns, not code units.
  */
 
-/** Container names: ASCII letters, digits and hyphens, not starting with a hyphen. */
-export const CONTAINER_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9-]*$/;
-export const CONTAINER_NAME_MAX_LENGTH = 16;
+/** Container names: lower-case ASCII letters, digits and hyphens, not starting with a hyphen. */
+export const CONTAINER_NAME_RE = /^[a-z0-9][a-z0-9-]*$/;
+/** Room for `<username>-<server>`, the default name, and a `-2` after it. */
+export const CONTAINER_NAME_MAX_LENGTH = 48;
 /** Terminal columns a server name may take (a CJK character takes two). */
 export const SERVER_NAME_MAX_WIDTH = 32;
 

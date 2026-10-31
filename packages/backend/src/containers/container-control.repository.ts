@@ -138,16 +138,18 @@ export class ContainerControlRepository {
       .executeTakeFirst();
   }
 
-  /** Which name rule a new container would break: unique per server, and per owner ignoring case. */
+  /** Which name rule a container with this name would break: unique per server, and per owner ignoring case. */
   async nameConflict(
     serverId: string,
     ownerId: string,
     name: string,
     executor: ContainerExecutor = this.database,
+    excludeContainerId?: string,
   ): Promise<'server' | 'owner' | null> {
     const rows = await executor
       .selectFrom('control.containers')
       .select(['server_id', 'name'])
+      .$if(excludeContainerId !== undefined, (query) => query.where('id', '!=', excludeContainerId!))
       .where((where) => where.or([
         where.and([where('server_id', '=', serverId), where('name', '=', name)]),
         where.and([
@@ -295,6 +297,7 @@ export class ContainerControlRepository {
     id: string,
     revision: number,
     values: {
+      name?: string;
       mem_bytes?: number;
       root_size_bytes?: number;
       root_size_pending_bytes?: number | null;

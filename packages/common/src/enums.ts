@@ -205,6 +205,7 @@ export enum AuditAction {
   StopContainer = 'container.stop',
   RestartContainer = 'container.restart',
   DeleteContainer = 'container.delete',
+  RenameContainer = 'container.rename',
   UpdateContainerLimits = 'container.limits.update',
   ResizeContainerRoot = 'container.root_size.update',
   UpdateContainerGpu = 'container.gpu.update',

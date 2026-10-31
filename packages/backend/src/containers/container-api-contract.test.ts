@@ -72,6 +72,7 @@ describe('container API contract', () => {
       restart: ':containerId/actions/restart',
       repairSsh: ':containerId/actions/repair-ssh',
       delete: ':containerId/actions/delete',
+      rename: ':containerId/name',
       limits: ':containerId/limits',
       rootSize: ':containerId/root-size',
       gpus: ':containerId/gpus',

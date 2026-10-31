@@ -32,6 +32,7 @@ import {
   createContainerIntent,
   rootSizeMinimum,
   stringArray,
+  containerNameConflict,
 } from './container-rules.js';
 import { requireUserId } from '../iam/actor.js';
 
@@ -145,13 +146,7 @@ export class ContainerCreateService {
       .executeTakeFirst() as ServerRow | undefined;
     const conflict = await this.repository.nameConflict(request.serverId, ownerId, request.name, transaction);
     if (conflict) {
-      throw new ConflictException({
-        code: FailureCode.InvalidInput,
-        message: conflict === 'server'
-          ? 'A container with this name already exists on the server'
-          : 'You already have a container with this name (names are unique per user, ignoring case)',
-        details: { serverId: request.serverId, name: request.name },
-      });
+      throw containerNameConflict(conflict, request.serverId, request.name);
     }
     const image = await this.lockActiveImage(transaction, request.imageId);
     if (!server) throw new NotFoundException('Server not found');
