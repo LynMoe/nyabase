@@ -122,15 +122,15 @@ describe('user routes: self, administrator, everyone else', () => {
 
 describe('administrators\' note on a user', () => {
   it('shows the note only to user admins, and only they write it (never on themselves)', async () => {
-    const toDtoSpy = vi.fn((user: unknown, options?: { withNote?: boolean }) => ({ user, withNote: options?.withNote }));
+    const toDtoSpy = vi.fn((user: unknown, options?: { administrative?: boolean }) => ({ user, administrative: options?.administrative }));
     const findById = vi.fn().mockResolvedValue({ id: 'user-b' });
     const updateUser = vi.fn().mockResolvedValue({ id: 'user-b' });
     const updateSelf = vi.fn();
     const controller = controllerWith({ toDto: toDtoSpy, findById, updateUser, updateSelf });
     const userAdmin = testActor('ua-a', Role.UserAdmin);
 
-    await expect(controller.getUser('user-b', userAdmin)).resolves.toMatchObject({ withNote: true });
-    await expect(controller.getUser('user-a', testActor('user-a'))).resolves.toMatchObject({ withNote: false });
+    await expect(controller.getUser('user-b', userAdmin)).resolves.toMatchObject({ administrative: true });
+    await expect(controller.getUser('user-a', testActor('user-a'))).resolves.toMatchObject({ administrative: false });
     await controller.updateUser('user-b', { note: '  lab member  ' }, userAdmin);
     expect(updateUser).toHaveBeenLastCalledWith('user-b', { note: 'lab member' }, 'ua-a');
     await controller.updateUser('user-b', { note: '' }, userAdmin);

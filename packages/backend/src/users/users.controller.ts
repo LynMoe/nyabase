@@ -51,14 +51,14 @@ export class UsersController {
       throw new ForbiddenException();
     }
     const user = await this.usersService.createUser(dto, { actorId: actor.userId });
-    return this.usersService.toDto(user, { withNote: true });
+    return this.usersService.toDto(user, { administrative: true });
   }
 
   @Get(':id')
   async getUser(@Param('id') id: string, @CurrentActor() actor: Actor) {
     this.assertSelfOr(actor, id, Role.UserAdmin);
     const user = await this.usersService.findById(id);
-    return this.usersService.toDto(user, { withNote: hasRole(actor, Role.UserAdmin) });
+    return this.usersService.toDto(user, { administrative: hasRole(actor, Role.UserAdmin) });
   }
 
   @Patch(':id')
@@ -71,19 +71,19 @@ export class UsersController {
     this.assertSelfOr(actor, id, Role.UserAdmin);
     const dto = zUpdateUserRequest.parse(body);
     if (dto.role !== undefined && !hasRole(actor, Role.Admin)) throw new ForbiddenException();
-    const withNote = hasRole(actor, Role.UserAdmin);
+    const administrative = hasRole(actor, Role.UserAdmin);
     if (this.isSelfService(actor, id, dto)) {
       if (dto.status !== undefined || dto.role !== undefined || dto.note !== undefined) {
         throw new BadRequestException('status, role and note cannot be changed through the self-service route');
       }
       const user = await this.usersService.updateSelf(id, dto, dto.currentPassword);
-      return this.usersService.toDto(user, { withNote });
+      return this.usersService.toDto(user, { administrative });
     }
     if (dto.currentPassword !== undefined) {
       throw new BadRequestException('currentPassword is only valid for self-service updates');
     }
     const user = await this.usersService.updateUser(id, dto, requireUserId(actor));
-    return this.usersService.toDto(user, { withNote });
+    return this.usersService.toDto(user, { administrative });
   }
 
   @Delete(':id')

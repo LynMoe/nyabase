@@ -144,6 +144,7 @@ export class IamAuthRepository implements AuthPersistence {
           created_at: now,
         })
         .executeTakeFirstOrThrow();
+      await transaction.updateTable('iam.users').set({ last_login_at: now }).where('id', '=', userId).execute();
       const user = this.toUser(userRow as UserRow);
       await onIssued?.(transaction, user);
       return user;

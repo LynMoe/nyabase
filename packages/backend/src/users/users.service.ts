@@ -64,6 +64,7 @@ export interface IamUser {
   role: Role;
   note: string | null;
   mustChangePassword: boolean;
+  lastLoginAt: Date | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -218,11 +219,11 @@ export class UsersService {
   }
 
   /**
-   * Administrative collection projection (with the note): one query per table, never a per-user lookup.
+   * Administrative collection projection (with the note and last login): one query per table, never a per-user lookup.
    */
   async listDtos(): Promise<UserDto[]> {
     const users = await this.database.selectFrom('iam.users')
-      .select(['id', 'username', 'display_name', 'status', 'role', 'note', 'created_at'])
+      .select(['id', 'username', 'display_name', 'status', 'role', 'note', 'last_login_at', 'created_at'])
       .where('status', '!=', UserStatus.Deleted)
       .orderBy('username')
       .orderBy('id')
@@ -235,6 +236,7 @@ export class UsersService {
       createdAt: user.created_at.toISOString(),
       role: user.role as Role,
       note: user.note,
+      lastLoginAt: user.last_login_at?.toISOString() ?? null,
     }));
   }
 
@@ -567,8 +569,8 @@ export class UsersService {
     });
   }
 
-  /** `withNote` only for user-admin views: the note is the administrators', not the user's. */
-  async toDto(user: IamUser, options: { withNote?: boolean } = {}): Promise<UserDto> {
+  /** `administrative` only for user-admin views: the note and last login are the administrators', not the user's. */
+  async toDto(user: IamUser, options: { administrative?: boolean } = {}): Promise<UserDto> {
     return {
       id: user.id,
       username: user.username,
@@ -576,7 +578,7 @@ export class UsersService {
       status: user.status,
       createdAt: user.createdAt.toISOString(),
       role: user.role,
-      ...(options.withNote ? { note: user.note } : {}),
+      ...(options.administrative ? { note: user.note, lastLoginAt: user.lastLoginAt?.toISOString() ?? null } : {}),
     };
   }
 
@@ -613,6 +615,7 @@ export class UsersService {
     role: string;
     note: string | null;
     must_change_password: boolean;
+    last_login_at: Date | null;
     created_at: Date;
     updated_at: Date;
   }): IamUser {
@@ -627,6 +630,7 @@ export class UsersService {
       role: row.role as Role,
       note: row.note,
       mustChangePassword: row.must_change_password,
+      lastLoginAt: row.last_login_at,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     };

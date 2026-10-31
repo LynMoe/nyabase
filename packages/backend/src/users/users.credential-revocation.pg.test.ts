@@ -46,6 +46,19 @@ describePg('credential revocation on password change, reset and account changes'
     });
   });
 
+  it('records a login only in the administrators\' view of the user', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const context = await setup(database);
+      expect((await context.users.listDtos()).find((user) => user.id === context.user.id)?.lastLoginAt).toBeNull();
+      await context.auth.login({ id: context.user.id });
+      const listed = (await context.users.listDtos()).find((user) => user.id === context.user.id);
+      expect(listed?.lastLoginAt).toEqual(expect.any(String));
+      const fresh = await context.users.findById(context.user.id);
+      expect((await context.users.toDto(fresh, { administrative: true })).lastLoginAt).toBe(listed?.lastLoginAt);
+      expect(await context.users.toDto(fresh)).not.toHaveProperty('lastLoginAt');
+    });
+  });
+
   it('requires a new password after an administrator chose it, until the user changes it', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const context = await setup(database);

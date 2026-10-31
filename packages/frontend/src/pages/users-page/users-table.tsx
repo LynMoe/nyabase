@@ -15,6 +15,7 @@ import { expiryLabel, expiryPhase, serverName } from '../../components/grants/us
 import { dataDiskSummary, quotaSummaryParts } from '../../lib/grant-bundle-form.js';
 import { roleLabel, userStatusLabel } from '../../lib/display-labels.js';
 import { userDeleting } from '../../lib/in-progress.js';
+import { relativeTime } from '../../lib/utils.js';
 
 /** One server a user holds a grant on; hovering shows the bundle and its effective quotas. */
 function ServerGrantBadge({ grant, servers }: { grant: ServerGrantDto; servers: UserServerDto[] }) {
@@ -42,7 +43,7 @@ function ServerGrantBadge({ grant, servers }: { grant: ServerGrantDto; servers: 
   );
 }
 
-/** Users, one compact row each: name, role, status, the servers granted, the administrators' note. */
+/** Users, one compact row each: name, role, status, the servers granted, last login, the administrators' note. */
 export function UsersTable({
   users,
   grants,
@@ -63,20 +64,21 @@ export function UsersTable({
     serverName(a.serverId, servers).localeCompare(serverName(b.serverId, servers), 'zh-CN')
   );
   return (
-    <Table className="min-w-[760px]">
+    <Table className="min-w-[860px]">
       <TableHeader>
         <TableRow>
           <TableHead className="py-2">用户</TableHead>
           <TableHead className="py-2">角色</TableHead>
           <TableHead className="py-2">状态</TableHead>
           <TableHead className="py-2">授权服务器</TableHead>
+          <TableHead className="py-2">最后登录</TableHead>
           <TableHead className="py-2">备注</TableHead>
         </TableRow>
       </TableHeader>
       <TableBody>
         {users.length === 0 ? (
           <TableRow>
-            <TableCell colSpan={5} className="py-8 text-center text-muted-foreground">
+            <TableCell colSpan={6} className="py-8 text-center text-muted-foreground">
               没有符合条件的用户
             </TableCell>
           </TableRow>
@@ -115,6 +117,12 @@ export function UsersTable({
                   <ServerGrantBadge key={grant.id} grant={grant} servers={servers} />
                 ))}
               </div>
+            </TableCell>
+            <TableCell
+              className="whitespace-nowrap py-2 text-muted-foreground"
+              title={user.lastLoginAt ? new Date(user.lastLoginAt).toLocaleString('zh-CN') : undefined}
+            >
+              {user.lastLoginAt ? relativeTime(user.lastLoginAt) : '—'}
             </TableCell>
             <TableCell className="max-w-[18rem] py-2">
               <p className="truncate text-muted-foreground" title={user.note ?? undefined}>{user.note ?? ''}</p>

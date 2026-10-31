@@ -55,6 +55,7 @@ Vite 通过 alias 将 `@nyabase/common` 指向 `src/index.ts`，但 `index.ts` �
 - `GET /server-grants?scope=all`（user_admin，没有 `scope=mine`）列出所有未删除用户的服务器授权，供用户列表显示授权服务器 badge；增删改仍走 `/users/:userId/server-grants`。
 - 用户备注（`iam.users.note`）是管理员对用户的备注：`UserDto.note` 只在 user_admin 及以上请求的 `GET /users`、`GET` / `PATCH` / `POST /users[/:id]` 里出现，
   登录 / 会话里的 `UserDto` 不带；自助路径不能改备注（user_admin 改不了自己的，admin 走管理员路径）。
+- 最后登录（`iam.users.last_login_at`，000010）：只记密码登录（refresh 和代操作不算），`UserDto.lastLoginAt` 与备注一样只在 user_admin 及以上的视图里出现；从审计回填，审计有保留期，所以 NULL = 未知（前端显示「—」），不是从未登录。
 - 强制改密（`iam.users.must_change_password`，000006）：管理员新建用户、或重置别人的密码时置位（启动补救的 `admin`、管理员改自己的密码不置位），用户自助改密时清除。
   只在会话里的 `UserDto.mustChangePassword`（login / refresh / `GET /auth/me`）出现；前端 `AppLayout` 据此弹出不可关闭的改密对话框（只能改密或退出登录）。后端不据此拦截其他 API。
 - intents 只有 `GET /intents`、`GET /intents/:id`、`POST /intents/:id/retry` 一个 controller；
@@ -71,7 +72,7 @@ Vite 通过 alias 将 `@nyabase/common` 指向 `src/index.ts`，但 `index.ts` �
     未覆盖的字段**实时跟随** bundle：改 bundle 立即作用于所有未覆盖该字段的授权（视图读 bundle，没有同步写入）；`POST /admin/grant-bundles/:id/preview` 先列出会变的用户、被 override 挡住的用户和用量警告，`PATCH` 带 `expectedRevision`。
     同一服务器已有授权时再分配（任何 bundle，含同一个）返回 409 `SERVER_GRANT_EXISTS`，带 `replace: true` 才在原行上替换：bundle、override 与到期都取自本次请求（未给即无 override、永久），数据盘授权保留，覆盖不中断。仍被授权引用的 bundle 不能删（409 `GRANT_BUNDLE_IN_USE`）。
   - **数据盘授权（`iam.storage_pool_grants`）** 在服务器授权之下按池给额度（`limit_bytes`，该用户在此池上本地卷之和），只能给该服务器的本地池（复合外键），没有自己的到期：随服务器授权生效、到期、删除（级联）。没有服务器授权时 409 `SERVER_GRANT_REQUIRED`。
-  - **共享后端授权** 独立，不属于任何 bundle。共享后端自带 `note`（用户新建共享卷时显示）与 `max_volumes_per_user`（每用户在该后端上 live 共享卷数上限，NULL = 不限；
+  - **共享后端授权** 独立，不属于任何 bundle。共享后端自带 `default_mount_path`（挂载表单选中其共享卷时预填，可改，NULL = `/data`，只是建议值）、`note`（用户新建共享卷时显示）与 `max_volumes_per_user`（每用户在该后端上 live 共享卷数上限，NULL = 不限；
     新建时在 serializable 的创建事务（`VOLUME_TX`）里准入（并发抢最后一个名额由 40001 重试解决），超出 409 `SHARED_BACKEND_VOLUME_LIMIT_REACHED`；`failed` / `deleting` 的卷不计；调低不影响已有的卷）。
   - GPU 不由管理员挑卡：视图按 `md5(用户 id, PCI 地址)` 从服务器最近观测到的卡（`infra.servers.observed_gpu_pci_addresses`，agent 连接与全量扫描时由 Incus resources 刷新）里取前 N 张（NULL = 全部）。
     结果只取决于用户和卡列表：张数增加保留已有的卡，减少去掉排名最低的；卡消失只影响排到它的用户。`grants/grant-fields.ts` 的 `pickGrantGpus` 是预览用的同一规则（pg 测试固定两者一致）。
@@ -210,6 +211,8 @@ Vite 通过 alias 将 `@nyabase/common` 指向 `src/index.ts`，但 `index.ts` �
     bindings / domain-pools / snapshot；`IncusClient` 保持单一 facade，按 API 领域分层（transport → server →
     instance → storage → image）。
 
+前端的字节显示只走 common 的 `formatBytes` / `scaleBytes`（B → PiB 自动进位，不写死 GiB），图表等紧凑处用 `formatBytesCompact`，速率用 `formatRate`；尺寸输入框仍以 GiB 为单位，下方提示用 `approxSizeHint` 显示换算结果。
+
 前端：页面或组件超过体量时拆成与页面同名的目录（`pages/foo-page.tsx` + `pages/foo-page/*`，hooks 用 `use-*.ts`），
 读取源码文本的 surface 测试用 `lib/read-source.test-helper.ts` 的 `readSource` / `readSourceDir`。
 
@@ -318,7 +321,7 @@ lab 场景 API 测试，不在 CI 里跑；CI 只跑 `pnpm e2e:check`（e2e 包 
   实例名与 guest 主机名保持 `nyc-<id>`。改服务器名唤醒全量扫描改写这两个键（被搁置 / failed 的容器扫描跳过，等下一个 intent），不记 `container.drift_corrected`（`isDisplayConfigKey`）。
   控制台默认命令是 `bash -l`（没有 bash 才 `sh -l`）：dash 登录 shell 不读 `~/.bashrc`，提示符只在 bash 里生效。
   容器名只许 `[a-z0-9-]`（SSH 按名路由，000007 把旧名转成了小写）、≤ 48 个字符，默认 `<用户名>-<服务器名>`（前端 `defaultContainerName`），可改名（`PATCH /containers/:id/name`：实例名不变，下发 intent 改写提示符标签与主机证书，代理快照立即失效）；服务器名任意可见字符与空格、≤ 32 列（中文 2 列，common 的 `displayWidth`）。
-- 镜像版本（`infra.image_versions`、`images/image-versions.service.ts`）：repull 只切镜像的当前指纹，已有容器保持创建时的
+- 镜像版本（`infra.image_versions`、`images/image-versions.service.ts`）：`version` 是 catalog 版本（`20261027_nb01`，`created_at` 只是首次拉取时间），`imageLabel` 显示为 `ubuntu/24.04(2026/10/27)`，容器显示自己 `image_fingerprint` 对应的版本。repull 只切镜像的当前指纹，已有容器保持创建时的
   `image_fingerprint`，ensure 绝不删除旧版副本（容器重建只从本机按指纹找镜像，catalog 只留最新版），`recordEnsured` 也不改写已有的当前指纹。
   旧版只能由 admin 删除，且只在不是当前版本、没有任何容器（不分阶段）引用时；删除只写 `deleted_at`，副本由镜像 reconciler 的全量扫描
   按库里状态移除（`listUnneededCopies` / `removeCopyIfUnneeded`），只碰 `infra.image_copies` 里记录为本服务器拉取的副本

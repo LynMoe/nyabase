@@ -35,6 +35,7 @@ export interface IamUserTable {
   role: Generated<string>;
   note: string | null;
   must_change_password: Generated<boolean>;
+  last_login_at: Date | null;
   created_at: GeneratedTimestamp;
   updated_at: GeneratedTimestamp;
 }
