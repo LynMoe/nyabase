@@ -212,6 +212,7 @@ export class ImageReconcileStore {
         image_id: assignment.image_id,
         fingerprint,
         description: learned ? learned.description : null,
+        version: null,
       })
       .onConflict((conflict) => conflict.columns(['image_id', 'fingerprint']).doNothing())
       .execute();

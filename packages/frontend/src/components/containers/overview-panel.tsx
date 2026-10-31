@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { Role, type ContainerDto, type ListScope, type PerformanceSelfResponse } from '@nyabase/common';
+import { imageLabel, Role, type ContainerDto, type ListScope, type PerformanceSelfResponse } from '@nyabase/common';
 import { Link } from '@tanstack/react-router';
 import { ChartLine, Pencil } from 'lucide-react';
 import { useHasRole } from '../../lib/use-role.js';
@@ -127,7 +127,7 @@ function SpecFootnote({ container, sample }: { container: ContainerDto; sample: 
               kind="fingerprint"
               alias={container.imageName}
               value={container.imageFingerprint}
-              visible={container.imageName?.trim() || undefined}
+              visible={container.imageName?.trim() ? imageLabel(container.imageName.trim(), container.imageVersion) : undefined}
               className="inline max-w-full truncate text-xs text-foreground"
             />
           ) : (container.imageName ?? '同步中')}

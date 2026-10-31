@@ -5,6 +5,7 @@ import {
   CONTAINER_NAME_RE,
   type ContainerDto,
   ContainerPowerIntent,
+  imageLabel,
   type CreateContainerRequest,
   type EffectiveAccessDto,
   type ImageDto,
@@ -129,7 +130,7 @@ function PlacementFields({ form }: { form: CreateContainerForm }) {
         label="镜像"
         value={form.form.imageId}
         onChange={(value) => form.update('imageId', value)}
-        options={images.map((image) => [image.id, image.alias])}
+        options={images.map((image) => [image.id, imageLabel(image.alias, image.version)])}
         placeholder={form.form.serverId ? '选择镜像' : '先选择服务器'}
         disabled={!form.form.serverId}
         loading={Boolean(form.form.serverId) && imagesLoading}

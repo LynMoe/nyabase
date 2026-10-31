@@ -557,6 +557,8 @@ export interface ImageDto {
   alias: string;
   fingerprint: string | null;
   description: string | null;
+  /** The catalog version of the current fingerprint; null when it did not come from the catalog. */
+  version: string | null;
   loginUser: string;
   minRootSizeBytes: number | null;
   networkManagedExternally: boolean;
@@ -695,6 +697,8 @@ export interface ContainerDto {
   imageId: string;
   imageName?: string;
   imageFingerprint: string;
+  /** The catalog version this container was created from; null when it did not come from the catalog. */
+  imageVersion: string | null;
   rootPoolId: string;
   /** displayName or Incus pool name for the container root disk pool. */
   rootPoolName: string;

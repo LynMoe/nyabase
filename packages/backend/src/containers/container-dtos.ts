@@ -43,6 +43,8 @@ interface PoolRecord {
 interface DtoContext {
   servers: Map<string, ServerRow>;
   images: Map<string, ImageRow>;
+  /** Catalog version by `<image id>:<fingerprint>`: containers keep the version they were created from. */
+  imageVersions: Map<string, string | null>;
   routes: Map<string, RouteRecord>;
   pools: Map<string, PoolRecord>;
   owners: Map<string, string>;
@@ -106,9 +108,13 @@ export class ContainerDtoAssembler {
     const imageIds = [...new Set(rows.map((row) => row.image_id))];
     const ownerIds = [...new Set(rows.map((row) => row.owner_id))];
     const poolIds = [...new Set(rows.map((row) => row.root_pool_id))];
-    const [serverRows, imageRows, routeRows] = await Promise.all([
+    const [serverRows, imageRows, imageVersionRows, routeRows] = await Promise.all([
       this.database.selectFrom('infra.servers').selectAll().where('id', 'in', serverIds).execute(),
       this.database.selectFrom('infra.images').selectAll().where('id', 'in', imageIds).execute(),
+      this.database.selectFrom('infra.image_versions')
+        .select(['image_id', 'fingerprint', 'version'])
+        .where('image_id', 'in', imageIds)
+        .execute(),
       this.repository.routes(ids),
     ]);
     const pendingRows = await this.database.selectFrom('control.intents')
@@ -142,6 +148,7 @@ export class ContainerDtoAssembler {
     return {
       servers: new Map(serverRows.map((server) => [server.id, server])),
       images: new Map(imageRows.map((image) => [image.id, image])),
+      imageVersions: new Map(imageVersionRows.map((row) => [`${row.image_id}:${row.fingerprint}`, row.version])),
       routes: new Map(routeRows.map((route) => [route.containerId, route])),
       pools: new Map(poolRows.map((pool) => [pool.id, pool])),
       owners,
@@ -171,6 +178,7 @@ export class ContainerDtoAssembler {
       imageId: row.image_id,
       imageName: image?.alias,
       imageFingerprint: row.image_fingerprint,
+      imageVersion: context.imageVersions.get(`${row.image_id}:${row.image_fingerprint}`) ?? null,
       rootPoolId: row.root_pool_id,
       rootPoolName: pool ? poolLabel(pool.display_name, pool.incus_name) : row.root_pool_id,
       rootSizeBytes: numberValue(row.root_size_bytes),

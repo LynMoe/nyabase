@@ -8,6 +8,7 @@ import {
   ipv4CidrContains,
   parseCidr,
   formatBytes,
+  imageLabel,
   generateToken,
 } from '@nyabase/common';
 
@@ -67,6 +68,20 @@ describe('parseCidr', () => {
     expect(() => parseCidr('10.0.0.0')).toThrow();
     expect(() => parseCidr('10.0.0.0/33')).toThrow();
     expect(() => parseCidr('garbage/24')).toThrow();
+  });
+});
+
+describe('imageLabel', () => {
+  it('shows the date a catalog version carries', () => {
+    expect(imageLabel('ubuntu/24.04', '20261027_nb01')).toBe('ubuntu/24.04(2026/10/27)');
+    expect(imageLabel('ubuntu/24.04', '20260920_07:42')).toBe('ubuntu/24.04(2026/09/20)');
+  });
+
+  it('shows just the name when there is no date', () => {
+    expect(imageLabel('ubuntu/24.04', null)).toBe('ubuntu/24.04');
+    expect(imageLabel('ubuntu/24.04', 'v6')).toBe('ubuntu/24.04');
+    expect(imageLabel('ubuntu/24.04', '20261399')).toBe('ubuntu/24.04');
+    expect(imageLabel('ubuntu/24.04', '202610271')).toBe('ubuntu/24.04');
   });
 });
 

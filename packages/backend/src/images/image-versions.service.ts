@@ -32,15 +32,20 @@ export async function recordImageVersion(
   imageId: string,
   fingerprint: string,
   description: string | null,
+  version: string | null = null,
 ): Promise<void> {
   await executor
     .insertInto('infra.image_versions')
-    .values({ image_id: imageId, fingerprint: fingerprint.toLowerCase(), description })
+    .values({ image_id: imageId, fingerprint: fingerprint.toLowerCase(), description, version })
     .onConflict((conflict) => conflict.columns(['image_id', 'fingerprint']).doUpdateSet({
       deleted_at: null,
       description: (expression) => expression.fn.coalesce(
         expression.ref('excluded.description'),
         expression.ref('infra.image_versions.description'),
+      ),
+      version: (expression) => expression.fn.coalesce(
+        expression.ref('excluded.version'),
+        expression.ref('infra.image_versions.version'),
       ),
     }))
     .execute();

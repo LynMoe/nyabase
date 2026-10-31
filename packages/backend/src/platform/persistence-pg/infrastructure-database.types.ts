@@ -142,6 +142,8 @@ export interface InfrastructureImageTable {
   alias: string;
   fingerprint: string | null;
   description: string | null;
+  /** The catalog version of the current fingerprint; null when it did not come from the catalog. */
+  version: string | null;
   login_user: string;
   min_root_size_bytes: InfrastructureBigInt | null;
   network_managed_externally: boolean;
@@ -158,6 +160,8 @@ export interface InfrastructureImageVersionTable {
   image_id: string;
   fingerprint: string;
   description: string | null;
+  /** The catalog version (`20261027_nb01`); null when it did not come from the catalog. */
+  version: string | null;
   created_at: InfrastructureGeneratedTimestamp;
   /** Deleted by an admin; servers drop the copy once nothing needs it. */
   deleted_at: InfrastructureTimestamp | null;

@@ -94,7 +94,7 @@ export class ImagesService {
         loginUser: 'root',
         minRootSizeBytes: null,
         networkManagedExternally: true,
-      }, entry.fingerprint);
+      }, entry.fingerprint, entry.version);
     } catch (error) {
       if (!isUniqueViolation(error)) throw error;
       throw new ConflictException({
@@ -123,6 +123,7 @@ export class ImagesService {
         .set({
           fingerprint: entry.fingerprint,
           description: entry.description,
+          version: entry.version,
           revision: Number(image.revision) + 1,
           updated_at: new Date(),
         })
@@ -131,7 +132,7 @@ export class ImagesService {
         .returningAll()
         .executeTakeFirstOrThrow();
       // The previous fingerprint stays a version for the containers created from it.
-      await recordImageVersion(transaction, imageId, entry.fingerprint, entry.description);
+      await recordImageVersion(transaction, imageId, entry.fingerprint, entry.description, entry.version);
       const assignments = await transaction
         .selectFrom('infra.image_server_assignments')
         .selectAll()
@@ -178,7 +179,12 @@ export class ImagesService {
     };
   }
 
-  async create(actorId: string, input: CreateImageRequest, fingerprint: string | null = null): Promise<AdminImageDto> {
+  async create(
+    actorId: string,
+    input: CreateImageRequest,
+    fingerprint: string | null = null,
+    version: string | null = null,
+  ): Promise<AdminImageDto> {
     const row = await this.transactions.run(async (transaction) => {
       await assertActorRole(transaction, actorId, Role.Admin);
       await lockImageCapacity(transaction);
@@ -199,6 +205,7 @@ export class ImagesService {
             alias: input.alias,
             fingerprint,
             description: input.description ?? null,
+            version,
             login_user: input.loginUser,
             min_root_size_bytes: input.minRootSizeBytes ?? null,
             network_managed_externally: input.networkManagedExternally,
@@ -216,7 +223,7 @@ export class ImagesService {
           message: `Image alias ${input.alias} is already in the catalog`,
         });
       }
-      if (fingerprint) await recordImageVersion(transaction, created.id, fingerprint, created.description);
+      if (fingerprint) await recordImageVersion(transaction, created.id, fingerprint, created.description, version);
       await this.audit.append(transaction, actorId, AuditAction.CreateImage, created.id, 'image', {
         alias: created.alias,
       });
@@ -299,6 +306,7 @@ export class ImagesService {
       alias: image.alias,
       fingerprint: image.fingerprint,
       description: image.description,
+      version: image.version,
       loginUser: image.login_user,
       minRootSizeBytes: image.min_root_size_bytes === null
         ? null

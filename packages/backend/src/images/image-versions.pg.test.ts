@@ -111,16 +111,23 @@ describePg('image versions', () => {
       const imageId = await seedImage(database);
       const { alias } = await database.selectFrom('infra.images').select('alias').where('id', '=', imageId)
         .executeTakeFirstOrThrow();
-      await recordImageVersion(database, imageId, OLD, 'v1');
+      await recordImageVersion(database, imageId, OLD, 'v1', '20261001_nb01');
       await seedAssignment(database, { imageId, serverId, fingerprint: OLD });
       await recordCopy(database, serverId, OLD);
       // seedContainer pins OLD.
       const containerId = await seedContainer(database, { ownerId, serverId, poolId, imageId, running: true });
 
-      const catalog = { requireAlias: vi.fn(async () => ({ fingerprint: NEW, description: 'v2' })) };
+      const catalog = { requireAlias: vi.fn(async () => ({ fingerprint: NEW, description: 'v2', version: '20261027_nb01' })) };
       const images = new ImagesService(database, transactions, {} as never, audit as never, intents, catalog as never);
       const repulled = await images.repull(operatorId, imageId);
       expect(repulled.image.fingerprint).toBe(NEW);
+      expect(repulled.image.version).toBe('20261027_nb01');
+      await expect(database.selectFrom('infra.image_versions').select(['fingerprint', 'version'])
+        .where('image_id', '=', imageId).orderBy('version').execute())
+        .resolves.toEqual([
+          { fingerprint: OLD, version: '20261001_nb01' },
+          { fingerprint: NEW, version: '20261027_nb01' },
+        ]);
 
       const { client, images: onServer } = fakeIncus(alias, [OLD, NEW]);
       await expect(reconciler.reconcile(runContext(repulled.intents[0]!, client)))

@@ -118,6 +118,21 @@ export function formatBytes(bytes: number, decimals = 2): string {
   return `${value} ${unit}`;
 }
 
+/** The date a catalog version carries: `20261027_nb01` → `2026/10/27`; null when it has none. */
+export function imageVersionDate(version: string | null | undefined): string | null {
+  const match = /^(\d{4})(\d{2})(\d{2})(?!\d)/.exec(version ?? '');
+  if (!match) return null;
+  const [, year, month, day] = match;
+  if (Number(month) < 1 || Number(month) > 12 || Number(day) < 1 || Number(day) > 31) return null;
+  return `${year}/${month}/${day}`;
+}
+
+/** An image name with its version date: `ubuntu/24.04(2026/10/27)`, or just the name without one. */
+export function imageLabel(alias: string, version: string | null | undefined): string {
+  const date = imageVersionDate(version);
+  return date ? `${alias}(${date})` : alias;
+}
+
 export function generateToken(byteLength = 16): string {
   if (!Number.isInteger(byteLength) || byteLength <= 0) {
     throw new Error('generateToken: byteLength must be a positive integer');
