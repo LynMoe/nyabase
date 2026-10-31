@@ -28,7 +28,7 @@ import {
   shrinkNeverTooltip,
 } from '../../lib/storage-shrink.js';
 import { useOpenSession } from '../../hooks/use-dom-state.js';
-import { approxGibHint, formatGibInput, sharedBackendAvailableBytes } from '../../lib/utils.js';
+import { approxSizeHint, formatGibInput, sharedBackendAvailableBytes } from '../../lib/utils.js';
 import { defaultResourceName } from '../../lib/default-names.js';
 import { useFittedDefaultSize } from '../../hooks/use-fitted-default-size.js';
 import { CreateSizeField, VolumeFormError, VolumeFormFooter } from './volume-form-parts.js';
@@ -151,7 +151,7 @@ function EditSizeField({
         title={shrinkBlocked ? shrinkNeverTooltip() : undefined}
       />
       <p className="text-xs text-muted-foreground">
-        {Number.isFinite(nextSize) && nextSize > 0 ? approxGibHint(nextSize) : '请输入正数 GiB'}
+        {Number.isFinite(nextSize) && nextSize > 0 ? approxSizeHint(nextSize) : '请输入正数 GiB'}
       </p>
       {shrinkBlocked && (
         <p className="text-xs text-muted-foreground" title={shrinkNeverTooltip()}>

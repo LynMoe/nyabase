@@ -1,5 +1,5 @@
 import type { GrantServerProfileDto } from '@nyabase/common';
-import { formatCompactBytes } from './grant-quota.js';
+import { formatBytes } from './utils.js';
 
 export interface ProfileRow {
   label: string;
@@ -13,8 +13,8 @@ function countByModel(models: Array<{ name: string; count: number }>): string {
 
 function poolUsage(pool: GrantServerProfileDto['pools'][number]): string {
   if (pool.totalBytes === null) return '容量未知';
-  const used = pool.usedBytes === null ? '用量未知' : `已用 ${formatCompactBytes(pool.usedBytes)}`;
-  return `${used} / 共 ${formatCompactBytes(pool.totalBytes)}`;
+  const used = pool.usedBytes === null ? '用量未知' : `已用 ${formatBytes(pool.usedBytes)}`;
+  return `${used} / 共 ${formatBytes(pool.totalBytes)}`;
 }
 
 /** The rows of the bundle form's server panel: CPU, memory, pools and GPUs. */
@@ -32,7 +32,7 @@ export function serverProfileRows(profile: GrantServerProfileDto): ProfileRow[] 
   });
   rows.push({
     label: '内存',
-    value: profile.memoryBytes === null ? '未知' : formatCompactBytes(profile.memoryBytes),
+    value: profile.memoryBytes === null ? '未知' : formatBytes(profile.memoryBytes),
   });
   const system = profile.pools.filter((pool) => pool.system);
   const data = profile.pools.filter((pool) => !pool.system);

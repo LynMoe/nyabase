@@ -1,20 +1,14 @@
 import { type ClassValue, clsx } from 'clsx';
 import { twMerge } from 'tailwind-merge';
+import { formatBytes, scaleBytes } from '@nyabase/common';
+
+export { formatBytes };
 
 export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
 
 export const GIB = 1024 ** 3;
-
-export function formatBytes(bytes: number, decimals = 2): string {
-  if (bytes === 0) return '0 B';
-  const k = 1024;
-  // Binary units everywhere, matching the GiB the forms ask for.
-  const sizes = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
-  return `${parseFloat((bytes / Math.pow(k, i)).toFixed(decimals))} ${sizes[i]}`;
-}
 
 /** Human-friendly GiB string for number inputs (strips trailing zeros). */
 export function formatGibInput(bytes: number): string {
@@ -26,16 +20,14 @@ export function gibToBytes(gib: number): number {
   return Math.round(gib * GIB);
 }
 
-/** Soft hint under GiB inputs — avoid raw byte clutter. */
-export function approxGibHint(bytes: number): string {
-  const gib = bytes / GIB;
-  const label = Number.isInteger(gib) ? String(gib) : parseFloat(gib.toFixed(2)).toString();
-  return `约 ${label} GiB`;
+/** Soft hint under GiB inputs: what the typed size amounts to. */
+export function approxSizeHint(bytes: number): string {
+  return `约 ${formatBytes(bytes)}`;
 }
 
-/** Capacity as plain GiB ("12.5 GiB"); `empty` for unknown. */
-export function formatGib(bytes: number | null, empty = '未知'): string {
-  return bytes === null ? empty : approxGibHint(bytes).replace(/^约 /, '');
+/** A capacity that may be unknown; `empty` for unknown. */
+export function formatCapacity(bytes: number | null, empty = '未知'): string {
+  return bytes === null ? empty : formatBytes(bytes);
 }
 
 /**
@@ -49,7 +41,7 @@ export function grantAvailableLabel(
   const unlimited = grantLimitBytes === null;
   if (availableBytes === null && unlimited) return '不限';
   if (availableBytes === null) return '未知';
-  return approxGibHint(availableBytes).replace(/^约 /, '');
+  return formatBytes(availableBytes);
 }
 
 /**
@@ -83,33 +75,18 @@ export function formatPercent(ratio: number): string {
   return `${(ratio * 100).toFixed(1)}%`;
 }
 
+/** Bytes for tight spots (chart axes, meters): one decimal from GiB up, whole below. */
 export function formatBytesCompact(bytes: number): string {
-  const value = Math.abs(bytes);
-  const sign = bytes < 0 ? '-' : '';
-  const scaled = (amount: number, unit: string) => {
-    const text = Number.isInteger(amount) ? String(amount) : amount.toFixed(1);
-    return `${sign}${text} ${unit}`;
-  };
-  if (value >= 1024 ** 4) return scaled(value / 1024 ** 4, 'TiB');
-  if (value >= 1024 ** 3) return scaled(value / 1024 ** 3, 'GiB');
-  if (value >= 1024 ** 2) return `${sign}${(value / 1024 ** 2).toFixed(0)} MiB`;
-  if (value >= 1024) return `${sign}${Math.round(value / 1024)} KiB`;
-  return `${sign}${Math.round(value)} B`;
+  const { value, unit } = scaleBytes(Math.abs(bytes), (scale) => (scale === 'KiB' || scale === 'MiB' ? 0 : 1));
+  return `${bytes < 0 ? '-' : ''}${value} ${unit}`;
 }
 
 /** Bytes per second for performance charts and occupancy lines. */
 export function formatRate(bytesPerSec: number): string {
   if (!Number.isFinite(bytesPerSec)) return '—';
-  const value = Math.abs(bytesPerSec);
-  const sign = bytesPerSec < 0 ? '-' : '';
-  const scaled = (amount: number, unit: string) => {
-    const text = amount < 10 ? amount.toFixed(1) : String(Math.round(amount));
-    return `${sign}${text} ${unit}`;
-  };
-  if (value >= 1024 ** 3) return scaled(value / 1024 ** 3, 'GB/s');
-  if (value >= 1024 ** 2) return scaled(value / 1024 ** 2, 'MB/s');
-  if (value >= 1024) return scaled(value / 1024, 'KB/s');
-  return `${sign}${Math.round(value)} B/s`;
+  const { value, unit } = scaleBytes(Math.abs(bytesPerSec), 1);
+  const text = unit === 'B' || value >= 10 ? String(Math.round(value)) : value.toFixed(1);
+  return `${bytesPerSec < 0 ? '-' : ''}${text} ${unit}/s`;
 }
 
 export function relativeTime(dateStr: string | null): string {

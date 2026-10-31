@@ -79,19 +79,26 @@ describe('formatBytes', () => {
   });
 
   it('formats kilobytes', () => {
-    expect(formatBytes(1024)).toBe('1 KB');
+    expect(formatBytes(1024)).toBe('1 KiB');
   });
 
   it('formats gigabytes', () => {
-    expect(formatBytes(1024 ** 3)).toBe('1 GB');
+    expect(formatBytes(1024 ** 3)).toBe('1 GiB');
+  });
+
+  it('moves up a unit instead of showing four digits, through PiB', () => {
+    expect(formatBytes(1400 * 1024 ** 3)).toBe('1.37 TiB');
+    expect(formatBytes(1024 ** 4 - 1)).toBe('1 TiB');
+    expect(formatBytes(1024 ** 5)).toBe('1 PiB');
+    expect(formatBytes(5000 * 1024 ** 5)).toBe('5000 PiB');
   });
 
   it('respects decimal places', () => {
-    expect(formatBytes(1536, 1)).toBe('1.5 KB');
+    expect(formatBytes(1536, 1)).toBe('1.5 KiB');
   });
 
   it('falls back to the largest unit instead of crashing', () => {
-    expect(formatBytes(1024 ** 6)).toMatch(/PB$/);
+    expect(formatBytes(1024 ** 6)).toMatch(/PiB$/);
   });
 });
 

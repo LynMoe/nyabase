@@ -14,7 +14,7 @@ import {
 import { api } from '../../lib/api.js';
 import { graceServerAccess, liveServerAccess } from '../../lib/effective-access.js';
 import { queryKeys } from '../../lib/query-keys.js';
-import { approxGibHint, formatGibInput, GIB } from '../../lib/utils.js';
+import { approxSizeHint, formatGibInput, GIB } from '../../lib/utils.js';
 import { truncateId } from '../refs/technical-id.js';
 
 /** The user's bundle on each server, with its data disks. */
@@ -138,7 +138,7 @@ export function parseGibQuotaKeeping(value: string, stored: number | null | unde
 export function gibHint(value: string): string | undefined {
   const bytes = parseGibQuota(value);
   if (bytes == null) return undefined;
-  return approxGibHint(bytes);
+  return approxSizeHint(bytes);
 }
 
 export function isoOrNull(value: string): string | null {

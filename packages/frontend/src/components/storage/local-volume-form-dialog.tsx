@@ -31,7 +31,7 @@ import {
   shrinkNeverTooltip,
 } from '../../lib/storage-shrink.js';
 import { useOpenSession } from '../../hooks/use-dom-state.js';
-import { approxGibHint, formatGib, formatGibInput, grantAvailableLabel } from '../../lib/utils.js';
+import { approxSizeHint, formatCapacity, formatGibInput, grantAvailableLabel } from '../../lib/utils.js';
 import { defaultResourceName } from '../../lib/default-names.js';
 import { useFittedDefaultSize } from '../../hooks/use-fitted-default-size.js';
 import { type QuotaLineQuota, quotaFrom, quotaSliderLimits } from '../quota/quota-line.js';
@@ -341,7 +341,7 @@ function EditSizeField({
         title={shrinkBlocked ? shrinkNeverTooltip() : undefined}
       />
       <p className="text-xs text-muted-foreground">
-        {Number.isFinite(nextSize) && nextSize > 0 ? approxGibHint(nextSize) : '请输入正数 GiB'}
+        {Number.isFinite(nextSize) && nextSize > 0 ? approxSizeHint(nextSize) : '请输入正数 GiB'}
       </p>
       <CapacityHint scope={scope} serverId={serverId} poolId={poolId} />
       {shrinkBlocked && (
@@ -362,7 +362,7 @@ function CapacityHint({ scope, serverId, poolId }: { scope: ListScope; serverId:
       <div className="space-y-1">
         {pool ? (
           <p className="text-xs text-muted-foreground">
-            {pool.availableBytes === null ? '物理剩余未知' : `物理剩余 ${formatGib(pool.availableBytes)}`}
+            {pool.availableBytes === null ? '物理剩余未知' : `物理剩余 ${formatCapacity(pool.availableBytes)}`}
             {pool.quotaEffective === true ? ' · 配额生效' : ' · 配额未生效'}
           </p>
         ) : null}
@@ -446,7 +446,7 @@ function PlacementFields({
           已选池：{selectedPool.displayName ?? selectedPool.incusName}
           {selectedPool.totalBytes === null
             ? ' · 容量未知'
-            : ` · ${formatGib(selectedPool.usedBytes ?? 0)} / ${formatGib(selectedPool.totalBytes)}`}
+            : ` · ${formatCapacity(selectedPool.usedBytes ?? 0)} / ${formatCapacity(selectedPool.totalBytes)}`}
           {selectedPool.quotaEffective === true ? ' · 配额生效' : ' · 配额未生效'}
         </p>
       )}

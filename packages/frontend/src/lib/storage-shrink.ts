@@ -6,7 +6,7 @@ import {
   StoragePoolDriver,
 } from '@nyabase/common';
 import { ApiError, apiErrorDetails } from './api-error.js';
-import { formatBytes, formatGib, GIB } from './utils.js';
+import { formatBytes, formatCapacity, GIB } from './utils.js';
 
 export type ShrinkPath = 'grow' | 'unchanged' | 'online' | 'requires_stop' | 'never';
 
@@ -65,7 +65,7 @@ export function observedRootUsedBytes(container: {
 
 export function formatObservedUsage(usedBytes: number | null): string {
   if (usedBytes === null) return '未知';
-  return formatGib(usedBytes);
+  return formatCapacity(usedBytes);
 }
 
 export function validateShrinkFloor(

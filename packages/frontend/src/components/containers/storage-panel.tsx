@@ -41,7 +41,7 @@ import { useActionMutation } from '../../hooks/use-action-mutation.js';
 import { ConfirmDialog } from '../layout/confirm-dialog.js';
 import { QueryView } from '../layout/query-view.js';
 import { RootShrinkOrchestrationDialog } from '../storage/root-shrink-orchestration-dialog.js';
-import { formatGib } from '../../lib/utils.js';
+import { formatCapacity } from '../../lib/utils.js';
 import { observedRootUsedBytes } from '../../lib/storage-shrink.js';
 import { RootSizeDialog } from './spec-panel.js';
 
@@ -482,7 +482,7 @@ function mountIdentifier(value: string) {
 }
 
 function gibLabel(bytes: number): string {
-  return formatGib(bytes);
+  return formatCapacity(bytes);
 }
 
 function UsageMeter({ used, total }: { used: number | null; total: number }) {

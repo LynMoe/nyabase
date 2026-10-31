@@ -51,18 +51,18 @@ describe('formatGrantQuotaLine', () => {
 });
 
 describe('formatConsumedQuotaParts', () => {
-  it('prints zeros as 0 核 / 0 GiB, never 不限', () => {
+  it('prints zeros as 0 核 / 0 B, never 不限', () => {
     expect(formatConsumedQuotaParts({ cpuCores: 0, memBytes: 0, rootDiskBytes: 0 }))
-      .toEqual(['0 核', '0 GiB', '0 GiB']);
+      .toEqual(['0 核', '0 B', '0 B']);
     expect(formatConsumedQuotaParts({ cpuCores: 0, memBytes: 0, rootDiskBytes: 0 }).join(' / '))
-      .toBe('0 核 / 0 GiB / 0 GiB');
+      .toBe('0 核 / 0 B / 0 B');
     expect(formatConsumedQuotaParts({ cpuCores: 0, memBytes: 0, rootDiskBytes: 0 }).join(' / '))
       .not.toMatch(/不限/);
   });
 
   it('omits null consumed dimensions', () => {
     expect(formatConsumedQuotaParts({ cpuCores: null, memBytes: 0, rootDiskBytes: null }))
-      .toEqual(['0 GiB']);
+      .toEqual(['0 B']);
   });
 });
 
@@ -86,7 +86,7 @@ describe('formatRemainingBytes', () => {
     expect(formatRemainingBytes(null, 0)).toBe('不限');
     expect(formatRemainingBytes(100 * GIB, 0)).toBe('100 GiB');
     expect(formatRemainingBytes(100 * GIB, 20 * GIB)).toBe('80 GiB');
-    expect(formatRemainingBytes(100 * GIB, 200 * GIB)).toBe('0 GiB');
+    expect(formatRemainingBytes(100 * GIB, 200 * GIB)).toBe('0 B');
   });
 });
 

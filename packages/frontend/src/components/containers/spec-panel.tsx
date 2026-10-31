@@ -14,7 +14,7 @@ import { Button } from '../ui/button.js';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '../ui/dialog.js';
 import { Input } from '../ui/input.js';
 import { FormField } from '../layout/form-field.js';
-import { approxGibHint, formatGibInput, gibToBytes } from '../../lib/utils.js';
+import { approxSizeHint, formatGibInput, gibToBytes } from '../../lib/utils.js';
 import { allocatedCores } from '../../lib/container-usage.js';
 import { cpuGrantLabel } from '../../lib/cpu-set.js';
 import {
@@ -91,7 +91,7 @@ export function LimitsDialog({
             label="内存 (GiB)"
             value={memGib}
             onChange={setMemGib}
-            hint={Number.isFinite(memBytes) ? approxGibHint(memBytes) : undefined}
+            hint={Number.isFinite(memBytes) ? approxSizeHint(memBytes) : undefined}
           />
           <Button
             onClick={() => {
@@ -165,7 +165,7 @@ export function RootSizeDialog({
           label="目标容量 (GiB)"
           value={rootSizeGib}
           onChange={setRootSizeGib}
-          hint={Number.isFinite(rootSizeBytes) ? approxGibHint(rootSizeBytes) : undefined}
+          hint={Number.isFinite(rootSizeBytes) ? approxSizeHint(rootSizeBytes) : undefined}
         />
         {shrinkBlocked && <p className="text-xs text-muted-foreground">{shrinkNeverTooltip()}</p>}
         <DialogFooter>

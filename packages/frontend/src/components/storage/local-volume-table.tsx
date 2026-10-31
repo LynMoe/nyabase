@@ -7,7 +7,7 @@ import { shrinkLabel } from '../../lib/storage-shrink.js';
 import { StatusBadge } from '../layout/status-badge.js';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../ui/table.js';
 import { ResourceRef } from '../refs/resource-ref.js';
-import { formatGib, relativeTime } from '../../lib/utils.js';
+import { formatCapacity, relativeTime } from '../../lib/utils.js';
 import { volumeInProgress } from '../../lib/in-progress.js';
 import { failureCodeLabel, volumeAttentionHint, volumeLifecycleLabel } from '../../lib/status-labels.js';
 import {
@@ -149,8 +149,8 @@ function VolumeRow({
       ) : null}
       {showServerColumn ? <TableCell>{serverName}</TableCell> : null}
       {showPoolColumn ? <TableCell>{volume.poolName}</TableCell> : null}
-      <TableCell>{formatGib(volume.sizeBytes)}</TableCell>
-      <TableCell>{volume.usedBytes === null ? '未知' : formatGib(volume.usedBytes)}</TableCell>
+      <TableCell>{formatCapacity(volume.sizeBytes)}</TableCell>
+      <TableCell>{volume.usedBytes === null ? '未知' : formatCapacity(volume.usedBytes)}</TableCell>
       <TableCell className="max-w-[16rem] whitespace-normal">
         <VolumeAttachmentsCell
           volume={volume}
@@ -294,8 +294,8 @@ export function LocalVolumeDetailDialog({
             <Field label="所有者" value={<ResourceRef kind="user" id={volume.ownerId} />} />
           ) : null}
           <Field label="存储池" value={volume.poolName} />
-          <Field label="容量" value={formatGib(volume.sizeBytes)} />
-          <Field label="已用" value={volume.usedBytes === null ? '未知' : formatGib(volume.usedBytes)} />
+          <Field label="容量" value={formatCapacity(volume.sizeBytes)} />
+          <Field label="已用" value={volume.usedBytes === null ? '未知' : formatCapacity(volume.usedBytes)} />
           <Field label="缩容能力" value={shrinkLabel(volume)} />
           <Field label="最近更新" value={relativeTime(volume.updatedAt)} />
           <div className="sm:col-span-2">

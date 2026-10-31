@@ -1,3 +1,5 @@
+import { GIB, formatBytes } from './utils.js';
+
 /**
  * Non-linear "nice" size scales for the size sliders. A slider moves over
  * stop indices, so every stop is equally far apart on the track while the
@@ -19,6 +21,7 @@ export interface SizeScale {
 }
 
 const TIB = 1024;
+const PIB = 1024 * TIB;
 
 const MEMORY_LADDER = [0.5, 1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64, 96, 128, 192, 256, 384, 512, 768, 1024, 1536, 2048, 3072, 4096];
 const MEMORY_MAJORS = [0.5, 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096];
@@ -154,15 +157,14 @@ function trimNumber(value: number, decimals: number): string {
 /** Compact tick label: 0.5 → "512M", 8 → "8G", 1536 → "1.5T". */
 export function formatTickLabel(gib: number): string {
   if (gib < 1) return `${Math.round(gib * 1024)}M`;
+  if (gib >= PIB) return `${trimNumber(gib / PIB, 1)}P`;
   if (gib >= TIB) return `${trimNumber(gib / TIB, 1)}T`;
   return `${trimNumber(gib, 1)}G`;
 }
 
 /** The selected size for display: "512 MiB", "8 GiB", "1.5 TiB". */
 export function formatSizeValue(gib: number): string {
-  if (gib < 1) return `${Math.round(gib * 1024)} MiB`;
-  if (gib >= TIB) return `${trimNumber(gib / TIB, 2)} TiB`;
-  return `${trimNumber(gib, 2)} GiB`;
+  return formatBytes(gib * GIB);
 }
 
 /** The text a slider writes into the GiB input. */

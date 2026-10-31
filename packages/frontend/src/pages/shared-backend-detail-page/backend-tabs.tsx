@@ -35,7 +35,7 @@ import {
   type SharedBackendFsidConflict,
 } from '../../lib/storage-shrink.js';
 import { useHasRole } from '../../lib/use-role.js';
-import { formatGib, formatPercent, relativeTime, sharedBackendAvailableBytes } from '../../lib/utils.js';
+import { formatCapacity, formatPercent, relativeTime, sharedBackendAvailableBytes } from '../../lib/utils.js';
 import {
   Dialog,
   DialogContent,
@@ -87,9 +87,9 @@ export function BackendOverviewTab({
           <CardTitle className="text-base">容量</CardTitle>
         </CardHeader>
         <CardContent className="grid gap-3 text-sm sm:grid-cols-2 lg:grid-cols-3">
-          <Field label="容量" value={formatGib(backend.totalBytes)} />
-          <Field label="已用" value={formatGib(backend.usedBytes)} />
-          <Field label="可用" value={formatGib(available)} />
+          <Field label="容量" value={formatCapacity(backend.totalBytes)} />
+          <Field label="已用" value={formatCapacity(backend.usedBytes)} />
+          <Field label="可用" value={formatCapacity(available)} />
           <Field label="在线执行端" value={backend.hasOnlineExecutor ? '有' : '无'} />
           <Field label="服务器" value={`${backend.serverIds.length} 台`} />
         </CardContent>
@@ -191,8 +191,8 @@ export function BackendExecutorsTab({
                   <TableCell>{executor.serverName}</TableCell>
                   <TableCell className="font-mono">{executor.incusName}</TableCell>
                   <TableCell>{executor.registered ? '已登记' : '未登记'}</TableCell>
-                  <TableCell>{formatGib(executor.totalBytes)}</TableCell>
-                  <TableCell>{formatGib(executor.usedBytes)}</TableCell>
+                  <TableCell>{formatCapacity(executor.totalBytes)}</TableCell>
+                  <TableCell>{formatCapacity(executor.usedBytes)}</TableCell>
                   {canManage ? (
                     <TableCell className="text-right">
                       <Button

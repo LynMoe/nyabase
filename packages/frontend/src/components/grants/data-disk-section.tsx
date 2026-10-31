@@ -3,7 +3,8 @@ import { Plus } from 'lucide-react';
 import type { LiveServerAccessDto, ServerGrantDto, StoragePoolGrantDto } from '@nyabase/common';
 import { useActionMutation } from '../../hooks/use-action-mutation.js';
 import { api } from '../../lib/api.js';
-import { formatCompactBytes, formatGrantBytes } from '../../lib/grant-quota.js';
+import { formatGrantBytes } from '../../lib/grant-quota.js';
+import { formatBytes } from '../../lib/utils.js';
 import { useServerPools } from '../../lib/server-queries.js';
 import { SelectField } from '../layout/form-field.js';
 import { ResourceRef } from '../refs/resource-ref.js';
@@ -87,7 +88,7 @@ export function DataDiskSection({
                       <ResourceRef kind="pool" id={row.poolId} name={nameOf(row.poolId)} />
                     </TableCell>
                     <TableCell>{formatGrantBytes(row.limitBytes)}</TableCell>
-                    <TableCell>{used === undefined ? '—' : formatCompactBytes(used)}</TableCell>
+                    <TableCell>{used === undefined ? '—' : formatBytes(used)}</TableCell>
                     <TableCell className="text-right">
                       <div className="flex justify-end gap-2">
                         <Button size="sm" variant="outline" onClick={() => setDialog(row)}>编辑</Button>

@@ -13,7 +13,7 @@ import {
   quotaToText,
   toggleOverride,
 } from '../../lib/grant-bundle-form.js';
-import { approxGibHint } from '../../lib/utils.js';
+import { approxSizeHint } from '../../lib/utils.js';
 import { FormField } from '../layout/form-field.js';
 import { Badge } from '../ui/badge.js';
 import { Input } from '../ui/input.js';
@@ -101,7 +101,7 @@ export function NumberField({
 function quotaHint(field: GrantBundleField, text: string): string | undefined {
   if (field !== 'memBytes' && field !== 'rootDiskBytes') return undefined;
   const bytes = parseQuotaText(field, text);
-  return typeof bytes === 'number' ? approxGibHint(bytes) : undefined;
+  return typeof bytes === 'number' ? approxSizeHint(bytes) : undefined;
 }
 
 const GPU_DISABLED_HINT = '该服务器未启用 GPU';

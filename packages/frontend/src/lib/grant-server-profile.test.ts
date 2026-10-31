@@ -26,8 +26,8 @@ describe('serverProfileRows', () => {
   it('summarises CPU, memory, pools and GPUs', () => {
     expect(serverProfileRows(profile)).toEqual([
       { label: 'CPU', value: '128 线程 · 可分配 126 · 保留 2', detail: '2 × Intel Xeon 8358' },
-      { label: '内存', value: '1024 GiB' },
-      { label: '系统盘池', value: '已用 120 GiB / 共 3000 GiB', detail: 'nyabase-zfs（zfs）' },
+      { label: '内存', value: '1 TiB' },
+      { label: '系统盘池', value: '已用 120 GiB / 共 2.93 TiB', detail: 'nyabase-zfs（zfs）' },
       { label: '数据盘池', value: '容量未知', detail: 'data（dir）' },
       { label: 'GPU', value: '2 张', detail: '2 × NVIDIA A800 80GB' },
     ]);

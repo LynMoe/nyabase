@@ -1,6 +1,5 @@
 import type * as React from 'react';
-import { GIB, cn } from '../../lib/utils.js';
-import { formatCompactBytes } from '../../lib/grant-quota.js';
+import { GIB, cn, formatBytes } from '../../lib/utils.js';
 import { type SizeScale, type SizeScaleKind, sizeScale } from '../../lib/size-ladder.js';
 
 /** What a create form knows about one byte quota on the chosen target. */
@@ -50,7 +49,7 @@ export function quotaSliderLimits(
 
 /** Field error for a selection above what is left: "超出剩余额度 12 GiB". */
 export function overQuotaMessage(quota: QuotaLineQuota): string {
-  return quota.kind === 'limited' ? `超出剩余额度 ${formatCompactBytes(quota.remainingBytes)}` : '超出剩余额度';
+  return quota.kind === 'limited' ? `超出剩余额度 ${formatBytes(quota.remainingBytes)}` : '超出剩余额度';
 }
 
 function quotaText(quota: QuotaLineQuota): string {
@@ -62,7 +61,7 @@ function quotaText(quota: QuotaLineQuota): string {
     case 'unlimited':
       return '额度 不限';
     case 'limited':
-      return `剩余 ${formatCompactBytes(quota.remainingBytes)} · 额度 ${formatCompactBytes(quota.limitBytes)}`;
+      return `剩余 ${formatBytes(quota.remainingBytes)} · 额度 ${formatBytes(quota.limitBytes)}`;
   }
 }
 

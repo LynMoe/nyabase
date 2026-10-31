@@ -3,7 +3,7 @@ import type { GrantBundlePreviewDto, GrantBundlePreviewEntryDto } from '@nyabase
 import { Alert, AlertDescription, AlertTitle } from '../../components/ui/alert.js';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../../components/ui/table.js';
 import { GRANT_FIELD_LABELS, formatQuotaValue } from '../../lib/grant-bundle-form.js';
-import { formatCompactBytes } from '../../lib/grant-quota.js';
+import { formatBytes } from '../../lib/utils.js';
 
 /** What the proposed values ask for beyond what the server has. */
 export function capacityWarnings(preview: GrantBundlePreviewDto): string[] {
@@ -22,10 +22,10 @@ export function capacityWarnings(preview: GrantBundlePreviewDto): string[] {
 export function entryWarnings(entry: GrantBundlePreviewEntryDto): string[] {
   const warnings: string[] = [];
   if (entry.memBytesInUse !== null) {
-    warnings.push(`运行中的容器共占用内存 ${formatCompactBytes(entry.memBytesInUse)}，超出新额度：降到额度内之前不能再启动容器或调大内存。`);
+    warnings.push(`运行中的容器共占用内存 ${formatBytes(entry.memBytesInUse)}，超出新额度：降到额度内之前不能再启动容器或调大内存。`);
   }
   if (entry.rootDiskBytesInUse !== null) {
-    warnings.push(`系统盘共 ${formatCompactBytes(entry.rootDiskBytesInUse)}，超出新额度：降到额度内之前不能新建容器或扩容系统盘。`);
+    warnings.push(`系统盘共 ${formatBytes(entry.rootDiskBytesInUse)}，超出新额度：降到额度内之前不能新建容器或扩容系统盘。`);
   }
   if (entry.gpusInUseRemoved.length > 0) {
     warnings.push(`容器占用的 GPU ${entry.gpusInUseRemoved.join(', ')} 不再在授权内，这些容器下次启动会失败。`);

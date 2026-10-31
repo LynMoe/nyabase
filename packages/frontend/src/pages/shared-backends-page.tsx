@@ -28,7 +28,7 @@ import { TechnicalId } from '../components/refs/technical-id.js';
 import { FsidConflictAlert } from '../components/storage/fsid-conflict-alert.js';
 import { SharedBackendPolicyFields } from '../components/storage/shared-backend-policy-fields.js';
 import { maxVolumesPerUserLabel, parseMaxVolumesPerUser } from '../lib/shared-backend-form.js';
-import { formatGib, formatPercent, sharedBackendAvailableBytes } from '../lib/utils.js';
+import { formatCapacity, formatPercent, sharedBackendAvailableBytes } from '../lib/utils.js';
 import { toast } from '../hooks/use-toast.js';
 import { queryKeys } from '../lib/query-keys.js';
 import { parseSharedBackendFsidConflict, type SharedBackendFsidConflict } from '../lib/storage-shrink.js';
@@ -134,9 +134,9 @@ function BackendRow({ backend }: { backend: SharedBackendDto }) {
         {backend.note ? <p className="mt-0.5 max-w-[22rem] truncate text-xs text-muted-foreground" title={backend.note}>{backend.note}</p> : null}
         <TechnicalId label="Identity key" value={backend.identityKey} kind="opaque" />
       </TableCell>
-      <TableCell>{formatGib(backend.totalBytes)}</TableCell>
-      <TableCell>{formatGib(backend.usedBytes)}</TableCell>
-      <TableCell>{formatGib(available)}</TableCell>
+      <TableCell>{formatCapacity(backend.totalBytes)}</TableCell>
+      <TableCell>{formatCapacity(backend.usedBytes)}</TableCell>
+      <TableCell>{formatCapacity(available)}</TableCell>
       <TableCell>{formatPercent(backend.overcommitRatio)}</TableCell>
       <TableCell>{maxVolumesPerUserLabel(backend.maxVolumesPerUser)}</TableCell>
       <TableCell>{backend.hasOnlineExecutor ? '有' : '无'}</TableCell>

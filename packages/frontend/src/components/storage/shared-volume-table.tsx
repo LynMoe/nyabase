@@ -6,7 +6,7 @@ import { Button } from '../ui/button.js';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../ui/table.js';
 import { ResourceRef } from '../refs/resource-ref.js';
 import { formatObservedUsage, shrinkLabel } from '../../lib/storage-shrink.js';
-import { formatGib, relativeTime } from '../../lib/utils.js';
+import { formatCapacity, relativeTime } from '../../lib/utils.js';
 import { volumeInProgress } from '../../lib/in-progress.js';
 import { failureCodeLabel, volumeAttentionHint, volumeLifecycleLabel } from '../../lib/status-labels.js';
 import {
@@ -130,7 +130,7 @@ function SharedVolumeRow({
         </TableCell>
       ) : null}
       {showBackendColumn ? <TableCell>{volume.sharedBackendName}</TableCell> : null}
-      <TableCell>{formatGib(volume.sizeBytes)}</TableCell>
+      <TableCell>{formatCapacity(volume.sizeBytes)}</TableCell>
       <TableCell>{formatObservedUsage(volume.usedBytes)}</TableCell>
       <TableCell className="max-w-[16rem] whitespace-normal">
         {volume.attachments.length === 0 ? (
@@ -214,7 +214,7 @@ export function SharedVolumeDetailDialog({
             <Field label="所有者" value={<ResourceRef kind="user" id={volume.ownerId} />} />
           ) : null}
           <Field label="共享后端" value={volume.sharedBackendName} />
-          <Field label="容量" value={formatGib(volume.sizeBytes)} />
+          <Field label="容量" value={formatCapacity(volume.sizeBytes)} />
           <Field label="已用" value={formatObservedUsage(volume.usedBytes)} />
           <Field label="缩容能力" value={shrinkLabel(volume)} />
           <Field label="目录" value={volume.dirEnsured ? '已在机器上落地' : '尚未挂载过'} />

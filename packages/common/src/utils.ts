@@ -90,12 +90,32 @@ export function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+const BYTE_UNITS = ['B', 'KiB', 'MiB', 'GiB', 'TiB', 'PiB'] as const;
+
+/**
+ * `bytes` in the largest unit that keeps it at least 1, after rounding: just
+ * under 1 TiB that rounds up reads 1 TiB, never 1024 GiB. Whole bytes have no decimals.
+ */
+export function scaleBytes(
+  bytes: number,
+  decimals: number | ((unit: (typeof BYTE_UNITS)[number]) => number),
+): { value: number; unit: (typeof BYTE_UNITS)[number] } {
+  const rounded = (index: number) => {
+    const unit = BYTE_UNITS[index]!;
+    const places = index === 0 ? 0 : typeof decimals === 'number' ? decimals : decimals(unit);
+    return parseFloat((bytes / 1024 ** index).toFixed(places));
+  };
+  let index = 0;
+  while (index < BYTE_UNITS.length - 1 && bytes >= 1024 ** (index + 1)) index += 1;
+  if (rounded(index) >= 1024 && index < BYTE_UNITS.length - 1) index += 1;
+  return { value: rounded(index), unit: BYTE_UNITS[index]! };
+}
+
+/** The one way bytes are shown: "512 MiB", "16 GiB", "1.37 TiB", "2 PiB". */
 export function formatBytes(bytes: number, decimals = 2): string {
   if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
-  const units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'] as const;
-  const base = 1024;
-  const index = Math.min(units.length - 1, Math.floor(Math.log(bytes) / Math.log(base)));
-  return `${parseFloat((bytes / Math.pow(base, index)).toFixed(decimals))} ${units[index]}`;
+  const { value, unit } = scaleBytes(bytes, decimals);
+  return `${value} ${unit}`;
 }
 
 export function generateToken(byteLength = 16): string {
