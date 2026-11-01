@@ -15,6 +15,7 @@ import {
   gpuReading,
   liveSample,
   memoryReading,
+  rootDiskReading,
 } from '../../lib/container-usage.js';
 import { containerStatusLabel, lifecyclePhaseLabel } from '../../lib/status-labels.js';
 import { ResourceRef } from '../refs/resource-ref.js';
@@ -65,9 +66,9 @@ export function ContainerTable({
       </ul>
     );
   }
-  const columnCount = 6 + (admin ? 1 : 0) + (showServerColumn ? 1 : 0) + (showGpuColumn ? 1 : 0);
+  const columnCount = 7 + (admin ? 1 : 0) + (showServerColumn ? 1 : 0) + (showGpuColumn ? 1 : 0);
   return (
-    <Table className={showGpuColumn ? 'min-w-[880px]' : 'min-w-[760px]'}>
+    <Table className={showGpuColumn ? 'min-w-[980px]' : 'min-w-[860px]'}>
       <TableHeader>
         <TableRow>
           <TableHead>名称</TableHead>
@@ -76,6 +77,7 @@ export function ContainerTable({
           <TableHead>状态</TableHead>
           <TableHead title="已用 / 可用核数">CPU</TableHead>
           <TableHead title="已用 / 规格">内存</TableHead>
+          <TableHead title="已用 / 规格">系统盘</TableHead>
           {showGpuColumn ? <TableHead title="显卡数 · 显存已用">GPU</TableHead> : null}
           <TableHead className="text-right">操作</TableHead>
         </TableRow>
@@ -144,6 +146,9 @@ function ContainerTableRow({
       </TableCell>
       <TableCell>
         <UsageMeter className="w-24" reading={memoryReading(container, sample)} stale={stale} />
+      </TableCell>
+      <TableCell>
+        <UsageMeter className="w-24" reading={rootDiskReading(container, sample)} stale={stale} />
       </TableCell>
       {showGpuColumn ? (
         <TableCell>
@@ -235,6 +240,7 @@ function ContainerCard({ container, admin, usage, onAction }: RowProps) {
       <div className="grid grid-cols-2 gap-x-4 gap-y-1">
         <UsageMeter layout="inline" label="CPU" reading={cpuReading(container, sample)} stale={stale} />
         <UsageMeter layout="inline" label="内存" reading={memoryReading(container, sample)} stale={stale} />
+        <UsageMeter className="col-span-2" layout="inline" label="系统盘" reading={rootDiskReading(container, sample)} stale={stale} />
         {gpu ? <UsageMeter layout="inline" label="GPU" reading={gpu} stale={stale} /> : null}
       </div>
     </li>

@@ -50,7 +50,7 @@ export function UsageMeter({
   if (layout === 'inline') {
     return (
       <div className={cn('flex min-w-0 items-center gap-2 text-xs', className)} title={title} data-testid={testId}>
-        {label != null ? <span className="w-8 shrink-0 text-muted-foreground">{label}</span> : null}
+        {label != null ? <span className="w-10 shrink-0 text-muted-foreground">{label}</span> : null}
         <span className="shrink-0">{value}</span>
         {bar ? <span className="min-w-6 max-w-24 flex-1">{bar}</span> : null}
       </div>
