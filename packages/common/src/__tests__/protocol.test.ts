@@ -618,6 +618,7 @@ describe('canonical DTO shapes', () => {
       },
       volumes: [],
       sharedVolumes: [],
+      access: { phase: 'live', expiresAt: null },
       needsAttention: false,
       failureCode: null,
       failureReason: null,

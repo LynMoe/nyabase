@@ -104,3 +104,22 @@ export function gpuReading(container: Pick<ContainerDto, 'gpu'>, usage: Containe
   const pair = formatBytesPair(used, limit);
   return { used: pair.used, total: pair.total, ratio, lead, title: `显存 ${pair.used} / ${pair.total}` };
 }
+
+function shortUnit(text: string): string;
+function shortUnit(text: string | null): string | null;
+function shortUnit(text: string | null): string | null {
+  return text && text.replace(/ ([KMGTPE])iB$/, '$1').replace(/ (B|核|卡)$/, '$1');
+}
+
+/** A reading for table cells: "1.2 / 4 GiB" becomes "1.2/4G", with the full form kept as the hover title. */
+export function compactReading(reading: MeterReading | null): MeterReading | null {
+  if (!reading) return null;
+  const pair = reading.total ? `${reading.used ?? '—'} / ${reading.total}` : reading.used;
+  return {
+    ...reading,
+    used: shortUnit(reading.used),
+    total: shortUnit(reading.total),
+    lead: reading.lead && shortUnit(reading.lead),
+    title: reading.title ?? ([reading.lead, pair].filter(Boolean).join(' · ') || undefined),
+  };
+}

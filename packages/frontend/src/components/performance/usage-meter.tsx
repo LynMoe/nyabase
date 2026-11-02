@@ -27,6 +27,7 @@ export function UsageMeter({
   label,
   detail,
   layout = 'stacked',
+  dense = false,
   stale = false,
   className,
   testId,
@@ -36,12 +37,14 @@ export function UsageMeter({
   /** Muted line under the bar (stacked layout only). */
   detail?: ReactNode;
   layout?: 'stacked' | 'inline';
+  /** No spaces around the separators, for table cells. */
+  dense?: boolean;
   /** The sample is older than the freshness window: dim the bar and say so. */
   stale?: boolean;
   className?: string;
   testId?: string;
 }) {
-  const value = <MeterValue reading={reading} />;
+  const value = <MeterValue reading={reading} dense={dense} />;
   const bar = reading && reading.used !== null && reading.ratio !== null
     ? <MeterBar ratio={reading.ratio} stale={stale} label={typeof label === 'string' ? label : undefined} />
     : null;
@@ -72,15 +75,15 @@ export function UsageMeter({
   );
 }
 
-function MeterValue({ reading }: { reading: MeterReading | null }) {
+function MeterValue({ reading, dense }: { reading: MeterReading | null; dense: boolean }) {
   if (!reading) return <span className="text-muted-foreground">—</span>;
   return (
     <span className="whitespace-nowrap tabular-nums">
-      {reading.lead ? <span>{reading.lead}{reading.used !== null || reading.total ? ' · ' : ''}</span> : null}
+      {reading.lead ? <span>{reading.lead}{reading.used !== null || reading.total ? (dense ? ' ' : ' · ') : ''}</span> : null}
       {reading.used === null && reading.lead && !reading.total ? null : (
         <span className={reading.used === null ? 'text-muted-foreground' : undefined}>{reading.used ?? '—'}</span>
       )}
-      {reading.total ? <span className="text-muted-foreground"> / {reading.total}</span> : null}
+      {reading.total ? <span className="text-muted-foreground">{dense ? '/' : ' / '}{reading.total}</span> : null}
     </span>
   );
 }

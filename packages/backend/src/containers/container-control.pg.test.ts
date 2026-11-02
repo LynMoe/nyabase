@@ -3,6 +3,7 @@ import type { Kysely } from 'kysely';
 import {
   ContainerPowerIntent,
   FailureCode,
+  GRANT_EXPIRY_GRACE_DAYS,
   MIN_CONTAINER_ROOT_SIZE_BYTES,
   ServerStatus,
   UserStatus,
@@ -681,6 +682,39 @@ describePg('PostgreSQL container admission needs current coverage', () => {
       await expect(service.create(owner, request(fixture, 'covered'))).resolves.toMatchObject({
         resourceType: 'container',
       });
+    });
+  });
+
+  it('reports the owner\'s coverage of the server on the container, for owner and admin alike', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const fixture = await seedFixture(database);
+      const service = coveredService(database);
+      const owner = testActor(fixture.userId);
+      const userAdmin = testActor(cryptoId(), Role.UserAdmin);
+      const expiresAt = days(3);
+      await grantServer(database, { user: fixture.userId }, fixture.serverId, { expiresAt });
+      const { resourceId } = await service.create(owner, request(fixture, 'expiry'));
+
+      const live = { phase: 'live', expiresAt: expiresAt.toISOString() };
+      await expect(service.get(owner, resourceId)).resolves.toMatchObject({ access: live });
+      await expect(service.list(userAdmin, { scope: 'all' })).resolves.toMatchObject([{ access: live }]);
+
+      await database.updateTable('iam.server_grants').set({ expires_at: null }).execute();
+      await expect(service.get(owner, resourceId)).resolves.toMatchObject({ access: { phase: 'live', expiresAt: null } });
+
+      // A lapse row the processor has not cleared yet does not hide a current grant.
+      const lapsedAt = days(-1);
+      await database.insertInto('control.access_lapses').values({
+        user_id: fixture.userId, resource_kind: 'server', resource_id: fixture.serverId, lapsed_at: lapsedAt,
+      }).execute();
+      await expect(service.get(owner, resourceId)).resolves.toMatchObject({ access: { phase: 'live', expiresAt: null } });
+
+      await database.deleteFrom('iam.server_grants').execute();
+      const purgeAt = new Date(lapsedAt.getTime() + GRANT_EXPIRY_GRACE_DAYS * 86_400_000).toISOString();
+      await expect(service.get(owner, resourceId)).resolves.toMatchObject({ access: { phase: 'grace', purgeAt } });
+
+      await database.deleteFrom('control.access_lapses').execute();
+      await expect(service.get(owner, resourceId)).resolves.toMatchObject({ access: { phase: 'none' } });
     });
   });
 

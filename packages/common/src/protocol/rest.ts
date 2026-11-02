@@ -692,6 +692,15 @@ export interface ContainerSshDto {
   lastError: string | null;
 }
 
+/**
+ * The owner's coverage of the container's server. `none`: no grant and no grace
+ * running, e.g. an administrator's own container.
+ */
+export type ContainerAccessDto =
+  | { phase: 'live'; expiresAt: string | null }
+  | { phase: 'grace'; purgeAt: string }
+  | { phase: 'none' };
+
 export interface ContainerDto {
   id: string;
   serverId: string;
@@ -724,6 +733,7 @@ export interface ContainerDto {
   ssh: ContainerSshDto;
   volumes: VolumeAttachmentDto[];
   sharedVolumes: VolumeAttachmentDto[];
+  access: ContainerAccessDto;
   needsAttention: boolean;
   failureCode: string | null;
   failureReason: string | null;

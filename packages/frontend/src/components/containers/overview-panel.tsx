@@ -6,6 +6,7 @@ import { ChartLine, Pencil } from 'lucide-react';
 import { useHasRole } from '../../lib/use-role.js';
 import { LimitsDialog } from './spec-panel.js';
 import { SshLoginCard } from './ssh-login.js';
+import { containerExpiryText } from './container-expiry.js';
 import { Button } from '../ui/button.js';
 import { SectionCard } from '../layout/section-card.js';
 import { UsageMeter } from '../performance/usage-meter.js';
@@ -132,6 +133,10 @@ function SpecFootnote({ container, sample }: { container: ContainerDto; sample: 
             />
           ) : (container.imageName ?? '同步中')}
         </dd>
+      </div>
+      <div className="flex items-baseline gap-2" data-testid="spec-expiry">
+        <dt className="text-muted-foreground">授权到期</dt>
+        <dd className="tabular-nums">{containerExpiryText(container.access)}</dd>
       </div>
     </dl>
   );

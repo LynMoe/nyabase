@@ -4,12 +4,14 @@ import type { ContainerDto } from '@nyabase/common';
 import { useState } from 'react';
 import { ContainerActionBar, type ContainerBarAction } from './container-action-bar.js';
 import { ConsoleShortcut } from './console-shortcut.js';
+import { ContainerRemaining } from './container-expiry.js';
 import { StatusBadge } from '../layout/status-badge.js';
 import { UsageMeter } from '../performance/usage-meter.js';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../ui/table.js';
 import { useResourceMutationPending } from '../../lib/resource-mutation-gate.js';
 import { containerLifecyclePending, containerStatusPending } from '../../lib/in-progress.js';
 import {
+  compactReading,
   cpuReading,
   gpuCardCount,
   gpuReading,
@@ -19,6 +21,7 @@ import {
 } from '../../lib/container-usage.js';
 import { containerStatusLabel, lifecyclePhaseLabel } from '../../lib/status-labels.js';
 import { ResourceRef } from '../refs/resource-ref.js';
+import { cn } from '../../lib/utils.js';
 import { useIsNarrow } from '../../hooks/use-dom-state.js';
 import { useContainerLiveUsage, type ContainerLiveUsageIndex } from '../../hooks/use-container-live-usage.js';
 import { SectionCard } from '../layout/section-card.js';
@@ -66,9 +69,9 @@ export function ContainerTable({
       </ul>
     );
   }
-  const columnCount = 7 + (admin ? 1 : 0) + (showServerColumn ? 1 : 0) + (showGpuColumn ? 1 : 0);
+  const columnCount = 8 + (admin ? 1 : 0) + (showServerColumn ? 1 : 0) + (showGpuColumn ? 1 : 0);
   return (
-    <Table className={showGpuColumn ? 'min-w-[980px]' : 'min-w-[860px]'}>
+    <Table className={cn(showGpuColumn ? 'min-w-[900px]' : 'min-w-[800px]', '[&_td]:px-2 [&_th]:px-2 [&_td:first-child]:pl-4 [&_th:first-child]:pl-4 [&_td:last-child]:pr-4 [&_th:last-child]:pr-4')}>
       <TableHeader>
         <TableRow>
           <TableHead>名称</TableHead>
@@ -79,6 +82,7 @@ export function ContainerTable({
           <TableHead title="已用 / 规格">内存</TableHead>
           <TableHead title="已用 / 规格">系统盘</TableHead>
           {showGpuColumn ? <TableHead title="显卡数 · 显存已用">GPU</TableHead> : null}
+          <TableHead title="所有者在该服务器上的授权">剩余</TableHead>
           <TableHead className="text-right">操作</TableHead>
         </TableRow>
       </TableHeader>
@@ -142,19 +146,22 @@ function ContainerTableRow({
         <ContainerStatusBadges container={container} />
       </TableCell>
       <TableCell>
-        <UsageMeter className="w-24" reading={cpuReading(container, sample)} stale={stale} />
+        <UsageMeter className="w-[4.5rem]" dense reading={compactReading(cpuReading(container, sample))} stale={stale} />
       </TableCell>
       <TableCell>
-        <UsageMeter className="w-24" reading={memoryReading(container, sample)} stale={stale} />
+        <UsageMeter className="w-[4.5rem]" dense reading={compactReading(memoryReading(container, sample))} stale={stale} />
       </TableCell>
       <TableCell>
-        <UsageMeter className="w-24" reading={rootDiskReading(container, sample)} stale={stale} />
+        <UsageMeter className="w-[4.5rem]" dense reading={compactReading(rootDiskReading(container, sample))} stale={stale} />
       </TableCell>
       {showGpuColumn ? (
         <TableCell>
-          <UsageMeter className="w-28" reading={gpuReading(container, sample)} stale={stale} />
+          <UsageMeter className="w-24" dense reading={compactReading(gpuReading(container, sample))} stale={stale} />
         </TableCell>
       ) : null}
+      <TableCell>
+        <ContainerRemaining access={container.access} />
+      </TableCell>
       <TableCell className="text-right">
         <RowActions container={container} admin={admin} pending={pending} onAction={onAction} />
       </TableCell>
@@ -242,6 +249,10 @@ function ContainerCard({ container, admin, usage, onAction }: RowProps) {
         <UsageMeter layout="inline" label="内存" reading={memoryReading(container, sample)} stale={stale} />
         <UsageMeter className="col-span-2" layout="inline" label="系统盘" reading={rootDiskReading(container, sample)} stale={stale} />
         {gpu ? <UsageMeter layout="inline" label="GPU" reading={gpu} stale={stale} /> : null}
+        <div className="flex items-center gap-2 text-xs">
+          <span className="w-10 shrink-0 text-muted-foreground">剩余</span>
+          <ContainerRemaining access={container.access} />
+        </div>
       </div>
     </li>
   );

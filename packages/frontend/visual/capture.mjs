@@ -23,6 +23,7 @@ const ISO = new Date(NOW - 10 * 60_000).toISOString();
 const CERT_EXPIRY = new Date(NOW + 30 * 86_400_000).toISOString();
 // A user who has not added an SSH key yet, to see the first-run prompts.
 const FRESH_USER = process.env.VISUAL_FRESH_USER === '1';
+const GRANT_EXPIRY = new Date(NOW + 28 * 86_400_000).toISOString();
 
 const CAPS = [
   'manage_users', 'manage_groups', 'manage_servers', 'manage_images',
@@ -159,6 +160,7 @@ const container = {
     detachDrainedAt: null, createdAt: ISO, updatedAt: ISO,
   }],
   sharedVolumes: [],
+  access: { phase: 'live', expiresAt: GRANT_EXPIRY },
   needsAttention: false,
   failureCode: null,
   failureReason: null,
@@ -534,9 +536,9 @@ function mockApi(urlString, method) {
 
   if (p.includes('/server-grants')) {
     return json([{
-      id: 'sg-1', scope: 'user', scopeId: 'user-alice', serverId: 'srv-1',
-      cpuCores: 4, memBytes: 8 * 1024 ** 3, diskBytes: 100 * 1024 ** 3,
-      gpu: { mode: 'none', pciAddresses: [] }, expiresAt: null, createdAt: ISO, updatedAt: ISO,
+      id: 'sg-1', userId: 'user-alice', serverId: 'srv-1', bundleId: 'bundle-1', bundleName: '标准',
+      overrides: {}, cpuCores: 4, memBytes: 8 * 1024 ** 3, rootDiskBytes: 100 * 1024 ** 3, gpuCount: 0,
+      expiresAt: GRANT_EXPIRY, storagePools: [], createdAt: ISO, updatedAt: ISO,
     }]);
   }
   if (p.includes('/storage-pool-grants')) return json([]);
@@ -575,7 +577,7 @@ function mockApi(urlString, method) {
         gpuCount: 1,
         gpuPciAddresses: ['0000:01:00.0'],
         storagePools: [{ poolId: 'pool-1', limitBytes: 500 * 1024 ** 3, usedBytes: 40 * 1024 ** 3 }],
-        expiresAt: null,
+        expiresAt: GRANT_EXPIRY,
         accessPhase: 'live',
         allowedImageIds: ['img-1'],
       }],
@@ -774,6 +776,22 @@ const DIALOGS = [
     const btn = p.getByTestId('grant-add-backend');
     if (await btn.count() === 0) return false;
     await btn.click();
+    await waitSettled(p);
+    return true;
+  } },
+  { name: 'container-expiry-hint', path: '/containers', open: async (p) => {
+    await p.getByText(/^\d+ 天$/).first().hover();
+    await p.waitForTimeout(500);
+    return true;
+  } },
+  { name: 'dialog-grant-expiry', path: '/users/user-alice?tab=grants', open: async (p) => {
+    const btn = p.getByTestId('grant-add-backend');
+    if (await btn.count() === 0) return false;
+    await btn.click();
+    await waitSettled(p);
+    await p.getByRole('switch', { name: '设置到期时间' }).click();
+    await p.getByRole('combobox', { name: '时' }).click();
+    await p.getByRole('option', { name: '23' }).click();
     await waitSettled(p);
     return true;
   } },

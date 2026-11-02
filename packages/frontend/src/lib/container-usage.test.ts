@@ -3,6 +3,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ContainerStatus, type ContainerDto } from '@nyabase/common';
 import {
+  compactReading,
   cpuReading,
   formatBytesPair,
   gpuReading,
@@ -69,6 +70,22 @@ describe('container usage readings', () => {
       gpu: { usedBytes: 3 * GIB, limitBytes: 24 * GIB, ratio: 0.125, pciAddresses: ['00000000:41:00.0'] },
     }));
     expect(reading).toMatchObject({ lead: '1 卡', used: '3', total: '24 GiB', ratio: 0.125 });
+  });
+});
+
+describe('compactReading', () => {
+  it('shortens units for table cells and keeps the full form as the title', () => {
+    expect(compactReading(memoryReading(container, sample()))).toMatchObject({ used: '1.2', total: '4G', title: '1.2 / 4 GiB' });
+    expect(compactReading(cpuReading(container, undefined))).toMatchObject({ used: null, total: '4核', title: '— / 4 核' });
+    expect(compactReading({ used: '512 MiB', total: '2 TiB', ratio: 0 })).toMatchObject({ used: '512M', total: '2T' });
+    expect(compactReading({ used: '512 B', total: null, ratio: null })).toMatchObject({ used: '512B' });
+  });
+
+  it('keeps the GPU lead and its own title, and passes no reading through', () => {
+    const gpu = { used: '3', total: '24 GiB', ratio: 0.125, lead: '1 卡', title: '显存 3 / 24 GiB' };
+    expect(compactReading(gpu)).toMatchObject({ lead: '1卡', total: '24G', title: '显存 3 / 24 GiB' });
+    expect(compactReading({ used: null, total: null, ratio: null, lead: '2 卡' })).toMatchObject({ lead: '2卡', title: '2 卡' });
+    expect(compactReading(null)).toBeNull();
   });
 });
 

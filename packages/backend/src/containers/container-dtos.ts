@@ -4,10 +4,12 @@ import {
   ContainerPhase,
   ContainerPowerIntent,
   ContainerStatus,
+  GRANT_EXPIRY_GRACE_DAYS,
   IntentResourceType,
   StoragePoolResizeFamily,
   parseContainerState,
   sshContainerHostName,
+  type ContainerAccessDto,
   type ContainerDto,
   type VolumeAttachmentDto,
 } from '@nyabase/common';
@@ -51,6 +53,8 @@ interface DtoContext {
   pending: Set<string>;
   localVolumes: Map<string, VolumeAttachmentDto[]>;
   sharedVolumes: Map<string, VolumeAttachmentDto[]>;
+  /** By `<owner id>:<server id>`; absent = no coverage and no grace. */
+  access: Map<string, ContainerAccessDto>;
 }
 
 function phase(value: string): ContainerPhase {
@@ -100,6 +104,39 @@ export class ContainerDtoAssembler {
     return { localVolumes, sharedVolumes };
   }
 
+  /** A current grant wins over a lapse row the processor has not cleared yet, as in `getEffectiveAccess`. */
+  private async loadAccess(
+    ownerIds: readonly string[],
+    serverIds: readonly string[],
+  ): Promise<DtoContext['access']> {
+    const [grants, lapses] = await Promise.all([
+      this.database.selectFrom('iam.effective_server_access')
+        .select(['user_id', 'server_id', 'expires_at'])
+        .where('user_id', 'in', [...ownerIds])
+        .where('server_id', 'in', [...serverIds])
+        .execute(),
+      this.database.selectFrom('control.access_lapses')
+        .select(['user_id', 'resource_id', 'lapsed_at'])
+        .where('user_id', 'in', [...ownerIds])
+        .where('resource_kind', '=', 'server')
+        .where('resource_id', 'in', [...serverIds])
+        .where('purged_at', 'is', null)
+        .execute(),
+    ]);
+    const access: DtoContext['access'] = new Map();
+    for (const lapse of lapses) {
+      const purgeAt = new Date(lapse.lapsed_at.getTime() + GRANT_EXPIRY_GRACE_DAYS * 86_400_000);
+      access.set(`${lapse.user_id}:${lapse.resource_id}`, { phase: 'grace', purgeAt: purgeAt.toISOString() });
+    }
+    for (const grant of grants) {
+      access.set(`${grant.user_id}:${grant.server_id}`, {
+        phase: 'live',
+        expiresAt: grant.expires_at?.toISOString() ?? null,
+      });
+    }
+    return access;
+  }
+
   private async loadContext(
     rows: readonly ContainerRow[],
   ): Promise<DtoContext> {
@@ -124,6 +161,7 @@ export class ContainerDtoAssembler {
       .where('status', '=', 'pending')
       .execute();
     const { localVolumes, sharedVolumes } = await this.loadAttachmentDtos(ids);
+    const access = await this.loadAccess(ownerIds, serverIds);
     const owners = new Map<string, string>();
     if (ownerIds.length > 0) {
       const ownerRows = await this.database.selectFrom('iam.users')
@@ -155,6 +193,7 @@ export class ContainerDtoAssembler {
       pending: new Set(pendingRows.map((item) => item.resource_id)),
       localVolumes,
       sharedVolumes,
+      access,
     };
   }
 
@@ -216,6 +255,7 @@ export class ContainerDtoAssembler {
       },
       volumes: context.localVolumes.get(row.id) ?? [],
       sharedVolumes: context.sharedVolumes.get(row.id) ?? [],
+      access: context.access.get(`${row.owner_id}:${row.server_id}`) ?? { phase: 'none' },
       needsAttention: row.needs_attention,
       failureCode: row.failure_code,
       failureReason: row.failure_reason,

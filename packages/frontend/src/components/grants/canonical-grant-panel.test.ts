@@ -7,9 +7,11 @@ import { GIB } from '../../lib/utils.js';
 import {
   addablePools,
   expiryLabel,
+  expiryMinuteOptions,
   expiryPhase,
   gibQuotaText,
   parseGibQuotaKeeping,
+  remainingLabel,
   toDatetimeLocalValue,
 } from './use-grant-panel-data.js';
 
@@ -34,6 +36,32 @@ describe('expiryPhase', () => {
 
   it('calls a grant without expiry 永久', () => {
     expect(expiryLabel(null)).toBe('永久');
+  });
+});
+
+describe('remainingLabel', () => {
+  const now = Date.parse('2026-11-02T00:00:00Z');
+  const after = (ms: number) => new Date(now + ms).toISOString();
+
+  it('reads whole days, hours in the last day and minutes in the last hour', () => {
+    expect(remainingLabel(after(30 * 86_400_000 - 1), now)).toBe('29 天');
+    expect(remainingLabel(after(86_400_000), now)).toBe('1 天');
+    expect(remainingLabel(after(86_400_000 - 1), now)).toBe('23 小时');
+    expect(remainingLabel(after(3_600_000 - 1), now)).toBe('59 分钟');
+    expect(remainingLabel(after(1_000), now)).toBe('1 分钟');
+  });
+
+  it('is null once past', () => {
+    expect(remainingLabel(after(0), now)).toBeNull();
+    expect(remainingLabel(after(-1), now)).toBeNull();
+  });
+});
+
+describe('expiryMinuteOptions', () => {
+  it('offers five-minute steps and keeps an existing minute between them', () => {
+    expect(expiryMinuteOptions('15')).toHaveLength(12);
+    expect(expiryMinuteOptions('37')).toHaveLength(13);
+    expect(expiryMinuteOptions('37').slice(7, 9)).toEqual(['35', '37']);
   });
 });
 

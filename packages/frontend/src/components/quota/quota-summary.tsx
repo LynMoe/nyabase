@@ -24,6 +24,7 @@ import {
 } from '../ui/table.js';
 import { UsageMeter } from '../performance/usage-meter.js';
 import { truncateId } from '../refs/technical-id.js';
+import { expiryLabel, remainingLabel } from '../grants/use-grant-panel-data.js';
 import { formatQuotaDimension, runningMemBytes } from '../../lib/grant-quota.js';
 import { sharedUnitPair } from '../../lib/container-usage.js';
 import { cpuGrantLabel } from '../../lib/cpu-set.js';
@@ -113,7 +114,7 @@ function QuotaBody({
       ) : null}
       {grants.length > 0 ? (
         <div data-testid="quota-servers">
-          <Table className="min-w-[860px]">
+          <Table className="min-w-[980px]">
             <TableHeader>
               <TableRow>
                 <TableHead>服务器</TableHead>
@@ -122,6 +123,7 @@ function QuotaBody({
                 <TableHead>系统盘</TableHead>
                 <TableHead>数据盘</TableHead>
                 <TableHead>GPU</TableHead>
+                <TableHead>到期</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -139,11 +141,12 @@ function QuotaBody({
       ) : null}
       {sharedBackends.length > 0 ? (
         <div data-testid="quota-shared" className={grants.length > 0 ? 'border-t' : undefined}>
-          <Table className="min-w-[560px]">
+          <Table className="min-w-[680px]">
             <TableHeader>
               <TableRow>
                 <TableHead>共享存储</TableHead>
                 <TableHead>已分配 / 额度</TableHead>
+                <TableHead>到期</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -163,6 +166,7 @@ function QuotaBody({
                         consumed={access.usedBytes}
                       />
                     </TableCell>
+                    <TableCell><QuotaExpiry expiresAt={access.expiresAt} /></TableCell>
                   </TableRow>
                 );
               })}
@@ -216,7 +220,19 @@ function ServerQuotaRow({
       <TableCell className="text-muted-foreground">
         {gpu ?? '无'}
       </TableCell>
+      <TableCell><QuotaExpiry expiresAt={grant.expiresAt} /></TableCell>
     </TableRow>
+  );
+}
+
+function QuotaExpiry({ expiresAt }: { expiresAt: string | null }) {
+  if (!expiresAt) return <span className="text-muted-foreground">永久</span>;
+  const remaining = remainingLabel(expiresAt);
+  return (
+    <div className="tabular-nums" data-testid="quota-expiry">
+      <p>{expiryLabel(expiresAt)}</p>
+      <p className="text-xs text-muted-foreground">{remaining ? `剩余 ${remaining}` : '已到期'}</p>
+    </div>
   );
 }
 

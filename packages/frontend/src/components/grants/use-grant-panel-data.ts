@@ -186,6 +186,21 @@ export function expiryLabel(value: string | null): string {
   return value ? new Date(value).toLocaleString('zh-CN') : '永久';
 }
 
+/** Time left as people read it: whole days, hours in the last day, minutes in the last hour; null once past. */
+export function remainingLabel(value: string, now = Date.now()): string | null {
+  const left = new Date(value).getTime() - now;
+  if (!(left > 0)) return null;
+  if (left >= 86_400_000) return `${Math.floor(left / 86_400_000)} 天`;
+  if (left >= 3_600_000) return `${Math.floor(left / 3_600_000)} 小时`;
+  return `${Math.max(1, Math.floor(left / 60_000))} 分钟`;
+}
+
+/** Five-minute steps, plus the current minute when an existing expiry falls between them. */
+export function expiryMinuteOptions(current: string): string[] {
+  const steps = Array.from({ length: 12 }, (_, index) => String(index * 5).padStart(2, '0'));
+  return steps.includes(current) ? steps : [...steps, current].sort();
+}
+
 export function expirySummary(value: string): string {
   return value ? expiryLabel(isoOrNull(value)) : '永久';
 }

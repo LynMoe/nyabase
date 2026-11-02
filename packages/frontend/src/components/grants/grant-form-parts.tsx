@@ -18,14 +18,51 @@ import { FormField } from '../layout/form-field.js';
 import { Badge } from '../ui/badge.js';
 import { Input } from '../ui/input.js';
 import { Label } from '../ui/label.js';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../ui/select.js';
 import { Switch } from '../ui/switch.js';
-import { defaultExpiryLocal, expirySummary } from './use-grant-panel-data.js';
+import { defaultExpiryLocal, expiryMinuteOptions, expirySummary } from './use-grant-panel-data.js';
 
 export function PhaseBadge({ phase }: { phase: GrantExpiryPhase }) {
   return (
     <Badge variant={phase === 'lost' ? 'destructive' : phase === 'grace' ? 'warning' : 'outline'}>
       {grantExpiryPhaseLabel(phase)}
     </Badge>
+  );
+}
+
+const EXPIRY_HOURS = Array.from({ length: 24 }, (_, hour) => String(hour).padStart(2, '0'));
+
+/**
+ * `YYYY-MM-DDTHH:mm` as a date plus 24-hour selects: a native time field follows
+ * the browser locale and shows AM/PM. Clearing the date keeps the old one, so it
+ * cannot silently turn the expiry off; the switch above does that.
+ */
+function ExpiryDateTime({ id, value, onChange }: { id: string; value: string; onChange: (value: string) => void }) {
+  const [date = '', time = ''] = value.split('T');
+  const [hour = '00', minute = '00'] = time.split(':');
+  return (
+    <div className="flex items-center gap-2">
+      <Input
+        id={id}
+        type="date"
+        className="min-w-0 flex-1"
+        value={date}
+        onChange={(event) => { if (event.target.value) onChange(`${event.target.value}T${hour}:${minute}`); }}
+      />
+      <Select value={hour} onValueChange={(next) => onChange(`${date}T${next}:${minute}`)}>
+        <SelectTrigger className="w-[4.5rem] shrink-0 tabular-nums" aria-label="时"><SelectValue /></SelectTrigger>
+        <SelectContent className="max-h-60">
+          {EXPIRY_HOURS.map((option) => <SelectItem key={option} value={option}>{option}</SelectItem>)}
+        </SelectContent>
+      </Select>
+      <span className="text-muted-foreground" aria-hidden>:</span>
+      <Select value={minute} onValueChange={(next) => onChange(`${date}T${hour}:${next}`)}>
+        <SelectTrigger className="w-[4.5rem] shrink-0 tabular-nums" aria-label="分"><SelectValue /></SelectTrigger>
+        <SelectContent className="max-h-60">
+          {expiryMinuteOptions(minute).map((option) => <SelectItem key={option} value={option}>{option}</SelectItem>)}
+        </SelectContent>
+      </Select>
+    </div>
   );
 }
 
@@ -48,12 +85,7 @@ export function GrantExpiryInput({ id, value, onChange }: { id: string; value: s
       </div>
       {enabled && (
         <FormField id={`${id}-at`} label="到期时间（本地时区）">
-          <Input
-            id={`${id}-at`}
-            type="datetime-local"
-            value={value}
-            onChange={(event) => onChange(event.target.value)}
-          />
+          <ExpiryDateTime id={`${id}-at`} value={value} onChange={onChange} />
         </FormField>
       )}
     </div>
