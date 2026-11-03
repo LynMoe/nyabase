@@ -1,6 +1,7 @@
+import { EventEmitter } from 'node:events';
 import { describe, expect, it, vi } from 'vitest';
 import type { PgPersistenceOptions } from './options.js';
-import { createPgPool, warnIfSuperuserConnection } from './pool.js';
+import { attachPgPoolErrorPolicy, createPgPool, warnIfSuperuserConnection } from './pool.js';
 
 function options(): PgPersistenceOptions {
   return {
@@ -46,6 +47,60 @@ describe('PostgreSQL pool runtime policy', () => {
     expect(error).toHaveBeenCalledWith(expect.stringContaining('total=0'));
     expect(error).toHaveBeenCalledWith(expect.stringContaining(failure.message));
     await pool.end();
+  });
+});
+
+describe('PostgreSQL pool saturation warning', () => {
+  function fakePool(counts: { total: number; idle: number; waiting: number }) {
+    const emitter = new EventEmitter() as EventEmitter & {
+      totalCount: number;
+      idleCount: number;
+      waitingCount: number;
+    };
+    emitter.totalCount = counts.total;
+    emitter.idleCount = counts.idle;
+    emitter.waitingCount = counts.waiting;
+    return emitter;
+  }
+
+  it('stays quiet while checkouts wait one tick for an idle client', () => {
+    const warn = vi.fn();
+    // Observed on production: pg-pool queues checkouts that find an idle
+    // client, so waiting > 0 here is not saturation.
+    const pool = fakePool({ total: 4, idle: 3, waiting: 1 });
+    attachPgPoolErrorPolicy(pool as never, { error: vi.fn(), warn }, 20);
+
+    pool.emit('acquire');
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it('stays quiet while the pool can still open clients', () => {
+    const warn = vi.fn();
+    const pool = fakePool({ total: 5, idle: 0, waiting: 2 });
+    attachPgPoolErrorPolicy(pool as never, { error: vi.fn(), warn }, 20);
+
+    pool.emit('acquire');
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it('warns at most every 30 s when full with nothing idle and checkouts waiting', () => {
+    vi.useFakeTimers();
+    try {
+      const warn = vi.fn();
+      const pool = fakePool({ total: 20, idle: 0, waiting: 3 });
+      attachPgPoolErrorPolicy(pool as never, { error: vi.fn(), warn }, 20);
+
+      pool.emit('acquire');
+      pool.emit('acquire');
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('total=20/20, idle=0, waiting=3'));
+
+      vi.advanceTimersByTime(30_000);
+      pool.emit('acquire');
+      expect(warn).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

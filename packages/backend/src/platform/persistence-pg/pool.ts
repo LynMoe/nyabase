@@ -15,6 +15,7 @@ function errorCode(error: Error): string {
 export function attachPgPoolErrorPolicy(
   pool: Pool,
   logger: PgPoolLogger,
+  poolMax: number,
 ): void {
   let lastSaturationWarningAt = 0;
   pool.on('error', (error) => {
@@ -29,14 +30,19 @@ export function attachPgPoolErrorPolicy(
   });
   pool.on('acquire', () => {
     const now = Date.now();
+    // pg-pool queues every checkout that finds an idle client and hands it
+    // over on the next tick, so `waiting > 0` alone is routine. The pool is
+    // saturated only when it cannot grow and has nothing idle to give.
     if (
       pool.waitingCount > 0
+      && pool.idleCount === 0
+      && pool.totalCount >= poolMax
       && now - lastSaturationWarningAt >= 30_000
     ) {
       lastSaturationWarningAt = now;
       logger.warn?.(
         `PostgreSQL pool is saturated `
-        + `(total=${pool.totalCount}, idle=${pool.idleCount}, waiting=${pool.waitingCount}, `
+        + `(total=${pool.totalCount}/${poolMax}, idle=${pool.idleCount}, waiting=${pool.waitingCount}, `
         + `acquisitionTimeoutMs is configured)`,
       );
     }
@@ -64,7 +70,7 @@ export function createPgPool(
     ssl: options.ssl,
     allowExitOnIdle: false,
   });
-  attachPgPoolErrorPolicy(pool, logger);
+  attachPgPoolErrorPolicy(pool, logger, options.poolMax);
   return pool;
 }
 
