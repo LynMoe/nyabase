@@ -164,10 +164,11 @@ function SshSessionTable({
             >
               {showUser ? (
                 <TableCell>
-                  <div className="font-medium text-foreground">{session.username}</div>
-                  {session.login !== session.username ? (
-                    <div className="text-xs text-muted-foreground">登录名 {session.login}</div>
-                  ) : null}
+                  <div className="font-medium text-foreground">{session.displayName || session.username}</div>
+                  <div className="text-xs text-muted-foreground">
+                    {session.username}
+                    {session.login !== session.username ? ` · 登录名 ${session.login}` : null}
+                  </div>
                 </TableCell>
               ) : null}
               <TableCell>

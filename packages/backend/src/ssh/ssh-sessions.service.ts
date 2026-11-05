@@ -34,6 +34,7 @@ interface ConnectionRow {
   login: string;
   user_id: string;
   username: string;
+  display_name: string | null;
   key_fingerprint: string;
   key_algorithm: string;
   pinned_server_id: string | null;
@@ -139,6 +140,7 @@ function toDto(row: ConnectionRow): SshSessionDto {
     login: row.login,
     userId: row.user_id,
     username: row.username,
+    displayName: row.display_name,
     keyFingerprint: row.key_fingerprint,
     keyAlgorithm: row.key_algorithm,
     pinned: row.pinned_container_id && row.pinned_server_id
@@ -249,8 +251,9 @@ export class SshSessionsService {
     }
     const limit = query.limit ?? DEFAULT_PAGE_SIZE;
     const result = await sql<ConnectionRow>`
-      SELECT c.*, ${TARGETS} AS targets
+      SELECT c.*, u.display_name, ${TARGETS} AS targets
       FROM interaction.ssh_proxy_connections c
+      LEFT JOIN iam.users u ON u.id = c.user_id
       WHERE ${where(conditions)}
       ORDER BY c.connected_at DESC, c.id DESC
       LIMIT ${limit + 1}
@@ -267,8 +270,9 @@ export class SshSessionsService {
     assertListScope(actor, scope, Role.UserAdmin);
     if (!zUuid.safeParse(id).success) throw new NotFoundException('SSH session not found');
     const result = await sql<ConnectionRow>`
-      SELECT c.*, ${TARGETS} AS targets
+      SELECT c.*, u.display_name, ${TARGETS} AS targets
       FROM interaction.ssh_proxy_connections c
+      LEFT JOIN iam.users u ON u.id = c.user_id
       WHERE c.id = ${id}
     `.execute(this.database);
     const row = result.rows[0];
@@ -423,8 +427,15 @@ export class SshSessionsService {
 
   /** Every user who connected in the window, most traffic first. */
   private async userUsage(filter: StatsFilter): Promise<SshSessionStatsDto['topUsers']> {
-    const result = await sql<{ user_id: string; username: string; connections: string; bytes: string }>`
-      SELECT user_id, max(username) AS username, sum(connections) AS connections, sum(bytes) AS bytes
+    const result = await sql<{
+      user_id: string;
+      username: string;
+      display_name: string | null;
+      connections: string;
+      bytes: string;
+    }>`
+      SELECT usage.user_id, max(usage.username) AS username, max(u.display_name) AS display_name,
+        sum(usage.connections) AS connections, sum(usage.bytes) AS bytes
       FROM (
         SELECT c.user_id, c.username, count(*) AS connections,
           sum(c.bytes_from_client + c.bytes_to_client) AS bytes
@@ -437,12 +448,14 @@ export class SshSessionsService {
         WHERE d.day >= ${filter.sinceDay}::date AND ${userOf(filter, 'd')}
           AND ${filter.containerId ? containerOf(filter, 'd') : sql`d.container_id IS NULL`}
       ) usage
-      GROUP BY user_id
-      ORDER BY sum(bytes) DESC, sum(connections) DESC
+      LEFT JOIN iam.users u ON u.id = usage.user_id
+      GROUP BY usage.user_id
+      ORDER BY sum(usage.bytes) DESC, sum(usage.connections) DESC
     `.execute(this.database);
     return result.rows.map((row) => ({
       userId: row.user_id,
       username: row.username,
+      displayName: row.display_name,
       connections: num(row.connections),
       bytes: num(row.bytes),
     }));

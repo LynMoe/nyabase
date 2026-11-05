@@ -181,6 +181,28 @@ describePg('SSH connection history (PostgreSQL)', () => {
     });
   });
 
+  it('reports the current display name next to the recorded username', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const repository = new SshHistoryRepository(database);
+      const sessions = new SshSessionsService(database);
+      await sql`INSERT INTO iam.users (id, numeric_id, username, password_hash, display_name)
+        VALUES (${alice}, 1, 'alice', 'x', '爱丽丝')`.execute(database);
+      await repository.store(INSTANCE, 'ssh-proxy-1', parseHistoryRecords([
+        connection(1),
+        connection(2, { userId: bob, username: 'bob', login: 'bob' }),
+      ]));
+      const admin = testActor(bob, Role.UserAdmin);
+      const all = await sessions.list(admin, zSshSessionListQuery.parse({ scope: 'all' }));
+      expect(Object.fromEntries(all.items.map((item) => [item.username, item.displayName])))
+        .toEqual({ alice: '爱丽丝', bob: null });
+      const aliceSession = all.items.find((item) => item.userId === alice)!;
+      expect((await sessions.detail(admin, aliceSession.id, 'all')).displayName).toBe('爱丽丝');
+      const stats = await sessions.stats(admin, zSshSessionStatsQuery.parse({ scope: 'all' }));
+      expect(Object.fromEntries(stats.topUsers.map((entry) => [entry.username, entry.displayName])))
+        .toEqual({ alice: '爱丽丝', bob: null });
+    });
+  });
+
   it('pages by connection time with a cursor', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const repository = new SshHistoryRepository(database);

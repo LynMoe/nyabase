@@ -97,7 +97,7 @@ function StatsBody({
             empty="没有连接"
             rows={stats.topUsers.map((entry) => ({
               key: entry.userId,
-              name: entry.username,
+              name: entry.displayName || entry.username,
               count: `${entry.connections} 次连接`,
               bytes: entry.bytes,
             }))}

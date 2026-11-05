@@ -46,12 +46,21 @@ export function SshSessionDetailDialog({
   );
 }
 
+function sessionUserLabel(session: SshSessionDetailDto): string {
+  const details = [
+    session.displayName ? session.username : null,
+    session.login !== session.username ? `登录名 ${session.login}` : null,
+  ].filter(Boolean);
+  const name = session.displayName || session.username;
+  return details.length > 0 ? `${name}（${details.join('，')}）` : name;
+}
+
 function SessionDetail({ session }: { session: SshSessionDetailDto }) {
   const rejected = sortedCounts(session.rejectedRequests);
   return (
     <div className="max-h-[70vh] space-y-4 overflow-y-auto">
       <div className="grid gap-3 rounded-lg border p-3 text-sm sm:grid-cols-3">
-        <Field label="用户" value={session.login === session.username ? session.username : `${session.username}（登录名 ${session.login}）`} />
+        <Field label="用户" value={sessionUserLabel(session)} />
         <Field label="来源" value={session.peer} mono />
         <Field label="客户端" value={session.clientVersion ?? '未知'} />
         <div className="min-w-0 sm:col-span-2">

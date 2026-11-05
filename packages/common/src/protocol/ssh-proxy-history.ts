@@ -176,7 +176,10 @@ export interface SshSessionDto {
   clientVersion: string | null;
   login: string;
   userId: string;
+  /** As the proxy authenticated it. */
   username: string;
+  /** The user's current display name; null once the account row is gone. */
+  displayName: string | null;
   keyFingerprint: string;
   keyAlgorithm: string;
   /** The container named by a `user.server.container` login, if any. */
@@ -234,7 +237,7 @@ export interface SshSessionStatsDto {
   since: string;
   totals: Omit<SshSessionDailyUsageDto, 'day'> & { users: number; containers: number };
   daily: SshSessionDailyUsageDto[];
-  topUsers: Array<{ userId: string; username: string; connections: number; bytes: number }>;
+  topUsers: Array<{ userId: string; username: string; displayName: string | null; connections: number; bytes: number }>;
   topContainers: Array<SshSessionRouteDto & { channels: number; bytes: number }>;
   /** From connections still within the detail retention only. */
   closeReasons: Record<string, number>;

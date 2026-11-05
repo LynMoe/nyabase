@@ -1,7 +1,7 @@
 import { Activity, Gauge, PlugZap, RefreshCw, RotateCcw, ShieldAlert, Wifi } from 'lucide-react';
 import { Link } from '@tanstack/react-router';
 import type { SshProxyHostKeySummaryDto, SshProxySnapshotSummaryDto, SshProxyStatusReport } from '@nyabase/common';
-import { useMutation, useQueryClient, type UseQueryResult } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient, type UseQueryResult } from '@tanstack/react-query';
 import { formatBytes, formatRate } from '../../lib/utils.js';
 import { Badge } from '../../components/ui/badge.js';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../../components/ui/table.js';
@@ -29,11 +29,21 @@ export interface SshProxyAdminStatus {
   proxies: SshProxyStatusReport[];
 }
 
+/** Display names by username, for live connections (the proxy reports only the username). */
+function useDisplayNames(): Map<string, string> {
+  const catalog = useQuery({
+    queryKey: queryKeys.catalog.users,
+    queryFn: () => api.get<Array<{ id: string; username: string; displayName: string; status: string }>>('/admin/catalog/users'),
+  });
+  return new Map((catalog.data ?? []).map((user) => [user.username, user.displayName]));
+}
+
 /** Above this share of the cap the next growth could make every build fail. */
 const SNAPSHOT_WARN_RATIO = 0.75;
 
 export function SshStatusSections({ status, noLines }: { status: SshProxyAdminStatus; noLines: boolean }) {
   const proxies = status.proxies ?? [];
+  const displayNames = useDisplayNames();
   const connections = proxies.flatMap((proxy) => (proxy.connections ?? []).map((connection) => ({
     ...connection,
     proxyId: proxy.proxyId,
@@ -130,7 +140,10 @@ export function SshStatusSections({ status, noLines }: { status: SshProxyAdminSt
                     <TableCell>
                       <div className="font-medium text-foreground">{connection.login ?? '未认证'}</div>
                       {connection.username ? (
-                        <div className="text-xs text-muted-foreground">{connection.username}</div>
+                        <div className="text-xs text-muted-foreground">
+                          {displayNames.get(connection.username) ?? connection.username}
+                          {displayNames.has(connection.username) ? ` · ${connection.username}` : null}
+                        </div>
                       ) : null}
                     </TableCell>
                     <TableCell>
