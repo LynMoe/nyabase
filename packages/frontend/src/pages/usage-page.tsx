@@ -24,6 +24,7 @@ import { SegmentedFilter } from '../components/layout/list-search.js';
 import { Progress } from '../components/ui/progress.js';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../components/ui/select.js';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../components/ui/table.js';
+import { ResourceRef } from '../components/refs/resource-ref.js';
 import { LinkedCharts } from '../components/performance/linked-charts.js';
 import { useGpuNames } from '../components/performance/host-occupancy.js';
 
@@ -150,7 +151,10 @@ function UserUsageTable({ people, host }: { people: PerformancePersonRow[]; host
         <TableBody>
           {ordered.map((row) => (
             <TableRow key={row.userId}>
-              <TableCell><p>{row.displayName}</p><p className="text-xs text-muted-foreground">{row.username}</p></TableCell>
+              <TableCell>
+                <p><ResourceRef kind="user" id={row.userId} name={row.displayName} username={row.username} /></p>
+                <p className="text-xs text-muted-foreground">{row.username}</p>
+              </TableCell>
               <TableCell className="tabular-nums" title={shareTitle(row.cpu.usageCores, host?.cpuCount ?? null)}>{coresText(row.cpu.usageCores)}</TableCell>
               <TableCell className="tabular-nums" title={shareTitle(row.memory.usedBytes, host?.memory.limitBytes ?? null)}>{bytesLabel(row.memory.usedBytes)}</TableCell>
               <TableCell title={shareTitle(row.disk.usedBytes, diskCapacity(host))}><DiskMeter used={row.disk.usedBytes} capacity={diskCapacity(host)} /></TableCell>
@@ -195,7 +199,7 @@ function AdminUsageTable({ usage }: { usage: PerformanceAdminUsageResponse | und
             <TableRow key={row.containerId}>
               {index === 0 ? (
                 <TableCell rowSpan={group.length}>
-                  <p>{row.displayName}</p>
+                  <p><ResourceRef kind="user" id={row.userId} name={row.displayName} username={row.username} /></p>
                   <p className="text-xs text-muted-foreground">{row.username}</p>
                 </TableCell>
               ) : null}

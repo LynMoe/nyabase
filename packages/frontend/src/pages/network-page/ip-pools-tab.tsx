@@ -14,6 +14,7 @@ import { TechnicalId } from '../../components/refs/technical-id.js';
 import { toast } from '../../hooks/use-toast.js';
 import { queryKeys } from '../../lib/query-keys.js';
 import { IpPoolEditorDialog } from './ip-pool-editor-dialog.js';
+import { ResourceRef } from '../../components/refs/resource-ref.js';
 
 /** The 网络 page's IP 池 tab. */
 export function IpPoolsTab() {
@@ -103,7 +104,12 @@ export function IpPoolsTab() {
                     )}
                   </TableCell>
                   <TableCell className="max-w-[12rem] truncate whitespace-normal">
-                    {pool.serverIds.map((id) => serverNameById.get(id) ?? id).join('、') || '未绑定'}
+                    {pool.serverIds.length === 0 ? '未绑定' : pool.serverIds.map((id, index) => (
+                      <span key={id}>
+                        {index > 0 ? '、' : null}
+                        <ResourceRef kind="server" id={id} name={serverNameById.get(id)} />
+                      </span>
+                    ))}
                   </TableCell>
                   <TableCell className="text-right" onClick={(event) => event.stopPropagation()}>
                     <div className="flex justify-end gap-2">

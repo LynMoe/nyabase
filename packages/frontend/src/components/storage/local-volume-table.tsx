@@ -1,5 +1,3 @@
-import { useState } from 'react';
-import { Link } from '@tanstack/react-router';
 import { Pencil, Trash2 } from 'lucide-react';
 import { IntentResourceType, type ListScope, type VolumeDto } from '@nyabase/common';
 import { Button } from '../ui/button.js';
@@ -21,11 +19,8 @@ import {
 import { ResourceIntentFailures, ResourceIntentHistory } from '../intents/resource-intent-failures.js';
 import { resourceIntentsPath } from '../../lib/intent-visibility.js';
 import { Field } from '../layout/form-field.js';
-
-function adminContainerDetailTo(scope: ListScope) {
-  if (scope === 'all') return '/manage/containers/$containerId' as const;
-  return null;
-}
+import { useVolumeDetail, type VolumeDetailFocus } from './volume-detail-focus.js';
+import { VolumeAttachmentList } from './volume-attachment-list.js';
 
 export function LocalVolumeTable({
   volumes,
@@ -33,24 +28,25 @@ export function LocalVolumeTable({
   showPoolColumn,
   showServerColumn = false,
   serverNameById,
-  canManageContainersAny = false,
   onEdit,
   onDelete,
   testId = 'server-volume-table',
   poolId,
+  detailFocus,
 }: {
   volumes: VolumeDto[];
   scope: ListScope;
   showPoolColumn: boolean;
   showServerColumn?: boolean;
   serverNameById?: ReadonlyMap<string, string>;
-  canManageContainersAny?: boolean;
   onEdit?: (volume: VolumeDto) => void;
   onDelete?: (volume: VolumeDto) => void;
   testId?: string;
   poolId?: string;
+  /** Keeps the open detail in the page URL. */
+  detailFocus?: VolumeDetailFocus;
 }) {
-  const [detail, setDetail] = useState<VolumeDto | null>(null);
+  const [detail, setDetail] = useVolumeDetail(volumes, detailFocus);
   const showActions = Boolean(onEdit || onDelete);
   const columnCount = 5
     + (scope === 'all' ? 1 : 0)
@@ -89,7 +85,6 @@ export function LocalVolumeTable({
             showPoolColumn={showPoolColumn}
             showServerColumn={showServerColumn}
             serverName={serverNameById?.get(volume.serverId) ?? '未知服务器'}
-            canManageContainersAny={canManageContainersAny}
             showActions={showActions}
             onOpenDetail={() => setDetail(volume)}
             onEdit={onEdit}
@@ -114,7 +109,6 @@ function VolumeRow({
   showPoolColumn,
   showServerColumn,
   serverName,
-  canManageContainersAny,
   showActions,
   onOpenDetail,
   onEdit,
@@ -125,7 +119,6 @@ function VolumeRow({
   showPoolColumn: boolean;
   showServerColumn: boolean;
   serverName: string;
-  canManageContainersAny: boolean;
   showActions: boolean;
   onOpenDetail: () => void;
   onEdit?: (volume: VolumeDto) => void;
@@ -147,16 +140,20 @@ function VolumeRow({
           <ResourceRef kind="user" id={volume.ownerId} />
         </TableCell>
       ) : null}
-      {showServerColumn ? <TableCell>{serverName}</TableCell> : null}
-      {showPoolColumn ? <TableCell>{volume.poolName}</TableCell> : null}
+      {showServerColumn ? (
+        <TableCell onClick={(event) => event.stopPropagation()}>
+          <ResourceRef kind="server" id={volume.serverId} name={serverName} />
+        </TableCell>
+      ) : null}
+      {showPoolColumn ? (
+        <TableCell onClick={(event) => event.stopPropagation()}>
+          <ResourceRef kind="pool" id={volume.poolId} name={volume.poolName} serverId={volume.serverId} />
+        </TableCell>
+      ) : null}
       <TableCell>{formatCapacity(volume.sizeBytes)}</TableCell>
       <TableCell>{volume.usedBytes === null ? '未知' : formatCapacity(volume.usedBytes)}</TableCell>
       <TableCell className="max-w-[16rem] whitespace-normal">
-        <VolumeAttachmentsCell
-          volume={volume}
-          scope={scope}
-          canManageContainersAny={canManageContainersAny}
-        />
+        <VolumeAttachmentList attachments={volume.attachments} scope={scope} testId="volume-attachments" />
       </TableCell>
       <TableCell className="whitespace-normal">
         <StatusBadge
@@ -193,74 +190,6 @@ function VolumeRow({
   );
 }
 
-function VolumeAttachmentsCell({
-  volume,
-  scope,
-  canManageContainersAny,
-}: {
-  volume: VolumeDto;
-  scope: ListScope;
-  canManageContainersAny: boolean;
-}) {
-  if (scope === 'all') {
-    if (volume.attachments.length === 0) {
-      return <span className="text-muted-foreground">未挂载</span>;
-    }
-    const adminTo = adminContainerDetailTo(scope);
-    return (
-      <span data-testid="volume-attachments">
-        挂载于{' '}
-        {volume.attachments.map((item, index) => (
-          <span key={item.attachmentId}>
-            {index > 0 ? '、' : null}
-            {canManageContainersAny && adminTo ? (
-              <Link
-                to={adminTo}
-                params={{ containerId: item.containerId }}
-                search={{ tab: 'overview' }}
-                className="underline"
-                onClick={(event) => event.stopPropagation()}
-              >
-                {item.containerName}（{item.containerPath}）
-              </Link>
-            ) : (
-              `${item.containerName}（${item.containerPath}）`
-            )}
-          </span>
-        ))}
-      </span>
-    );
-  }
-
-  if (scope === 'mine') {
-    if (volume.attachments.length === 0) {
-      return <span className="text-muted-foreground">未挂载</span>;
-    }
-    return (
-      <span data-testid="volume-attachments">
-        挂载于{' '}
-        {volume.attachments.map((item, index) => (
-          <span key={item.attachmentId}>
-            {index > 0 ? '、' : null}
-            <Link
-              to="/containers/$containerId"
-              params={{ containerId: item.containerId }}
-              search={{ tab: 'overview' }}
-              className="underline underline-offset-4"
-              onClick={(event) => event.stopPropagation()}
-            >
-              {item.containerName}
-            </Link>
-            <span className="text-muted-foreground">（{item.containerPath}）</span>
-          </span>
-        ))}
-      </span>
-    );
-  }
-
-  return null;
-}
-
 export function LocalVolumeDetailDialog({
   volume,
   scope,
@@ -293,7 +222,10 @@ export function LocalVolumeDetailDialog({
           {scope === 'all' ? (
             <Field label="所有者" value={<ResourceRef kind="user" id={volume.ownerId} />} />
           ) : null}
-          <Field label="存储池" value={volume.poolName} />
+          <Field
+            label="存储池"
+            value={<ResourceRef kind="pool" id={volume.poolId} name={volume.poolName} serverId={volume.serverId} />}
+          />
           <Field label="容量" value={formatCapacity(volume.sizeBytes)} />
           <Field label="已用" value={volume.usedBytes === null ? '未知' : formatCapacity(volume.usedBytes)} />
           <Field label="缩容能力" value={shrinkLabel(volume)} />
@@ -319,13 +251,7 @@ export function LocalVolumeDetailDialog({
           <div className="sm:col-span-2">
             <p className="text-xs text-muted-foreground">挂载</p>
             <p className="mt-1">
-              {volume.attachments.length === 0 ? (
-                <span className="text-muted-foreground">未挂载</span>
-              ) : (
-                <span data-testid="volume-attachments">
-                  挂载于 {volume.attachments.map((item) => `${item.containerName}（${item.containerPath}）`).join('、')}
-                </span>
-              )}
+              <VolumeAttachmentList attachments={volume.attachments} scope={scope} testId="volume-attachments" />
             </p>
           </div>
         </div>

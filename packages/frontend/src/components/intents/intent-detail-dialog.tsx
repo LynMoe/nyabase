@@ -1,5 +1,4 @@
 import { useMutation, useQuery } from '@tanstack/react-query';
-import { Link } from '@tanstack/react-router';
 import {
   Role,
   IntentResourceType,
@@ -27,7 +26,6 @@ import {
   intentStatusLabel,
 } from '../../lib/status-labels.js';
 import { useHasRole } from '../../lib/use-role.js';
-import { ACCESS } from '../../lib/route-access.js';
 import { ResourceRef } from '../refs/resource-ref.js';
 import { StatusBadge } from '../layout/status-badge.js';
 import { Button } from '../ui/button.js';
@@ -64,15 +62,15 @@ function VolumeIntentRef({ id }: { id: string }) {
   const localName = local.data?.find((row) => row.id === id)?.name;
   const sharedName = shared.data?.find((row) => row.id === id)?.name;
   if (sharedName && !localName) {
-    return <ResourceRef kind="shared-volume" id={id} name={sharedName} />;
+    return <ResourceRef kind="shared-volume" id={id} name={sharedName} scope="all" />;
   }
-  return <ResourceRef kind="volume" id={id} name={localName ?? sharedName} />;
+  return <ResourceRef kind="volume" id={id} name={localName ?? sharedName} scope="all" />;
 }
 
 export function IntentResourceName({ intent }: { intent: IntentDto }) {
   switch (intent.resourceType) {
     case IntentResourceType.Container:
-      return <ResourceRef kind="container" id={intent.resourceId} />;
+      return <ResourceRef kind="container" id={intent.resourceId} scope="all" />;
     case IntentResourceType.Volume:
       return <VolumeIntentRef id={intent.resourceId} />;
     case IntentResourceType.ImageAssignment:
@@ -84,27 +82,9 @@ export function IntentResourceName({ intent }: { intent: IntentDto }) {
   }
 }
 
-export function IntentServerRef({
-  serverId,
-  link,
-}: {
-  serverId: string | null;
-  link?: boolean;
-}) {
+export function IntentServerRef({ serverId }: { serverId: string | null }) {
   if (!serverId) return '—';
-  const ref = <ResourceRef kind="server" id={serverId} />;
-  if (!link) return ref;
-  return (
-    <Link
-      to="/servers/$id"
-      params={{ id: serverId }}
-      search={{ tab: 'overview' }}
-      className="underline-offset-2 hover:underline"
-      onClick={(event) => event.stopPropagation()}
-    >
-      {ref}
-    </Link>
-  );
+  return <ResourceRef kind="server" id={serverId} />;
 }
 
 function JsonBlock({ value }: { value: unknown }) {
@@ -126,7 +106,6 @@ export function IntentDetailDialog({
   onOpenChange: (open: boolean) => void;
   onRetried: () => void;
 }) {
-  const canManageServers = useHasRole(ACCESS.servers);
   const detailQuery = useQuery({
     queryKey: queryKeys.adminIntent(intent?.id ?? ''),
     queryFn: () => {
@@ -195,7 +174,7 @@ export function IntentDetailDialog({
               />
               <Field
                 label="服务器"
-                value={<IntentServerRef serverId={view.serverId} link={canManageServers} />}
+                value={<IntentServerRef serverId={view.serverId} />}
               />
               <Field
                 label="请求人"

@@ -16,6 +16,17 @@ import { volumeInProgress } from '../lib/in-progress.js';
 import { queryKeys } from '../lib/query-keys.js';
 import { refetchWhileInProgress } from '../lib/query-lifecycle.js';
 import { toast } from '../hooks/use-toast.js';
+import { useNavigate, useSearch } from '@tanstack/react-router';
+import type { VolumeDetailFocus } from '../components/storage/volume-detail-focus.js';
+
+function useVolumeFocus(): VolumeDetailFocus {
+  const search = useSearch({ from: '/volumes/' });
+  const navigate = useNavigate({ from: '/volumes/' });
+  return {
+    id: search.volume ?? null,
+    onChange: (id) => { void navigate({ search: (prev) => ({ ...prev, volume: id ?? undefined }), replace: true }); },
+  };
+}
 
 export default function VolumesPage() {
   const queryClient = useQueryClient();
@@ -132,6 +143,7 @@ function VolumeList({
   onEdit: (volume: VolumeDto) => void;
   onDelete: (volume: VolumeDto) => void;
 }) {
+  const detailFocus = useVolumeFocus();
   const serverNameById = useMemo(() => {
     const map = new Map<string, string>();
     for (const server of servers) map.set(server.id, server.name);
@@ -158,6 +170,7 @@ function VolumeList({
         onEdit={onEdit}
         onDelete={onDelete}
         testId="volume-server-table"
+        detailFocus={detailFocus}
       />
     </SectionCard>
   );

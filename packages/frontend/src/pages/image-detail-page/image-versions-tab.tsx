@@ -118,9 +118,10 @@ function VersionRow({
           <ul className="space-y-1 text-sm">
             {version.containers.map((container) => (
               <li key={container.id} className="flex flex-wrap items-center gap-x-2">
-                <ResourceRef kind="container" id={container.id} name={container.name} />
+                <ResourceRef kind="container" id={container.id} name={container.name} scope="all" />
                 <span className="text-xs text-muted-foreground">
-                  {container.ownerName} · {container.serverName}
+                  <ResourceRef kind="user" id={container.ownerId} name={container.ownerDisplayName} username={container.ownerName} />
+                  {' · '}<ResourceRef kind="server" id={container.serverId} name={container.serverName} />
                   {container.lifecyclePhase === 'active' ? '' : ` · ${lifecyclePhaseLabel(container.lifecyclePhase)}`}
                 </span>
               </li>

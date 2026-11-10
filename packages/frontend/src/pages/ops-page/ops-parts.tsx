@@ -105,11 +105,9 @@ export function IntentFilters({
 
 export function IntentsTable({
   items,
-  linkServers,
   onSelect,
 }: {
   items: IntentDto[];
-  linkServers: boolean;
   onSelect: (intent: IntentDto) => void;
 }) {
   return (
@@ -149,7 +147,7 @@ export function IntentsTable({
                     <IntentResourceName intent={intent} />
                   </TableCell>
                   <TableCell>
-                    <IntentServerRef serverId={intent.serverId} link={linkServers} />
+                    <IntentServerRef serverId={intent.serverId} />
                   </TableCell>
                   <TableCell>
                     {intent.requestedBy

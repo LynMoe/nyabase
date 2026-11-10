@@ -1,3 +1,4 @@
+import type { ListScope } from '@nyabase/common';
 import type { MouseEvent } from 'react';
 import { cn } from '../../lib/utils.js';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '../ui/tooltip.js';
@@ -99,6 +100,15 @@ export type ResourceRefProps = {
   kind: ResourceKind;
   id: string;
   name?: string;
+  /** kind="user" only: shown as `@username` on hover. */
+  username?: string;
+  /**
+   * container / volume / shared-volume: which surface the link opens (`all` the
+   * 全平台 pages, `mine` the owner's). Omitted: the 全平台 page when the viewer may open it.
+   */
+  scope?: ListScope;
+  /** kind="pool" only: the pool's server, whose storage tab the link opens. */
+  serverId?: string;
 };
 
 const DEFAULT_LENGTH = 8;

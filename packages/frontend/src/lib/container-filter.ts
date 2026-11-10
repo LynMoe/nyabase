@@ -22,6 +22,7 @@ export function filterContainers(
     container.serverName,
     container.routedIp,
     container.ownerName,
+    container.ownerDisplayName,
     container.imageName,
   ]));
 }

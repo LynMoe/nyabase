@@ -31,6 +31,7 @@ import { cpuGrantLabel } from '../../lib/cpu-set.js';
 import { graceServerAccess, liveServerAccess } from '../../lib/effective-access.js';
 import { queryKeys } from '../../lib/query-keys.js';
 import { queryPollInterval } from '../../lib/query-lifecycle.js';
+import { ResourceRef } from '../refs/resource-ref.js';
 
 /**
  * What the signed-in user is granted and how much of it is already allocated.
@@ -156,7 +157,9 @@ function QuotaBody({
                 const disk = formatQuotaDimension(access.limitBytes, access.usedBytes);
                 return (
                   <TableRow key={access.sharedBackendId}>
-                    <TableCell className="font-medium">{name}</TableCell>
+                    <TableCell className="font-medium">
+                      <ResourceRef kind="shared-backend" id={access.sharedBackendId} name={name} />
+                    </TableCell>
                     <TableCell>
                       <QuotaCell
                         used={disk.used}
@@ -200,7 +203,7 @@ function ServerQuotaRow({
   const gpu = formatGpuGrantSummary(grant.gpuPciAddresses);
   return (
     <TableRow>
-      <TableCell className="font-medium">{name}</TableCell>
+      <TableCell className="font-medium"><ResourceRef kind="server" id={grant.serverId} name={name} /></TableCell>
       <TableCell>
         <p className="min-w-[5rem] text-sm tabular-nums" data-testid="quota-cpu">{cpuGrantLabel(grant)}</p>
       </TableCell>

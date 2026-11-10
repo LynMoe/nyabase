@@ -44,16 +44,15 @@ describe('user panel pages stay on scope=mine', () => {
     expect(src).not.toMatch(/api\.post/);
   });
 
-  it('local-volume-table gates admin links behind scope === all', () => {
-    const src = [
-      readSrc('components/storage/local-volume-table.tsx'),
-      readSrc('components/storage/local-volume-table.tsx'),
-    ].join('\n');
+  it('local-volume-table links attached containers on its own scope', () => {
+    const src = readSrc('components/storage/local-volume-table.tsx');
+    const list = readSrc('components/storage/volume-attachment-list.tsx');
     expect(src).not.toMatch(/['`]\/admin\//);
-    assertScopeAllOnly(src, /\/manage\/containers/);
-    expect(src).toMatch(/scope === 'mine'/);
+    // The table never picks a container route itself; ResourceRef does, from the scope.
+    expect(src).not.toMatch(/\/manage\/containers/);
+    expect(src).toMatch(/<VolumeAttachmentList attachments=\{volume\.attachments\} scope=\{scope\}/);
+    expect(list).toMatch(/kind="container"[^>]*scope=\{scope\}/);
     expect(src).toMatch(/resourceIntentsPath\(scope, IntentResourceType\.Volume, volume\.id\)/);
-    expect(src).toMatch(/to="\/containers\/\$containerId"/);
   });
 
   it('local-volume-form-dialog uses one volumes route and gates scope=all by scope', () => {

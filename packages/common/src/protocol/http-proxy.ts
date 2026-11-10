@@ -156,6 +156,8 @@ export interface HttpProxyBindingDto {
   mine: boolean;
   ownerId: string;
   ownerUsername: string;
+  /** Null when the owner row is gone (ownerUsername then falls back to the id). */
+  ownerDisplayName: string | null;
   hostname: string;
   domainPoolId: string;
   domainPool: string;

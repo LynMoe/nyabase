@@ -13,6 +13,7 @@ import { Badge } from '../../components/ui/badge.js';
 import { Button } from '../../components/ui/button.js';
 import { SectionCard } from '../../components/layout/section-card.js';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../../components/ui/table.js';
+import { ResourceRef } from '../../components/refs/resource-ref.js';
 import { TechnicalId } from '../../components/refs/technical-id.js';
 import { BindingTrafficCells, BindingTrafficHeads } from '../../components/http-proxy/binding-traffic.js';
 import {
@@ -133,9 +134,18 @@ export function AllBindingsCard({ bindings, onDelete }: {
           <TableBody>
             {bindings.map((binding) => (
               <TableRow key={binding.id}>
-                <TableCell>{binding.ownerUsername}</TableCell>
+                <TableCell>
+                  <ResourceRef
+                    kind="user"
+                    id={binding.ownerId}
+                    name={binding.ownerDisplayName ?? undefined}
+                    username={binding.ownerUsername}
+                  />
+                </TableCell>
                 <TableCell className="font-mono text-xs">{binding.hostname}</TableCell>
-                <TableCell>{binding.containerName ?? binding.containerId}</TableCell>
+                <TableCell>
+                  <ResourceRef kind="container" id={binding.containerId} name={binding.containerName ?? undefined} scope="all" />
+                </TableCell>
                 <TableCell>{binding.targetPort}</TableCell>
                 <TableCell>{binding.entryHttpsEnabled ? '是' : '否'}</TableCell>
                 <TableCell>

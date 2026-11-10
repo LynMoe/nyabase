@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react';
 import type { AuditLogDto, AuditResourceSnapshotDto } from '@nyabase/common';
 import { Eye } from 'lucide-react';
 import { Button } from '../../components/ui/button.js';
@@ -17,6 +18,7 @@ import {
   TableHeader,
   TableRow,
 } from '../../components/ui/table.js';
+import { ResourceRef, type ResourceKind } from '../../components/refs/resource-ref.js';
 import { TechnicalId } from '../../components/refs/technical-id.js';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../../components/ui/select.js';
 import { Field } from '../../components/layout/form-field.js';
@@ -57,7 +59,7 @@ export function AuditTable({ items, onView }: { items: AuditLogDto[]; onView: (i
               </TableCell>
               <TableCell className="min-w-0">
                 <ResourceSummary
-                  primary={actorLabel(log)}
+                  primary={<AuditActor log={log} />}
                   secondary={log.actorId}
                   secondaryLabel="操作者 ID"
                 />
@@ -72,7 +74,7 @@ export function AuditTable({ items, onView }: { items: AuditLogDto[]; onView: (i
               </TableCell>
               <TableCell className="min-w-0">
                 <ResourceSummary
-                  primary={targetLabel(log)}
+                  primary={<AuditTarget log={log} />}
                   secondary={targetSecondary(log)}
                   secondaryLabel="目标"
                 />
@@ -131,12 +133,12 @@ export function AuditDetailDialog({
             <section className="grid gap-3 lg:grid-cols-2">
               <Field label="时间" value={new Date(log.ts).toLocaleString('zh-CN')} />
               <Field label="操作" value={auditActionLabel(log.action)} />
-              <Field label="操作者" value={actorLabel(log)} />
+              <Field label="操作者" value={<AuditActor log={log} />} />
               <Field label="操作者 ID" value={log.actorId ?? '系统'} mono />
               {log.impersonatorId && (
                 <Field label="代操作的管理员" value={`${impersonatorLabel(log)}（${log.impersonatorId}）`} />
               )}
-              <Field label="目标" value={targetLabel(log)} />
+              <Field label="目标" value={<AuditTarget log={log} />} />
               <Field label="目标 ID" value={log.targetId ?? '无'} mono />
             </section>
 
@@ -189,7 +191,7 @@ export function ResourceSummary({
   secondary,
   secondaryLabel,
 }: {
-  primary: string;
+  primary: ReactNode;
   secondary: string | null;
   secondaryLabel: string;
 }) {
@@ -244,6 +246,48 @@ function SnapshotPanel({
         </dl>
       )}
     </div>
+  );
+}
+
+/** Audit target types that have a page to link to. */
+const AUDIT_TARGET_KINDS: Partial<Record<string, ResourceKind>> = {
+  user: 'user',
+  server: 'server',
+  image: 'image',
+  container: 'container',
+  // Local and shared volumes share the type; 全平台数据卷 lists both.
+  volume: 'volume',
+  shared_backend: 'shared-backend',
+};
+
+function AuditTarget({ log }: { log: AuditLogDto }) {
+  const kind = log.targetType ? AUDIT_TARGET_KINDS[log.targetType] : undefined;
+  if (!kind || !log.targetId) return <>{targetLabel(log)}</>;
+  return <ResourceRef kind={kind} id={log.targetId} name={targetLabel(log)} scope="all" />;
+}
+
+function AuditActor({ log }: { log: AuditLogDto }) {
+  if (!log.actorId) return <>{actorLabel(log)}</>;
+  const actor = (
+    <ResourceRef
+      kind="user"
+      id={log.actorId}
+      name={log.actorName ?? log.actorUsername ?? `用户 ${shortId(log.actorId)}`}
+      username={log.actorUsername ?? undefined}
+    />
+  );
+  if (!log.impersonatorId) return actor;
+  return (
+    <>
+      {actor}（
+      <ResourceRef
+        kind="user"
+        id={log.impersonatorId}
+        name={impersonatorLabel(log) ?? undefined}
+        username={log.impersonatorUsername ?? undefined}
+      />
+      {' '}代操作）
+    </>
   );
 }
 

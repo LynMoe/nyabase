@@ -1,4 +1,3 @@
-import { useState } from 'react';
 import { Pencil, Search, Trash2 } from 'lucide-react';
 import { IntentResourceType, type ListScope, type SharedVolumeDto } from '@nyabase/common';
 import { StatusBadge } from '../layout/status-badge.js';
@@ -20,6 +19,8 @@ import {
 import { ResourceIntentFailures, ResourceIntentHistory } from '../intents/resource-intent-failures.js';
 import { resourceIntentsPath } from '../../lib/intent-visibility.js';
 import { Field } from '../layout/form-field.js';
+import { useVolumeDetail, type VolumeDetailFocus } from './volume-detail-focus.js';
+import { VolumeAttachmentList } from './volume-attachment-list.js';
 
 export function SharedVolumeTable({
   volumes,
@@ -30,6 +31,7 @@ export function SharedVolumeTable({
   onInspect,
   testId = 'shared-volume-table',
   emptyLabel,
+  detailFocus,
 }: {
   volumes: SharedVolumeDto[];
   scope: ListScope;
@@ -39,8 +41,10 @@ export function SharedVolumeTable({
   onInspect?: (volume: SharedVolumeDto) => void;
   testId?: string;
   emptyLabel?: string;
+  /** Keeps the open detail in the page URL. */
+  detailFocus?: VolumeDetailFocus;
 }) {
-  const [detail, setDetail] = useState<SharedVolumeDto | null>(null);
+  const [detail, setDetail] = useVolumeDetail(volumes, detailFocus);
   const showActions = Boolean(onEdit || onDelete || onInspect);
   const columnCount = 5
     + (scope === 'all' ? 1 : 0)
@@ -129,17 +133,15 @@ function SharedVolumeRow({
           <ResourceRef kind="user" id={volume.ownerId} />
         </TableCell>
       ) : null}
-      {showBackendColumn ? <TableCell>{volume.sharedBackendName}</TableCell> : null}
+      {showBackendColumn ? (
+        <TableCell onClick={(event) => event.stopPropagation()}>
+          <ResourceRef kind="shared-backend" id={volume.sharedBackendId} name={volume.sharedBackendName} />
+        </TableCell>
+      ) : null}
       <TableCell>{formatCapacity(volume.sizeBytes)}</TableCell>
       <TableCell>{formatObservedUsage(volume.usedBytes)}</TableCell>
       <TableCell className="max-w-[16rem] whitespace-normal">
-        {volume.attachments.length === 0 ? (
-          <span className="text-muted-foreground">未挂载</span>
-        ) : (
-          <span data-testid="shared-volume-attachments">
-            挂载于 {volume.attachments.map((item) => `${item.containerName}（${item.containerPath}）`).join('、')}
-          </span>
-        )}
+        <VolumeAttachmentList attachments={volume.attachments} scope={scope} testId="shared-volume-attachments" />
       </TableCell>
       <TableCell className="whitespace-normal">
         <StatusBadge
@@ -213,7 +215,10 @@ export function SharedVolumeDetailDialog({
           {scope === 'all' ? (
             <Field label="所有者" value={<ResourceRef kind="user" id={volume.ownerId} />} />
           ) : null}
-          <Field label="共享后端" value={volume.sharedBackendName} />
+          <Field
+            label="共享后端"
+            value={<ResourceRef kind="shared-backend" id={volume.sharedBackendId} name={volume.sharedBackendName} />}
+          />
           <Field label="容量" value={formatCapacity(volume.sizeBytes)} />
           <Field label="已用" value={formatObservedUsage(volume.usedBytes)} />
           <Field label="缩容能力" value={shrinkLabel(volume)} />
@@ -240,13 +245,7 @@ export function SharedVolumeDetailDialog({
           <div className="sm:col-span-2">
             <p className="text-xs text-muted-foreground">挂载</p>
             <p className="mt-1">
-              {volume.attachments.length === 0 ? (
-                <span className="text-muted-foreground">未挂载</span>
-              ) : (
-                <span data-testid="shared-volume-attachments">
-                  挂载于 {volume.attachments.map((item) => `${item.containerName}（${item.containerPath}）`).join('、')}
-                </span>
-              )}
+              <VolumeAttachmentList attachments={volume.attachments} scope={scope} testId="shared-volume-attachments" />
             </p>
           </div>
         </div>

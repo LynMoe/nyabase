@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react';
 import { useState } from 'react';
 import { keepPreviousData, useQuery } from '@tanstack/react-query';
 import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
@@ -12,6 +13,7 @@ import { QueryView } from '../layout/query-view.js';
 import { MetricTile, SectionCard } from '../layout/section-card.js';
 import { Badge } from '../ui/badge.js';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../ui/table.js';
+import { ResourceRef } from '../refs/resource-ref.js';
 
 const RANGES = [
   { value: '7', label: '7 天' },
@@ -85,7 +87,14 @@ function StatsBody({
             empty="没有打开过通道"
             rows={stats.topContainers.map((entry) => ({
               key: entry.containerId,
-              name: `${entry.serverSlug}.${entry.containerName}`,
+              name: (
+                <ResourceRef
+                  kind="container"
+                  id={entry.containerId}
+                  name={`${entry.serverSlug}.${entry.containerName}`}
+                  scope={scope}
+                />
+              ),
               count: `${entry.channels} 个通道`,
               bytes: entry.bytes,
             }))}
@@ -97,7 +106,9 @@ function StatsBody({
             empty="没有连接"
             rows={stats.topUsers.map((entry) => ({
               key: entry.userId,
-              name: entry.displayName || entry.username,
+              name: (
+                <ResourceRef kind="user" id={entry.userId} name={entry.displayName ?? undefined} username={entry.username} />
+              ),
               count: `${entry.connections} 次连接`,
               bytes: entry.bytes,
             }))}
@@ -178,7 +189,7 @@ function TopTable({
 }: {
   title: string;
   empty: string;
-  rows: Array<{ key: string; name: string; count: string; bytes: number }>;
+  rows: Array<{ key: string; name: ReactNode; count: string; bytes: number }>;
 }) {
   return (
     <div className="overflow-hidden rounded-lg border">

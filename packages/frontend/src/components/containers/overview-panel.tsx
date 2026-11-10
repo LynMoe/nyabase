@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { type ReactNode, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { imageLabel, Role, type ContainerDto, type ListScope, type PerformanceSelfResponse } from '@nyabase/common';
 import { Link } from '@tanstack/react-router';
@@ -123,6 +123,7 @@ function SpecFootnote({ container, sample }: { container: ContainerDto; sample: 
         <dt className="shrink-0 text-muted-foreground">镜像</dt>
         <dd className="min-w-0">
           {container.imageFingerprint ? (
+            <ImageLink imageId={container.imageId}>
             <TechnicalId
               label="镜像"
               kind="fingerprint"
@@ -131,6 +132,7 @@ function SpecFootnote({ container, sample }: { container: ContainerDto; sample: 
               visible={container.imageName?.trim() ? imageLabel(container.imageName.trim(), container.imageVersion) : undefined}
               className="inline max-w-full truncate text-xs text-foreground"
             />
+            </ImageLink>
           ) : (container.imageName ?? '同步中')}
         </dd>
       </div>
@@ -139,5 +141,16 @@ function SpecFootnote({ container, sample }: { container: ContainerDto; sample: 
         <dd className="tabular-nums">{containerExpiryText(container.access)}</dd>
       </div>
     </dl>
+  );
+}
+
+/** The image page is admin-only; everyone else sees the label alone. */
+function ImageLink({ imageId, children }: { imageId: string; children: ReactNode }) {
+  const canOpen = useHasRole(Role.Admin);
+  if (!canOpen) return <>{children}</>;
+  return (
+    <Link to="/images/$id" params={{ id: imageId }} search={{ tab: 'overview' }} className="hover:underline">
+      {children}
+    </Link>
   );
 }

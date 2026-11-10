@@ -448,7 +448,7 @@ export class HttpProxyBindingsService {
         .where('container_id', 'in', containerIds)
         .execute(),
       executor.selectFrom('iam.users')
-        .select(['id', 'username', 'status'])
+        .select(['id', 'username', 'display_name', 'status'])
         .where('id', 'in', ownerIds)
         .execute(),
       this.traffic.statsFor(bindings.map((row) => row.id)),
@@ -482,6 +482,7 @@ export class HttpProxyBindingsService {
           mine: binding.owner_id === requesterId,
           ownerId: binding.owner_id,
           ownerUsername: usersById.get(binding.owner_id)?.username ?? binding.owner_id,
+          ownerDisplayName: usersById.get(binding.owner_id)?.display_name ?? null,
           hostname: binding.hostname,
           domainPoolId: binding.domain_pool_id,
           domainPool: pool?.wildcard_domain ?? binding.domain_pool_id,

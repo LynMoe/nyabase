@@ -13,6 +13,7 @@ import { api } from '../../lib/api.js';
 import { errorMessage } from '../../lib/api-error.js';
 import { toast } from '../../hooks/use-toast.js';
 import { queryKeys } from '../../lib/query-keys.js';
+import { ResourceRef } from '../../components/refs/resource-ref.js';
 
 export interface SshProxyAdminStatus {
   connectedProxies: number;
@@ -134,7 +135,6 @@ export function SshStatusSections({ status, noLines }: { status: SshProxyAdminSt
                   <TableCell className="py-8 text-center text-muted-foreground" colSpan={6}>暂无活跃连接</TableCell>
                 </TableRow>
               ) : connections.map((connection) => {
-                const targetId = connection.containerId ?? connection.instanceName;
                 return (
                   <TableRow key={`${connection.proxyId}:${connection.id}`}>
                     <TableCell>
@@ -146,33 +146,7 @@ export function SshStatusSections({ status, noLines }: { status: SshProxyAdminSt
                         </div>
                       ) : null}
                     </TableCell>
-                    <TableCell>
-                      {connection.bridges && connection.bridges.length > 0 ? (
-                        <div className="space-y-1">
-                          {connection.bridges.map((bridge) => (
-                            <div key={bridge.channelSeq} className="text-sm">
-                              {`${bridge.serverSlug}.${bridge.containerName}`}
-                              <span className="ml-2 text-xs text-muted-foreground tabular-nums">
-                                {formatBytes(bridge.bytesFromClient)} / {formatBytes(bridge.bytesToClient)}
-                              </span>
-                            </div>
-                          ))}
-                        </div>
-                      ) : connection.serverSlug && connection.containerName ? (
-                        <>
-                          <div>{`${connection.serverSlug}.${connection.containerName}`}</div>
-                          {targetId ? (
-                            <TechnicalId
-                              label={connection.containerId ? '容器' : '实例名'}
-                              value={targetId}
-                              kind="opaque"
-                            />
-                          ) : null}
-                        </>
-                      ) : (
-                        <span className="text-muted-foreground">未绑定容器</span>
-                      )}
-                    </TableCell>
+                    <TableCell><ConnectionTarget connection={connection} /></TableCell>
                     <TableCell>
                       <div className="font-mono text-xs">{connection.peer}</div>
                       <TechnicalId label="代理" value={connection.proxyId} kind="opaque" />
@@ -403,4 +377,52 @@ export function useSshProxyMutations({
   });
 
   return { disconnectAll, rotateHostKey, resetHostAuthorities };
+}
+
+/** The containers a live connection reaches: its open bridges, or the one its login pinned. */
+function ConnectionTarget({ connection }: { connection: NonNullable<SshProxyStatusReport['connections']>[number] }) {
+  const targetId = connection.containerId ?? connection.instanceName;
+  return (
+    <>
+      {connection.bridges && connection.bridges.length > 0 ? (
+        <div className="space-y-1">
+          {connection.bridges.map((bridge) => (
+            <div key={bridge.channelSeq} className="text-sm">
+              <ResourceRef
+                kind="container"
+                id={bridge.containerId}
+                name={`${bridge.serverSlug}.${bridge.containerName}`}
+                scope="all"
+              />
+              <span className="ml-2 text-xs text-muted-foreground tabular-nums">
+                {formatBytes(bridge.bytesFromClient)} / {formatBytes(bridge.bytesToClient)}
+              </span>
+            </div>
+          ))}
+        </div>
+      ) : connection.serverSlug && connection.containerName ? (
+        <>
+          <div>
+            {connection.containerId ? (
+              <ResourceRef
+                kind="container"
+                id={connection.containerId}
+                name={`${connection.serverSlug}.${connection.containerName}`}
+                scope="all"
+              />
+            ) : `${connection.serverSlug}.${connection.containerName}`}
+          </div>
+          {targetId ? (
+            <TechnicalId
+              label={connection.containerId ? '容器' : '实例名'}
+              value={targetId}
+              kind="opaque"
+            />
+          ) : null}
+        </>
+      ) : (
+        <span className="text-muted-foreground">未绑定容器</span>
+      )}
+    </>
+  );
 }

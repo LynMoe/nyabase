@@ -16,6 +16,7 @@ import { dataDiskSummary, quotaSummaryParts } from '../../lib/grant-bundle-form.
 import { roleLabel, userStatusLabel } from '../../lib/display-labels.js';
 import { userDeleting } from '../../lib/in-progress.js';
 import { relativeTime } from '../../lib/utils.js';
+import { ResourceRef } from '../../components/refs/resource-ref.js';
 
 /** One server a user holds a grant on; hovering shows the bundle and its effective quotas. */
 function ServerGrantBadge({ grant, servers }: { grant: ServerGrantDto; servers: UserServerDto[] }) {
@@ -37,7 +38,7 @@ function ServerGrantBadge({ grant, servers }: { grant: ServerGrantDto; servers: 
         className="px-1.5 py-0 text-xs font-normal"
         data-testid={`user-grant-${grant.userId}-${grant.serverId}`}
       >
-        {serverName(grant.serverId, servers)}
+        <ResourceRef kind="server" id={grant.serverId} name={serverName(grant.serverId, servers)} />
       </Badge>
     </Hint>
   );

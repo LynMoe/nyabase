@@ -63,7 +63,7 @@ export function SshLoginCard({ container, scope }: { container: ContainerDto; sc
       <div className="space-y-4">
         {ownContainer && sshKeys.missing ? <SshKeyNotice variant="inline" /> : null}
         {!ownContainer ? (
-          <p className="text-sm text-muted-foreground">仅所有者（{container.ownerName ?? '其他用户'}）可登录</p>
+          <p className="text-sm text-muted-foreground">仅所有者（{container.ownerDisplayName ?? container.ownerName ?? '其他用户'}）可登录</p>
         ) : login.ready ? (
           <SshLoginTabs login={login} onOpenSetup={() => setConfigOpen(true)} />
         ) : (

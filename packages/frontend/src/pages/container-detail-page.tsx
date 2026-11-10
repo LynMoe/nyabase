@@ -46,6 +46,7 @@ import {
   containerStatusLabel,
   lifecyclePhaseLabel,
 } from '../lib/status-labels.js';
+import { ResourceRef } from '../components/refs/resource-ref.js';
 
 export type DetailTab = 'overview' | 'console' | 'ssh';
 const DETAIL_TABS: DetailTab[] = ['overview', 'console', 'ssh'];
@@ -199,7 +200,17 @@ function ContainerDetailHeader({ container: c, scope }: { container: ContainerDt
           </span>
         ) : '容器'
       }
-      description={c ? c.serverName : undefined}
+      description={c ? (
+        <>
+          {admin ? (
+            <>
+              <ResourceRef kind="user" id={c.ownerId} name={c.ownerDisplayName} username={c.ownerName} />
+              {' · '}
+            </>
+          ) : null}
+          <ResourceRef kind="server" id={c.serverId} name={c.serverName} />
+        </>
+      ) : undefined}
       crumbs={[
         admin
           ? { label: '全平台容器', to: '/manage/containers' }

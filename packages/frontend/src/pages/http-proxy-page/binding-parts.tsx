@@ -36,6 +36,7 @@ import {
 import { BindingTrafficCells } from '../../components/http-proxy/binding-traffic.js';
 import { Badge } from '../../components/ui/badge.js';
 import { TableCell, TableRow } from '../../components/ui/table.js';
+import { ResourceRef } from '../../components/refs/resource-ref.js';
 
 type BindingBody = { hostname: string; containerId: string; targetPort: number };
 
@@ -262,7 +263,9 @@ export function BindingRow({
         </Badge>
         {warning ? <p className="mt-1 text-xs text-destructive">{warning}</p> : null}
       </TableCell>
-      <TableCell>{binding.containerName ?? binding.containerId}</TableCell>
+      <TableCell onClick={(event) => event.stopPropagation()}>
+        <ResourceRef kind="container" id={binding.containerId} name={binding.containerName ?? undefined} scope="mine" />
+      </TableCell>
       <TableCell>{binding.targetPort}</TableCell>
       <BindingTrafficCells stats={binding.stats} />
       <TableCell className="font-mono">{binding.domainPool}</TableCell>

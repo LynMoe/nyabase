@@ -706,7 +706,9 @@ export interface ContainerDto {
   serverId: string;
   serverName: string;
   ownerId: string;
+  /** The owner's username. */
   ownerName?: string;
+  ownerDisplayName?: string;
   name: string;
   instanceName: string | null;
   imageId: string;

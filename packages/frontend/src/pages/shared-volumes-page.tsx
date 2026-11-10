@@ -16,9 +16,21 @@ import { volumeInProgress } from '../lib/in-progress.js';
 import { queryKeys } from '../lib/query-keys.js';
 import { refetchWhileInProgress } from '../lib/query-lifecycle.js';
 import { toast } from '../hooks/use-toast.js';
+import { useNavigate, useSearch } from '@tanstack/react-router';
+import type { VolumeDetailFocus } from '../components/storage/volume-detail-focus.js';
+
+function useVolumeFocus(): VolumeDetailFocus {
+  const search = useSearch({ from: '/shared-volumes/' });
+  const navigate = useNavigate({ from: '/shared-volumes/' });
+  return {
+    id: search.volume ?? null,
+    onChange: (id) => { void navigate({ search: (prev) => ({ ...prev, volume: id ?? undefined }), replace: true }); },
+  };
+}
 
 export default function SharedVolumesPage() {
   const queryClient = useQueryClient();
+  const detailFocus = useVolumeFocus();
   const [createOpen, setCreateOpen] = useState(false);
   const [editTarget, setEditTarget] = useState<SharedVolumeDto | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<SharedVolumeDto | null>(null);
@@ -75,6 +87,7 @@ export default function SharedVolumesPage() {
               showBackendColumn
               onEdit={setEditTarget}
               onDelete={setDeleteTarget}
+              detailFocus={detailFocus}
             />
           </SectionCard>
         )}

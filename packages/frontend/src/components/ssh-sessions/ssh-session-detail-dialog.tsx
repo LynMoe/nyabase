@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import type { ListScope, SshSessionDetailDto } from '@nyabase/common';
 import { api } from '../../lib/api.js';
@@ -16,6 +17,7 @@ import { TechnicalId } from '../refs/technical-id.js';
 import { Badge } from '../ui/badge.js';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../ui/dialog.js';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../ui/table.js';
+import { ResourceRef } from '../refs/resource-ref.js';
 
 /** One connection: who, from where, with which key, and every channel it opened or was refused. */
 export function SshSessionDetailDialog({
@@ -39,28 +41,37 @@ export function SshSessionDetailDialog({
           <DialogTitle>SSH 连接详情</DialogTitle>
         </DialogHeader>
         <QueryView query={detailQuery} resourceName="SSH 连接" loadingLabel="加载 SSH 连接...">
-          {(session) => <SessionDetail session={session} />}
+          {(session) => <SessionDetail session={session} scope={scope} />}
         </QueryView>
       </DialogContent>
     </Dialog>
   );
 }
 
-function sessionUserLabel(session: SshSessionDetailDto): string {
+function SessionUser({ session }: { session: SshSessionDetailDto }) {
   const details = [
     session.displayName ? session.username : null,
     session.login !== session.username ? `登录名 ${session.login}` : null,
   ].filter(Boolean);
-  const name = session.displayName || session.username;
-  return details.length > 0 ? `${name}（${details.join('，')}）` : name;
+  return (
+    <>
+      <ResourceRef
+        kind="user"
+        id={session.userId}
+        name={session.displayName || session.username}
+        username={session.username}
+      />
+      {details.length > 0 ? `（${details.join('，')}）` : null}
+    </>
+  );
 }
 
-function SessionDetail({ session }: { session: SshSessionDetailDto }) {
+function SessionDetail({ session, scope }: { session: SshSessionDetailDto; scope: ListScope }) {
   const rejected = sortedCounts(session.rejectedRequests);
   return (
     <div className="max-h-[70vh] space-y-4 overflow-y-auto">
       <div className="grid gap-3 rounded-lg border p-3 text-sm sm:grid-cols-3">
-        <Field label="用户" value={sessionUserLabel(session)} />
+        <Field label="用户" value={<SessionUser session={session} />} />
         <Field label="来源" value={session.peer} mono />
         <Field label="客户端" value={session.clientVersion ?? '未知'} />
         <div className="min-w-0 sm:col-span-2">
@@ -69,7 +80,14 @@ function SessionDetail({ session }: { session: SshSessionDetailDto }) {
         </div>
         <Field
           label="登录名指定的容器"
-          value={session.pinned ? `${session.pinned.serverSlug}.${session.pinned.containerName}` : '无'}
+          value={session.pinned ? (
+            <ResourceRef
+              kind="container"
+              id={session.pinned.containerId}
+              name={`${session.pinned.serverSlug}.${session.pinned.containerName}`}
+              scope={scope}
+            />
+          ) : '无'}
         />
         <Field label="连接时间" value={formatTime(session.connectedAt)} />
         <Field
@@ -125,7 +143,12 @@ function SessionDetail({ session }: { session: SshSessionDetailDto }) {
                   {channel.route ? (
                     <>
                       <div className="max-w-[220px] truncate" title={`${channel.route.serverSlug}.${channel.route.containerName}`}>
-                        {channel.route.serverSlug}.{channel.route.containerName}
+                        <ResourceRef
+                          kind="container"
+                          id={channel.route.containerId}
+                          name={`${channel.route.serverSlug}.${channel.route.containerName}`}
+                          scope={scope}
+                        />
                       </div>
                       <div className="font-mono text-xs text-muted-foreground">{channel.route.routedIp}</div>
                     </>
@@ -165,7 +188,7 @@ function SessionDetail({ session }: { session: SshSessionDetailDto }) {
   );
 }
 
-function Field({ label, value, mono = false }: { label: string; value: string; mono?: boolean }) {
+function Field({ label, value, mono = false }: { label: string; value: ReactNode; mono?: boolean }) {
   return (
     <div className="min-w-0">
       <p className="text-xs text-muted-foreground">{label}</p>

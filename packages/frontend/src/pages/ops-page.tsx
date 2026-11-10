@@ -22,7 +22,6 @@ import { queryKeys } from '../lib/query-keys.js';
 import { refetchWhileInProgress } from '../lib/query-lifecycle.js';
 import { IntentFilters, type IntentFilterState, type StatusSegment } from './ops-page/ops-parts.js';
 import { IntentsTable } from './ops-page/ops-parts.js';
-import { ACCESS } from '../lib/route-access.js';
 
 const PAGE_SIZES = [25, 50, 100] as const;
 type OpsPageSize = (typeof PAGE_SIZES)[number];
@@ -55,8 +54,6 @@ function adminIntentsPath(filters: {
 export default function OpsPage() {
   const user = useAuthStore((state) => state.user);
   const canManageServers = user ? roleAtLeast(user.role, Role.UserAdmin) : false;
-  // The server pages themselves are admin-only; user admins only filter by server.
-  const canOpenServers = user ? roleAtLeast(user.role, ACCESS.servers) : false;
   const [filters, setFilters] = useState<IntentFilterState>({ segment: 'all' });
   const [pageSize, setPageSize] = useState<OpsPageSize>(50);
   const [selected, setSelected] = useState<IntentDto | null>(null);
@@ -111,7 +108,7 @@ export default function OpsPage() {
             </div>
           ) : (
             <div className={turning ? 'opacity-60 transition-opacity' : undefined} aria-busy={turning}>
-              <IntentsTable items={data.items} linkServers={canOpenServers} onSelect={setSelected} />
+              <IntentsTable items={data.items} onSelect={setSelected} />
             </div>
           )}
         </QueryView>

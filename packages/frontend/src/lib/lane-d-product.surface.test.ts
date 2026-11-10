@@ -69,7 +69,7 @@ describe('lane D product UI copy', () => {
   it('shows typed volume attachments and a layout cert expiry banner', () => {
     const page = read('pages/volumes-page.tsx');
     const table = read('components/storage/local-volume-table.tsx');
-    const dialog = read('components/storage/local-volume-table.tsx');
+    const dialog = read('components/storage/volume-attachment-list.tsx');
     const volumes = [page, table, dialog].join('\n');
     expect(volumes).toMatch(/volume\.attachments/);
     expect(volumes).toMatch(/挂载于/);

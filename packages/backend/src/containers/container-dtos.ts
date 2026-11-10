@@ -49,7 +49,7 @@ interface DtoContext {
   imageVersions: Map<string, string | null>;
   routes: Map<string, RouteRecord>;
   pools: Map<string, PoolRecord>;
-  owners: Map<string, string>;
+  owners: Map<string, { username: string; displayName: string }>;
   pending: Set<string>;
   localVolumes: Map<string, VolumeAttachmentDto[]>;
   sharedVolumes: Map<string, VolumeAttachmentDto[]>;
@@ -162,13 +162,15 @@ export class ContainerDtoAssembler {
       .execute();
     const { localVolumes, sharedVolumes } = await this.loadAttachmentDtos(ids);
     const access = await this.loadAccess(ownerIds, serverIds);
-    const owners = new Map<string, string>();
+    const owners = new Map<string, { username: string; displayName: string }>();
     if (ownerIds.length > 0) {
       const ownerRows = await this.database.selectFrom('iam.users')
-        .select(['id', 'username'])
+        .select(['id', 'username', 'display_name'])
         .where('id', 'in', ownerIds)
         .execute();
-      for (const owner of ownerRows) owners.set(owner.id, owner.username);
+      for (const owner of ownerRows) {
+        owners.set(owner.id, { username: owner.username, displayName: owner.display_name });
+      }
     }
     const poolRows = poolIds.length === 0
       ? []
@@ -211,7 +213,8 @@ export class ContainerDtoAssembler {
       serverId: row.server_id,
       serverName: server?.name ?? row.server_id,
       ownerId: row.owner_id,
-      ownerName: context.owners.get(row.owner_id),
+      ownerName: context.owners.get(row.owner_id)?.username,
+      ownerDisplayName: context.owners.get(row.owner_id)?.displayName,
       name: row.name,
       instanceName: route?.instanceName ?? row.instance_name,
       imageId: row.image_id,

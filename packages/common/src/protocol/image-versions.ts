@@ -5,7 +5,9 @@ export interface ImageVersionContainerDto {
   id: string;
   name: string;
   ownerId: string;
+  /** The owner's username. */
   ownerName: string;
+  ownerDisplayName: string;
   serverId: string;
   serverName: string;
   lifecyclePhase: ResourceLifecyclePhase;

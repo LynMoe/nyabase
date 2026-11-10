@@ -23,6 +23,7 @@ import { Input } from '../ui/input.js';
 import { Pagination } from '../ui/pagination.js';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../ui/table.js';
 import { SshSessionDetailDialog } from './ssh-session-detail-dialog.js';
+import { ResourceRef } from '../refs/resource-ref.js';
 
 const PAGE_SIZES = [20, 50, 100] as const;
 const STATES = [
@@ -103,7 +104,7 @@ export function SshSessionList({
             </div>
           ) : (
             <div className={turning ? 'opacity-60 transition-opacity' : undefined} aria-busy={turning}>
-              <SshSessionTable items={data.items} showUser={showUser} onSelect={setSelected} />
+              <SshSessionTable items={data.items} scope={scope} showUser={showUser} onSelect={setSelected} />
             </div>
           )}
         </QueryView>
@@ -133,10 +134,12 @@ export function SshSessionList({
 
 function SshSessionTable({
   items,
+  scope,
   showUser,
   onSelect,
 }: {
   items: SshSessionDto[];
+  scope: ListScope;
   showUser: boolean;
   onSelect: (id: string) => void;
 }) {
@@ -164,7 +167,14 @@ function SshSessionTable({
             >
               {showUser ? (
                 <TableCell>
-                  <div className="font-medium text-foreground">{session.displayName || session.username}</div>
+                  <div className="font-medium text-foreground">
+                    <ResourceRef
+                      kind="user"
+                      id={session.userId}
+                      name={session.displayName || session.username}
+                      username={session.username}
+                    />
+                  </div>
                   <div className="text-xs text-muted-foreground">
                     {session.username}
                     {session.login !== session.username ? ` · 登录名 ${session.login}` : null}
@@ -189,7 +199,12 @@ function SshSessionTable({
                         className="max-w-[240px] truncate font-normal"
                         title={`${target.serverSlug}.${target.containerName}`}
                       >
-                        {target.serverSlug}.{target.containerName}
+                        <ResourceRef
+                          kind="container"
+                          id={target.containerId}
+                          name={`${target.serverSlug}.${target.containerName}`}
+                          scope={scope}
+                        />
                       </Badge>
                     ))}
                   </div>

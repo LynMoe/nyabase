@@ -151,7 +151,7 @@ export default function HttpProxyOpsPage() {
         open={Boolean(deleteBinding)}
         onOpenChange={(open) => { if (!open) setDeleteBinding(null); }}
         title="删除发布绑定？"
-        description={`将删除用户「${deleteBinding?.ownerUsername}」的发布「${deleteBinding?.hostname}」。`}
+        description={`将删除用户「${deleteBinding?.ownerDisplayName ?? deleteBinding?.ownerUsername}」的发布「${deleteBinding?.hostname}」。`}
         confirmLabel="确认删除"
         pendingLabel="删除中..."
         pending={removeBinding.isPending}

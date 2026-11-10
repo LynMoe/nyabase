@@ -137,11 +137,13 @@ function ContainerTableRow({
       {admin ? (
         <TableCell>
           {container.ownerId ? (
-            <ResourceRef kind="user" id={container.ownerId} name={container.ownerName} />
+            <ResourceRef kind="user" id={container.ownerId} name={container.ownerDisplayName} username={container.ownerName} />
           ) : '—'}
         </TableCell>
       ) : null}
-      {showServerColumn ? <TableCell>{container.serverName}</TableCell> : null}
+      {showServerColumn ? (
+        <TableCell><ResourceRef kind="server" id={container.serverId} name={container.serverName} /></TableCell>
+      ) : null}
       <TableCell className="whitespace-normal">
         <ContainerStatusBadges container={container} />
       </TableCell>
@@ -239,8 +241,13 @@ function ContainerCard({ container, admin, usage, onAction }: RowProps) {
         </div>
       </div>
       <p className="text-xs text-muted-foreground">
-        {admin && container.ownerName ? `${container.ownerName} · ` : null}
-        {container.serverName}
+        {admin && container.ownerId ? (
+          <>
+            <ResourceRef kind="user" id={container.ownerId} name={container.ownerDisplayName} username={container.ownerName} />
+            {' · '}
+          </>
+        ) : null}
+        <ResourceRef kind="server" id={container.serverId} name={container.serverName} />
         {' · '}
         <span className="font-mono">{container.routedIp ?? '等待容器 IP'}</span>
       </p>

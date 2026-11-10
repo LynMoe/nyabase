@@ -85,7 +85,7 @@ export function DataDiskSection({
                 return (
                   <TableRow key={row.id}>
                     <TableCell className="whitespace-normal">
-                      <ResourceRef kind="pool" id={row.poolId} name={nameOf(row.poolId)} />
+                      <ResourceRef kind="pool" id={row.poolId} name={nameOf(row.poolId)} serverId={grant.serverId} />
                     </TableCell>
                     <TableCell>{formatGrantBytes(row.limitBytes)}</TableCell>
                     <TableCell>{used === undefined ? '—' : formatBytes(used)}</TableCell>

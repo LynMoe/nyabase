@@ -18,6 +18,7 @@ import {
   TableHeader,
   TableRow,
 } from '../ui/table.js';
+import { ResourceRef } from '../refs/resource-ref.js';
 
 const PG_STATE_LABEL = {
   ensuring: '登记中',
@@ -86,10 +87,14 @@ export function SharedVolumeCatalogInspectDialog({
                     {items.map((item) => (
                       <TableRow key={`${item.serverId}:${item.poolId ?? 'none'}`}>
                         <TableCell>
-                          <div>{item.serverName}</div>
+                          <div><ResourceRef kind="server" id={item.serverId} name={item.serverName} /></div>
                           <div className="text-xs text-muted-foreground">{serverStatusLabel(item.serverStatus)}</div>
                         </TableCell>
-                        <TableCell>{item.poolName ?? '—'}</TableCell>
+                        <TableCell>
+                          {item.poolId ? (
+                            <ResourceRef kind="pool" id={item.poolId} name={item.poolName ?? undefined} serverId={item.serverId} />
+                          ) : (item.poolName ?? '—')}
+                        </TableCell>
                         <TableCell>
                           <span className="inline-flex items-center">
                             {catalogPgPending(item.pgCatalogState) ? (

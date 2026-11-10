@@ -13,6 +13,7 @@ import {
   firewallProtocolPortsLabel,
   firewallSyncBadge,
 } from '../../lib/firewall-rules.js';
+import { ResourceRef } from '../refs/resource-ref.js';
 
 const CIDR_PREVIEW = 3;
 
@@ -75,7 +76,7 @@ export function FirewallServerList({
     <div className="flex flex-col gap-1">
       {serverIds.map((id) => (
         <div key={id} className="flex items-center gap-2 text-sm">
-          <span className="truncate">{serverName(id) ?? id}</span>
+          <span className="truncate"><ResourceRef kind="server" id={id} name={serverName(id)} /></span>
           <SyncBadge status={statusById.get(id)} />
         </div>
       ))}

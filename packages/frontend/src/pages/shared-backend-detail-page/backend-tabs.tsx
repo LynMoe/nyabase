@@ -46,6 +46,7 @@ import {
 import { Input } from '../../components/ui/input.js';
 import { ConfirmDialog } from '../../components/layout/confirm-dialog.js';
 import { MoreActions } from '../../components/layout/more-actions.js';
+import { ResourceRef } from '../../components/refs/resource-ref.js';
 
 export function BackendOverviewTab({
   backend,
@@ -189,7 +190,7 @@ export function BackendExecutorsTab({
             <TableBody>
               {executors.map((executor) => (
                 <TableRow key={executor.id}>
-                  <TableCell>{executor.serverName}</TableCell>
+                  <TableCell><ResourceRef kind="server" id={executor.serverId} name={executor.serverName} /></TableCell>
                   <TableCell className="font-mono">{executor.incusName}</TableCell>
                   <TableCell>{executor.registered ? '已登记' : '未登记'}</TableCell>
                   <TableCell>{formatCapacity(executor.totalBytes)}</TableCell>

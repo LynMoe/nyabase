@@ -41,6 +41,7 @@ import { ResourceIntentFailures, ResourceIntentHistory } from '../../components/
 import { formatBytes, relativeTime } from '../../lib/utils.js';
 import { assignmentInProgress, imageInProgress } from '../../lib/in-progress.js';
 import { lifecyclePhaseLabel } from '../../lib/display-labels.js';
+import { ResourceRef } from '../../components/refs/resource-ref.js';
 
 export function ImageOverviewTab({ image }: { image: AdminImageDto }) {
   return (
@@ -304,7 +305,7 @@ function AssignmentRow({
   const fingerprint = assignment.observedFingerprint ?? assignment.managedFingerprint;
   return (
     <TableRow>
-      <TableCell>{serverName}</TableCell>
+      <TableCell><ResourceRef kind="server" id={assignment.serverId} name={serverName} /></TableCell>
       <TableCell className="whitespace-normal">
         <StatusBadge
           label={ready ? '已同步' : lifecyclePhaseLabel(assignment.lifecyclePhase)}

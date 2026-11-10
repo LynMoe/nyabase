@@ -15,6 +15,17 @@ import { queryKeys } from '../lib/query-keys.js';
 import { refetchWhileInProgress } from '../lib/query-lifecycle.js';
 import { scopedPath } from '../lib/scoped-paths.js';
 import { toast } from '../hooks/use-toast.js';
+import { useNavigate, useSearch } from '@tanstack/react-router';
+import type { VolumeDetailFocus } from '../components/storage/volume-detail-focus.js';
+
+function useVolumeFocus(): VolumeDetailFocus {
+  const search = useSearch({ from: '/manage/volumes/' });
+  const navigate = useNavigate({ from: '/manage/volumes/' });
+  return {
+    id: search.volume ?? null,
+    onChange: (id) => { void navigate({ search: (prev) => ({ ...prev, volume: id ?? undefined }), replace: true }); },
+  };
+}
 
 type DeleteTarget = { kind: 'local'; volume: VolumeDto } | { kind: 'shared'; volume: SharedVolumeDto };
 
@@ -27,6 +38,7 @@ const pollWhileInProgress = { steadyIntervalMs: 5_000, isSettled: (volumes: Arra
  */
 export default function ManageVolumesPage() {
   const queryClient = useQueryClient();
+  const detailFocus = useVolumeFocus();
   const [editTarget, setEditTarget] = useState<VolumeDto | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null);
   const localQuery = useQuery({
@@ -74,10 +86,10 @@ export default function ManageVolumesPage() {
               showPoolColumn
               showServerColumn
               serverNameById={serverNameById}
-              canManageContainersAny
               onEdit={setEditTarget}
               onDelete={(volume) => setDeleteTarget({ kind: 'local', volume })}
               testId="manage-local-volume-table"
+              detailFocus={detailFocus}
             />
           </SectionCard>
         )}
@@ -91,6 +103,7 @@ export default function ManageVolumesPage() {
               showBackendColumn
               onDelete={(volume) => setDeleteTarget({ kind: 'shared', volume })}
               testId="manage-shared-volume-table"
+              detailFocus={detailFocus}
             />
           </SectionCard>
         )}

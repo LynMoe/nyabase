@@ -24,7 +24,6 @@ export function ServerStorageTab({
 }) {
   const queryClient = useQueryClient();
   const canManageVolumes = useHasRole(Role.Admin);
-  const canManageContainersAny = useHasRole(Role.UserAdmin);
   const [formOpen, setFormOpen] = useState(false);
   const [formVolume, setFormVolume] = useState<VolumeDto | undefined>(undefined);
   const [deleteTarget, setDeleteTarget] = useState<VolumeDto | null>(null);
@@ -77,7 +76,6 @@ export function ServerStorageTab({
             volumes={volumesQuery.data}
             scope="all"
             showPoolColumn
-            canManageContainersAny={canManageContainersAny}
             onEdit={openEdit}
             onDelete={setDeleteTarget}
             testId="server-volume-table"

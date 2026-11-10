@@ -44,6 +44,7 @@ import { RootShrinkOrchestrationDialog } from '../storage/root-shrink-orchestrat
 import { formatCapacity } from '../../lib/utils.js';
 import { observedRootUsedBytes } from '../../lib/storage-shrink.js';
 import { RootSizeDialog } from './spec-panel.js';
+import { ResourceRef } from '../refs/resource-ref.js';
 
 const BIND_STATE_LABEL = {
   attaching: '挂载中',
@@ -281,6 +282,7 @@ function StorageCard({
               running={container.actual.status === ContainerStatus.Running}
               canMutate={attachment.kind === 'shared' ? canMutateShared : canMutateLocal}
               usage={usageById.get(attachment.volumeId)}
+              scope={scope}
               onDetachRequest={onDetachRequest}
             />
           ))}
@@ -422,12 +424,14 @@ function AttachmentRow({
   running,
   canMutate,
   usage,
+  scope,
   onDetachRequest,
 }: {
   attachment: VolumeAttachmentDto;
   running: boolean;
   canMutate: boolean;
   usage?: VolumeUsage;
+  scope: ListScope;
   onDetachRequest: (attachment: VolumeAttachmentDto) => void;
 }) {
   const cancel = attachment.onlineCancelAllowed;
@@ -435,7 +439,14 @@ function AttachmentRow({
   const label = cancel ? '取消挂载' : '卸载';
   return (
     <TableRow>
-      <TableCell>{attachment.volumeName}</TableCell>
+      <TableCell>
+        <ResourceRef
+          kind={attachment.kind === 'shared' ? 'shared-volume' : 'volume'}
+          id={attachment.volumeId}
+          name={attachment.volumeName}
+          scope={scope}
+        />
+      </TableCell>
       <TableCell>{attachment.kind === 'shared' ? '共享卷' : '数据卷'}</TableCell>
       <TableCell className="min-w-32 whitespace-normal">{mountIdentifier(attachment.containerPath)}</TableCell>
       <TableCell>
