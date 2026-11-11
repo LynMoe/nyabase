@@ -393,10 +393,7 @@ function mockApi(urlString, method) {
       }],
     });
   }
-  if (p.endsWith('/performance/series')) {
-    const chart = { unit: 'cores', yMax: null, lines: [], otherCount: 0 };
-    return json({ range: '1h', serverId: 'srv-1', t: [], charts: { cpu: chart, memory: chart, disk: chart, network: chart }, gpus: [] });
-  }
+  if (p.endsWith('/performance/series')) return json(performanceSeries());
 
   if (p === '/servers') return json(all ? [server] : [userServer]);
   if (p === '/servers/srv-1') return json(all ? server : userServer);
@@ -594,6 +591,38 @@ function mockApi(urlString, method) {
   return json([]);
 }
 
+/** One shared card: two people time-slicing SM, memory stacked under the card total. */
+function performanceSeries() {
+  const t = Array.from({ length: 60 }, (_, index) => new Date(NOW - (59 - index) * 60_000).toISOString());
+  const wave = (base, swing, phase) => t.map((_, index) => Math.max(0, Math.min(1, base + swing * Math.sin(index / 6 + phase))));
+  const points = (values) => values.map((v, index) => ({ t: t[index], v: Number(v.toFixed(3)) }));
+  const people = [
+    { key: 'user-admin', label: '平台管理员', sm: wave(0.45, 0.2, 0), bw: wave(0.25, 0.1, 0), mem: 14 * 1024 ** 3 },
+    { key: 'user-alice', label: 'Alice Chen', sm: wave(0.3, 0.15, 2), bw: wave(0.4, 0.15, 2), mem: 6 * 1024 ** 3 },
+  ];
+  const line = (person, values) => ({ key: person.key, label: person.label, points: points(values) });
+  const chart = { unit: 'cores', yMax: null, lines: [], otherCount: 0 };
+  return {
+    range: '1h',
+    serverId: 'srv-1',
+    t,
+    charts: { cpu: chart, memory: chart, disk: chart, network: chart },
+    gpus: [{
+      pci: '0000:01:00.0',
+      index: 0,
+      unit: 'bytes',
+      yMax: 24 * 1024 ** 3,
+      otherCount: 0,
+      lines: people.map((person) => line(person, t.map(() => person.mem))),
+      utilization: {
+        sm: people.map((person) => line(person, person.sm)),
+        memoryBandwidth: people.map((person) => line(person, person.bw)),
+        otherCount: 0,
+      },
+    }],
+  };
+}
+
 async function portOpen(port) {
   return new Promise((resolve) => {
     const socket = createServer();
@@ -604,7 +633,8 @@ async function portOpen(port) {
 }
 
 async function ensureVite() {
-  if (await portOpen(5173)) return null;
+  // A caller-supplied base URL is a dev server someone else runs.
+  if (process.env.VISUAL_BASE_URL || await portOpen(5173)) return null;
   const child = spawn('pnpm', ['exec', 'vite', '--host', '127.0.0.1', '--port', '5173'], {
     cwd: frontendRoot,
     stdio: 'pipe',
@@ -698,6 +728,14 @@ const PAGES = [
 ];
 
 const DIALOGS = [
+  // Not a dialog: the per-card GPU memory + mirrored utilization charts, below the fold.
+  { name: 'usage-gpu-charts', path: '/usage', open: async (p) => {
+    const label = p.getByText('上：SM　下：显存带宽').first();
+    await label.waitFor({ timeout: 5_000 });
+    await label.scrollIntoViewIfNeeded();
+    await p.mouse.move(800, 600);
+    return true;
+  } },
   { name: 'dialog-create-user', path: '/users', open: (p) => clickByText(p, '新建用户') },
   { name: 'dialog-disable-user', path: '/users/user-alice', open: (p) => clickByText(p, '停用') },
   { name: 'dialog-create-group', path: '/groups', open: (p) => clickByText(p, '新建用户组') },

@@ -3,25 +3,16 @@ import type {
   PerformanceChartSeries,
   PerformanceGpuChartSeries,
   PerformanceMultiSeriesResponse,
-  PerformanceSeriesLine,
 } from '@nyabase/common';
 import { ChartLine } from 'lucide-react';
 import { formatBytesCompact, formatPercent, formatRate } from '../../lib/utils.js';
 import { EmptyState } from '../layout/empty-state.js';
 import { SectionCard } from '../layout/section-card.js';
 import { ChartHover, formatChartAxis } from './chart-hover.js';
+import { chartColor, latestValue } from './chart-lines.js';
+import { GpuUtilizationChart } from './gpu-utilization-chart.js';
 import { gpuChartTitle } from './host-occupancy.js';
 
-const COLORS = [
-  'hsl(221 83% 53%)',
-  'hsl(173 58% 39%)',
-  'hsl(32 90% 42%)',
-  'hsl(346 72% 48%)',
-  'hsl(262 47% 50%)',
-  'hsl(199 80% 38%)',
-  'hsl(142 45% 34%)',
-  'hsl(24 75% 42%)',
-];
 
 export function LinkedCharts({
   series,
@@ -64,8 +55,24 @@ export function LinkedCharts({
           title={gpuChartTitle(gpu.index, gpu.pci, gpuNames ?? new Map())}
           description={gpu.pci}
         >
-          <div className="px-1">
-            <MetricChart chart={gpu} times={series.t} syncId={syncId} dense={dense} plotClassName={height} />
+          <div className="space-y-4 px-1">
+            <div>
+              <p className="px-2 pb-1 text-xs font-medium text-muted-foreground">显存</p>
+              <MetricChart chart={gpu} times={series.t} syncId={syncId} dense={dense} plotClassName={height} stacked />
+            </div>
+            <div>
+              <p className="px-2 pb-1 text-xs font-medium text-muted-foreground">
+                利用率
+                <span className="ml-2 font-normal">上：SM　下：显存带宽</span>
+              </p>
+              <GpuUtilizationChart
+                utilization={gpu.utilization}
+                times={series.t}
+                syncId={syncId}
+                dense={dense}
+                plotClassName={height}
+              />
+            </div>
           </div>
         </SectionCard>
       ))}
@@ -79,12 +86,15 @@ function MetricChart({
   syncId,
   dense,
   plotClassName,
+  stacked = false,
 }: {
   chart: PerformanceChartSeries | PerformanceGpuChartSeries;
   times: string[];
   syncId: string;
   dense: boolean;
   plotClassName: string;
+  /** Lines are parts of one whole (a card's memory), not overlapping readings. */
+  stacked?: boolean;
 }) {
   const lines = chart.lines;
   if (times.length === 0) {
@@ -145,12 +155,13 @@ function MetricChart({
               )}
             />
             {lines.map((line) => {
-              const color = colorFor(line.key);
+              const color = chartColor(line.key);
               return (
                 <Area
                   key={line.key}
                   type="linear"
                   dataKey={line.key}
+                  stackId={stacked ? 'stack' : undefined}
                   stroke={color}
                   fill={color}
                   fillOpacity={0.14}
@@ -170,7 +181,7 @@ function MetricChart({
           const latest = latestValue(line);
           return (
             <span key={line.key} className="inline-flex items-center gap-1.5 tabular-nums">
-              <span className="inline-block h-1.5 w-1.5 rounded-full" style={{ background: colorFor(line.key) }} />
+              <span className="inline-block h-1.5 w-1.5 rounded-full" style={{ background: chartColor(line.key) }} />
               {line.label}
               {latest === null ? null : ` · ${formatValue(latest)}`}
             </span>
@@ -181,22 +192,7 @@ function MetricChart({
   );
 }
 
-function latestValue(line: PerformanceSeriesLine): number | null {
-  for (let index = line.points.length - 1; index >= 0; index -= 1) {
-    const value = line.points[index]?.v;
-    if (value != null) return value;
-  }
-  return null;
-}
-
 function formatCores(value: number): string {
   const text = Math.abs(value) >= 10 ? String(Math.round(value)) : value.toFixed(1);
   return `${text} 核`;
-}
-
-function colorFor(key: string): string {
-  if (key === 'host' || key === 'other') return 'hsl(221 83% 53%)';
-  let result = 0;
-  for (const char of key) result = (result * 33 + char.charCodeAt(0)) >>> 0;
-  return COLORS[result % COLORS.length] ?? COLORS[0];
 }

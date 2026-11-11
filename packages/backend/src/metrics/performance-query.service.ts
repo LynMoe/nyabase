@@ -28,6 +28,7 @@ import {
   type InventoryContainer,
   type ObservedSample,
 } from './performance-model.js';
+import { gpuCardCharts } from './performance-gpu-charts.js';
 
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -55,13 +56,15 @@ const INSTANT_QUERIES: Array<[string, (selector: string) => string, string]> = [
   ['volume_size_bytes', (selector) => `last_over_time(nyabase_container_volume_size_bytes${selector}[2m])`, 'nyabase_container_volume_size_bytes'],
   ['gpu_limit_bytes', (selector) => `last_over_time(nyabase_container_gpu_mem_limit_bytes${selector}[2m])`, 'nyabase_container_gpu_mem_limit_bytes'],
   ['gpu_process_bytes', (selector) => `last_over_time(nyabase_node_gpu_process_mem_used_bytes${selector}[2m])`, 'nyabase_node_gpu_process_mem_used_bytes'],
+  ['gpu_process_sm', (selector) => `last_over_time(nyabase_node_gpu_process_sm_ratio${selector}[2m])`, 'nyabase_node_gpu_process_sm_ratio'],
+  ['gpu_process_mem_bw', (selector) => `last_over_time(nyabase_node_gpu_process_mem_bw_ratio${selector}[2m])`, 'nyabase_node_gpu_process_mem_bw_ratio'],
 ];
 
 const SERIES_FAMILIES: Record<PerformanceMetric, readonly string[]> = {
   cpu: ['cpu_usage_cores'],
   memory: ['mem_used_bytes', 'mem_limit_bytes'],
   disk: ['root_used_bytes', 'root_size_bytes', 'volume_used_bytes', 'volume_size_bytes'],
-  gpu: ['gpu_process_bytes', 'gpu_limit_bytes'],
+  gpu: ['gpu_process_bytes', 'gpu_limit_bytes', 'gpu_process_sm', 'gpu_process_mem_bw'],
   network: ['net_rx_bytes_per_sec', 'net_tx_bytes_per_sec'],
 };
 
@@ -294,14 +297,7 @@ export class PerformanceQueryService {
     const count = Math.floor(window.seconds / window.step) + 1;
     const timeline = Array.from({ length: count }, (_, index) => (start + index * window.step) * 1000);
     const machine = await this.machineFrame(query.serverId);
-    const chart = (metric: PerformanceMetric, pci?: string) => absoluteChart({
-      metric,
-      containers,
-      series,
-      containerId,
-      timeline,
-      pci,
-    });
+    const chart = (metric: PerformanceMetric) => absoluteChart({ metric, containers, series, containerId, timeline });
     const cpu = chart('cpu');
     const memory = chart('memory');
     const disk = chart('disk');
@@ -317,17 +313,7 @@ export class PerformanceQueryService {
         disk: { unit: 'bytes', yMax: machine.diskTotal, otherCount: disk.otherCount, lines: disk.lines },
         network: { unit: 'bytes_per_sec', yMax: null, otherCount: network.otherCount, lines: network.lines },
       },
-      gpus: machine.gpus.map((card) => {
-        const gpu = chart('gpu', card.pci);
-        return {
-          pci: card.pci,
-          index: card.index,
-          unit: 'bytes' as const,
-          yMax: card.totalBytes,
-          otherCount: gpu.otherCount,
-          lines: gpu.lines,
-        };
-      }),
+      gpus: gpuCardCharts({ containers, series, containerId, timeline }, machine.gpus),
     };
   }
 

@@ -7,6 +7,7 @@ import type {
   PerformancePersonRow,
   PerformanceQuantity,
   PerformanceSeriesLine,
+  PerformanceSeriesPoint,
   PerformanceUsageResponse,
   PerformanceVolumeUsage,
 } from '@nyabase/common';
@@ -242,56 +243,109 @@ export function buildChart(input: {
   return { lines: result, otherCount: rest.length };
 }
 
-export function absoluteChart(input: {
+/** Per-process GPU families: memory bytes, SM share, memory-controller share. */
+export type GpuProcessFamily = 'gpu_process_bytes' | 'gpu_process_sm' | 'gpu_process_mem_bw';
+
+export interface ChartInput {
   metric: PerformanceMetric;
   containers: readonly InventoryContainer[];
   series: ReadonlyMap<string, Array<{ ts: number; labels: Record<string, string>; value: number }>>;
   containerId?: string;
   timeline: readonly number[];
   pci?: string;
-}): { lines: PerformanceSeriesLine[]; otherCount: number } {
-  const containers = input.containerId
-    ? input.containers.filter((container) => container.id === input.containerId)
-    : input.containers;
-  const read = (group: readonly InventoryContainer[], ts: number) => {
-    const live = group.filter((container) => container.createdAt <= ts);
-    if (live.length === 0) return null;
-    return absoluteUsed(input.metric, live, input.series, ts, input.pci) ?? 0;
-  };
-  const pointsFor = (group: readonly InventoryContainer[]) => input.timeline.map((ts) => ({
-    t: new Date(ts).toISOString(),
-    v: read(group, ts),
-  }));
+  gpuFamily?: GpuProcessFamily;
+  /** Drop owners whose line never rises above 0 (a card they never held). */
+  hideIdle?: boolean;
+}
+
+/** One line's containers: the requested container, or one owner's containers. */
+export interface ChartGroup {
+  key: string;
+  label: string;
+  containers: InventoryContainer[];
+}
+
+export function chartGroups(input: Pick<ChartInput, 'containers' | 'containerId'>): ChartGroup[] {
   if (input.containerId) {
-    const container = containers[0];
-    if (!container) return { lines: [], otherCount: 0 };
-    return { otherCount: 0, lines: [{ key: container.id, label: container.name, points: pointsFor([container]) }] };
+    const container = input.containers.find((item) => item.id === input.containerId);
+    return container ? [{ key: container.id, label: container.name, containers: [container] }] : [];
   }
   const byOwner = new Map<string, InventoryContainer[]>();
-  for (const container of containers) {
+  for (const container of input.containers) {
     const group = byOwner.get(container.ownerId) ?? [];
     group.push(container);
     byOwner.set(container.ownerId, group);
   }
-  const lines = [...byOwner.entries()].map(([userId, group]) => ({
+  return [...byOwner.entries()].map(([userId, group]) => ({
     key: userId,
     label: group[0]?.displayName || group[0]?.username || userId,
-    points: pointsFor(group),
-    rank: lastValue(input.timeline, (ts) => read(group, ts)),
+    containers: group,
   }));
-  lines.sort((left, right) => (right.rank ?? -1) - (left.rank ?? -1) || left.label.localeCompare(right.label));
-  const head = lines.slice(0, PERFORMANCE_SERIES_LIMIT);
-  const rest = lines.slice(PERFORMANCE_SERIES_LIMIT);
-  const result: PerformanceSeriesLine[] = head.map(({ key, label, points }) => ({ key, label, points }));
-  const restContainers = rest.flatMap((line) => byOwner.get(line.key) ?? []);
-  if (restContainers.length > 0) {
-    result.push({
-      key: 'other',
-      label: '其他',
-      points: pointsFor(restContainers),
-    });
+}
+
+export function chartPoints(input: ChartInput, group: readonly InventoryContainer[]): PerformanceSeriesPoint[] {
+  return input.timeline.map((ts) => {
+    const live = group.filter((container) => container.createdAt <= ts);
+    return {
+      t: new Date(ts).toISOString(),
+      v: live.length === 0
+        ? null
+        : absoluteUsed(input.metric, live, input.series, ts, input.pci, input.gpuFamily) ?? 0,
+    };
+  });
+}
+
+/** Latest non-null value, for ranking lines. */
+export function latestPoint(points: readonly PerformanceSeriesPoint[]): number | null {
+  for (let index = points.length - 1; index >= 0; index -= 1) {
+    const value = points[index]?.v;
+    if (value !== null && value !== undefined) return value;
   }
-  return { lines: result, otherCount: rest.length };
+  return null;
+}
+
+/**
+ * Splits ranked groups into the first PERFORMANCE_SERIES_LIMIT lines and the
+ * containers folded into the `other` line.
+ */
+export function splitRanked<T extends ChartGroup>(ranked: readonly T[]): {
+  head: T[];
+  restContainers: InventoryContainer[];
+  otherCount: number;
+} {
+  const rest = ranked.slice(PERFORMANCE_SERIES_LIMIT);
+  return {
+    head: ranked.slice(0, PERFORMANCE_SERIES_LIMIT),
+    restContainers: rest.flatMap((group) => group.containers),
+    otherCount: rest.length,
+  };
+}
+
+export function idlePoints(points: readonly PerformanceSeriesPoint[]): boolean {
+  return points.every((point) => point.v === null || point.v <= 0);
+}
+
+export const OTHER_LINE = { key: 'other', label: '其他' } as const;
+
+export function absoluteChart(input: ChartInput): { lines: PerformanceSeriesLine[]; otherCount: number } {
+  const groups = chartGroups(input);
+  if (input.containerId) {
+    return {
+      otherCount: 0,
+      lines: groups.map((group) => ({ key: group.key, label: group.label, points: chartPoints(input, group.containers) })),
+    };
+  }
+  const lines = groups.map((group) => {
+    const points = chartPoints(input, group.containers);
+    return { ...group, points, rank: latestPoint(points) };
+  }).filter((line) => !input.hideIdle || !idlePoints(line.points));
+  lines.sort((left, right) => (right.rank ?? -1) - (left.rank ?? -1) || left.label.localeCompare(right.label));
+  const { head, restContainers, otherCount } = splitRanked(lines);
+  const result: PerformanceSeriesLine[] = head.map(({ key, label, points }) => ({ key, label, points }));
+  if (restContainers.length > 0) {
+    result.push({ ...OTHER_LINE, points: chartPoints(input, restContainers) });
+  }
+  return { lines: result, otherCount };
 }
 
 function containerRow(
@@ -563,6 +617,7 @@ export function absoluteUsed(
   series: ReadonlyMap<string, Array<{ ts: number; labels: Record<string, string>; value: number }>>,
   ts: number,
   pci?: string,
+  gpuFamily: GpuProcessFamily = 'gpu_process_bytes',
 ): number | null {
   if (metric === 'network') {
     const rx = sumAt(series.get('net_rx_bytes_per_sec') ?? [], containers, ts);
@@ -582,7 +637,7 @@ export function absoluteUsed(
       sumAt(volumeUsed, containers, ts),
     ]);
   }
-  const points = (series.get('gpu_process_bytes') ?? [])
+  const points = (series.get(gpuFamily) ?? [])
     .filter((point) => pci === undefined || point.labels.gpu_pci === pci);
   return sumAt(points, containers, ts);
 }

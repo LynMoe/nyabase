@@ -22,6 +22,16 @@ export const NVIDIA_GPU_METRIC_DEFINITIONS: Readonly<Record<string, NodeMetricDe
     type: 'gauge',
     labels: ['gpu_pci', 'container_id'],
   },
+  /** Share of the card's time a container had kernels running (`pmon` sm). */
+  nyabase_node_gpu_process_sm_ratio: {
+    type: 'gauge',
+    labels: ['gpu_pci', 'container_id'],
+  },
+  /** Share of the card's time a container kept the memory controller busy (`pmon` mem). */
+  nyabase_node_gpu_process_mem_bw_ratio: {
+    type: 'gauge',
+    labels: ['gpu_pci', 'container_id'],
+  },
 };
 
 const UUID_PATTERN =

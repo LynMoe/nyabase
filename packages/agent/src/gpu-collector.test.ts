@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   collectNvidiaGpuMetrics,
   joinGpuProcesses,
+  parseGpuProcessUtilization,
   parseGpuStats,
   type ReadOnlyCommand,
   type ReadOnlyNodeFileSystem,
@@ -27,6 +28,36 @@ describe('parseGpuStats', () => {
         uuid: 'GPU-a',
       })]);
     }
+  });
+});
+
+// Verbatim shape of `nvidia-smi pmon -c 1 -s u` on driver 595 (A800).
+const PMON_595 = [
+  '# gpu         pid   type     sm    mem    enc    dec    jpg    ofa    command ',
+  '# Idx           #    C/G      %      %      %      %      %      %    name ',
+  '    0         42     C     63     21      -      -      -      -    python         ',
+  '    0         43     C      -      -      -      -      -      -    python         ',
+  '    1          -     -      -      -      -      -      -      -    -              ',
+  '',
+].join('\n');
+
+describe('parseGpuProcessUtilization', () => {
+  it('reads sm and mem by header position and treats unsampled processes as idle', () => {
+    expect(parseGpuProcessUtilization(PMON_595)).toEqual([
+      { gpuIndex: 0, pid: 42, smRatio: 0.63, memoryBandwidthRatio: 0.21 },
+      { gpuIndex: 0, pid: 43, smRatio: 0, memoryBandwidthRatio: 0 },
+    ]);
+  });
+
+  it('follows the header when older drivers omit columns', () => {
+    const old = '# gpu pid type sm mem enc dec command\n# Idx # C/G % % % % name\n 2 7 C 5 90 0 0 train\n';
+    expect(parseGpuProcessUtilization(old)).toEqual([
+      { gpuIndex: 2, pid: 7, smRatio: 0.05, memoryBandwidthRatio: 0.9 },
+    ]);
+  });
+
+  it('returns nothing without a recognisable header', () => {
+    expect(parseGpuProcessUtilization('0 42 C 63 21 python\n')).toEqual([]);
   });
 });
 
@@ -147,6 +178,33 @@ describe('collectNvidiaGpuMetrics', () => {
         name: 'nyabase_node_gpu_process_mem_used_bytes',
         labels: { gpu_pci: '00000000:42:00.0', container_id: '__unattributed__' },
       }),
+    ]));
+  });
+
+  it('sums pmon shares per container and card, capped at the whole card', async () => {
+    const hex = '11111111111141118111111111111111';
+    const command: ReadOnlyCommand = async (file, args) => {
+      if (file === 'nvidia-smi' && args[0]?.startsWith('--query-gpu=')) {
+        return { stdout: '0, 00000000:41:00.0, GPU-a, 90, 0, 4096, 40, 10\n' };
+      }
+      if (file === 'nvidia-smi' && args[0] === 'pmon') {
+        return { stdout: '# gpu pid type sm mem command\n 0 42 C 70 30 python\n 0 43 C 50 20 python\n 0 44 C 10 5 other\n' };
+      }
+      if (file === 'nvidia-smi') return { stdout: '' };
+      throw new Error('ENOENT');
+    };
+    const cgroup = '0::/lxc.payload.nyc-' + hex + '\n';
+    const samples = await collectNvidiaGpuMetrics({
+      fileSystem: new FakeFileSystem({ '/proc/42/cgroup': cgroup, '/proc/43/cgroup': cgroup }),
+      command,
+    });
+    const container = { gpu_pci: '00000000:41:00.0', container_id: '11111111-1111-4111-8111-111111111111' };
+    const host = { gpu_pci: '00000000:41:00.0', container_id: '__unattributed__' };
+    expect(samples).toEqual(expect.arrayContaining([
+      { name: 'nyabase_node_gpu_process_sm_ratio', labels: container, value: 1 },
+      { name: 'nyabase_node_gpu_process_mem_bw_ratio', labels: container, value: 0.5 },
+      { name: 'nyabase_node_gpu_process_sm_ratio', labels: host, value: 0.1 },
+      { name: 'nyabase_node_gpu_process_mem_bw_ratio', labels: host, value: 0.05 },
     ]));
   });
 

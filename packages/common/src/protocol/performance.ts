@@ -107,9 +107,20 @@ export interface PerformanceChartSeries {
   otherCount: number;
 }
 
+/**
+ * Per-card time shares (0..1) of each line. `sm` and `memoryBandwidth` carry
+ * the same keys in the same order, so a line is one user (or container) in both.
+ */
+export interface PerformanceGpuUtilizationSeries {
+  sm: PerformanceSeriesLine[];
+  memoryBandwidth: PerformanceSeriesLine[];
+  otherCount: number;
+}
+
 export interface PerformanceGpuChartSeries extends PerformanceChartSeries {
   pci: string;
   index: number | null;
+  utilization: PerformanceGpuUtilizationSeries;
 }
 
 export interface PerformanceMultiSeriesResponse {

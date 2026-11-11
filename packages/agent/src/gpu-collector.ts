@@ -11,6 +11,8 @@ import {
 
 const execFile = promisify(childExecFile);
 const COMMAND_TIMEOUT_MS = 1_000;
+/** `pmon -c 1` waits for one sampling interval (0.3 s on an idle 8-card A800). */
+const PMON_TIMEOUT_MS = 3_000;
 const COMMAND_MAX_BUFFER_BYTES = 256 * 1024;
 const BYTES_PER_MIB = 1024 * 1024;
 
@@ -51,6 +53,14 @@ export interface GpuProcessMetricRecord {
   readonly containerId: string;
 }
 
+/** One `nvidia-smi pmon` row: per-process share of the card over the last sample. */
+export interface GpuProcessUtilizationRecord {
+  readonly gpuIndex: number;
+  readonly pid: number;
+  readonly smRatio: number;
+  readonly memoryBandwidthRatio: number;
+}
+
 const defaultFileSystem: ReadOnlyNodeFileSystem = {
   readFile: (path) => fsReadFile(path, 'utf8'),
 };
@@ -72,8 +82,8 @@ const defaultCommand: ReadOnlyCommand = async (file, args, options) => {
   }
 };
 
-function commandOptions(): ReadOnlyCommandOptions {
-  return { timeout: COMMAND_TIMEOUT_MS, maxBuffer: COMMAND_MAX_BUFFER_BYTES };
+function commandOptions(timeout = COMMAND_TIMEOUT_MS): ReadOnlyCommandOptions {
+  return { timeout, maxBuffer: COMMAND_MAX_BUFFER_BYTES };
 }
 
 async function commandSucceeds(
@@ -133,13 +143,33 @@ export async function collectNvidiaGpuMetrics(
     addSample(samples, 'nyabase_node_gpu_temperature_celsius', labels, gpu.temperatureCelsius);
     addSample(samples, 'nyabase_node_gpu_power_watts', labels, gpu.powerWatts);
   }
-  samples.push(...await collectGpuProcessMetrics(gpus, fileSystem, command));
+  const containerOf = pidContainerResolver(fileSystem);
+  const [memory, utilization] = await Promise.all([
+    collectGpuProcessMetrics(gpus, containerOf, command),
+    collectGpuProcessUtilization(gpus, containerOf, command),
+  ]);
+  samples.push(...memory, ...utilization);
   return samples;
+}
+
+type PidContainerResolver = (pid: number) => Promise<string>;
+
+/** Memoizes `/proc/<pid>/cgroup` lookups within one collection. */
+function pidContainerResolver(fileSystem: ReadOnlyNodeFileSystem): PidContainerResolver {
+  const cache = new Map<number, Promise<string>>();
+  return (pid) => {
+    let entry = cache.get(pid);
+    if (!entry) {
+      entry = pidContainerId(fileSystem, pid);
+      cache.set(pid, entry);
+    }
+    return entry;
+  };
 }
 
 async function collectGpuProcessMetrics(
   gpus: readonly GpuMetricRecord[],
-  fileSystem: ReadOnlyNodeFileSystem,
+  containerOf: PidContainerResolver,
   command: ReadOnlyCommand,
 ): Promise<NodeMetricSample[]> {
   let stdout: string;
@@ -167,7 +197,7 @@ async function collectGpuProcessMetrics(
     processes.push({
       gpuUuid,
       memoryUsedBytes: memoryMiB * BYTES_PER_MIB,
-      containerId: await pidContainerId(fileSystem, pid),
+      containerId: await containerOf(pid),
     });
   }
   return joinGpuProcesses(gpus, processes).map((process) => ({
@@ -178,6 +208,75 @@ async function collectGpuProcessMetrics(
     },
     value: process.memoryUsedBytes,
   }));
+}
+
+/**
+ * SM and memory-controller share per container and card. Without MPS the card
+ * time-slices between processes, so the shares of one card sum to at most 1.
+ */
+async function collectGpuProcessUtilization(
+  gpus: readonly GpuMetricRecord[],
+  containerOf: PidContainerResolver,
+  command: ReadOnlyCommand,
+): Promise<NodeMetricSample[]> {
+  let stdout: string;
+  try {
+    ({ stdout } = await command('nvidia-smi', ['pmon', '-c', '1', '-s', 'u'], commandOptions(PMON_TIMEOUT_MS)));
+  } catch {
+    return [];
+  }
+  const pciByIndex = new Map(gpus.map((gpu) => [gpu.index, gpu.pci] as const));
+  const totals = new Map<string, { pci: string; containerId: string; sm: number; bandwidth: number }>();
+  for (const row of parseGpuProcessUtilization(stdout)) {
+    const pci = pciByIndex.get(row.gpuIndex);
+    if (!pci) continue;
+    const containerId = await containerOf(row.pid);
+    const key = `${pci}\0${containerId}`;
+    const current = totals.get(key) ?? { pci, containerId, sm: 0, bandwidth: 0 };
+    current.sm += row.smRatio;
+    current.bandwidth += row.memoryBandwidthRatio;
+    totals.set(key, current);
+  }
+  return [...totals.values()].flatMap((total) => {
+    const labels = { gpu_pci: total.pci, container_id: total.containerId };
+    return [
+      { name: 'nyabase_node_gpu_process_sm_ratio', labels, value: Math.min(1, total.sm) },
+      { name: 'nyabase_node_gpu_process_mem_bw_ratio', labels, value: Math.min(1, total.bandwidth) },
+    ];
+  });
+}
+
+/**
+ * Parses `nvidia-smi pmon -s u`. Columns are located by the header because
+ * drivers add columns (jpg, ofa); `-` means no sample in the interval, i.e. idle.
+ */
+export function parseGpuProcessUtilization(content: string): GpuProcessUtilizationRecord[] {
+  const lines = content.split(/\r?\n/);
+  const header = lines.find((line) => /^#\s*gpu\b/i.test(line.trim()));
+  if (!header) return [];
+  const columns = header.trim().replace(/^#\s*/, '').split(/\s+/).map((name) => name.toLowerCase());
+  const at = (name: string) => columns.indexOf(name);
+  const [gpuAt, pidAt, smAt, memAt] = [at('gpu'), at('pid'), at('sm'), at('mem')];
+  if ([gpuAt, pidAt, smAt, memAt].some((index) => index < 0)) return [];
+  const rows: GpuProcessUtilizationRecord[] = [];
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (trimmed.length === 0 || trimmed.startsWith('#')) continue;
+    const fields = trimmed.split(/\s+/);
+    const gpuIndex = Number(fields[gpuAt]);
+    const pid = Number(fields[pidAt]);
+    if (!Number.isInteger(gpuIndex) || gpuIndex < 0 || !Number.isSafeInteger(pid) || pid <= 0) continue;
+    const sm = sampledShare(fields[smAt]);
+    const bandwidth = sampledShare(fields[memAt]);
+    if (sm === undefined || bandwidth === undefined) continue;
+    rows.push({ gpuIndex, pid, smRatio: sm, memoryBandwidthRatio: bandwidth });
+  }
+  return rows;
+}
+
+function sampledShare(value: string | undefined): number | undefined {
+  if (value === '-') return 0;
+  return boundedPercent(value);
 }
 
 async function pidContainerId(fileSystem: ReadOnlyNodeFileSystem, pid: number): Promise<string> {
