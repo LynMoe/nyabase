@@ -187,9 +187,15 @@ export class LinuxNodeMetricsCollector {
       return [];
     }
     const devices = parseDiskStats(content);
-    const groups = await Promise.all(devices.map(async (device) => {
-      const deviceId = await this.stableDeviceId(device.name);
-      if (!deviceId) return [];
+    const deviceIds = await Promise.all(devices.map((device) => this.stableDeviceId(device.name)));
+    // Two block devices can resolve to one identity (NVMe namespaces share their
+    // controller's serial). The Backend rejects a response with a duplicate
+    // series, so only the first device (in /proc/diskstats order) reports it.
+    const claimed = new Set<string>();
+    const groups = await Promise.all(devices.map(async (device, index) => {
+      const deviceId = deviceIds[index];
+      if (!deviceId || claimed.has(deviceId)) return [];
+      claimed.add(deviceId);
       const samples: NodeMetricSample[] = [
         {
           name: 'nyabase_node_disk_io_read_bytes_total',
@@ -480,6 +486,9 @@ function isVirtualBlockDevice(name: string): boolean {
     || name.startsWith('dm-')
     || name.startsWith('md')
     || /^(?:sd[a-z]+\d+|vd[a-z]+\d+|xvd[a-z]+\d+|nvme\d+n\d+p\d+|mmcblk\d+p\d+)$/.test(name)
+    // Hidden native-multipath paths (`nvme0c0n1`): their I/O is also counted on
+    // the head device (`nvme0n1`), which carries the same serial.
+    || /^nvme\d+c\d+n\d+$/.test(name)
   );
 }
 

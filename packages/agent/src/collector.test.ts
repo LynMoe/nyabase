@@ -7,7 +7,12 @@ import {
   type ReadOnlyCommand,
   type ReadOnlyNodeFileSystem,
 } from './collector.js';
-import { CORE_NODE_METRIC_CATALOG, validateNodeMetricSample } from '@nyabase/common';
+import {
+  CORE_NODE_METRIC_CATALOG,
+  parseOpenMetrics,
+  renderOpenMetrics,
+  validateNodeMetricSample,
+} from '@nyabase/common';
 
 class FakeFileSystem implements ReadOnlyNodeFileSystem {
   constructor(
@@ -134,8 +139,37 @@ describe('LinuxNodeMetricsCollector', () => {
     expect(second.some((sample) => sample.labels && 'pid' in sample.labels)).toBe(false);
   });
 
+  it('reports one disk series per identity with NVMe multipath paths and shared serials', async () => {
+    // Kernel 6.8 on a multi-controller-capable NVMe (h200-1's KIOXIA CD8) lists the
+    // hidden path `nvme0c0n1` next to `nvme0n1`; both resolve to the controller serial.
+    const line = (name: string, sectors: number) => `259 0 ${name} 1 0 ${sectors} 4 2 0 ${sectors} 2 0 0 0 0 0 0 0 0 0`;
+    const files = {
+      '/proc/diskstats': [
+        line('nvme0c0n1', 4096),
+        line('nvme0n1', 4096),
+        line('nvme0n1p1', 4096),
+        line('nvme0n2', 512),
+        line('nvme1n1', 2048),
+      ].join('\n'),
+      '/sys/class/block/nvme0c0n1/device/serial': 'SERIAL0\n',
+      '/sys/class/block/nvme0n1/device/serial': 'SERIAL0\n',
+      '/sys/class/block/nvme0n2/device/serial': 'SERIAL0\n',
+      '/sys/class/block/nvme1n1/device/serial': 'SERIAL1\n',
+    };
+    const collector = new LinuxNodeMetricsCollector({
+      fileSystem: new FakeFileSystem(files, []),
+      command: async () => { throw new Error('no commands'); },
+    });
 
-
+    const samples = (await collector.collect())
+      .filter((sample) => sample.name === 'nyabase_node_disk_io_read_bytes_total');
+    expect(samples).toEqual([
+      { name: 'nyabase_node_disk_io_read_bytes_total', labels: { device_id: 'SERIAL0' }, value: 4096 * 512 },
+      { name: 'nyabase_node_disk_io_read_bytes_total', labels: { device_id: 'SERIAL1' }, value: 2048 * 512 },
+    ]);
+    expect(() => parseOpenMetrics(renderOpenMetrics(samples, CORE_NODE_METRIC_CATALOG), CORE_NODE_METRIC_CATALOG))
+      .not.toThrow();
+  });
 
   it('does not fabricate unavailable capabilities or expose a mutation surface', async () => {
     const collector = new LinuxNodeMetricsCollector({
