@@ -376,7 +376,7 @@ export const controlPlaneConfigDefinitions = [
     key: 'containers.processLimit',
     yamlPath: 'containers.processLimit',
     env: 'CONTAINER_PROCESS_LIMIT',
-    defaultValue: 4_096,
+    defaultValue: 65_536,
     schema: positiveInt.min(64).max(4_194_304),
     valueKind: 'number',
     secret: false,
