@@ -32,6 +32,7 @@ export default defineConfig({
             'src/components/refs/**/*.test.tsx',
             'src/components/performance/**/*.test.tsx',
             'src/components/ui/**/*.test.tsx',
+            'src/components/container-scripts/**/*.test.tsx',
           ],
           exclude: ['dist/**'],
         },

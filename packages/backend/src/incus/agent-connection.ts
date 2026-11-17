@@ -284,7 +284,8 @@ export class AgentConnection implements StreamOwner {
     for (const [id, pending] of this.pending) {
       clearTimeout(pending.timer);
       pending.cleanup();
-      pending.reject(new IncusError('SERVER_UNREACHABLE', 'retry', { reason: 'agent_disconnected' }));
+      // Sent, unanswered: whether the request took effect is unknown (`in_flight`).
+      pending.reject(new IncusError('SERVER_UNREACHABLE', 'retry', { reason: 'agent_disconnected', phase: 'in_flight' }));
       this.pending.delete(id);
     }
   }

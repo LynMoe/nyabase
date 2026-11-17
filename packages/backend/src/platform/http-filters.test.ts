@@ -40,6 +40,14 @@ describe('RouteIdPipe', () => {
     expect(() => pipe.transform(fingerprint.toUpperCase(), { type: 'param', data: 'fingerprint' }))
       .toThrow(NotFoundException);
   });
+
+  it('passes a positive version number only as :version', () => {
+    expect(pipe.transform('12', { type: 'param', data: 'version' })).toBe('12');
+    expect(() => pipe.transform('12', { type: 'param', data: 'id' })).toThrow(NotFoundException);
+    for (const bad of ['0', '-1', '1.5', '01', '1e3', '9999999999']) {
+      expect(() => pipe.transform(bad, { type: 'param', data: 'version' }), bad).toThrow(NotFoundException);
+    }
+  });
 });
 
 describe('isStaticFilePath', () => {

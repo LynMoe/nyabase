@@ -27,6 +27,8 @@ function logLevelsUpTo(level: LogLevel): LogLevel[] {
   return LOG_LEVELS_BY_VERBOSITY.slice(0, LOG_LEVELS_BY_VERBOSITY.indexOf(level) + 1);
 }
 
+const JSON_BODY_LIMIT_BYTES = 256 * 1024;
+
 async function bootstrap() {
   const logger = new Logger('Bootstrap');
 
@@ -40,6 +42,10 @@ async function bootstrap() {
   const config = app.get(NyabaseConfigService);
   app.useLogger(logLevelsUpTo(config.get<LogLevel>('server.logLevel')));
 
+  // The default JSON limit is 100 KiB; a container script version carries a
+  // script of up to 64 KiB (CONTAINER_SCRIPT_MAX_SCRIPT_BYTES), which JSON
+  // escaping can double. Registered before init, it replaces the default parser.
+  app.useBodyParser('json', { limit: JSON_BODY_LIMIT_BYTES });
   app.setGlobalPrefix('api');
   const trustedProxies = trustProxySetting(config.get<string>('server.trustedProxies'));
   app.set('trust proxy', trustedProxies);

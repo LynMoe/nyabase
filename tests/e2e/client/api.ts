@@ -20,6 +20,8 @@ export class ApiError extends Error {
 
 export interface RequestOptions {
   body?: unknown;
+  /** Sent as is (application/octet-stream) instead of a JSON body. */
+  bytes?: Uint8Array;
   query?: Record<string, string | number | boolean | undefined>;
   /** Extra headers (e.g. the cookie of the refresh flow). */
   headers?: Record<string, string>;
@@ -52,10 +54,11 @@ export class Api {
     };
     if (this.token) headers.authorization = `Bearer ${this.token}`;
     if (options.body !== undefined) headers['content-type'] = 'application/json';
+    if (options.bytes !== undefined) headers['content-type'] = 'application/octet-stream';
     return fetch(url, {
       method,
       headers,
-      body: options.body === undefined ? undefined : JSON.stringify(options.body),
+      body: options.bytes ? new Blob([new Uint8Array(options.bytes)]) : options.body === undefined ? undefined : JSON.stringify(options.body),
       signal: AbortSignal.timeout(60_000),
     });
   }
@@ -81,6 +84,11 @@ export class Api {
 
   post<T>(path: string, body?: unknown): Promise<T> {
     return this.request<T>('POST', path, { body });
+  }
+
+  /** POSTs raw bytes (file uploads). */
+  upload<T>(path: string, bytes: Uint8Array): Promise<T> {
+    return this.request<T>('POST', path, { bytes });
   }
 
   put<T>(path: string, body: unknown): Promise<T> {

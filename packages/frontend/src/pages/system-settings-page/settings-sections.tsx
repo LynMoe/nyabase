@@ -196,6 +196,7 @@ const GROUP_LABELS: Record<string, string> = {
   metrics: '监控',
   ssh: 'SSH 代理',
   containers: '容器统一限制',
+  containerScripts: '容器脚本',
 };
 
 const FIELD_LABELS: Record<string, { label: string; description?: string }> = {
@@ -295,6 +296,14 @@ const FIELD_LABELS: Record<string, { label: string; description?: string }> = {
   'containers.diskWriteMBps': {
     label: '磁盘写速率上限（MB/s）',
     description: '每块盘；CephFS 不限速',
+  },
+  'containerScripts.maxConcurrent': {
+    label: '容器脚本同时执行数（全平台）',
+    description: '全平台同时执行的容器脚本数',
+  },
+  'containerScripts.maxConcurrentPerServer': {
+    label: '容器脚本同时执行数（每台服务器）',
+    description: '每台服务器上同时执行的容器脚本数',
   },
   'ssh.proxySnapshotStaleMs': {
     label: 'SSH 代理快照过期时间',

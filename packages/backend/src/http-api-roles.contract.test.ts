@@ -40,6 +40,23 @@ const USER_ADMIN_ROUTES = [
 ];
 
 const ADMIN_ROUTES = [
+  'GET admin/container-scripts',
+  'POST admin/container-scripts',
+  'POST admin/container-scripts/blobs',
+  'GET admin/container-scripts/blobs/:param',
+  'POST admin/container-scripts/preview',
+  'GET admin/container-scripts/:param',
+  'PATCH admin/container-scripts/:param',
+  'GET admin/container-scripts/:param/versions',
+  'POST admin/container-scripts/:param/versions',
+  'GET admin/container-scripts/:param/versions/:param',
+  'POST admin/container-scripts/:param/pause',
+  'POST admin/container-scripts/:param/resume',
+  'POST admin/container-scripts/:param/archive',
+  'POST admin/container-scripts/:param/retry',
+  'GET admin/container-scripts/:param/targets',
+  'GET admin/container-scripts/:param/runs',
+  'GET admin/container-scripts/:param/runs/:param',
   'DELETE admin/firewall-rules/:param',
   'DELETE admin/ip-pools/:param',
   'DELETE admin/ssh-proxy/lines/:param',
@@ -138,6 +155,7 @@ describe('HTTP API role contract', () => {
       'GET intents', 'GET intents/:param', 'POST intents/:param/retry',
       'GET ssh-sessions', 'GET ssh-sessions/stats', 'GET ssh-sessions/:param',
       'GET users/:param', 'PATCH users/:param',
+      'GET containers/:param/maintenance',
     ]) {
       const route = routes.find((candidate) => candidate.key === key);
       expect(route, `${key} is mounted`).toBeDefined();

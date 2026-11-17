@@ -27,7 +27,7 @@ Vite 通过 alias 将 `@nyabase/common` 指向 `src/index.ts`，但 `index.ts` �
 ## API 表面：每个资源只有一套路由
 
 - 同一资源不再有 `/x` 与 `/admin/x` 两套 controller。`/admin/` 前缀只留给没有用户版本的运维资源
-  （grant-bundles、ip-pools、firewall-rules、catalog、metrics、ssh-proxy、system-settings、agent-rejections）；
+  （grant-bundles、ip-pools、firewall-rules、container-scripts、catalog、metrics、ssh-proxy、system-settings、agent-rejections）；
   `http-api-duplicate-routes.contract.test.ts` 断言不存在同名资源同时挂在两处。
 - 鉴权在 service 里：`@CurrentActor()`（`iam/actor.ts`）给出 `{ userId, role, authKind, authVersion }`，
   `RolesGuard` 用 `JwtAuthGuard` 已加载的用户行（带 `role`）构造，不再额外查询。
@@ -252,6 +252,29 @@ MAC 在 forward / output 钩子、Incus MAC 过滤之后从发往 `nyh*` 的帧�
 `firewall/` 只依赖 platform / iam / incus，servers → firewall 单向（`FirewallSyncService.agentStatuses`）。预检不再检查「容器可达宿主」与出站网络。
 
 GPU 是平台内置功能（`gpu/` 模块、`common/src/gpu/`、agent 的 `gpu-collector`），不存在扩展框架。卡与 CPU 一样共享：同一张卡可同时绑定到多个容器，只按授权准入（授权的卡由 GPU 张数按用户 hash 选出，见授权模型），`control.container_gpu_claims` 不按（服务器, 卡）唯一。
+
+容器脚本（`container-scripts/`、`common/src/protocol/container-scripts.ts`、迁移 000011）：管理员的脚本 + 文件，以 root 在容器内执行，仅 admin（`/admin/container-scripts`）。
+脚本 = 范围（全部，或服务器 / 镜像 / 所有者 / 指定容器，每个非空列表都要命中，排除列表永不命中；只用容器终身不变的属性，所以容器不会移进移出范围；SQL 版 `container-script-scope.ts` 与 common 的 `containerScriptScopeMatches` 由 pg 测试固定一致）
++ 触发：立即（`applyNow`，每次发布单独选）/ 新容器（`onNewContainers`）/ 每次开机（`everyBoot`，创建后不可改，隐含新容器）+ 全局唯一优先级（未归档的脚本之间唯一，数字小先跑）。
+内容、范围与执行参数按版本存（`container_script_versions`，发布后不可改；文件内容按 sha256 去重存在 `container_script_blobs`，经 `POST …/blobs` 原始字节上传，≤ 16 MiB，反代要放行）。
+每个（脚本，容器）一行 `container_script_targets`，持 `lockContainerScripts` 改写：
+- 执行一次：`target_version` 比成功过的新就待执行。发布带立即 → 范围内现有容器（含 provisioning）都按新版本待执行（停机的按 `stoppedPolicy` 等开机或 `skipped`），正在跑的置 `rerun`，跑完再来一次；
+  不带立即 → 未完成的（pending / running / failed）改用新版本，成功过的不动，范围内其余现有容器记 `exempt`（provisioning 的不记，算新容器）。「新容器」= 范围内没有目标行的容器（以行为界，不以时间戳：竞态时宁可多跑）。
+- 每次开机：开机标识是 Incus 实例的 `last_used_at`（start、restart、guest 内 reboot 都变，exec / 推文件 / 读状态 / 冻结解冻不变；`listInstances(1)` 就有），记在 `container_boot_observations`；
+  行记着它处理过的 `boot_id`，观测到别的开机就重置为待执行（`applyBoots`）。不带立即发布时，现有容器记 `exempt` + 当前观测到的开机；从未观测到的记 `boot_after`（发布时间），不晚于它开始的开机视为发布时那次。
+调度（`ContainerScriptScheduler`，单进程、不进 reconcile 槽位）：唤醒（脚本写操作、容器 intent、Incus 事件经 `ReconcileWakeService`、跑完的执行）+ 30 s 兜底；每分钟观测全部在线服务器。
+候选 = 待执行、到了重试时间、容器 active + `power_intent=running` + 观测 running、没有在跑的脚本、没有 reconcile claim，且同一容器上没有优先级更小的就绪行（每容器至多一个候选，严格按优先级；
+失败不阻塞后面的脚本）。上限：全局 / 每服务器（系统设置 `containerScripts.maxConcurrent` / `maxConcurrentPerServer`）、每脚本（`maxParallel` / `maxParallelPerServer`）、灰度（`canaryCount`：已开始的容器数到了就不再开新容器）。
+`container_script_runs` 上 `(container_id) WHERE status='running'` 唯一索引兜底同一容器不并发。
+执行（`container-script-runner.ts`，只用 exec（无 WebSocket、`record-output=false`）和文件 API，与 authorized_keys 同步同一批请求，agent 协议不变，流程在 `agent-policy.contract.test.ts`）：
+先读实例（不在运行 / 开机变了 → `abandonRun`，不计次数、30 s 后再试），把脚本、文件和 wrapper 分块（≤ 768 KiB，`X-Incus-write: append`）推到 rootfs 上的 `/var/lib/nyabase/script-runs/<run id>/`（不放 `/run`：开机早期 tmpfs 会遮住），
+exec wrapper 并等 operation；wrapper（`container-script-wrapper.ts`，有真实 shell 测试）持 `flock`、等 `systemctl is-system-running --wait`（≤ 120 s）、
+`install` 到 `<路径>.nyabase-tmp` 再 `mv` 原子替换、`timeout -k 30` 杀整个进程组、只留合并输出最后 64 KiB，最后写 `output` → `timed_out` → `rc`（`rc` 在即结果完整）。
+从 exec 发出起每次执行都有结果：operation 丢了就轮询 `rc`；Backend 重启后 running 的执行按 `rc` 恢复（`watchRun`），开机变了或过了 `deadline_at` 记 `interrupted`。脚本须幂等（失败、超时、中断都计一次尝试，1 / 5 / 15 分钟退避，用完 `failed`，人工重试）。
+跑完按 `container-script-rules.ts` 的 `targetAfterRun` 更新目标行；本版本失败（failed / timed_out，不含 interrupted）的容器数达 `pauseAfterFailures`，或灰度跑够且没有在跑的，脚本自动暂停（审计 `container_script.auto_pause`，actor NULL）；
+发布新版本解除自动暂停，手动暂停要手动恢复，恢复时清灰度。暂停 / 归档不撤销已做的事；归档让出名称与优先级。
+执行记录每（脚本，容器）留最近 20 条；不进审计（只审计管理员操作）。所有者经 `GET /containers/:id/maintenance`（scope 规则同其他容器子资源）只看到脚本名、状态与时间，看不到脚本和输出。
+JSON 请求体上限是 256 KiB（`main.ts`），因为 64 KiB 的脚本转义后可能翻倍。
 
 ## Schema 规则（上线冻结）
 

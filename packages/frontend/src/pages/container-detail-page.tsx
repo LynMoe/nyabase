@@ -26,6 +26,7 @@ import { IntentsPanel } from '../components/containers/intents-panel.js';
 import { RenameContainerButton } from '../components/containers/rename-container-button.js';
 import { OverviewPanel } from '../components/containers/overview-panel.js';
 import { StoragePanel } from '../components/containers/storage-panel.js';
+import { ContainerMaintenanceSection } from '../components/container-scripts/container-maintenance-section.js';
 import { SshSessionList } from '../components/ssh-sessions/ssh-session-list.js';
 import { SshSessionStats } from '../components/ssh-sessions/ssh-session-stats.js';
 import { useActionMutation } from '../hooks/use-action-mutation.js';
@@ -129,6 +130,7 @@ function ContainerDetailContent({
               <TabsContent value="overview" className="space-y-3">
                 <OverviewPanel container={container} scope={scope} />
                 <StoragePanel container={container} scope={scope} />
+                <ContainerMaintenanceSection containerId={container.id} scope={scope} />
               </TabsContent>
               <TabsContent value="console">
                 <ContainerConsole container={container} scope={scope} />

@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { AccessModule } from './access/access.module.js';
 import { AuditModule } from './audit/audit.module.js';
+import { ContainerScriptsModule } from './container-scripts/container-scripts.module.js';
 import { ContainersModule } from './containers/containers.module.js';
 import { FirewallModule } from './firewall/firewall.module.js';
 import { GpuModule } from './gpu/gpu.module.js';
@@ -31,6 +32,7 @@ import { VolumesModule } from './volumes/volumes.module.js';
     AccessModule,
     AuditModule,
     ContainersModule,
+    ContainerScriptsModule,
     FirewallModule,
     GpuModule,
     GrantsModule,

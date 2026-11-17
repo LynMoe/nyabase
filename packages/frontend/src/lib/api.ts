@@ -297,11 +297,16 @@ export async function freshAccessTokenWithRetry(
   }
 }
 
-async function request<T>(
+/**
+ * One authenticated request: the access token as a bearer, a single refresh
+ * and retry on 401, and an ApiError for any non-2xx answer. The response body
+ * is left for the caller (JSON for `request`, raw bytes for `getBlob`).
+ */
+async function send(
   path: string,
   options: RequestInit = {},
   retry = true,
-): Promise<T> {
+): Promise<Response> {
   const requestSession = useAuthStore.getState();
   const requestEpoch = requestSession.epoch;
   const token = requestSession.accessToken;
@@ -329,12 +334,17 @@ async function request<T>(
       if (useAuthStore.getState().epoch !== requestEpoch) {
         throw new ApiError(401, 'SESSION_CHANGED', '会话已切换，本次请求未自动重试，请重新执行操作');
       }
-      return request<T>(path, options, false);
+      return send(path, options, false);
     }
     throw new ApiError(401, 'UNAUTHORIZED', '会话已过期，请重新登录');
   }
 
   if (!res.ok) throw await apiErrorFromResponse(res);
+  return res;
+}
+
+async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
+  const res = await send(path, options);
   const text = res.status === 204 || res.status === 205 ? '' : await res.text();
   return parseSuccessfulResponseBody<T>(res.status, text);
 }
@@ -487,6 +497,11 @@ export const api = {
   put: <T>(path: string, body?: unknown) =>
     request<T>(path, { method: 'PUT', body: body !== undefined ? JSON.stringify(body) : undefined }),
   delete: <T>(path: string) => request<T>(path, { method: 'DELETE' }),
+  /** POST raw bytes (a file) as the body; the answer is JSON like any other call. */
+  upload: <T>(path: string, body: Blob, contentType = 'application/octet-stream') =>
+    request<T>(path, { method: 'POST', body, headers: { 'Content-Type': contentType } }),
+  /** GET raw bytes (a file's content) with the session's credentials. */
+  getBlob: async (path: string): Promise<Blob> => (await send(path)).blob(),
   login,
   logout,
 };

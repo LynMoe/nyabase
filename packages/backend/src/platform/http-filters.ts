@@ -168,18 +168,22 @@ export function serveBundledFrontend(app: NestExpressApplication, publicDir: str
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-/** Image fingerprints (`/images/:id/versions/:fingerprint`): lowercase sha256 hex. */
+/** Image fingerprints (`/images/:id/versions/:fingerprint`) and file contents: lowercase sha256 hex. */
 const FINGERPRINT = /^[0-9a-f]{64}$/;
+/** Container script versions (`/admin/container-scripts/:id/versions/:version`): a positive integer. */
+const VERSION_NUMBER = /^[1-9][0-9]{0,8}$/;
 
 /**
  * Every route path parameter names a resource by UUID, except `:fingerprint`,
- * which names an image version by its sha256. A malformed one cannot name
+ * which names an image version or a container script file by its sha256, and
+ * `:version`, a container script version number. A malformed one cannot name
  * anything, so it is a 404 here instead of a PostgreSQL cast error (500).
  */
 export class RouteIdPipe implements PipeTransform {
   transform(value: unknown, metadata: ArgumentMetadata): unknown {
     if (metadata.type !== 'param' || typeof value !== 'string' || UUID.test(value)) return value;
     if (metadata.data === 'fingerprint' && FINGERPRINT.test(value)) return value;
+    if (metadata.data === 'version' && VERSION_NUMBER.test(value)) return value;
     throw new NotFoundException(`No resource has the id ${JSON.stringify(value.slice(0, 64))}`);
   }
 }

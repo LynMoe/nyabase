@@ -11,6 +11,7 @@ const IMAGE_CAPACITY_ADVISORY_KEY = 6;
 const IP_POOL_TOPOLOGY_ADVISORY_KEY = 7;
 const FIREWALL_POLICY_ADVISORY_KEY = 8;
 const SSH_PROXY_LINES_ADVISORY_KEY = 9;
+const CONTAINER_SCRIPTS_ADVISORY_KEY = 10;
 
 /** Transaction-scoped lock serializing server admission and removal. */
 export async function lockServerOnboarding(executor: AdvisoryLockExecutor): Promise<void> {
@@ -49,6 +50,18 @@ export async function lockFirewallPolicy(executor: AdvisoryLockExecutor): Promis
   await sql`select pg_advisory_xact_lock(
     ${INFRASTRUCTURE_ADVISORY_NAMESPACE},
     ${FIREWALL_POLICY_ADVISORY_KEY}
+  )`.execute(executor);
+}
+
+/**
+ * Transaction-scoped lock serializing container script state changes: script
+ * writes (publish, retry, pause) and the scheduler's target transitions and
+ * run starts / finishes, so a publish never interleaves with a start.
+ */
+export async function lockContainerScripts(executor: AdvisoryLockExecutor): Promise<void> {
+  await sql`select pg_advisory_xact_lock(
+    ${INFRASTRUCTURE_ADVISORY_NAMESPACE},
+    ${CONTAINER_SCRIPTS_ADVISORY_KEY}
   )`.execute(executor);
 }
 

@@ -66,6 +66,20 @@ export const queryKeys = {
     intents: (scope: Scope, containerId: string) => ['container-intents', scope, containerId] as const,
     attachments: (scope: Scope, containerId: string) =>
       ['container-attachments', scope, containerId] as const,
+    /** The container scripts that ran or will run in it (names and state only). */
+    maintenance: (scope: Scope, containerId: string) =>
+      ['container-maintenance', scope, containerId] as const,
+  },
+  containerScripts: {
+    all: ['container-scripts'] as const,
+    list: ['container-scripts', 'list'] as const,
+    detail: (scriptId: string) => ['container-scripts', 'detail', scriptId] as const,
+    versions: (scriptId: string) => ['container-scripts', 'versions', scriptId] as const,
+    version: (scriptId: string, version: number) => ['container-scripts', 'version', scriptId, version] as const,
+    targets: (scriptId: string, state: string | null) => ['container-scripts', 'targets', scriptId, state] as const,
+    runs: (scriptId: string, containerId: string | null, limit: number, before: string | null) =>
+      ['container-scripts', 'runs', scriptId, containerId, limit, before] as const,
+    run: (scriptId: string, runId: string) => ['container-scripts', 'run', scriptId, runId] as const,
   },
   volumes: {
     user: ['volumes', 'user'] as const,

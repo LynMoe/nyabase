@@ -1,5 +1,9 @@
 import { beforeEach, describe, expect, it } from 'vitest';
+import { randomUUID } from 'node:crypto';
+import { MAX_AGENT_INCUS_REQUEST_BODY_BYTES } from '@nyabase/common';
 import { AgentPolicyTunnel } from './agent-policy.test-helper.js';
+import { observeServer } from './container-scripts/container-script-observer.js';
+import { executeRun, PUSH_CHUNK_BYTES, watchRun } from './container-scripts/container-script-runner.js';
 import { ConsoleSessionService } from './containers/console-session.service.js';
 import {
   buildContainerSpec,
@@ -215,6 +219,49 @@ describe('the agent policy accepts what the Backend sends', () => {
     await expect.poll(() => tunnel.forwarded).toContain('WS /1.0/events');
     events.close();
     expect(tunnel.refusals).toEqual([]);
+  });
+
+  it('for container scripts: observe, push the run directory in chunks, run the wrapper, read results, clean up', async () => {
+    const name = deriveInstanceName(CONTAINER_ID);
+    await createInstance(client, buildContainerSpec(containerRow(), [], RUNTIME), name);
+    await setPowerState(client, name, 'start');
+    const bodies: number[] = [];
+    const request = tunnel.request.bind(tunnel);
+    tunnel.request = async (input) => {
+      bodies.push(input.body?.byteLength ?? 0);
+      return request(input);
+    };
+    const signal = new AbortController().signal;
+    await observeServer(client, [{ id: CONTAINER_ID, instance_name: name }], signal);
+    let clock = 0;
+    const deps = {
+      client: async () => client,
+      blob: async () => Buffer.alloc(PUSH_CHUNK_BYTES * 2 + 10, 7),
+      recordBoot: async () => undefined,
+      sleep: async () => undefined,
+      now: () => (clock += 1_000),
+    };
+    const runId = randomUUID();
+    // The fake host keeps no files, so the run ends without a result; every request still went through.
+    const result = await executeRun(deps, {
+      runId,
+      serverId: 'server',
+      instanceName: name,
+      timeoutSeconds: 60,
+      script: '#!/bin/sh\ntrue\n',
+      files: [{ name: 'big.bin', sha256: 'a'.repeat(64), destination: { path: '/opt/big.bin', mode: '0644', owner: 'login_user' } }],
+      environment: { NYABASE_LOGIN_USER: 'dev' },
+      expectedBootId: null,
+      deadline: new Date(60_000),
+    }, signal);
+    expect(result).toMatchObject({ kind: 'finished', status: 'failed' });
+    await watchRun(deps, { runId, serverId: 'server', instanceName: name, bootId: null, deadline: new Date(clock + 5_000) }, signal);
+    expect(tunnel.refusals).toEqual([]);
+    expect(Math.max(...bodies)).toBeLessThanOrEqual(MAX_AGENT_INCUS_REQUEST_BODY_BYTES);
+    expect(tunnel.mutations).toEqual(expect.arrayContaining([
+      `POST /1.0/instances/${name}/files`,
+      `POST /1.0/instances/${name}/exec`,
+    ]));
   });
 
   it('for local and shared volumes: create, resize, delete', async () => {

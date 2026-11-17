@@ -7,6 +7,7 @@ import type { ContainerControlDatabase } from './container-control-database.type
 import type { HttpProxyDatabase } from './http-proxy-database.types.js';
 import type { SystemSettingsDatabase } from './system-settings-database.types.js';
 import type { SshProxyHistoryDatabase } from './ssh-proxy-history-database.types.js';
+import type { ContainerScriptsDatabase } from './container-scripts-database.types.js';
 
 export type Timestamp = ColumnType<Date, Date | string, Date | string>;
 export type GeneratedTimestamp = ColumnType<
@@ -100,6 +101,7 @@ export interface NyabaseDatabase
     InfrastructureDatabase,
     StorageDatabase,
     ContainerControlDatabase,
+    ContainerScriptsDatabase,
     HttpProxyDatabase,
     SshProxyHistoryDatabase,
     SystemSettingsDatabase {

@@ -30,7 +30,8 @@ describe('sidebar navigation', () => {
       '/ssh-proxy', '/audit']) {
       expect(items).toContain(to);
     }
-    for (const to of ['/servers', '/network', '/shared-backends', '/images', '/http-proxy-ops', '/system-settings']) {
+    for (const to of ['/servers', '/network', '/shared-backends', '/images', '/http-proxy-ops', '/system-settings',
+      '/container-scripts']) {
       expect(items).not.toContain(to);
     }
   });
@@ -40,6 +41,7 @@ describe('sidebar navigation', () => {
     expect(items).toContain('/network');
     expect(items).toContain('/shared-backends');
     expect(items).toContain('/grant-bundles');
+    expect(items).toContain('/container-scripts');
   });
 
   it('never repeats a label or an icon', () => {

@@ -3,6 +3,7 @@ import { Link } from '@tanstack/react-router';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   type AdminImageDto,
+  type ContainerScriptDto,
   Role,
   type ContainerDto,
   type ListScope,
@@ -100,6 +101,8 @@ export function ResourceRef({ kind, id, name, username, scope, serverId }: Resou
       return <PoolRef id={id} name={name} serverId={serverId} />;
     case 'shared-backend':
       return <SharedBackendRef id={id} name={name} />;
+    case 'container-script':
+      return <ContainerScriptRef id={id} name={name} />;
   }
 }
 
@@ -342,6 +345,30 @@ function SharedBackendRef({ id, name }: { id: string; name?: string }) {
       to="/shared-backends/$id"
       params={{ id }}
       search={{ tab: 'overview' }}
+      className={LINK_CLASS}
+      onClick={keepRowClick}
+    >
+      {linkText(id, resolved)}
+    </Link>
+  );
+}
+
+function ContainerScriptRef({ id, name }: { id: string; name?: string }) {
+  const role = useRole();
+  const explicit = providedName(name);
+  const allowed = canAccess(role, ACCESS.containerScripts);
+  const query = useQuery({
+    queryKey: queryKeys.containerScripts.list,
+    queryFn: () => api.get<ContainerScriptDto[]>('/admin/container-scripts'),
+    enabled: Boolean(id) && !explicit && allowed,
+  });
+  const resolved = explicit ?? query.data?.find((row) => row.id === id)?.name;
+  if (!id || !allowed) return <RefLabel id={id} name={resolved} />;
+  return (
+    <Link
+      to="/container-scripts/$scriptId"
+      params={{ scriptId: id }}
+      search={{ tab: 'targets' }}
       className={LINK_CLASS}
       onClick={keepRowClick}
     >

@@ -88,6 +88,7 @@ types come from `@nyabase/common`, so DTO drift fails `pnpm e2e:check`.
 | `10-gpu` | GPU enablement, claim, release (skipped without a GPU host) |
 | `11-isolation` | another user's resources: 403 / 404 |
 | `12-runtime-constraints` | per-user CPU sets, reserved CPUs, aggregate memory, uniform limits, isolated uid maps, IPv6 guard, drift revert |
+| `15-container-scripts` | once-script with an installed file, every-boot reruns after an in-guest reboot and a restart, failure and retry, timeout kill, owner view |
 
 The lapse purge is driven by moving `control.access_lapses.lapsed_at` 15 days into
 the past in the run's database; production code has no test switch.

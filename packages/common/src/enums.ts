@@ -153,6 +153,14 @@ export enum FailureCode {
   IpPoolCidrConflict = 'IP_POOL_CIDR_CONFLICT',
   FirewallRuleConflict = 'FIREWALL_RULE_CONFLICT',
   FirewallTooLarge = 'FIREWALL_TOO_LARGE',
+  /** Another container script already has this name or priority. */
+  ContainerScriptConflict = 'CONTAINER_SCRIPT_CONFLICT',
+  /** The container script is archived and takes no more versions or runs. */
+  ContainerScriptArchived = 'CONTAINER_SCRIPT_ARCHIVED',
+  /** A file of the version names content that was never uploaded. */
+  ContainerScriptBlobMissing = 'CONTAINER_SCRIPT_BLOB_MISSING',
+  /** The upload or the version's files exceed the size limits. */
+  ContainerScriptTooLarge = 'CONTAINER_SCRIPT_TOO_LARGE',
   SshProxyLineConflict = 'SSH_PROXY_LINE_CONFLICT',
   SharedBackendQuotaExceeded = 'SHARED_BACKEND_QUOTA_EXCEEDED',
   SharedBackendVolumeLimitReached = 'SHARED_BACKEND_VOLUME_LIMIT_REACHED',
@@ -228,6 +236,15 @@ export enum AuditAction {
   CreateFirewallRule = 'firewall_rule.create',
   UpdateFirewallRule = 'firewall_rule.update',
   DeleteFirewallRule = 'firewall_rule.delete',
+  CreateContainerScript = 'container_script.create',
+  PublishContainerScript = 'container_script.publish',
+  UpdateContainerScript = 'container_script.update',
+  PauseContainerScript = 'container_script.pause',
+  ResumeContainerScript = 'container_script.resume',
+  ArchiveContainerScript = 'container_script.archive',
+  RetryContainerScript = 'container_script.retry',
+  /** The system paused a script: its canary finished or too many runs of a version failed. */
+  AutoPauseContainerScript = 'container_script.auto_pause',
   CreateSharedBackend = 'shared_backend.create',
   UpdateSharedBackend = 'shared_backend.update',
   DeleteSharedBackend = 'shared_backend.delete',

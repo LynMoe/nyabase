@@ -32,6 +32,18 @@ describe('audit labels', () => {
     expect(auditResourceTypeLabel('firewall_rule')).toBe('防火墙规则');
   });
 
+  it('maps container script actions and links the resource type', () => {
+    expect(auditActionLabel(AuditAction.CreateContainerScript)).toBe('创建容器脚本');
+    expect(auditActionLabel(AuditAction.PublishContainerScript)).toBe('发布脚本版本');
+    expect(auditActionLabel(AuditAction.UpdateContainerScript)).toBe('修改容器脚本');
+    expect(auditActionLabel(AuditAction.PauseContainerScript)).toBe('暂停容器脚本');
+    expect(auditActionLabel(AuditAction.ResumeContainerScript)).toBe('恢复容器脚本');
+    expect(auditActionLabel(AuditAction.ArchiveContainerScript)).toBe('归档容器脚本');
+    expect(auditActionLabel(AuditAction.RetryContainerScript)).toBe('重试容器脚本');
+    expect(auditActionLabel(AuditAction.AutoPauseContainerScript)).toBe('自动暂停容器脚本');
+    expect(auditResourceTypeLabel('container_script')).toBe('容器脚本');
+  });
+
   it('maps host agent enrollment and container drift correction', () => {
     expect(auditActionLabel(AuditAction.IssueAgentEnrollment)).toBe('签发 Agent 接入令牌');
     expect(auditActionLabel(AuditAction.EnrollAgent)).toBe('Agent 接入');

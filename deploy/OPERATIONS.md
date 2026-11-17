@@ -220,6 +220,16 @@ server {
         proxy_send_timeout 1h;
     }
 
+    # Container script file uploads (raw bytes, up to 16 MiB each).
+    location = /api/admin/container-scripts/blobs {
+        client_max_body_size 17m;
+        proxy_pass http://127.0.0.1:3001;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto https;
+    }
+
     # Unauthenticated probes; readiness queries PostgreSQL. Monitoring on this
     # host uses http://127.0.0.1:3001/api/health/* directly. Case-insensitive,
     # because the Backend routes /API/Health/ready like /api/health/ready.
@@ -2011,6 +2021,22 @@ GPU 是平台内置功能，不是插件。管理员在服务器详情的 GPU �
 GPU 与 CPU 一样是共享的：同一张卡可以同时绑定到任意多个容器（授权是唯一的边界，不按卡排他）；
 占用数按卡去重计数。
 授权用服务器授权的 `gpuPciAddresses`（空数组表示无 GPU 权限）。
+
+## 容器脚本
+
+管理后台「容器脚本」（或本地 `nya script`）以 root 在容器里执行管理员的脚本，可带文件。
+触发方式：立即（发布时范围内的容器）、新容器、每次开机（平台在容器开机完成后执行，
+不在开机流程里；需要严格开机时序就用「执行一次」装一个 systemd unit）。
+
+- guest 需要 `/bin/sh` 与 coreutils（`timeout`、`install`、`tail`）；有 `flock`、`systemctl`
+  时还会串行化残留的执行、等开机完成。Nyabase 的 workload 镜像都满足。
+- 运行目录在 guest 的 `/var/lib/nyabase/script-runs/<run id>/`，结束后删除，残留的 7 天后清掉。
+- 脚本须幂等：失败、超时、中断（容器重启、Backend 重启后找不到结果）都会按 1 / 5 / 15 分钟退避重试，
+  用完次数停在「失败」等人工重试；本版本失败的容器数到阈值（默认 3）脚本自动暂停。
+- 文件上传走 `POST /api/admin/container-scripts/blobs`（原始字节，单个 ≤ 16 MiB）：反代要给这个路径
+  放行 16 MiB 以上的请求体（见上面 nginx 示例的 `client_max_body_size 17m`）。其余 JSON 请求 ≤ 256 KiB。
+- 并发：系统设置「容器脚本同时执行数」全平台默认 8、每台服务器默认 2，不占 reconcile 的槽位。
+- 暂停、归档只停止以后的执行，不撤销已经做过的修改。
 
 ## Workload images
 

@@ -14,6 +14,7 @@ export const ACCESS = {
   network: Role.Admin,
   sharedBackends: Role.Admin,
   images: Role.Admin,
+  containerScripts: Role.Admin,
   manageContainers: Role.UserAdmin,
   manageVolumes: Role.UserAdmin,
   ops: Role.UserAdmin,

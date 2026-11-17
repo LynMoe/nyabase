@@ -94,7 +94,8 @@ export type ResourceKind =
   | 'shared-volume'
   | 'image'
   | 'pool'
-  | 'shared-backend';
+  | 'shared-backend'
+  | 'container-script';
 
 export type ResourceRefProps = {
   kind: ResourceKind;

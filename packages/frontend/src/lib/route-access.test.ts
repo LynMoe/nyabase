@@ -23,7 +23,7 @@ describe('role-based route access', () => {
 
   it('keeps infrastructure and system settings admin-only', () => {
     for (const rule of [ACCESS.servers, ACCESS.network, ACCESS.sharedBackends, ACCESS.images,
-      ACCESS.httpProxyOps, ACCESS.sshProxyOps, ACCESS.systemSettings]) {
+      ACCESS.httpProxyOps, ACCESS.sshProxyOps, ACCESS.systemSettings, ACCESS.containerScripts]) {
       expect(canAccess(Role.UserAdmin, rule)).toBe(false);
       expect(canAccess(Role.Admin, rule)).toBe(true);
     }

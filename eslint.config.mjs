@@ -25,4 +25,21 @@ export default [
       '@typescript-eslint/no-misused-promises': 'error',
     },
   },
+  {
+    // These compile to CommonJS: tsc rewrites a reference to an exported binding of the
+    // same file as `exports.NAME`, so a local named `exports` turns it into `undefined` in
+    // dist while vitest (ESM) still passes. `require` breaks emitted dynamic imports the same way.
+    files: ['packages/{backend,common,agent}/src/**/*.ts'],
+    rules: {
+      'no-restricted-syntax': ['error', {
+        selector: [
+          'VariableDeclaration:not([declare=true]) > VariableDeclarator > Identifier.id',
+          ':matches(FunctionDeclaration, ClassDeclaration) > Identifier.id',
+          'CatchClause > Identifier.param',
+          ':function > Identifier.params',
+        ].map((binding) => `${binding}[name=/^(exports|require)$/]`).join(', '),
+        message: 'Do not name a binding `exports` or `require`: the CommonJS output reads those names.',
+      }],
+    },
+  },
 ];

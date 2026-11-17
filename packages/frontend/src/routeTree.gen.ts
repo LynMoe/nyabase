@@ -13,6 +13,8 @@ import { Route as IndexRouteImport } from './routes/index'
 import { Route as LoginRouteImport } from './routes/login'
 import { Route as ProfileRouteImport } from './routes/profile'
 import { Route as AuditIndexRouteImport } from './routes/audit/index'
+import { Route as ContainerScriptsIndexRouteImport } from './routes/container-scripts/index'
+import { Route as ContainerScriptsScriptIdRouteImport } from './routes/container-scripts/$scriptId'
 import { Route as ContainersIndexRouteImport } from './routes/containers/index'
 import { Route as ContainersContainerIdRouteImport } from './routes/containers/$containerId'
 import { Route as GrantBundlesIndexRouteImport } from './routes/grant-bundles/index'
@@ -61,6 +63,17 @@ const AuditIndexRoute = AuditIndexRouteImport.update({
   path: '/audit/',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ContainerScriptsIndexRoute = ContainerScriptsIndexRouteImport.update({
+  id: '/container-scripts/',
+  path: '/container-scripts/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ContainerScriptsScriptIdRoute =
+  ContainerScriptsScriptIdRouteImport.update({
+    id: '/container-scripts/$scriptId',
+    path: '/container-scripts/$scriptId',
+    getParentRoute: () => rootRouteImport,
+  } as any)
 const ContainersIndexRoute = ContainersIndexRouteImport.update({
   id: '/containers/',
   path: '/containers/',
@@ -204,6 +217,7 @@ export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/login': typeof LoginRoute
   '/profile': typeof ProfileRoute
+  '/container-scripts/$scriptId': typeof ContainerScriptsScriptIdRoute
   '/containers/$containerId': typeof ContainersContainerIdRoute
   '/images/$id': typeof ImagesIdRoute
   '/servers/$id': typeof ServersIdRoute
@@ -211,6 +225,7 @@ export interface FileRoutesByFullPath {
   '/shared-backends/$id': typeof SharedBackendsIdRoute
   '/users/$id': typeof UsersIdRoute
   '/audit/': typeof AuditIndexRoute
+  '/container-scripts/': typeof ContainerScriptsIndexRoute
   '/containers/': typeof ContainersIndexRoute
   '/grant-bundles/': typeof GrantBundlesIndexRoute
   '/http-proxy-ops/': typeof HttpProxyOpsIndexRoute
@@ -237,6 +252,7 @@ export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/login': typeof LoginRoute
   '/profile': typeof ProfileRoute
+  '/container-scripts/$scriptId': typeof ContainerScriptsScriptIdRoute
   '/containers/$containerId': typeof ContainersContainerIdRoute
   '/images/$id': typeof ImagesIdRoute
   '/servers/$id': typeof ServersIdRoute
@@ -244,6 +260,7 @@ export interface FileRoutesByTo {
   '/shared-backends/$id': typeof SharedBackendsIdRoute
   '/users/$id': typeof UsersIdRoute
   '/audit': typeof AuditIndexRoute
+  '/container-scripts': typeof ContainerScriptsIndexRoute
   '/containers': typeof ContainersIndexRoute
   '/grant-bundles': typeof GrantBundlesIndexRoute
   '/http-proxy-ops': typeof HttpProxyOpsIndexRoute
@@ -271,6 +288,7 @@ export interface FileRoutesById {
   '/': typeof IndexRoute
   '/login': typeof LoginRoute
   '/profile': typeof ProfileRoute
+  '/container-scripts/$scriptId': typeof ContainerScriptsScriptIdRoute
   '/containers/$containerId': typeof ContainersContainerIdRoute
   '/images/$id': typeof ImagesIdRoute
   '/servers/$id': typeof ServersIdRoute
@@ -278,6 +296,7 @@ export interface FileRoutesById {
   '/shared-backends/$id': typeof SharedBackendsIdRoute
   '/users/$id': typeof UsersIdRoute
   '/audit/': typeof AuditIndexRoute
+  '/container-scripts/': typeof ContainerScriptsIndexRoute
   '/containers/': typeof ContainersIndexRoute
   '/grant-bundles/': typeof GrantBundlesIndexRoute
   '/http-proxy-ops/': typeof HttpProxyOpsIndexRoute
@@ -306,6 +325,7 @@ export interface FileRouteTypes {
     | '/'
     | '/login'
     | '/profile'
+    | '/container-scripts/$scriptId'
     | '/containers/$containerId'
     | '/images/$id'
     | '/servers/$id'
@@ -313,6 +333,7 @@ export interface FileRouteTypes {
     | '/shared-backends/$id'
     | '/users/$id'
     | '/audit/'
+    | '/container-scripts/'
     | '/containers/'
     | '/grant-bundles/'
     | '/http-proxy-ops/'
@@ -339,6 +360,7 @@ export interface FileRouteTypes {
     | '/'
     | '/login'
     | '/profile'
+    | '/container-scripts/$scriptId'
     | '/containers/$containerId'
     | '/images/$id'
     | '/servers/$id'
@@ -346,6 +368,7 @@ export interface FileRouteTypes {
     | '/shared-backends/$id'
     | '/users/$id'
     | '/audit'
+    | '/container-scripts'
     | '/containers'
     | '/grant-bundles'
     | '/http-proxy-ops'
@@ -372,6 +395,7 @@ export interface FileRouteTypes {
     | '/'
     | '/login'
     | '/profile'
+    | '/container-scripts/$scriptId'
     | '/containers/$containerId'
     | '/images/$id'
     | '/servers/$id'
@@ -379,6 +403,7 @@ export interface FileRouteTypes {
     | '/shared-backends/$id'
     | '/users/$id'
     | '/audit/'
+    | '/container-scripts/'
     | '/containers/'
     | '/grant-bundles/'
     | '/http-proxy-ops/'
@@ -406,6 +431,7 @@ export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   LoginRoute: typeof LoginRoute
   ProfileRoute: typeof ProfileRoute
+  ContainerScriptsScriptIdRoute: typeof ContainerScriptsScriptIdRoute
   ContainersContainerIdRoute: typeof ContainersContainerIdRoute
   ImagesIdRoute: typeof ImagesIdRoute
   ServersIdRoute: typeof ServersIdRoute
@@ -413,6 +439,7 @@ export interface RootRouteChildren {
   SharedBackendsIdRoute: typeof SharedBackendsIdRoute
   UsersIdRoute: typeof UsersIdRoute
   AuditIndexRoute: typeof AuditIndexRoute
+  ContainerScriptsIndexRoute: typeof ContainerScriptsIndexRoute
   ContainersIndexRoute: typeof ContainersIndexRoute
   GrantBundlesIndexRoute: typeof GrantBundlesIndexRoute
   HttpProxyOpsIndexRoute: typeof HttpProxyOpsIndexRoute
@@ -464,6 +491,20 @@ declare module '@tanstack/react-router' {
       path: '/audit'
       fullPath: '/audit/'
       preLoaderRoute: typeof AuditIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/container-scripts/': {
+      id: '/container-scripts/'
+      path: '/container-scripts'
+      fullPath: '/container-scripts/'
+      preLoaderRoute: typeof ContainerScriptsIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/container-scripts/$scriptId': {
+      id: '/container-scripts/$scriptId'
+      path: '/container-scripts/$scriptId'
+      fullPath: '/container-scripts/$scriptId'
+      preLoaderRoute: typeof ContainerScriptsScriptIdRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/containers/': {
@@ -662,6 +703,7 @@ const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   LoginRoute: LoginRoute,
   ProfileRoute: ProfileRoute,
+  ContainerScriptsScriptIdRoute: ContainerScriptsScriptIdRoute,
   ContainersContainerIdRoute: ContainersContainerIdRoute,
   ImagesIdRoute: ImagesIdRoute,
   ServersIdRoute: ServersIdRoute,
@@ -669,6 +711,7 @@ const rootRouteChildren: RootRouteChildren = {
   SharedBackendsIdRoute: SharedBackendsIdRoute,
   UsersIdRoute: UsersIdRoute,
   AuditIndexRoute: AuditIndexRoute,
+  ContainerScriptsIndexRoute: ContainerScriptsIndexRoute,
   ContainersIndexRoute: ContainersIndexRoute,
   GrantBundlesIndexRoute: GrantBundlesIndexRoute,
   HttpProxyOpsIndexRoute: HttpProxyOpsIndexRoute,

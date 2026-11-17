@@ -7,6 +7,7 @@ import {
   Cable,
   ChartColumn,
   Database,
+  FileTerminal,
   FolderTree,
   Globe,
   HardDrive,
@@ -69,6 +70,7 @@ export const NAV_SECTIONS: NavSection[] = [
     items: [
       { to: '/manage/containers', icon: Boxes, label: '全平台容器', access: ACCESS.manageContainers },
       { to: '/manage/volumes', icon: Archive, label: '全平台数据卷', access: ACCESS.manageVolumes },
+      { to: '/container-scripts', icon: FileTerminal, label: '容器脚本', access: ACCESS.containerScripts },
       { to: '/ops', icon: ListChecks, label: '操作记录', access: ACCESS.ops },
       { to: '/servers/usage', icon: ChartColumn, label: '全平台用量', access: ACCESS.adminUsage },
       { to: '/ssh-proxy', icon: Cable, label: 'SSH 代理', access: ACCESS.sshProxy },

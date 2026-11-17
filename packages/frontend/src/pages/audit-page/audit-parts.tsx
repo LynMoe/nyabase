@@ -258,6 +258,7 @@ const AUDIT_TARGET_KINDS: Partial<Record<string, ResourceKind>> = {
   // Local and shared volumes share the type; 全平台数据卷 lists both.
   volume: 'volume',
   shared_backend: 'shared-backend',
+  container_script: 'container-script',
 };
 
 function AuditTarget({ log }: { log: AuditLogDto }) {
