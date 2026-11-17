@@ -15,6 +15,7 @@ import {
   observedDiskUsageBytes,
   powerTransition,
   restartTransition,
+  sameStartTime,
 } from './container-instance-ops.js';
 import { decideRootShrink } from './container-rules.js';
 import type { IntentRecord } from '../reconcile/intent.repository.js';
@@ -83,10 +84,27 @@ describe('container reconciliation identity and power policy', () => {
     expect(powerTransition('Frozen', 'stopped')).toBe('none');
   });
 
-  it('uses started_at as the restart proof baseline', () => {
-    expect(restartTransition('old', 'old', 'Running')).toBe('restart');
-    expect(restartTransition('new', 'old', 'Running')).toBe('proven');
-    expect(restartTransition(null, null, 'Stopped')).toBe('restart');
+  it('proves a restart by a start after the request, other than the recorded one', () => {
+    // Incus: nanoseconds and the host's offset; the baseline: timestamptz, then Date#toISOString.
+    const incus = '2026-11-17T12:41:01.409999999+08:00';
+    const baseline = new Date('2026-11-17T04:41:01.410000Z').toISOString();
+    const requestedAt = '2026-11-17T04:45:00.000Z';
+    const transition = (currentStartedAt: string | null, currentStatus = 'Running', at = requestedAt) =>
+      restartTransition({ currentStartedAt, baselineStartedAt: baseline, currentStatus, requestedAt: at });
+
+    expect(sameStartTime(incus, baseline)).toBe(true);
+    expect(sameStartTime(incus, null)).toBe(false);
+    expect(sameStartTime(null, undefined)).toBe(true);
+
+    expect(transition(incus)).toBe('restart');
+    // Restarted after the request (a retried run whose restart already happened).
+    expect(transition('2026-11-17T12:45:03.120000001+08:00')).toBe('proven');
+    // Rebooted in the guest after the recorded start but before the request.
+    expect(transition('2026-11-17T12:44:30.5+08:00')).toBe('restart');
+    // The host clock runs ahead: the recorded start still counts as not restarted.
+    expect(transition(incus, 'Running', '2026-11-17T04:40:00.000Z')).toBe('restart');
+    expect(transition('2026-11-17T12:45:03.12+08:00', 'Stopped')).toBe('restart');
+    expect(transition(null)).toBe('restart');
   });
 
   it('treats SSH metadata drift as drift even when the content hash is unchanged', () => {

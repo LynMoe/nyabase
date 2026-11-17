@@ -567,7 +567,7 @@ export class ContainerReconciler implements ManagedReconciler, OnModuleInit {
     return readState(client, name);
   }
 
-  /** Restart, proven by a changed `started_at` against the baseline recorded at request time. */
+  /** Restart unless the instance started since the request (`restartTransition`). */
   private async reconcileRestart(
     context: ReconcileRunContext,
     client: IncusClientPort,
@@ -581,10 +581,15 @@ export class ContainerReconciler implements ManagedReconciler, OnModuleInit {
     }
     const baselineStartedAt = baseline.startedAt === null ? null : String(baseline.startedAt);
     const currentStartedAt = currentState.started_at ?? null;
-    if (restartTransition(currentStartedAt, baselineStartedAt, currentState.status) === 'proven') {
+    if (restartTransition({
+      currentStartedAt,
+      baselineStartedAt,
+      currentStatus: currentState.status,
+      requestedAt: context.intent.createdAt,
+    }) === 'proven') {
       return;
     }
-    await restartWithProof(client, name, baselineStartedAt);
+    await restartWithProof(client, name, currentStartedAt);
   }
 
   // --- verification and observation ----------------------------------------------

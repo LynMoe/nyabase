@@ -139,7 +139,14 @@ describe('container lifecycle and SSH through the ssh-proxy', () => {
     const started = await h.power(api, container.id, 'start', owner);
     assert.match(await h.ssh(owner, started, 'echo back-up'), /back-up/);
 
+    // The instance really restarts: a new start time in Incus (the intent alone
+    // succeeded without restarting while start times were compared as strings).
+    const startedAt = async () => Date.parse((JSON.parse(await h.incus(h.server, [
+      'query', `/1.0/instances/${started.instanceName}/state`,
+    ])) as { started_at: string }).started_at);
+    const startedBefore = await startedAt();
     const restarted = await h.power(api, container.id, 'restart', owner);
+    assert.ok(await startedAt() > startedBefore, 'the restart started the instance again');
     assert.match(await h.ssh(owner, restarted, 'uptime -s; echo restarted'), /restarted/);
   });
 

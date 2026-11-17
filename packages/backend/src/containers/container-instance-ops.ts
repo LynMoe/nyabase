@@ -80,14 +80,43 @@ export function powerTransition(
   return current === 'running' ? 'stop' : 'none';
 }
 
-export function restartTransition(
-  currentStartedAt: string | null | undefined,
-  baselineStartedAt: string | null | undefined,
-  currentStatus: string | undefined,
-): 'restart' | 'proven' {
+/**
+ * Whether two instance start times name the same start. Incus reports nanoseconds
+ * with the host's offset (`2026-11-17T12:41:01.409999999+08:00`); a baseline went
+ * through timestamptz (microseconds, rounded) and a JS Date (milliseconds, UTC), so
+ * the same start differs by up to 1 ms and never matches as a string.
+ */
+export function sameStartTime(
+  left: string | null | undefined,
+  right: string | null | undefined,
+): boolean {
+  if (!left || !right) return !left && !right;
+  const leftMs = Date.parse(left);
+  const rightMs = Date.parse(right);
+  if (Number.isNaN(leftMs) || Number.isNaN(rightMs)) return left === right;
+  return Math.abs(leftMs - rightMs) <= 1;
+}
+
+/**
+ * Whether a restart requested at `requestedAt` already happened: the instance runs
+ * and started after the request, from a start other than the one recorded with it.
+ * The recorded start alone is not enough: it is the last start the platform saw,
+ * and an in-guest reboot since then also moves `started_at`. The time alone is not
+ * either: it compares the Incus host's clock with the database's. When in doubt this
+ * says restart; a second restart is cheaper than a restart that never happens.
+ */
+export function restartTransition(input: {
+  readonly currentStartedAt: string | null | undefined;
+  readonly baselineStartedAt: string | null | undefined;
+  readonly currentStatus: string | undefined;
+  readonly requestedAt: string;
+}): 'restart' | 'proven' {
+  const started = input.currentStartedAt ? Date.parse(input.currentStartedAt) : Number.NaN;
+  const requested = Date.parse(input.requestedAt);
   if (
-    currentStatus?.toLowerCase() === 'running'
-    && currentStartedAt !== baselineStartedAt
+    input.currentStatus?.toLowerCase() === 'running'
+    && !sameStartTime(input.currentStartedAt, input.baselineStartedAt)
+    && started > requested
   ) {
     return 'proven';
   }
@@ -435,11 +464,11 @@ export async function setPowerState(
   );
 }
 
-/** Force-restart and require a `started_at` newer than the baseline as proof. */
+/** Force-restart and require a `started_at` other than `previousStartedAt` (read just before) as proof. */
 export async function restartWithProof(
   client: IncusClientPort,
   name: string,
-  baselineStartedAt: string | null,
+  previousStartedAt: string | null,
 ): Promise<void> {
   await readAfterTimeout(
     () => requestAndWait(
@@ -455,7 +484,7 @@ export async function restartWithProof(
       if (
         running(after)
         && after.started_at
-        && after.started_at !== baselineStartedAt
+        && !sameStartTime(after.started_at, previousStartedAt)
       ) {
         return undefined;
       }
@@ -467,10 +496,10 @@ export async function restartWithProof(
   if (
     !running(verified.metadata)
     || nextStartedAt === null
-    || nextStartedAt === baselineStartedAt
+    || sameStartTime(nextStartedAt, previousStartedAt)
   ) {
     throw new IncusError('RESTART_PROOF_MISSING', 'managed_failure', {
-      baselineStartedAt: baselineStartedAt ?? '',
+      previousStartedAt: previousStartedAt ?? '',
       observedStartedAt: nextStartedAt ?? '',
     });
   }
