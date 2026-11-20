@@ -8,6 +8,7 @@ import {
   IntentStatus,
   NodeMetricsStatus,
   PreflightStatus,
+  RootPlacement,
   UserStatus,
 } from '../enums.js';
 import {
@@ -272,7 +273,9 @@ export const zPatchServerRequest = z.object({
   slug: zServerSlug.optional(),
   parentInterface: zNetworkInterface.optional(),
   dnsServers: z.array(zIpv4Address).max(8).optional(),
-  systemPoolId: zResourceIdentity.nullable().optional(),
+  rootPlacement: z.nativeEnum(RootPlacement).optional(),
+  /** Only with random placement; single placement always stores false. */
+  rootPlacementSticky: z.boolean().optional(),
   storageOvercommitRatio: z.number().finite()
     .min(1)
     .max(MAX_STORAGE_OVERCOMMIT_RATIO)
@@ -281,6 +284,9 @@ export const zPatchServerRequest = z.object({
 }).strict().refine(
   (value) => Object.keys(value).some((key) => key !== 'expectedRevision'),
   'At least one server field is required',
+).refine(
+  (value) => !(value.rootPlacement === RootPlacement.Single && value.rootPlacementSticky === true),
+  { message: 'Sticky placement needs random placement', path: ['rootPlacementSticky'] },
 );
 
 export const zRotateServerEnrollmentRequest = z.object({
@@ -323,6 +329,11 @@ export function mountPathsOverlap(left: string, right: string): boolean {
   return left === right || left.startsWith(`${right}/`) || right.startsWith(`${left}/`);
 }
 
+export const zStoragePoolSystemDisk = z.object({
+  weight: z.number().int().min(1).max(100),
+  maxUsedPercent: z.number().int().min(1).max(100).nullable(),
+}).strict();
+
 export const zPatchStoragePoolRequest = z.object({
   expectedRevision: zExpectedRevision,
   registered: z.boolean().optional(),
@@ -331,6 +342,11 @@ export const zPatchStoragePoolRequest = z.object({
   mountPath: zStorageMountPath.nullable().optional(),
   /** A disk under maintenance is left out of every container (they start without it). */
   maintenance: z.boolean().optional(),
+  /**
+   * Turns the system disk role on with these parameters (replacing the old ones), or off with null.
+   * Under single placement, turning it on moves the role here from the server's other pool.
+   */
+  systemDisk: zStoragePoolSystemDisk.nullable().optional(),
 }).strict().refine(
   (value) => Object.keys(value).some((key) => key !== 'expectedRevision'),
   'At least one storage pool field is required',

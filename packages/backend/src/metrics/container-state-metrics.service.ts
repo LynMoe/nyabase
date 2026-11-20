@@ -171,27 +171,19 @@ export class ContainerStateMetricsPublisher implements OnModuleInit, OnModuleDes
       shareable: boolean;
       driver: string;
       shared_backend_id: string | null;
+      system_disk: boolean;
     }>;
-    let systemPools: Array<{ id: string; system_pool_id: string | null }>;
     try {
-      [pools, systemPools] = await Promise.all([
-        this.database
-          .selectFrom('infra.storage_pools')
-          .select(['id', 'server_id', 'incus_name', 'shareable', 'driver', 'shared_backend_id'])
-          .where('registered', '=', true)
-          .where('server_id', 'in', [...onlineServerIds])
-          .execute(),
-        this.database
-          .selectFrom('infra.servers')
-          .select(['id', 'system_pool_id'])
-          .where('id', 'in', [...onlineServerIds])
-          .execute(),
-      ]);
+      pools = await this.database
+        .selectFrom('infra.storage_pools')
+        .select(['id', 'server_id', 'incus_name', 'shareable', 'driver', 'shared_backend_id', 'system_disk'])
+        .where('registered', '=', true)
+        .where('server_id', 'in', [...onlineServerIds])
+        .execute();
     } catch (error) {
       this.logger.warn(`Storage pool metrics list failed: ${messageOf(error)}`);
       return;
     }
-    const systemPoolByServer = new Map(systemPools.map((row) => [row.id, row.system_pool_id]));
     const byServer = new Map<string, typeof pools>();
     for (const pool of pools) {
       if (!isLocalPoolRow(pool)) continue;
@@ -200,10 +192,9 @@ export class ContainerStateMetricsPublisher implements OnModuleInit, OnModuleDes
       byServer.set(pool.server_id, list);
     }
     await Promise.all([...byServer.entries()].map(async ([serverId, rows]) => {
-      const systemPoolId = systemPoolByServer.get(serverId);
       const ordered = [...rows].sort((left, right) => {
-        const leftSystem = left.id === systemPoolId ? 0 : 1;
-        const rightSystem = right.id === systemPoolId ? 0 : 1;
+        const leftSystem = left.system_disk ? 0 : 1;
+        const rightSystem = right.system_disk ? 0 : 1;
         return leftSystem - rightSystem || left.incus_name.localeCompare(right.incus_name);
       });
       const start = this.poolCursor.get(serverId) ?? 0;

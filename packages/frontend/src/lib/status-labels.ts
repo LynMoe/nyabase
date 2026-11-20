@@ -48,6 +48,8 @@ const FAILURE_CODE_ZH: Partial<Record<string, string>> = {
   [FailureCode.DataDiskPoolGranted]: '部分盘已属于该用户的其他数据盘授权',
   [FailureCode.StorageMountPathConflict]: '挂载点与其他盘的挂载点相同或互相嵌套',
   [FailureCode.StorageMountUnsupported]: '该存储池不能作为数据盘（需已登记、在线配额且配额生效）',
+  [FailureCode.SystemDiskUnsupported]: '该存储池不能作为系统盘（需已登记、能放系统盘的本地池）',
+  [FailureCode.SystemDiskNotSingle]: '「单一」分配只能有一个系统盘池，请先关闭其余池的系统盘用途',
   [FailureCode.GrantBundleConflict]: '该服务器上已有同名授权模板',
   [FailureCode.GrantBundleInUse]: '授权模板仍有用户在使用',
   [FailureCode.StoragePoolExhausted]: '存储池容量不足',

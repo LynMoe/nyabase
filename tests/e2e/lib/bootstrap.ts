@@ -108,15 +108,13 @@ async function main(): Promise<void> {
     if (!found) {
       throw new Error(`pool ${wanted} not found on ${slug}; discovered: ${discovered.pools.map((p) => p.incusName).join(', ')}`);
     }
+    // Registered as the server's one system pool (single placement, the default).
     const pool = await api.patch<StoragePoolDto>(`/servers/${server.id}/storage-pools/${found.id}`, {
       expectedRevision: found.revision,
       registered: true,
+      systemDisk: { weight: 1, maxUsedPercent: null },
     });
     server = await api.get<ServerDto>(`/servers/${server.id}`, { scope: 'all' });
-    await api.patch<ServerDto>(`/servers/${server.id}`, {
-      expectedRevision: server.revision,
-      systemPoolId: pool.id,
-    });
     // Optional data disk: registered here, enabled (given a mount path) by the scenarios.
     let dataPoolId: string | null = null;
     const dataPoolName = opt(`${prefix}DATA_POOL`);

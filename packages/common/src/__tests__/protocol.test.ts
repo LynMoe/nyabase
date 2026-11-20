@@ -10,6 +10,7 @@ import {
   NodeMetricsStatus,
   PreflightStatus,
   ResourceLifecyclePhase,
+  RootPlacement,
   ServerStatus,
   zBrowserToConsole,
   zConsoleToBrowser,
@@ -74,6 +75,23 @@ describe('canonical server network contract', () => {
       parentInterface: 'eno1',
       dnsServers: ['192.0.2.53'],
     });
+  });
+
+  it('accepts root placement, sticky only with random placement', () => {
+    expect(zPatchServerRequest.parse({
+      expectedRevision: 1,
+      rootPlacement: RootPlacement.Random,
+      rootPlacementSticky: true,
+    })).toMatchObject({ rootPlacement: 'random', rootPlacementSticky: true });
+    expect(zPatchServerRequest.parse({ expectedRevision: 1, rootPlacementSticky: false }))
+      .toMatchObject({ rootPlacementSticky: false });
+    expect(zPatchServerRequest.safeParse({
+      expectedRevision: 1,
+      rootPlacement: RootPlacement.Single,
+      rootPlacementSticky: true,
+    }).success).toBe(false);
+    expect(zPatchServerRequest.safeParse({ expectedRevision: 1, rootPlacement: 'balanced' }).success).toBe(false);
+    expect(zPatchServerRequest.safeParse({ expectedRevision: 1, systemPoolId: null }).success).toBe(false);
   });
 
   it('rejects unknown extra server fields', () => {
@@ -468,6 +486,25 @@ describe('storage pool patch', () => {
     }).registered).toBe(true);
   });
 
+  it('turns the system disk role on with its parameters, or off with null', () => {
+    expect(zPatchStoragePoolRequest.parse({
+      expectedRevision: 2,
+      systemDisk: { weight: 3, maxUsedPercent: 90 },
+    }).systemDisk).toEqual({ weight: 3, maxUsedPercent: 90 });
+    expect(zPatchStoragePoolRequest.parse({ expectedRevision: 2, systemDisk: null }).systemDisk).toBeNull();
+    for (const systemDisk of [
+      { weight: 0, maxUsedPercent: null },
+      { weight: 101, maxUsedPercent: null },
+      { weight: 1.5, maxUsedPercent: null },
+      { weight: 1, maxUsedPercent: 0 },
+      { weight: 1, maxUsedPercent: 101 },
+      { weight: 1 },
+      { weight: 1, maxUsedPercent: null, extra: true },
+    ]) {
+      expect(zPatchStoragePoolRequest.safeParse({ expectedRevision: 2, systemDisk }).success).toBe(false);
+    }
+  });
+
   it('rejects empty patches and unknown keys', () => {
     expect(zPatchStoragePoolRequest.safeParse({ expectedRevision: 2 }).success).toBe(false);
     expect(zPatchStoragePoolRequest.safeParse({
@@ -509,8 +546,9 @@ describe('canonical DTO shapes', () => {
       slug: 'incus-one',
       incusVersion: null,
       apiExtensions: [],
-      systemPoolId: null,
-      systemPoolName: null,
+      rootPlacement: RootPlacement.Single,
+      rootPlacementSticky: false,
+      systemPools: [],
       storageOvercommitRatio: 1,
       parentInterface: 'eno1',
       dnsServers: [],

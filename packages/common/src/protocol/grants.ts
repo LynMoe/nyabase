@@ -138,12 +138,15 @@ export interface GrantServerProfileDto {
   };
   /** Physical memory in bytes; null when not read live. */
   memoryBytes: number | null;
-  /** Registered local pools of the server; `system` marks the one system disks live on. */
+  /** Registered local pools of the server; a pool can be a system disk and a data disk at once. */
   pools: Array<{
     poolId: string;
     name: string;
     driver: string;
+    /** New root disks may land on it. */
     system: boolean;
+    /** Where it mounts as a data disk; null = not a data disk. */
+    mountPath: string | null;
     totalBytes: number | null;
     usedBytes: number | null;
   }>;

@@ -52,12 +52,15 @@ export class GrantServerProfileService {
 
   async profile(serverId: string): Promise<GrantServerProfileDto> {
     const server = await this.database.selectFrom('infra.servers')
-      .select(['id', 'cpu_topology', 'reserved_cpus', 'system_pool_id', 'gpu_enabled', 'observed_gpu_pci_addresses'])
+      .select(['id', 'cpu_topology', 'reserved_cpus', 'gpu_enabled', 'observed_gpu_pci_addresses'])
       .where('id', '=', serverId)
       .executeTakeFirst();
     if (!server) throw new NotFoundException('Server not found');
     const pools = (await this.database.selectFrom('infra.storage_pools')
-      .select(['id', 'incus_name', 'display_name', 'driver', 'shareable', 'shared_backend_id', 'total_bytes', 'used_bytes'])
+      .select([
+        'id', 'incus_name', 'display_name', 'driver', 'shareable', 'shared_backend_id', 'total_bytes', 'used_bytes',
+        'system_disk', 'mount_path',
+      ])
       .where('server_id', '=', serverId)
       .where('registered', '=', true)
       .orderBy('incus_name')
@@ -80,7 +83,8 @@ export class GrantServerProfileService {
         poolId: pool.id,
         name: pool.display_name || pool.incus_name,
         driver: pool.driver,
-        system: pool.id === server.system_pool_id,
+        system: pool.system_disk,
+        mountPath: pool.mount_path,
         totalBytes: pool.total_bytes === null ? null : numberValue(pool.total_bytes),
         usedBytes: pool.used_bytes === null ? null : numberValue(pool.used_bytes),
       })),

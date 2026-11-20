@@ -73,6 +73,21 @@ export enum StoragePoolResizeFamily {
   BlockBacked = 'block_backed',
 }
 
+/** How a server picks the system pool for a new container's root disk. */
+export enum RootPlacement {
+  /** At most one system pool; every new root disk goes there. */
+  Single = 'single',
+  /** A weighted random system pool (optionally sticky per user). */
+  Random = 'random',
+}
+
+/** Why a system pool could not take a new root disk. */
+export enum RootPlacementExclusion {
+  QuotaIneffective = 'quota_ineffective',
+  AboveWatermark = 'above_watermark',
+  Capacity = 'capacity',
+}
+
 export enum ResourceLifecyclePhase {
   Provisioning = 'provisioning',
   Active = 'active',
@@ -147,6 +162,10 @@ export enum FailureCode {
   StorageMountPathConflict = 'STORAGE_MOUNT_PATH_CONFLICT',
   /** The pool cannot be a data disk (not a registered local pool with an effective online quota). */
   StorageMountUnsupported = 'STORAGE_MOUNT_UNSUPPORTED',
+  /** The pool cannot be a system disk (not a registered, root-capable local pool). */
+  SystemDiskUnsupported = 'SYSTEM_DISK_UNSUPPORTED',
+  /** Single root placement needs at most one system pool; turn the others off first. */
+  SystemDiskNotSingle = 'SYSTEM_DISK_NOT_SINGLE',
   GrantBundleConflict = 'GRANT_BUNDLE_CONFLICT',
   GrantBundleInUse = 'GRANT_BUNDLE_IN_USE',
   MemoryGrantExceeded = 'MEMORY_GRANT_EXCEEDED',

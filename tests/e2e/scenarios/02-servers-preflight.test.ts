@@ -35,7 +35,8 @@ describe('server agents and preflight status', () => {
       assert.equal(server.agent.enrollmentExpiresAt, null, 'the enrollment token was used up');
       assert.ok(server.incusVersion, 'the Incus version came with the agent hello');
       assert.ok((server.cpuTopology?.length ?? 0) > 0, 'the CPU topology was read through the agent');
-      assert.equal(server.systemPoolId, expected.poolId);
+      assert.deepEqual(server.systemPools.map((pool) => pool.id), [expected.poolId]);
+      assert.equal(server.rootPlacement, 'single');
       assert.equal(server.preflightStatus, PreflightStatus.Passed);
       assert.equal(server.preflightReport?.controlReady, true);
       assert.equal(server.preflightReport?.checks.api, 'pass');

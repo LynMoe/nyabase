@@ -29,7 +29,9 @@ function database(selectResult?: unknown) {
     query.execute = vi.fn().mockResolvedValue(
       String(table).includes('ip_pool')
         ? [{ gateway: '192.0.2.1', cidr: '192.0.2.0/24' }]
-        : [],
+        : String(table).includes('storage_pools') && selectResult
+          ? [selectResult]
+          : [],
     );
     return query;
   };
@@ -152,7 +154,6 @@ function server() {
     name: 'test-server',
     parent_interface: 'eth0',
     status: 'unknown',
-    system_pool_id: null,
     preflight_status: 'not_run',
     revision: 1,
   };
@@ -397,7 +398,6 @@ describe('ServerPreflightReconciler', () => {
       client,
       {
         ...server(),
-        system_pool_id: 'pool-1',
       },
       {
         probeImageAlias: 'pinned-preflight-alias',
@@ -605,7 +605,6 @@ describe('ServerPreflightReconciler', () => {
         client,
         {
           ...server(),
-          system_pool_id: 'pool-1',
         },
         {
           probeImageAlias: '',
@@ -676,7 +675,6 @@ describe('ServerPreflightReconciler', () => {
         {
           ...server(),
           preflight_status: 'not_run',
-          system_pool_id: 'pool-1',
         },
         {
           probeImageAlias: '',
@@ -743,7 +741,6 @@ describe('ServerPreflightReconciler', () => {
         client,
         {
           ...server(),
-          system_pool_id: 'pool-1',
         },
         {
           probeImageAlias: 'ubuntu/24.04',

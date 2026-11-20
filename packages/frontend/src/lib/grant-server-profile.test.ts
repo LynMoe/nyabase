@@ -10,8 +10,10 @@ const profile: GrantServerProfileDto = {
   cpu: { models: [{ name: 'Intel Xeon 8358', sockets: 2 }], logical: 128, reserved: 2, allocatable: 126 },
   memoryBytes: 1024 * GIB,
   pools: [
-    { poolId: 'p1', name: 'nyabase-zfs', driver: 'zfs', system: true, totalBytes: 3000 * GIB, usedBytes: 120 * GIB },
-    { poolId: 'p2', name: 'data', driver: 'dir', system: false, totalBytes: null, usedBytes: null },
+    { poolId: 'p1', name: 'nyabase-zfs', driver: 'zfs', system: true, mountPath: null, totalBytes: 3000 * GIB, usedBytes: 120 * GIB },
+    { poolId: 'p2', name: 'data', driver: 'dir', system: false, mountPath: '/data1', totalBytes: null, usedBytes: null },
+    { poolId: 'p3', name: 'both', driver: 'dir', system: true, mountPath: '/data2', totalBytes: null, usedBytes: null },
+    { poolId: 'p4', name: 'idle', driver: 'dir', system: false, mountPath: null, totalBytes: null, usedBytes: null },
   ],
   gpu: {
     enabled: true,
@@ -28,7 +30,9 @@ describe('serverProfileRows', () => {
       { label: 'CPU', value: '128 线程 · 可分配 126 · 保留 2', detail: '2 × Intel Xeon 8358' },
       { label: '内存', value: '1 TiB' },
       { label: '系统盘池', value: '已用 120 GiB / 共 2.93 TiB', detail: 'nyabase-zfs（zfs）' },
-      { label: '数据盘池', value: '容量未知', detail: 'data（dir）' },
+      { label: '系统盘池', value: '容量未知', detail: 'both（dir）' },
+      { label: '数据盘池', value: '容量未知', detail: 'data（dir）· /data1' },
+      { label: '数据盘池', value: '容量未知', detail: 'both（dir）· /data2' },
       { label: 'GPU', value: '2 张', detail: '2 × NVIDIA A800 80GB' },
     ]);
   });

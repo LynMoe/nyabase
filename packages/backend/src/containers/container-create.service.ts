@@ -5,8 +5,11 @@ import {
   FailureCode,
   IntentKind,
   IntentResourceType,
+  RootPlacementExclusion,
   type CreateContainerRequest,
+  type RootPlacement,
 } from '@nyabase/common';
+import { randomInt } from 'node:crypto';
 import { sql, type Transaction } from 'kysely';
 import { AccessResolverService } from '../iam/access-resolver.service.js';
 import type { Actor } from '../iam/actor.js';
@@ -34,6 +37,7 @@ import {
   containerNameConflict,
 } from './container-rules.js';
 import { requireUserId } from '../iam/actor.js';
+import { chooseRootPool, type RootPlacementDecision, type RootPlacementPool } from '../storage-pools/root-placement.js';
 
 type Tx = Transaction<NyabaseDatabase>;
 
@@ -41,12 +45,73 @@ type CreateAccess = NonNullable<
   Awaited<ReturnType<AccessResolverService['resolveContainerCreateAccessInTransaction']>>
 >;
 
+/** Locks the server row (root admissions on a server serialise on it) and reads its overcommit ratio. */
+async function lockServerForRootAdmission(transaction: Transaction<NyabaseDatabase>, serverId: string): Promise<number> {
+  const server = await transaction.selectFrom('infra.servers')
+    .select('storage_overcommit_ratio')
+    .where('id', '=', serverId)
+    .forUpdate()
+    .executeTakeFirstOrThrow();
+  return numberValue(server.storage_overcommit_ratio);
+}
+
+/** The owner's system-disk quota on the server: system disks on every pool, not data volumes. */
+async function assertRootGrant(
+  repository: ContainerControlRepository,
+  transaction: Transaction<NyabaseDatabase>,
+  ownerId: string,
+  serverId: string,
+  delta: number,
+  grantLimit: number | null,
+): Promise<void> {
+  if (grantLimit === null) return;
+  const used = await repository.sumLiveRootBytes({ ownerId, serverId }, transaction);
+  if (used + delta > grantLimit) {
+    throw new ConflictException({
+      code: FailureCode.StorageGrantExceeded,
+      message: 'System disk grant exceeded',
+      details: {
+        requestedBytes: delta,
+        availableBytes: Math.max(0, grantLimit - used),
+        grantLimitBytes: grantLimit,
+      },
+    });
+  }
+}
+
 /**
- * Admission check for growing root-disk commitments: the owner's system-disk
- * quota on the server (system disks only; data volumes have their own quota
- * per pool), then the pool's overcommitted capacity (the owner's own
- * commitments on the pool stay within its physical size). Locks the server and
- * pool rows so concurrent admissions serialise.
+ * What the pool's overcommitted capacity still admits for the owner (whose own
+ * commitments on the pool stay within its physical size); null while the pool's
+ * capacity is unknown. The caller holds the pool row lock.
+ */
+async function rootPoolAvailableBytes(
+  repository: ContainerControlRepository,
+  transaction: Transaction<NyabaseDatabase>,
+  ownerId: string,
+  poolId: string,
+  totalBytes: string | number | null,
+  ratio: number,
+): Promise<number | null> {
+  if (totalBytes === null) return null;
+  // Custom volumes belong to the volumes module; only their committed size on the pool is read here.
+  const sumPoolVolumes = async (owner?: string) => {
+    let query = transaction.selectFrom('control.volumes')
+      .select(sql<string>`coalesce(sum(${committedVolumeBytesSql()}), 0)`.as('bytes'))
+      .where('lifecycle_phase', 'not in', ['failed', 'deleting'])
+      .where('pool_id', '=', poolId);
+    if (owner !== undefined) query = query.where('owner_id', '=', owner);
+    return numberValue((await query.executeTakeFirstOrThrow()).bytes);
+  };
+  const committed = await repository.sumLiveRootBytes({ poolId }, transaction) + await sumPoolVolumes();
+  const ownerCommitted = await repository.sumLiveRootBytes({ ownerId, poolId }, transaction)
+    + await sumPoolVolumes(ownerId);
+  return overcommitAvailableBytes(numberValue(totalBytes), ratio, committed, ownerCommitted);
+}
+
+/**
+ * Admission check for growing a root disk on its pool: the owner's system-disk
+ * quota on the server, then the pool's overcommitted capacity. Locks the server
+ * and pool rows so concurrent admissions serialise.
  */
 export async function assertRootCapacity(
   repository: ContainerControlRepository,
@@ -58,55 +123,53 @@ export async function assertRootCapacity(
   grantLimit: number | null,
 ): Promise<void> {
   if (delta <= 0) return;
-  await transaction.selectFrom('infra.servers')
-    .select('id')
-    .where('id', '=', serverId)
-    .forUpdate()
-    .executeTakeFirstOrThrow();
-  // Custom volumes belong to the volumes module; only their committed size on the pool is read here.
-  const sumPoolVolumes = async (owner?: string) => {
-    let query = transaction.selectFrom('control.volumes')
-      .select(sql<string>`coalesce(sum(${committedVolumeBytesSql()}), 0)`.as('bytes'))
-      .where('lifecycle_phase', 'not in', ['failed', 'deleting'])
-      .where('pool_id', '=', poolId);
-    if (owner !== undefined) query = query.where('owner_id', '=', owner);
-    return numberValue((await query.executeTakeFirstOrThrow()).bytes);
-  };
-  const used = await repository.sumLiveRootBytes({ ownerId, serverId }, transaction);
-  if (grantLimit !== null && used + delta > grantLimit) {
-    throw new ConflictException({
-      code: FailureCode.StorageGrantExceeded,
-      message: 'System disk grant exceeded',
-      details: {
-        requestedBytes: delta,
-        availableBytes: Math.max(0, grantLimit - used),
-        grantLimitBytes: grantLimit,
-      },
-    });
-  }
+  const ratio = await lockServerForRootAdmission(transaction, serverId);
+  await assertRootGrant(repository, transaction, ownerId, serverId, delta, grantLimit);
   const pool = await transaction.selectFrom('infra.storage_pools')
     .select(['total_bytes'])
     .where('id', '=', poolId)
     .forUpdate()
     .executeTakeFirstOrThrow();
-  if (pool.total_bytes === null) return;
-  const committed = await repository.sumLiveRootBytes({ poolId }, transaction)
-    + await sumPoolVolumes();
-  const ownerCommitted = await repository.sumLiveRootBytes({ ownerId, poolId }, transaction)
-    + await sumPoolVolumes(ownerId);
-  const server = await transaction.selectFrom('infra.servers')
-    .select('storage_overcommit_ratio')
-    .where('id', '=', serverId)
-    .executeTakeFirstOrThrow();
-  const ratio = numberValue(server.storage_overcommit_ratio);
-  const available = overcommitAvailableBytes(numberValue(pool.total_bytes), ratio, committed, ownerCommitted);
-  if (delta > available) {
+  const available = await rootPoolAvailableBytes(repository, transaction, ownerId, poolId, pool.total_bytes, ratio);
+  if (available !== null && delta > available) {
     throw new ConflictException({
       code: FailureCode.StoragePoolExhausted,
       message: 'Storage pool capacity exceeded',
       details: { poolId, requestedBytes: delta, availableBytes: available, overcommitRatio: ratio },
     });
   }
+}
+
+/** Why no system pool took the root disk, as the API error. */
+function rootPlacementFailure(
+  decision: Exclude<RootPlacementDecision, { kind: 'chosen' }>,
+  requestedBytes: number,
+  ratio: number,
+): ConflictException {
+  if (decision.kind === 'no_system_pool') {
+    return new ConflictException({
+      code: FailureCode.StoragePoolExhausted,
+      message: 'The server has no system root storage pool',
+    });
+  }
+  const only = decision.excluded.length === 1 ? decision.excluded[0]! : null;
+  if (decision.excluded.every((pool) => pool.reason === RootPlacementExclusion.QuotaIneffective)) {
+    return new ConflictException({
+      code: FailureCode.StoragePoolQuotaIneffective,
+      message: 'The server system storage pool cannot enforce root quotas',
+      details: { ...(only ? { poolId: only.poolId } : {}), pools: decision.excluded },
+    });
+  }
+  return new ConflictException({
+    code: FailureCode.StoragePoolExhausted,
+    message: 'No system storage pool can take the root disk',
+    details: {
+      ...(only ? { poolId: only.poolId, availableBytes: only.availableBytes } : {}),
+      requestedBytes,
+      overcommitRatio: ratio,
+      pools: decision.excluded,
+    },
+  });
 }
 
 @Injectable()
@@ -120,6 +183,9 @@ export class ContainerCreateService {
     private readonly volumes: VolumeProvisioner,
     private readonly gpuClaims: GpuClaimsRepository,
   ) {}
+
+  /** A uniform integer in [0, bound) for random root placement; tests may replace it. */
+  randomInt: (bound: number) => number = (bound) => randomInt(bound);
 
   /** The active, non-deleting image row, locked for the rest of the transaction. */
   private lockActiveImage(transaction: Tx, id: string): Promise<ImageRow | undefined> {
@@ -231,44 +297,30 @@ export class ContainerCreateService {
     }
   }
 
-  /** The server's system pool, locked, when it can host a root disk of this image. */
-  private async lockRootPool(
+  /**
+   * The system pool for the new root disk (AGENTS.md, 存储池用途与系统盘分配):
+   * the image's minimum size, the owner's system-disk quota on the server, then
+   * the server's placement among its system pools, all rows locked (server
+   * first, as every capacity change does).
+   */
+  private async placeRootDisk(
     transaction: Tx,
     server: ServerRow,
+    ownerId: string,
     request: CreateContainerRequest,
     image: ImageRow,
+    grantLimit: number | null,
   ): Promise<string> {
-    const rootPoolId = server.system_pool_id;
-    if (!rootPoolId) {
-      throw new ConflictException({
-        code: FailureCode.StoragePoolExhausted,
-        message: 'The server has no system root storage pool',
-      });
-    }
-    const rootPool = await transaction.selectFrom('infra.storage_pools')
+    const ratio = await lockServerForRootAdmission(transaction, request.serverId);
+    const rows = await transaction.selectFrom('infra.storage_pools')
       .selectAll()
-      .where('id', '=', rootPoolId)
+      .where('server_id', '=', request.serverId)
+      .where('system_disk', '=', true)
       .where('registered', '=', true)
+      .orderBy('id')
       .forUpdate()
-      .executeTakeFirst();
-    if (
-      !rootPool
-      || rootPool.server_id !== request.serverId
-      || !rootPool.root_disk_capable
-      || Boolean(rootPool.shared_backend_id)
-    ) {
-      throw new ConflictException({
-        code: FailureCode.StoragePoolExhausted,
-        message: 'The server system storage pool is not usable',
-      });
-    }
-    if (rootPool.resize_family === 'quota_online' && rootPool.quota_effective !== true) {
-      throw new ConflictException({
-        code: FailureCode.StoragePoolQuotaIneffective,
-        message: 'The server system storage pool cannot enforce root quotas',
-        details: { poolId: rootPoolId },
-      });
-    }
+      .execute();
+    if (rows.length === 0) throw rootPlacementFailure({ kind: 'no_system_pool' }, request.rootSizeBytes, ratio);
     const minimum = rootSizeMinimum(image.min_root_size_bytes);
     if (request.rootSizeBytes < minimum) {
       throw new ConflictException({
@@ -281,7 +333,37 @@ export class ContainerCreateService {
         },
       });
     }
-    return rootPoolId;
+    await assertRootGrant(this.repository, transaction, ownerId, request.serverId, request.rootSizeBytes, grantLimit);
+    const pools: RootPlacementPool[] = [];
+    for (const row of rows) {
+      pools.push({
+        id: row.id,
+        resizeFamily: row.resize_family,
+        quotaEffective: row.quota_effective,
+        totalBytes: row.total_bytes === null ? null : numberValue(row.total_bytes),
+        usedBytes: row.used_bytes === null ? null : numberValue(row.used_bytes),
+        weight: row.system_weight,
+        maxUsedPercent: row.system_max_used_percent,
+        availableBytes: await rootPoolAvailableBytes(
+          this.repository,
+          transaction,
+          ownerId,
+          row.id,
+          row.total_bytes,
+          ratio,
+        ),
+      });
+    }
+    const decision = chooseRootPool({
+      placement: server.root_placement as RootPlacement,
+      sticky: server.root_placement_sticky,
+      pools,
+      ownerRootBytesByPool: await this.repository.liveRootBytesByPool(ownerId, request.serverId, transaction),
+      requestedBytes: request.rootSizeBytes,
+      randomInt: this.randomInt,
+    });
+    if (decision.kind !== 'chosen') throw rootPlacementFailure(decision, request.rootSizeBytes, ratio);
+    return decision.poolId;
   }
 
   /** First free address across the server's IP pools. */
@@ -356,14 +438,12 @@ export class ContainerCreateService {
         details: { serverId: request.serverId },
       });
     }
-    const rootPoolId = await this.lockRootPool(transaction, server, request, image);
-    await assertRootCapacity(
-      this.repository,
+    const rootPoolId = await this.placeRootDisk(
       transaction,
+      server,
       ownerId,
-      request.serverId,
-      rootPoolId,
-      request.rootSizeBytes,
+      request,
+      image,
       access.grant.rootDiskBytes ?? null,
     );
     const { networkKey, address } = await this.allocateAddress(

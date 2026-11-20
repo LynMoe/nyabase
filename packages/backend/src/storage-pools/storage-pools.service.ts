@@ -7,8 +7,10 @@ import {
   type StoragePoolDiscoverResult,
   type StoragePoolDto,
   Role,
+  RootPlacement,
 } from '@nyabase/common';
-import type { Kysely } from 'kysely';
+import type { Kysely, Selectable, Transaction } from 'kysely';
+import type { InfrastructureStoragePoolTable } from '../platform/persistence-pg/infrastructure-database.types.js';
 import { listPoolAccess, listServerAccess } from '../iam/effective-access.js';
 import { assertListScope, hasRole, type Actor, requireUserId } from '../iam/actor.js';
 import type { IncusClientPort } from '../incus/index.js';
@@ -68,7 +70,8 @@ export class StoragePoolsService {
 
   async list(serverId?: string, includeUnregistered = false): Promise<StoragePoolDto[]> {
     const rows = await this.repository.list(serverId, includeUnregistered);
-    return rows.map((row) => toAdminPoolDto(row)).filter(isLocalPoolDto);
+    const rootDisks = await this.repository.rootDiskSummary(rows.map((row) => row.id));
+    return rows.map((row) => toAdminPoolDto(row, rootDisks)).filter(isLocalPoolDto);
   }
 
   /** Pools the user may use: granted servers' pools, or individually granted pools. */
@@ -91,7 +94,7 @@ export class StoragePoolsService {
     if (!row || (!includeUnregistered && !row.registered) || !isLocalPoolRow(row)) {
       throw new NotFoundException('Storage pool not found');
     }
-    return toAdminPoolDto(row);
+    return toAdminPoolDto(row, await this.repository.rootDiskSummary([row.id]));
   }
 
   async getVisible(
@@ -147,8 +150,10 @@ export class StoragePoolsService {
         if (Number(current.revision) !== input.expectedRevision) {
           throw new ConflictException({ code: FailureCode.RevisionConflict });
         }
+        const system = await this.systemDiskChange(transaction, current, input);
         if (input.registered === false && current.registered) {
-          if (await this.repository.hasDependencies(id, transaction)) {
+          // The pool's own system role counts as it stands after this PATCH.
+          if (system.next || await this.repository.hasDependencies(id, transaction, { ignoreSystemRole: true })) {
             throw new ConflictException({
               code: FailureCode.StoragePoolInUse,
               message: 'Storage pool registration or backend mapping cannot change while referenced',
@@ -172,8 +177,19 @@ export class StoragePoolsService {
             : { display_name: input.displayName?.trim() ? input.displayName.trim() : null }),
           ...(mountChanged ? { mount_path: mountPath } : {}),
           ...(maintenanceChanged ? { maintenance: input.maintenance } : {}),
+          ...system.values,
         }, transaction);
         if (!updated) throw new ConflictException({ code: FailureCode.RevisionConflict });
+        const replaced = system.next && system.single
+          ? await this.repository.dropOtherSystemPools(current.server_id, id, transaction)
+          : [];
+        for (const replacedId of replaced) {
+          await this.audit.append(transaction, actorId, AuditAction.UpdateStoragePool, replacedId, 'storage_pool', {
+            serverId: current.server_id,
+            systemDisk: null,
+            systemDiskMovedTo: id,
+          });
+        }
         await this.audit.append(
           transaction,
           actorId,
@@ -188,6 +204,13 @@ export class StoragePoolsService {
             ...(input.displayName === undefined ? {} : { displayName: input.displayName }),
             ...(mountChanged ? { mountPath, previousMountPath: current.mount_path } : {}),
             ...(maintenanceChanged ? { maintenance: input.maintenance } : {}),
+            ...(system.change === undefined ? {} : {
+              systemDisk: system.change,
+              previousSystemDisk: current.system_disk
+                ? { weight: current.system_weight, maxUsedPercent: current.system_max_used_percent }
+                : null,
+              ...(replaced.length > 0 ? { replacedSystemPoolIds: replaced } : {}),
+            }),
           },
         );
         if (mountChanged || maintenanceChanged) {
@@ -200,6 +223,52 @@ export class StoragePoolsService {
       },
       { isolationLevel: 'serializable', maxAttempts: 5 },
     );
-    return toAdminPoolDto(result);
+    return toAdminPoolDto(result, await this.repository.rootDiskSummary([result.id]));
+  }
+
+  /**
+   * The system disk role a PATCH asks for (AGENTS.md, 存储池用途与系统盘分配):
+   * only a registered, root-capable local pool can take it; turning it off
+   * resets its parameters. Under single placement, turning it on moves the role
+   * here from the server's other pool (the caller holds the server row lock).
+   */
+  private async systemDiskChange(
+    transaction: Transaction<NyabaseDatabase>,
+    current: Selectable<InfrastructureStoragePoolTable>,
+    input: PatchStoragePoolRequest,
+  ): Promise<{
+    change: PatchStoragePoolRequest['systemDisk'];
+    next: boolean;
+    single: boolean;
+    values: { system_disk?: boolean; system_weight?: number; system_max_used_percent?: number | null };
+  }> {
+    const change = input.systemDisk;
+    if (change === undefined) return { change, next: current.system_disk, single: false, values: {} };
+    if (change === null) {
+      return {
+        change,
+        next: false,
+        single: false,
+        values: { system_disk: false, system_weight: 1, system_max_used_percent: null },
+      };
+    }
+    const registered = input.registered ?? current.registered;
+    if (!registered || !current.root_disk_capable || current.shareable || current.shared_backend_id !== null) {
+      throw new ConflictException({
+        code: FailureCode.SystemDiskUnsupported,
+        message: 'Only a registered, root-capable local pool can be a system disk',
+        details: { poolId: current.id },
+      });
+    }
+    const server = await transaction.selectFrom('infra.servers')
+      .select('root_placement')
+      .where('id', '=', current.server_id)
+      .executeTakeFirstOrThrow();
+    return {
+      change,
+      next: true,
+      single: server.root_placement === RootPlacement.Single,
+      values: { system_disk: true, system_weight: change.weight, system_max_used_percent: change.maxUsedPercent },
+    };
   }
 }

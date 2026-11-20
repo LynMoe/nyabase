@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
-import { Role, ServerStatus, UserStatus, parseAgentSecret } from '@nyabase/common';
+import { FailureCode, Role, RootPlacement, ServerStatus, UserStatus, parseAgentSecret } from '@nyabase/common';
 import { AgentCredentialRejections } from '../incus/agent-credentials.js';
 import { AgentCredentialVerifier, agentSecretDigest } from '../incus/agent-credentials.js';
 import { withPostgresTestDatabase } from '../platform/persistence-pg/postgres-test-harness.js';
@@ -117,6 +117,82 @@ describePg('server agent onboarding and removal', () => {
     });
   });
 
+  it('switches root placement, single only with at most one system pool', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const transactions = new PgTransactionManager(database);
+      const agents = { disconnect: vi.fn(), isConnected: vi.fn(() => false), current: vi.fn(() => undefined) };
+      const audit = { append: vi.fn() };
+      const service = new ServersService(
+        database,
+        transactions,
+        {} as never,
+        audit as never,
+        { invalidate: vi.fn() } as never,
+        agents as never,
+        new AgentEnrollmentService(database, transactions, audit as never, agents as never),
+        { wake: vi.fn() } as never,
+        { agentStatuses: vi.fn(async () => new Map()) } as never,
+      );
+      const operatorId = await seedUser(database, undefined, UserStatus.Active, Role.Admin);
+      const created = await service.create(operatorId, {
+        name: 'placement',
+        slug: `placement-${randomUUID().slice(0, 8)}`,
+        parentInterface: 'vmbr0',
+        dnsServers: [],
+        reservedCpus: [],
+      });
+      expect(created).toMatchObject({ rootPlacement: 'single', rootPlacementSticky: false, systemPools: [] });
+      const pools = [randomUUID(), randomUUID()];
+      for (const [index, id] of pools.entries()) {
+        await database.insertInto('infra.storage_pools').values({
+          id,
+          server_id: created.id,
+          incus_name: `pool-${index}`,
+          driver: 'dir',
+          resize_family: 'quota_online',
+          root_disk_capable: true,
+          shareable: false,
+          block_filesystem: null,
+          shared_backend_id: null,
+          total_bytes: null,
+          used_bytes: null,
+          quota_effective: true,
+          display_name: index === 0 ? '系统盘 /data0' : null,
+          registered: true,
+          last_observed_at: null,
+          revision: 1,
+        }).execute();
+      }
+      await database.updateTable('infra.storage_pools').set({ system_disk: true }).where('id', '=', pools[0]!).execute();
+
+      await expect(service.update(operatorId, created.id, {
+        expectedRevision: created.revision,
+        rootPlacementSticky: true,
+      })).rejects.toMatchObject({ status: 400 });
+      const random = await service.update(operatorId, created.id, {
+        expectedRevision: created.revision,
+        rootPlacement: RootPlacement.Random,
+        rootPlacementSticky: true,
+      });
+      expect(random).toMatchObject({
+        rootPlacement: 'random',
+        rootPlacementSticky: true,
+        systemPools: [{ id: pools[0], name: '系统盘 /data0' }],
+      });
+      await database.updateTable('infra.storage_pools').set({ system_disk: true }).where('id', '=', pools[1]!).execute();
+      await expect(service.update(operatorId, created.id, {
+        expectedRevision: random.revision,
+        rootPlacement: RootPlacement.Single,
+      })).rejects.toMatchObject({ response: { code: FailureCode.SystemDiskNotSingle } });
+      await database.updateTable('infra.storage_pools').set({ system_disk: false }).where('id', '=', pools[1]!).execute();
+      const single = await service.update(operatorId, created.id, {
+        expectedRevision: random.revision,
+        rootPlacement: RootPlacement.Single,
+      });
+      expect(single).toMatchObject({ rootPlacement: 'single', rootPlacementSticky: false });
+    });
+  });
+
   it('rejects stale revision and control-plane-cascades referenced servers', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const actor = await seedUser(database, undefined, UserStatus.Active, Role.Admin);
@@ -129,7 +205,6 @@ describePg('server agent onboarding and removal', () => {
           slug: `guarded-${serverId.slice(0, 8)}`,
           incus_version: null,
           api_extensions: [],
-          system_pool_id: null,
           storage_overcommit_ratio: 1,
           parent_interface: 'eth0',
           dns_servers: ['10.20.1.1'],
@@ -235,7 +310,6 @@ describePg('server agent onboarding and removal', () => {
           slug: `cascade-s-${serverS.slice(0, 8)}`,
           incus_version: null,
           api_extensions: [],
-          system_pool_id: null,
           storage_overcommit_ratio: 1,
           parent_interface: 'eth0',
           dns_servers: [],
@@ -257,7 +331,6 @@ describePg('server agent onboarding and removal', () => {
           slug: `cascade-t-${serverT.slice(0, 8)}`,
           incus_version: null,
           api_extensions: [],
-          system_pool_id: null,
           storage_overcommit_ratio: 1,
           parent_interface: 'eth0',
           dns_servers: [],
@@ -361,9 +434,9 @@ describePg('server agent onboarding and removal', () => {
           revision: 1,
         },
       ]).execute();
-      await database.updateTable('infra.servers')
-        .set({ system_pool_id: poolS })
-        .where('id', '=', serverS)
+      await database.updateTable('infra.storage_pools')
+        .set({ system_disk: true })
+        .where('id', '=', poolS)
         .execute();
       await database.insertInto('infra.images').values({
         id: imageId,
@@ -617,7 +690,6 @@ describePg('server agent onboarding and removal', () => {
           slug: `unrelated-${unrelated.slice(0, 8)}`,
           incus_version: null,
           api_extensions: [],
-          system_pool_id: null,
           storage_overcommit_ratio: 1,
           parent_interface: 'eth0',
           dns_servers: [],
@@ -639,7 +711,6 @@ describePg('server agent onboarding and removal', () => {
           slug: `peer-${peer.slice(0, 8)}`,
           incus_version: null,
           api_extensions: [],
-          system_pool_id: null,
           storage_overcommit_ratio: 1,
           parent_interface: 'eth0',
           dns_servers: [],

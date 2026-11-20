@@ -17,7 +17,6 @@ export async function insertServerFixture(
     status: 'unknown',
     api_extensions: [],
     storage_overcommit_ratio: 1,
-    system_pool_id: null,
     incus_version: null,
     last_seen_at: null,
     last_error: null,

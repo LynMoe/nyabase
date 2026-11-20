@@ -1,5 +1,6 @@
 import { Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { sql, type Kysely, type Transaction } from 'kysely';
+import { committedRootBytesSql } from '../platform/persistence-pg/committed-bytes.js';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
 
@@ -273,6 +274,9 @@ export class StoragePoolsRepository {
       shareable?: boolean;
       mount_path?: string | null;
       maintenance?: boolean;
+      system_disk?: boolean;
+      system_weight?: number;
+      system_max_used_percent?: number | null;
     },
     executor: StorageExecutor = this.database,
   ) {
@@ -401,7 +405,11 @@ export class StoragePoolsRepository {
    * Whether the pool still carries anything. Shared (CephFS) executors never
    * appear in `volumes.pool_id`, so their volumes show up as placements.
    */
-  async hasDependencies(id: string, executor: StorageExecutor = this.database): Promise<boolean> {
+  async hasDependencies(
+    id: string,
+    executor: StorageExecutor = this.database,
+    options: { ignoreSystemRole?: boolean } = {},
+  ): Promise<boolean> {
     const [containers, volumes, placements, systemPool, grants] = await Promise.all([
       executor
         .selectFrom('control.containers')
@@ -421,12 +429,14 @@ export class StoragePoolsRepository {
         .where('pool_id', '=', id)
         .limit(1)
         .executeTakeFirst(),
-      executor
-        .selectFrom('infra.servers')
-        .select('id')
-        .where('system_pool_id', '=', id)
-        .limit(1)
-        .executeTakeFirst(),
+      options.ignoreSystemRole
+        ? undefined
+        : executor
+          .selectFrom('infra.storage_pools')
+          .select('id')
+          .where('id', '=', id)
+          .where('system_disk', '=', true)
+          .executeTakeFirst(),
       executor
         .selectFrom('iam.storage_pool_grants')
         .select('id')
@@ -435,6 +445,51 @@ export class StoragePoolsRepository {
         .executeTakeFirst(),
     ]);
     return Boolean(containers || volumes || placements || systemPool || grants);
+  }
+
+  /** Live root disks (neither failed nor deleting) per pool, for the admin view. */
+  async rootDiskSummary(
+    poolIds: readonly string[],
+    executor: StorageExecutor = this.database,
+  ): Promise<Map<string, { count: number; committedBytes: number }>> {
+    if (poolIds.length === 0) return new Map();
+    const rows = await executor
+      .selectFrom('control.containers')
+      .select([
+        'root_pool_id',
+        sql<string>`count(*)`.as('count'),
+        sql<string>`coalesce(sum(${committedRootBytesSql()}), 0)`.as('bytes'),
+      ])
+      .where('lifecycle_phase', 'not in', ['failed', 'deleting'])
+      .where('root_pool_id', 'in', [...poolIds])
+      .groupBy('root_pool_id')
+      .execute();
+    return new Map(rows.map((row) => [
+      row.root_pool_id,
+      { count: Number(row.count), committedBytes: Number(row.bytes) },
+    ]));
+  }
+
+  /** Turn the system disk role off on the server's other pools (single placement moving it); locks them. */
+  async dropOtherSystemPools(
+    serverId: string,
+    keepId: string,
+    executor: StorageExecutor,
+  ): Promise<string[]> {
+    const rows = await executor
+      .updateTable('infra.storage_pools')
+      .set({
+        system_disk: false,
+        system_weight: 1,
+        system_max_used_percent: null,
+        revision: sql<string>`revision + 1`,
+      })
+      .where('server_id', '=', serverId)
+      .where('id', '<>', keepId)
+      .where('system_disk', '=', true)
+      .returning('id')
+      .execute();
+    return rows.map((row) => row.id).sort();
   }
 
   /**

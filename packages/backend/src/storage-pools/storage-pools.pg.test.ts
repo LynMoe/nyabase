@@ -19,7 +19,6 @@ function serverValues(id: string, status: 'online' | 'unknown' = 'unknown') {
     slug: `storage-test-${id.slice(0, 8)}`,
     incus_version: null,
     api_extensions: [],
-    system_pool_id: null,
     storage_overcommit_ratio: 1,
     parent_interface: null,
     dns_servers: [],
@@ -373,6 +372,70 @@ describePg('storage pool registration and shared mapping', () => {
       expect(moved?.source).toBe('/data1/moved');
       expect(moved?.displayName).toBe('系统盘');
       expect(moved?.registered).toBe(true);
+    });
+  });
+
+  it('turns the system disk role on and off, moving it under single placement', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const serverId = randomUUID();
+      await database.insertInto('infra.servers').values(serverValues(serverId, 'online')).execute();
+      const client = incusClient([
+        { name: 'dir-a', driver: 'dir', config: { source: '/data0' } },
+        { name: 'dir-b', driver: 'dir', config: { source: '/data1' } },
+      ]);
+      const service = makeService(database, { get: vi.fn().mockResolvedValue(client) });
+      const discovered = await service.discover(ACTOR_ID, serverId);
+      const byName = (name: string) => discovered.pools.find((pool) => pool.incusName === name)!;
+      expect(byName('dir-a')).toMatchObject({ systemDisk: null, rootDisks: { count: 0, committedBytes: 0 } });
+
+      // Only a registered pool can take the role.
+      await expect(service.patch(ACTOR_ID, byName('dir-a').id, {
+        expectedRevision: byName('dir-a').revision,
+        systemDisk: { weight: 1, maxUsedPercent: null },
+      })).rejects.toMatchObject({ response: { code: FailureCode.SystemDiskUnsupported } });
+      const a = await service.patch(ACTOR_ID, byName('dir-a').id, {
+        expectedRevision: byName('dir-a').revision,
+        registered: true,
+        systemDisk: { weight: 2, maxUsedPercent: 90 },
+      });
+      expect(a.systemDisk).toEqual({ weight: 2, maxUsedPercent: 90 });
+
+      // Single placement: turning it on elsewhere moves it in one step.
+      const b = await service.patch(ACTOR_ID, byName('dir-b').id, {
+        expectedRevision: byName('dir-b').revision,
+        registered: true,
+        systemDisk: { weight: 1, maxUsedPercent: null },
+      });
+      expect(b.systemDisk).toEqual({ weight: 1, maxUsedPercent: null });
+      const aAfter = await service.get(a.id);
+      expect(aAfter.systemDisk).toBeNull();
+      expect(aAfter.revision).toBe(a.revision + 1);
+
+      // Random placement keeps both.
+      await database.updateTable('infra.servers').set({ root_placement: 'random' }).where('id', '=', serverId).execute();
+      const aAgain = await service.patch(ACTOR_ID, a.id, {
+        expectedRevision: aAfter.revision,
+        systemDisk: { weight: 3, maxUsedPercent: null },
+      });
+      expect(aAgain.systemDisk).toEqual({ weight: 3, maxUsedPercent: null });
+      expect((await service.get(b.id)).systemDisk).toEqual({ weight: 1, maxUsedPercent: null });
+
+      // A system pool cannot be unregistered until the role is off (in the same PATCH is fine).
+      await expect(service.patch(ACTOR_ID, b.id, {
+        expectedRevision: b.revision,
+        registered: false,
+      })).rejects.toMatchObject({ response: { code: FailureCode.StoragePoolInUse } });
+      const bOff = await service.patch(ACTOR_ID, b.id, {
+        expectedRevision: b.revision,
+        registered: false,
+        systemDisk: null,
+      });
+      expect(bOff).toMatchObject({ registered: false, systemDisk: null });
+      const row = await database.selectFrom('infra.storage_pools')
+        .select(['system_weight', 'system_max_used_percent'])
+        .where('id', '=', b.id)
+        .executeTakeFirstOrThrow();
+      expect(row).toEqual({ system_weight: 1, system_max_used_percent: null });
     });
   });
 });

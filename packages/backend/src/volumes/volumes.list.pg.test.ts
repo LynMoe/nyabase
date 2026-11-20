@@ -21,7 +21,6 @@ function serverValues(id: string, suffix: string) {
     slug: `list-vol-${suffix}`,
     incus_version: null,
     api_extensions: [],
-    system_pool_id: null,
     storage_overcommit_ratio: 1,
     parent_interface: null,
     dns_servers: [],

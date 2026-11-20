@@ -2,16 +2,14 @@ import {
   ContainerPhase,
   ContainerPowerIntent,
   ContainerStatus,
-  FailureCode,
   IntentKind,
   IntentResourceType,
   IntentStatus,
   PreflightStatus,
   ResourceLifecyclePhase,
   Role,
+  RootPlacement,
   ServerStatus,
-  StoragePoolDriver,
-  StoragePoolResizeFamily,
   UserStatus,
 } from '../enums.js';
 import type {
@@ -20,6 +18,11 @@ import type {
   PreflightReport,
 } from './rest-schema.js';
 import type { DataDiskUsageDto } from './grants.js';
+import type {
+  SharedBackendExecutorDto,
+  StorageDiscoverIssueDto,
+  StoragePoolCapabilityDto,
+} from './storage-pools.js';
 import type { GpuContainerState, GpuHealthDto } from '../gpu/dto.js';
 import type { ConfigSourceName, ConfigValueKind } from '../config/definition.js';
 import type { SshProxyLineDto } from './ssh-proxy.js';
@@ -227,15 +230,24 @@ export interface SshProxyHostKeySummaryDto {
   rotatedAt: string | null;
 }
 
+export interface ServerSystemPoolDto {
+  id: string;
+  /** Display name, else the Incus name. */
+  name: string;
+}
+
 export interface ServerDto {
   id: string;
   name: string;
   slug: string;
   incusVersion: string | null;
   apiExtensions: string[];
-  systemPoolId: string | null;
-  /** Human pool name for the server system disk pool; null when unset. */
-  systemPoolName: string | null;
+  /** How new root disks pick among the system pools. */
+  rootPlacement: RootPlacement;
+  /** Random placement keeps a user's next root disk on the pool holding most of their live ones. */
+  rootPlacementSticky: boolean;
+  /** Pools with the system disk role, by Incus name. */
+  systemPools: ServerSystemPoolDto[];
   storageOvercommitRatio: number;
   parentInterface: string;
   dnsServers: string[];
@@ -301,103 +313,6 @@ export interface UserServerDto {
 }
 
 export interface NodeMetricsHealthDto extends NodeMetricsHealth {}
-
-export interface StoragePoolCapabilityDto {
-  growOnline: boolean;
-  shrinkOnline: boolean;
-  shrinkRequiresStop: boolean;
-  shrinkNever: boolean;
-  enforceUsageFloor: boolean;
-}
-
-export interface StoragePoolDto {
-  id: string;
-  serverId: string;
-  incusName: string;
-  displayName: string | null;
-  /** Incus config.source. Admin list/discover/PATCH only; user GET is always null. */
-  source: string | null;
-  driver: StoragePoolDriver;
-  resizeFamily: StoragePoolResizeFamily;
-  rootDiskCapable: boolean;
-  shareable: boolean;
-  blockFilesystem: string | null;
-  sharedBackendId: string | null;
-  totalBytes: number | null;
-  usedBytes: number | null;
-  quotaEffective: boolean | null;
-  registered: boolean;
-  /** Where the pool mounts as a data disk in every container of its users; null = not a data disk. */
-  mountPath: string | null;
-  /** A disk under maintenance is left out of every container. */
-  maintenance: boolean;
-  capability: StoragePoolCapabilityDto;
-  lastObservedAt: string | null;
-  revision: number;
-}
-
-export interface StorageCapacityPoolDto {
-  poolId: string;
-  displayName: string | null;
-  driver: StoragePoolDriver;
-  shareable: boolean;
-  totalBytes: number | null;
-  committedBytes: number;
-  availableBytes: number | null;
-  quotaEffective: boolean | null;
-  overcommitRatio: number;
-  capability: StoragePoolCapabilityDto;
-  mountPath: string | null;
-  maintenance: boolean;
-  /**
-   * `scope=mine`: the caller's data-disk grant covering this pool, for its whole
-   * group of disks; null without one (and always in the `scope=all` view).
-   */
-  grant: DataDiskUsageDto | null;
-}
-
-export interface StorageCapacityDto {
-  /** `scope=mine`: the caller's system-disk quota on the server (null = unlimited, and in `scope=all`). */
-  rootDiskLimitBytes: number | null;
-  usedByRootDisksBytes: number;
-  rootDiskAvailableBytes: number | null;
-  usedByLocalVolumesBytes: number;
-  pools: StorageCapacityPoolDto[];
-}
-
-export interface SharedBackendExecutorDto {
-  id: string;
-  backendId: string;
-  serverId: string;
-  serverName: string;
-  serverStatus: ServerStatus;
-  incusName: string;
-  registered: boolean;
-  totalBytes: number | null;
-  usedBytes: number | null;
-  lastObservedAt: string | null;
-  revision: number;
-}
-
-export interface StorageDiscoverIssueDto {
-  code:
-    | typeof FailureCode.SharedBackendIdentityConflict
-    | typeof FailureCode.StoragePoolInUse
-    | typeof FailureCode.ServerUnreachable;
-  message: string;
-  identityKey: string | null;
-  expectedFsid: string | null;
-  discoveredFsid: string | null;
-  existingIdentityKey: string | null;
-  serverId: string | null;
-  incusName: string | null;
-  poolId: string | null;
-}
-
-export interface StoragePoolDiscoverResult {
-  pools: StoragePoolDto[];
-  identityConflicts: StorageDiscoverIssueDto[];
-}
 
 export interface SharedBackendExecutorDiscoverResult {
   executors: SharedBackendExecutorDto[];

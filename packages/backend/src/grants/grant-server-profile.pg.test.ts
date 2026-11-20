@@ -46,9 +46,11 @@ describePg('GrantServerProfileService', () => {
       const dataPool = await seedPool(database, serverId);
       await seedBackendPool(database, serverId, await seedBackend(database));
       await database.updateTable('infra.servers')
-        .set({ cpu_topology: JSON.stringify(topology), reserved_cpus: [0], system_pool_id: systemPool, gpu_enabled: true })
+        .set({ cpu_topology: JSON.stringify(topology), reserved_cpus: [0], gpu_enabled: true })
         .where('id', '=', serverId)
         .execute();
+      await database.updateTable('infra.storage_pools').set({ system_disk: true }).where('id', '=', systemPool).execute();
+      await database.updateTable('infra.storage_pools').set({ mount_path: '/data1' }).where('id', '=', dataPool).execute();
       const clients = { get: async () => ({ getResources: async () => ({ metadata: RESOURCES }) }) };
       const profile = await new GrantServerProfileService(database, clients as never).profile(serverId);
 
@@ -60,8 +62,8 @@ describePg('GrantServerProfileService', () => {
         gpu: { enabled: true, cards: [{ model: 'NVIDIA A800 80GB' }, { model: 'GA100' }] },
       });
       // The CephFS pool is a shared backend's, not a data disk of this server.
-      expect(profile.pools.map((pool) => [pool.poolId, pool.system]).sort())
-        .toEqual([[systemPool, true], [dataPool, false]].sort());
+      expect(profile.pools.map((pool) => [pool.poolId, pool.system, pool.mountPath]).sort())
+        .toEqual([[systemPool, true, null], [dataPool, false, '/data1']].sort());
       expect(profile.pools[0]).toMatchObject({ driver: 'dir', totalBytes: 1000, usedBytes: 0 });
     });
   });

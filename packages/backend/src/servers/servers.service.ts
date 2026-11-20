@@ -1,11 +1,13 @@
-import { ConflictException, Inject, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { sql, type Kysely, type Selectable, type Transaction } from 'kysely';
 import { randomUUID } from 'node:crypto';
 import {
   AuditAction,
+  FailureCode,
   MAX_PLATFORM_SERVERS,
   NodeMetricsStatus,
   PreflightStatus,
+  RootPlacement,
   ServerStatus,
   type CreateServerRequest,
   type CreatedServerDto,
@@ -71,7 +73,6 @@ export class ServersService {
           slug: input.slug,
           incus_version: null,
           api_extensions: [],
-          system_pool_id: null,
           storage_overcommit_ratio: 1,
           parent_interface: input.parentInterface,
           dns_servers: input.dnsServers,
@@ -190,6 +191,7 @@ export class ServersService {
         .executeTakeFirst();
       if (!current) throw new NotFoundException('Server not found');
       if (input.reservedCpus !== undefined) assertReservedCpus(current, input.reservedCpus);
+      const placement = await nextRootPlacement(transaction, current, input);
       const updated = await transaction
         .updateTable('infra.servers')
         .set({
@@ -199,7 +201,7 @@ export class ServersService {
             ? {}
             : { parent_interface: input.parentInterface }),
           ...(input.dnsServers === undefined ? {} : { dns_servers: input.dnsServers }),
-          ...(input.systemPoolId === undefined ? {} : { system_pool_id: input.systemPoolId }),
+          ...placement,
           ...(input.storageOvercommitRatio === undefined
             ? {}
             : { storage_overcommit_ratio: input.storageOvercommitRatio }),
@@ -269,33 +271,32 @@ export class ServersService {
   }
 
   private async toDtos(rows: ServerRow[]): Promise<ServerDto[]> {
-    const ids = [...new Set(
-      rows
-        .map((row) => row.system_pool_id)
-        .filter((id): id is string => typeof id === 'string' && id.length > 0),
-    )];
-    const names = new Map<string, string>();
-    if (ids.length > 0) {
+    const systemPools = new Map<string, ServerDto['systemPools']>();
+    if (rows.length > 0) {
       const pools = await this.database
         .selectFrom('infra.storage_pools')
-        .select(['id', 'display_name', 'incus_name'])
-        .where('id', 'in', ids)
+        .select(['id', 'server_id', 'display_name', 'incus_name'])
+        .where('server_id', 'in', rows.map((row) => row.id))
+        .where('system_disk', '=', true)
+        .orderBy('incus_name')
         .execute();
       for (const pool of pools) {
-        names.set(pool.id, poolLabel(pool.display_name, pool.incus_name));
+        const list = systemPools.get(pool.server_id) ?? [];
+        list.push({ id: pool.id, name: poolLabel(pool.display_name, pool.incus_name) });
+        systemPools.set(pool.server_id, list);
       }
     }
     const firewall = await this.firewall.agentStatuses(rows.map((row) => row.id));
     return rows.map((row) => this.toDto(
       row,
-      row.system_pool_id ? names.get(row.system_pool_id) ?? null : null,
+      systemPools.get(row.id) ?? [],
       firewall.get(row.id) ?? null,
     ));
   }
 
   private toDto(
     row: ServerRow,
-    systemPoolName: string | null,
+    systemPools: ServerDto['systemPools'],
     firewall: ServerAgentDto['firewall'],
   ): ServerDto {
     return {
@@ -304,8 +305,9 @@ export class ServersService {
       slug: row.slug,
       incusVersion: row.incus_version,
       apiExtensions: row.api_extensions,
-      systemPoolId: row.system_pool_id,
-      systemPoolName,
+      rootPlacement: row.root_placement as RootPlacement,
+      rootPlacementSticky: row.root_placement_sticky,
+      systemPools,
       storageOvercommitRatio: numberValue(row.storage_overcommit_ratio),
       parentInterface: row.parent_interface ?? '',
       dnsServers: row.dns_servers,
@@ -380,6 +382,44 @@ function assertReservedCpus(server: ServerRow, reserved: readonly number[]): voi
 }
 
 type Tx = Transaction<NyabaseDatabase>;
+
+/**
+ * The root placement columns a server PATCH writes. Single placement stores no
+ * sticky flag and needs at most one system pool (the caller holds the server
+ * row lock, which pool role changes take too).
+ */
+async function nextRootPlacement(
+  transaction: Tx,
+  current: ServerRow,
+  input: PatchServerRequest,
+): Promise<{ root_placement?: RootPlacement; root_placement_sticky?: boolean }> {
+  if (input.rootPlacement === undefined && input.rootPlacementSticky === undefined) return {};
+  const placement = input.rootPlacement ?? (current.root_placement as RootPlacement);
+  if (placement === RootPlacement.Single && input.rootPlacementSticky === true) {
+    throw new BadRequestException('Sticky placement needs random placement');
+  }
+  if (placement === RootPlacement.Single && current.root_placement !== RootPlacement.Single) {
+    const systemPools = await transaction.selectFrom('infra.storage_pools')
+      .select('id')
+      .where('server_id', '=', current.id)
+      .where('system_disk', '=', true)
+      .orderBy('id')
+      .execute();
+    if (systemPools.length > 1) {
+      throw new ConflictException({
+        code: FailureCode.SystemDiskNotSingle,
+        message: 'Single root placement needs at most one system pool',
+        details: { poolIds: systemPools.map((pool) => pool.id) },
+      });
+    }
+  }
+  return {
+    root_placement: placement,
+    root_placement_sticky: placement === RootPlacement.Single
+      ? false
+      : input.rootPlacementSticky ?? current.root_placement_sticky,
+  };
+}
 
 /** Drop the server's claims, intents, containers and their volume attachments. */
 async function purgeContainers(transaction: Tx, serverId: string): Promise<void> {
@@ -521,11 +561,6 @@ async function purgeGrantsAndInventory(transaction: Tx, serverId: string): Promi
   await transaction.deleteFrom('infra.image_server_assignments').where('server_id', '=', serverId).execute();
   await transaction.deleteFrom('control.container_network_claims').where('server_id', '=', serverId).execute();
   await transaction.deleteFrom('infra.ip_pool_servers').where('server_id', '=', serverId).execute();
-  await transaction
-    .updateTable('infra.servers')
-    .set({ system_pool_id: null })
-    .where('id', '=', serverId)
-    .execute();
   await transaction.deleteFrom('infra.storage_pools').where('server_id', '=', serverId).execute();
   await transaction.deleteFrom('infra.servers').where('id', '=', serverId).execute();
 }

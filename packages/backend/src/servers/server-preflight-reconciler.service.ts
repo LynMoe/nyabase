@@ -267,25 +267,23 @@ export class ServerPreflightReconciler implements ManagedReconciler, OnModuleIni
     }
   }
 
-  private async requireSystemPool(
+  /**
+   * Every system pool must exist in Incus (new root disks may land on any of
+   * them); the first by name hosts the probe unless the request names a pool.
+   */
+  private async requireSystemPools(
     server: ServerRow,
     pools: readonly IncusSchema<'StoragePool'>[],
   ) {
-    const systemPool = server.system_pool_id
-      ? await this.store.readSystemPool(server.system_pool_id)
-      : undefined;
-    if (
-      !systemPool ||
-      systemPool.server_id !== server.id ||
-      !systemPool.registered ||
-      !pools.some((pool) => pool.name === systemPool.incus_name)
-    ) {
+    const systemPools = await this.store.readSystemPools(server.id);
+    const missing = systemPools.filter((pool) => !pools.some((observed) => observed.name === pool.incus_name));
+    if (systemPools.length === 0 || missing.length > 0) {
       throw new IncusError('MISSING_STORAGE_POOL', 'managed_failure', {
         serverId: server.id,
-        systemPoolId: server.system_pool_id,
+        missingSystemPools: missing.map((pool) => pool.incus_name),
       });
     }
-    return systemPool;
+    return systemPools[0]!;
   }
 
   private async collectMetrics(
@@ -395,7 +393,7 @@ export class ServerPreflightReconciler implements ManagedReconciler, OnModuleIni
     const pools = await client.listStoragePools(1, { signal });
     const resources = await client.getResources({ signal });
     await this.requireUnreservedCpus(server.id, resources.metadata);
-    const systemPool = await this.requireSystemPool(server, pools.metadata);
+    const systemPool = await this.requireSystemPools(server, pools.metadata);
     const metrics = await this.collectMetrics(server, signal, expectedRevision);
     const metricEvidence = metrics.failure ? undefined : metrics.pull.report;
     const firstSamples = metricSamplesFrom(metricEvidence);

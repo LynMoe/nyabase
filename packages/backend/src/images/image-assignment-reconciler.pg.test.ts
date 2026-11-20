@@ -19,7 +19,6 @@ function serverValues(id: string) {
     slug: `image-reconciler-${id.slice(0, 8)}`,
     incus_version: null,
     api_extensions: [],
-    system_pool_id: null,
     storage_overcommit_ratio: 1,
     parent_interface: null,
     dns_servers: [],

@@ -144,8 +144,12 @@ describePg('PostgreSQL container create admission and capacity', () => {
       );
 
       await database.updateTable('infra.servers')
-        .set({ preflight_status: 'passed', system_pool_id: null })
+        .set({ preflight_status: 'passed' })
         .where('id', '=', fixture.serverId)
+        .execute();
+      await database.updateTable('infra.storage_pools')
+        .set({ system_disk: false })
+        .where('id', '=', fixture.poolId)
         .execute();
       await expectCode(
         service.service.create(testActor(fixture.userId), request(fixture, 'system-pool-missing')),
@@ -237,6 +241,99 @@ describePg('PostgreSQL container create admission and capacity', () => {
         })),
         FailureCode.StoragePoolExhausted,
       );
+    });
+  });
+
+  it('places root disks among the system pools by the server placement', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const fixture = await seedFixture(database, { minimumRootSizeBytes: 1 * DISK_UNIT });
+      const second = cryptoId();
+      await database.insertInto('infra.storage_pools').values({
+        id: second,
+        server_id: fixture.serverId,
+        incus_name: `pool-${second.slice(0, 8)}`,
+        driver: 'dir',
+        resize_family: 'quota_online',
+        root_disk_capable: true,
+        shareable: false,
+        block_filesystem: null,
+        shared_backend_id: null,
+        total_bytes: 10_000 * DISK_UNIT,
+        used_bytes: 0,
+        quota_effective: true,
+        display_name: null,
+        registered: true,
+        last_observed_at: new Date(),
+        revision: 1,
+      }).execute();
+      const { service } = containerService(database, { rootDiskBytes: 10_000 * DISK_UNIT });
+      const creator = (service as unknown as { creator: { randomInt: (bound: number) => number } }).creator;
+      const draws: number[] = [];
+      let ticket = 0;
+      creator.randomInt = (bound) => {
+        draws.push(bound);
+        return ticket;
+      };
+      const rootPoolOf = async (id: string) => (await database.selectFrom('control.containers')
+        .select('root_pool_id').where('id', '=', id).executeTakeFirstOrThrow()).root_pool_id;
+      const create = async (name: string, rootSizeBytes = 100 * DISK_UNIT) =>
+        rootPoolOf((await service.create(testActor(fixture.userId), request(fixture, name, { rootSizeBytes }))).resourceId);
+
+      // Single: the one system pool, nothing drawn.
+      expect(await create('single')).toBe(fixture.poolId);
+      expect(draws).toEqual([]);
+
+      // Random over both, by weight in pool id order.
+      await database.updateTable('infra.servers').set({ root_placement: 'random' })
+        .where('id', '=', fixture.serverId).execute();
+      await database.updateTable('infra.storage_pools').set({ system_disk: true, system_weight: 3 })
+        .where('id', '=', second).execute();
+      const ordered = [fixture.poolId, second].sort();
+      const weightOf = (id: string) => (id === second ? 3 : 1);
+      ticket = ordered[0] === second ? 0 : weightOf(ordered[0]!);
+      expect(await create('random', 300 * DISK_UNIT)).toBe(second);
+      expect(draws).toEqual([4]);
+
+      // Sticky: the pool holding most of the owner's root bytes, without drawing.
+      await database.updateTable('infra.servers').set({ root_placement_sticky: true })
+        .where('id', '=', fixture.serverId).execute();
+      ticket = Number.NaN;
+      expect(await create('sticky')).toBe(second);
+      expect(draws).toEqual([4]);
+
+      // Above its mark the owner's pool is left out; the one remaining pool needs no draw.
+      await database.updateTable('infra.storage_pools')
+        .set({ system_max_used_percent: 50, used_bytes: 6_000 * DISK_UNIT })
+        .where('id', '=', second).execute();
+      expect(await create('above-mark')).toBe(fixture.poolId);
+      expect(draws).toEqual([4]);
+
+      // No pool can take it: the reasons come back per pool.
+      await database.updateTable('infra.storage_pools').set({ quota_effective: false })
+        .where('id', '=', fixture.poolId).execute();
+      await service.create(testActor(fixture.userId), request(fixture, 'none')).then(
+        () => { throw new Error('expected a conflict'); },
+        (error: { response?: { code?: string; details?: { pools?: unknown[] } } }) => {
+          expect(error.response?.code).toBe(FailureCode.StoragePoolExhausted);
+          expect(error.response?.details?.pools).toEqual(expect.arrayContaining([
+            expect.objectContaining({ poolId: fixture.poolId, reason: 'quota_ineffective' }),
+            expect.objectContaining({ poolId: second, reason: 'above_watermark' }),
+          ]));
+        },
+      );
+      await database.updateTable('infra.storage_pools').set({ quota_effective: false, system_max_used_percent: null })
+        .where('id', '=', second).execute();
+      await expectCode(
+        service.create(testActor(fixture.userId), request(fixture, 'quota')),
+        FailureCode.StoragePoolQuotaIneffective,
+      );
+
+      // Turning the role off leaves existing root disks where they are.
+      await database.updateTable('infra.storage_pools')
+        .set({ system_disk: false, system_weight: 1, system_max_used_percent: null })
+        .where('id', '=', second).execute();
+      expect(await database.selectFrom('control.containers').select('id')
+        .where('root_pool_id', '=', second).execute()).toHaveLength(2);
     });
   });
 
@@ -914,7 +1011,6 @@ async function seedFixture(
     slug: `container-${serverId.slice(0, 8)}`,
     incus_version: null,
     api_extensions: [],
-    system_pool_id: null,
     storage_overcommit_ratio: options.overcommitRatio ?? 1,
     parent_interface: 'eth0',
     dns_servers: [gateway],
@@ -962,9 +1058,9 @@ async function seedFixture(
     last_observed_at: new Date(),
     revision: 1,
   }).execute();
-  await database.updateTable('infra.servers')
-    .set({ system_pool_id: poolId })
-    .where('id', '=', serverId)
+  await database.updateTable('infra.storage_pools')
+    .set({ system_disk: true })
+    .where('id', '=', poolId)
     .execute();
   await database.insertInto('infra.images').values({
     id: imageId,

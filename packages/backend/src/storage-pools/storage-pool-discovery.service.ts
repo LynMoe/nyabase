@@ -242,8 +242,9 @@ export class StoragePoolDiscoveryService {
   /** Discover one server's pools and return the local ones. */
   async discover(serverId: string): Promise<StoragePoolDiscoverResult> {
     const { rows, identityConflicts } = await this.discoverAndApply(serverId);
+    const rootDisks = await this.repository.rootDiskSummary(rows.map((row) => row.id));
     return {
-      pools: rows.map((row) => toAdminPoolDto(row)).filter(isLocalPoolDto),
+      pools: rows.map((row) => toAdminPoolDto(row, rootDisks)).filter(isLocalPoolDto),
       identityConflicts,
     };
   }

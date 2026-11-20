@@ -18,7 +18,6 @@ function serverValues(
     slug: `scan-${id.slice(0, 8)}`,
     incus_version: null,
     api_extensions: [],
-    system_pool_id: null,
     storage_overcommit_ratio: 1,
     parent_interface: 'eth0',
     dns_servers: [],

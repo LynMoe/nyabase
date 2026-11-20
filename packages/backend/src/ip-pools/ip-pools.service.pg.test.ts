@@ -133,7 +133,6 @@ async function seedServer(
     slug,
     incus_version: null,
     api_extensions: [],
-    system_pool_id: null,
     storage_overcommit_ratio: 1,
     parent_interface: 'eth0',
     dns_servers: [],

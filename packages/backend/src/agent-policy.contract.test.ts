@@ -316,7 +316,6 @@ describe('the agent policy accepts what the Backend sends', () => {
       parent_interface: 'vmbr0',
       dns_servers: ['10.20.0.1'],
       status: 'online',
-      system_pool_id: null,
       preflight_status: 'running',
       gpu_enabled: false,
       revision: 1,

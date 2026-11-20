@@ -4,6 +4,7 @@ import {
   StoragePoolResizeFamily,
   type SharedBackendExecutorDto,
   type StoragePoolDto,
+  type StoragePoolRootDisksDto,
 } from '@nyabase/common';
 import { isoDate, numberValue } from '../platform/domain-utils.js';
 import { storagePoolCapability } from './storage-pool-capability.js';
@@ -26,11 +27,18 @@ interface PoolRowShape {
   registered: boolean;
   mount_path: string | null;
   maintenance: boolean;
+  system_disk: boolean;
+  system_weight: number;
+  system_max_used_percent: number | null;
   last_observed_at: Date | string | null;
   revision: string | number;
 }
 
-function toPoolDto(row: PoolRowShape, source: string | null): StoragePoolDto {
+function toPoolDto(
+  row: PoolRowShape,
+  source: string | null,
+  rootDisks: StoragePoolRootDisksDto | null,
+): StoragePoolDto {
   return {
     id: row.id,
     serverId: row.server_id,
@@ -49,6 +57,10 @@ function toPoolDto(row: PoolRowShape, source: string | null): StoragePoolDto {
     registered: row.registered,
     mountPath: row.mount_path,
     maintenance: row.maintenance,
+    systemDisk: row.system_disk
+      ? { weight: row.system_weight, maxUsedPercent: row.system_max_used_percent }
+      : null,
+    rootDisks,
     capability: storagePoolCapability(
       row.resize_family as StoragePoolResizeFamily,
       row.quota_effective,
@@ -59,13 +71,16 @@ function toPoolDto(row: PoolRowShape, source: string | null): StoragePoolDto {
   };
 }
 
-/** Administrators also see the pool's Incus `source`. */
-export function toAdminPoolDto(row: PoolRowShape): StoragePoolDto {
-  return toPoolDto(row, row.source ?? null);
+/** Administrators also see the pool's Incus `source` and its live root disks. */
+export function toAdminPoolDto(
+  row: PoolRowShape,
+  rootDisks: ReadonlyMap<string, StoragePoolRootDisksDto>,
+): StoragePoolDto {
+  return toPoolDto(row, row.source ?? null, rootDisks.get(row.id) ?? { count: 0, committedBytes: 0 });
 }
 
 export function toUserPoolDto(row: PoolRowShape): StoragePoolDto {
-  return toPoolDto(row, null);
+  return toPoolDto(row, null, null);
 }
 
 export function toExecutorDto(row: {

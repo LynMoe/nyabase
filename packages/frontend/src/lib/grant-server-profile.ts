@@ -34,14 +34,15 @@ export function serverProfileRows(profile: GrantServerProfileDto): ProfileRow[] 
     label: '内存',
     value: profile.memoryBytes === null ? '未知' : formatBytes(profile.memoryBytes),
   });
+  // A pool can be a system disk and a data disk at once; it shows under both.
   const system = profile.pools.filter((pool) => pool.system);
-  const data = profile.pools.filter((pool) => !pool.system);
+  const data = profile.pools.filter((pool) => pool.mountPath !== null);
   for (const pool of system) {
     rows.push({ label: '系统盘池', value: poolUsage(pool), detail: `${pool.name}（${pool.driver}）` });
   }
   if (system.length === 0) rows.push({ label: '系统盘池', value: '未设置' });
   for (const pool of data) {
-    rows.push({ label: '数据盘池', value: poolUsage(pool), detail: `${pool.name}（${pool.driver}）` });
+    rows.push({ label: '数据盘池', value: poolUsage(pool), detail: `${pool.name}（${pool.driver}）· ${pool.mountPath}` });
   }
   const cards = profile.gpu.cards;
   const models = new Map<string, number>();

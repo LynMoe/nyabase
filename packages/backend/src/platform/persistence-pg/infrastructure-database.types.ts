@@ -24,8 +24,11 @@ export interface InfrastructureServerTable {
   slug: string;
   incus_version: string | null;
   api_extensions: string[];
-  system_pool_id: string | null;
   storage_overcommit_ratio: InfrastructureNumeric;
+  /** How new root disks pick among the server's system pools (000013). */
+  root_placement: ColumnType<'single' | 'random', 'single' | 'random' | undefined, 'single' | 'random'>;
+  /** Random placement keeps a user's next root disk on the pool holding most of their live ones. */
+  root_placement_sticky: ColumnType<boolean, boolean | undefined, boolean>;
   parent_interface: string | null;
   dns_servers: string[];
   status: 'online' | 'unreachable' | 'unknown';
@@ -118,6 +121,12 @@ export interface InfrastructureStoragePoolTable {
   /** Where the pool mounts as a data disk; NULL = not a data disk. */
   mount_path: string | null;
   maintenance: ColumnType<boolean, boolean | undefined, boolean>;
+  /** New root disks may land here (000013); off keeps existing ones in place. */
+  system_disk: ColumnType<boolean, boolean | undefined, boolean>;
+  /** Relative chance under random placement; 1 while the role is off. */
+  system_weight: ColumnType<number, number | undefined, number>;
+  /** No new root disk once observed used / total reaches this percentage; NULL = no mark. */
+  system_max_used_percent: number | null;
   last_observed_at: InfrastructureTimestamp | null;
   revision: InfrastructureBigInt;
   created_at: InfrastructureGeneratedTimestamp;

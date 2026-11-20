@@ -17,6 +17,7 @@ import { TechnicalId } from '../../components/refs/technical-id.js';
 import { useServerPools } from '../../lib/server-queries.js';
 import { useHasRole } from '../../lib/use-role.js';
 import { preflightStatusLabel, storageOvercommitLabel } from '../../lib/display-labels.js';
+import { rootPlacementLabel } from '../../lib/system-disks.js';
 
 export const SERVER_DETAIL_TABS = [
   'overview', 'connect', 'storage', 'preflight', 'metrics', 'gpu', 'activity',
@@ -119,7 +120,8 @@ function ServerOverviewTab({
             value={server.agent.hostname ? <TechnicalId label="Agent 主机名" value={server.agent.hostname} kind="text" /> : '—'}
           />
           <Field label="Incus 版本" value={server.incusVersion ?? '未连接'} />
-          <Field label="系统盘池" value={server.systemPoolName ?? server.systemPoolId ?? '未指定'} />
+          <Field label="系统盘池" value={server.systemPools.length > 0 ? server.systemPools.map((pool) => pool.name).join('、') : '未指定'} />
+          <Field label="系统盘分配" value={rootPlacementLabel(server)} />
           <Field label="存储超分比例" value={storageOvercommitLabel(server.storageOvercommitRatio)} />
         </CardContent>
       </Card>

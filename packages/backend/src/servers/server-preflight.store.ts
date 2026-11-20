@@ -10,7 +10,6 @@ export interface ServerRow {
   parent_interface: string | null;
   dns_servers: string[] | null;
   status: 'online' | 'unreachable' | 'unknown';
-  system_pool_id: string | null;
   preflight_status: 'not_run' | 'running' | 'passed' | 'failed';
   gpu_enabled: boolean;
   revision: string | number | bigint;
@@ -62,7 +61,6 @@ export class ServerPreflightStore {
         'parent_interface',
         'dns_servers',
         'status',
-        'system_pool_id',
         'preflight_status',
         'gpu_enabled',
         'revision',
@@ -118,12 +116,16 @@ export class ServerPreflightStore {
     );
   }
 
-  async readSystemPool(poolId: string) {
+  /** The server's registered system pools, by Incus name. */
+  async readSystemPools(serverId: string) {
     return this.database
       .selectFrom('infra.storage_pools')
       .select(['incus_name', 'server_id', 'registered'])
-      .where('id', '=', poolId)
-      .executeTakeFirst();
+      .where('server_id', '=', serverId)
+      .where('system_disk', '=', true)
+      .where('registered', '=', true)
+      .orderBy('incus_name')
+      .execute();
   }
 
   async setGpuHealth(serverId: string, health: unknown): Promise<void> {

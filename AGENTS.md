@@ -67,7 +67,7 @@ Vite 通过 alias 将 `@nyabase/common` 指向 `src/index.ts`，但 `index.ts` �
   没有用户组（000003 已删除，连同旧授权一起清空，不做转换）。不存在系统用户。`users/iam-bootstrap.service.ts` 启动时只在**没有任何 active admin** 时补救：创建保留账号 `admin`，
   或把已存在的 active `admin` 提升为 admin（审计归属 NULL）；已有 active admin 时什么都不做（不会撤销降级），`admin` 被禁用且无其他 admin 则报 `ADMIN_BOOTSTRAP_UNAVAILABLE`。
   资源授权只授给用户，每个（用户, 资源）至多一条：
-  - **授权模板（bundle，`iam.grant_bundles`）** 绑定一台服务器，定义 CPU 核数、内存、**系统盘配额**（该用户在此服务器上所有容器系统盘之和，不含数据卷）、GPU 张数；一台服务器可有多个 bundle。
+  - **授权模板（bundle，`iam.grant_bundles`）** 绑定一台服务器，定义 CPU 核数、内存、**系统盘配额**（该用户在此服务器上所有容器系统盘之和，跨所有系统盘池，不含数据卷）、GPU 张数；一台服务器可有多个 bundle。
   - **服务器授权（`iam.server_grants`）** = 用户在一台服务器上的唯一 bundle（复合外键保证 bundle 属于该服务器）+ 可选 override（`overridden` 列出覆盖的字段，值在同名列，NULL = 不限；未覆盖的列恒为 NULL，CHECK 保证）+ 到期。
     未覆盖的字段**实时跟随** bundle：改 bundle 立即作用于所有未覆盖该字段的授权（视图读 bundle，没有同步写入）；`POST /admin/grant-bundles/:id/preview` 先列出会变的用户、被 override 挡住的用户和用量警告，`PATCH` 带 `expectedRevision`。
     同一服务器已有授权时再分配（任何 bundle，含同一个）返回 409 `SERVER_GRANT_EXISTS`，带 `replace: true` 才在原行上替换：bundle、override 与到期都取自本次请求（未给即无 override、永久），数据盘授权保留，覆盖不中断。仍被授权引用的 bundle 不能删（409 `GRANT_BUNDLE_IN_USE`）。
@@ -159,6 +159,19 @@ Vite 通过 alias 将 `@nyabase/common` 指向 `src/index.ts`，但 `index.ts` �
 - **挂载路径检查**（`container-reconcile-steps.ts` 的 `checkPendingMountPaths`）：实例上还没有的挂载，先经 Incus 文件 API 看路径；是文件或非空目录则挂载行置 `blocked`（不进实例文档），
   之后该容器每次 pass（启动、重启、任何更新）复查，路径空了或没了再挂；建容器时实例不存在，不查；查询本身出错则照常挂载（只遮盖、不删除）。
 - **删除**：用户只读（`GET /volumes`、`/shared-volumes`、容器的挂载列表、容量）。user_admin 可 `DELETE /volumes/:id`、`/shared-volumes/:id`，仅当没有授权覆盖该盘（否则 409 `VOLUME_STILL_GRANTED`，会被马上重建）且已卸载（409 `VOLUME_REQUIRES_UNBIND`）。
+
+## 存储池用途与系统盘分配（`storage-pools/root-placement.ts`，000013）
+
+- 本地池有两个独立用途，可同时开：**系统盘**（`infra.storage_pools.system_disk` + 参数 `system_weight` 1–100、`system_max_used_percent` 水位 1–100 / NULL）与**数据盘**（`mount_path`，见上节）。
+  系统盘要求已登记、`root_disk_capable`、非共享执行池（CHECK）；关闭时参数复位（CHECK），已有系统盘照常运行、扩容仍按所在池准入，只是不再接收新容器。
+  开着系统盘的池不能取消登记（`STORAGE_POOL_IN_USE`，同一 PATCH 里一起关掉可以）。没有 `servers.system_pool_id` 了。
+- 服务器 `root_placement`：`single`（至多一个系统盘池，约束触发器 `servers_root_placement_single` 兜底）或 `random`（按权重随机）；`root_placement_sticky` 只在 random 下可为 true。
+  single 下 `PATCH .../storage-pools/:id` 给另一个池开系统盘 = 在同一事务里把角色搬过来（原池关闭、revision +1，审计 `systemDiskMovedTo`）；random → single 时多于一个系统盘池返回 409 `SYSTEM_DISK_NOT_SINGLE`。
+  池的系统盘改动与服务器 PATCH 都持服务器行锁。改策略 / 开关只影响之后新建的容器，平台不在池之间搬系统盘。
+- 建容器选池（`chooseRootPool`，服务器行 → 系统盘池按 id `FOR UPDATE`）：先查系统盘配额（每服务器跨池合计），再排除配额未生效、实际用量（`used_bytes`，全量扫描 / agent 连接时刷新）达到水位、超分准入放不下的池；
+  都被排除时全为配额原因返回 `STORAGE_POOL_QUOTA_INEFFECTIVE`，否则 `STORAGE_POOL_EXHAUSTED`（`details.pools` 逐池给原因）。sticky：该用户在本服务器 live 容器（非 failed / deleting）系统盘承诺量最大的池仍可用就用它（不单独记录，同一用户同服务器的创建由 `lockOwnerServerQuota` 串行，所以无竞态），否则照常随机。
+  水位只管新系统盘的落点：超分比看承诺量，水位看盘实际有多满（盘上有平台账外的数据时两者差很远）。
+- 预检要求至少一个系统盘池且每个都在 Incus 里；探针默认跑在按名排第一的系统盘池上。管理员的池 DTO 带 `rootDisks`（该池 live 系统盘数与承诺量），用户视图为 null。
 
 ## 后端结构规则（`packages/backend/src`）
 

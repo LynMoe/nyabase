@@ -70,7 +70,8 @@ export interface ServerRow {
   name: string;
   slug: string;
   status: string;
-  system_pool_id: string | null;
+  root_placement: string;
+  root_placement_sticky: boolean;
   parent_interface: string | null;
   preflight_status: string;
 }
@@ -200,6 +201,23 @@ export class ContainerControlRepository {
     if (filter.poolId !== undefined) query = query.where('root_pool_id', '=', filter.poolId);
     const row = await query.executeTakeFirstOrThrow();
     return numberValue(row.bytes);
+  }
+
+  /** The owner's live committed root bytes on the server, per root pool (for sticky placement). */
+  async liveRootBytesByPool(
+    ownerId: string,
+    serverId: string,
+    executor: ContainerExecutor = this.database,
+  ): Promise<Map<string, number>> {
+    const rows = await executor
+      .selectFrom('control.containers')
+      .select(['root_pool_id', sql<string>`sum(${committedRootBytesSql()})`.as('bytes')])
+      .where('lifecycle_phase', 'not in', ['failed', 'deleting'])
+      .where('owner_id', '=', ownerId)
+      .where('server_id', '=', serverId)
+      .groupBy('root_pool_id')
+      .execute();
+    return new Map(rows.map((row) => [row.root_pool_id, numberValue(row.bytes)]));
   }
 
   async lapseStopRedriveDue(id: string, executor: ContainerExecutor): Promise<boolean> {

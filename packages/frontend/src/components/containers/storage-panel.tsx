@@ -104,7 +104,12 @@ export function StoragePanel({ container, scope }: { container: ContainerDto; sc
               <TableBody>
                 <TableRow>
                   <TableCell>系统盘</TableCell>
-                  <TableCell>系统盘</TableCell>
+                  <TableCell>
+                    系统盘
+                    {scope === 'all' ? (
+                      <div className="text-xs text-muted-foreground" data-testid="container-root-pool">{container.rootPoolName}</div>
+                    ) : null}
+                  </TableCell>
                   <TableCell>/</TableCell>
                   <TableCell>
                     <UsageMeter used={observedRootUsedBytes(container)} total={container.rootSizeBytes} />

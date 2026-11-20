@@ -37,7 +37,6 @@ export async function seedServer(database: Db, name = `server-${nextName++}`): P
     slug: `${name}-${id.slice(0, 8)}`,
     incus_version: null,
     api_extensions: [],
-    system_pool_id: null,
     storage_overcommit_ratio: 1,
     parent_interface: 'eth0',
     dns_servers: ['10.20.0.1'],
