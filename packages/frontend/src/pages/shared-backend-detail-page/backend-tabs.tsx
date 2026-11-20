@@ -20,7 +20,9 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '.
 import { SharedVolumeCatalogInspectDialog } from '../../components/storage/shared-volume-catalog-inspect.js';
 import { SharedVolumeTable } from '../../components/storage/shared-volume-table.js';
 import { SharedBackendPolicyFields } from '../../components/storage/shared-backend-policy-fields.js';
-import { maxVolumesPerUserLabel, parseMaxVolumesPerUser } from '../../lib/shared-backend-form.js';
+import { DeleteVolumeDialog, type DeleteVolumeTarget } from '../../components/storage/delete-volume-dialog.js';
+import { DiskMountDialog } from '../../components/storage/disk-mount-dialog.js';
+import { Badge } from '../../components/ui/badge.js';
 import { TechnicalId } from '../../components/refs/technical-id.js';
 import { toast } from '../../hooks/use-toast.js';
 import { api } from '../../lib/api.js';
@@ -57,9 +59,36 @@ export function BackendOverviewTab({
 }) {
   const canManage = useHasRole(Role.Admin);
   const [editOpen, setEditOpen] = useState(false);
+  const [mountOpen, setMountOpen] = useState(false);
   const available = sharedBackendAvailableBytes(backend);
+  const invalidate = useInvalidateBackend(backend.id);
   return (
     <>
+      <SectionCard
+        title="挂载"
+        testId="shared-backend-mount"
+        actions={canManage ? (
+          <Button size="sm" variant="outline" onClick={() => setMountOpen(true)} data-testid="shared-backend-mount-edit">
+            <Pencil className="h-3.5 w-3.5" />挂载设置
+          </Button>
+        ) : undefined}
+      >
+        <div className="grid gap-3 text-sm sm:grid-cols-2">
+          <Field
+            label="挂载点"
+            value={backend.mountPath
+              ? <span className="font-mono">{backend.mountPath}</span>
+              : <span className="text-muted-foreground">未启用</span>}
+          />
+          <Field
+            label="状态"
+            value={backend.maintenance ? <Badge variant="warning">维护中</Badge> : backend.mountPath ? '正常' : '—'}
+          />
+          <p className="text-xs text-muted-foreground sm:col-span-2">
+            启用后，每个获得该存储授权的用户自动得到一个共享卷，挂载到这个路径，出现在他所有服务器上的容器里；容量随授权额度自动调整。
+          </p>
+        </div>
+      </SectionCard>
       <SectionCard
         title="身份"
         actions={canManage ? (
@@ -74,11 +103,9 @@ export function BackendOverviewTab({
           <Field label="identity key" value={<TechnicalId label="identity key" value={backend.identityKey} />} />
           <Field label="Ceph FSID" value={<TechnicalId label="Ceph FSID" value={backend.cephFsid} />} />
           <Field label="超分比例" value={formatPercent(backend.overcommitRatio)} />
-          <Field label="每用户最多共享卷" value={maxVolumesPerUserLabel(backend.maxVolumesPerUser)} />
-          <Field label="默认挂载点" value={backend.defaultMountPath ?? '/data'} />
           <Field label="最近更新" value={relativeTime(backend.updatedAt)} />
           <Field
-            label="备注（用户创建共享卷时可见）"
+            label="备注（用户可见）"
             className="sm:col-span-2"
             value={backend.note ? <span className="whitespace-pre-wrap">{backend.note}</span> : null}
           />
@@ -98,6 +125,20 @@ export function BackendOverviewTab({
       </Card>
       {editOpen ? (
         <EditBackendDialog backend={backend} onConflict={onConflict} onClose={() => setEditOpen(false)} />
+      ) : null}
+      {mountOpen ? (
+        <DiskMountDialog
+          title={`挂载设置：${backend.displayName ?? backend.name}`}
+          reach="在所有服务器上"
+          current={backend}
+          previewPath={`/shared-backends/${backend.id}/mount-preview`}
+          save={(change) => api.patch<SharedBackendDto>(`/shared-backends/${backend.id}`, {
+            expectedRevision: backend.revision,
+            ...change,
+          })}
+          onSaved={invalidate}
+          onClose={() => setMountOpen(false)}
+        />
       ) : null}
     </>
   );
@@ -223,6 +264,7 @@ export function BackendExecutorsTab({
 export function BackendVolumesTab({ backendId }: { backendId: string }) {
   const canManageVolumes = useHasRole(Role.Admin);
   const [inspectTarget, setInspectTarget] = useState<SharedVolumeDto | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<DeleteVolumeTarget | null>(null);
   const volumesQuery = useQuery({
     queryKey: queryKeys.sharedVolumes.admin,
     queryFn: () => api.get<SharedVolumeDto[]>('/shared-volumes?scope=all'),
@@ -247,7 +289,9 @@ export function BackendVolumesTab({ backendId }: { backendId: string }) {
         volumes={volumesQuery.data.filter((volume) => volume.sharedBackendId === backendId)}
         scope="all"
         onInspect={setInspectTarget}
+        onDelete={(volume) => setDeleteTarget({ kind: 'shared', volume })}
       />
+      <DeleteVolumeDialog target={deleteTarget} onClose={() => setDeleteTarget(null)} />
       <SharedVolumeCatalogInspectDialog
         volume={inspectTarget}
         open={Boolean(inspectTarget)}
@@ -284,8 +328,6 @@ export function EditBackendDialog({
   const [displayName, setDisplayName] = useState(backend.displayName ?? '');
   const [overcommitRatio, setOvercommitRatio] = useState(String(backend.overcommitRatio));
   const [note, setNote] = useState(backend.note ?? '');
-  const [maxVolumes, setMaxVolumes] = useState(backend.maxVolumesPerUser === null ? '' : String(backend.maxVolumesPerUser));
-  const [defaultMountPath, setDefaultMountPath] = useState(backend.defaultMountPath ?? '');
   const invalidate = useInvalidateBackend(backend.id);
   const patchBackend = useMutation({
     mutationFn: (body: PatchSharedBackendRequest) =>
@@ -301,15 +343,12 @@ export function EditBackendDialog({
     },
   });
   const pending = patchBackend.isPending;
-  const maxVolumesPerUser = parseMaxVolumesPerUser(maxVolumes);
   const save = () => {
     const parsed = zPatchSharedBackendRequest.safeParse({
       expectedRevision: backend.revision,
       displayName: displayName.trim() || null,
       overcommitRatio: Number(overcommitRatio),
       note: note.trim() || null,
-      maxVolumesPerUser,
-      defaultMountPath: defaultMountPath.trim() || null,
     });
     if (!parsed.success) {
       toast({
@@ -342,18 +381,10 @@ export function EditBackendDialog({
             onChange={(event) => setOvercommitRatio(event.target.value)}
           />
         </FormField>
-        <SharedBackendPolicyFields
-          idPrefix="shared-backend-edit"
-          note={note}
-          onNoteChange={setNote}
-          maxVolumes={maxVolumes}
-          onMaxVolumesChange={setMaxVolumes}
-          defaultMountPath={defaultMountPath}
-          onDefaultMountPathChange={setDefaultMountPath}
-        />
+        <SharedBackendPolicyFields idPrefix="shared-backend-edit" note={note} onNoteChange={setNote} />
         <DialogFooter>
           <Button variant="outline" onClick={onClose} disabled={pending}>取消</Button>
-          <Button onClick={save} disabled={pending || maxVolumesPerUser === undefined}>
+          <Button onClick={save} disabled={pending}>
             {pending ? '保存中...' : '保存'}
           </Button>
         </DialogFooter>

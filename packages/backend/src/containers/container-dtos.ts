@@ -13,7 +13,7 @@ import {
   type ContainerDto,
   type VolumeAttachmentDto,
 } from '@nyabase/common';
-import type { Kysely } from 'kysely';
+import { sql, type Kysely } from 'kysely';
 import { isoDate, nullableNumber, numberValue, poolLabel } from '../platform/domain-utils.js';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 import { NyabaseConfigService } from '../platform/config/nyabase-config.service.js';
@@ -76,14 +76,13 @@ export class ContainerDtoAssembler {
     const attachments = await this.database.selectFrom('control.volume_attachments as attachment')
       .innerJoin('control.volumes as volume', 'volume.id', 'attachment.volume_id')
       .leftJoin('control.containers as container', 'container.id', 'attachment.container_id')
-      .leftJoin('control.volume_placements as placement', (join) => join
-        .onRef('placement.volume_id', '=', 'attachment.volume_id')
-        .onRef('placement.server_id', '=', 'container.server_id'))
+      .leftJoin('infra.storage_pools as disk_pool', 'disk_pool.id', 'volume.pool_id')
+      .leftJoin('infra.shared_backends as disk_backend', 'disk_backend.id', 'volume.shared_backend_id')
       .selectAll('attachment')
       .select([
         'volume.name as volume_name',
         'volume.shared_backend_id as shared_backend_id',
-        'placement.catalog_state as catalog_state',
+        sql<boolean>`coalesce(disk_pool.maintenance, disk_backend.maintenance, false)`.as('maintenance'),
       ])
       .where('attachment.container_id', 'in', [...containerIds])
       .orderBy('attachment.created_at')
@@ -94,7 +93,7 @@ export class ContainerDtoAssembler {
       const kind = attachment.shared_backend_id !== null ? 'shared' : 'local';
       const dto = toAttachmentDto(attachment, attachment.volume_name, {
         kind,
-        catalogState: attachment.catalog_state,
+        maintenance: attachment.maintenance === true,
       });
       const target = kind === 'shared' ? sharedVolumes : localVolumes;
       const list = target.get(attachment.container_id) ?? [];

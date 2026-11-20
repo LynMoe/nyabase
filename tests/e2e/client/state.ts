@@ -7,9 +7,14 @@ export interface RunServer {
   slug: string;
   /** SSH target of the lab host (`local` = this machine). Used by cleanup only. */
   ssh: string;
-  /** Registered pool that holds root disks and local volumes. */
+  /** Registered pool that holds root disks. */
   poolId: string;
   poolName: string;
+  /**
+   * Registered `dir` pool with project quotas the data-disk scenarios enable
+   * (at a mount path) and disable again; null when the lab has none.
+   */
+  dataPoolId: string | null;
   /** Registered executor pool of the shared backend on this server, if any. */
   sharedPoolId: string | null;
   /** PCI address of a GPU on this host that the GPU scenarios may use. */

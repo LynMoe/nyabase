@@ -39,10 +39,13 @@ describe('queryKeys catalog', () => {
     expect(queryKeys.sharedVolumes.all).toEqual(['shared-volumes']);
     expect(queryKeys.sharedVolumes.user).toEqual(['shared-volumes', 'user']);
     expect(queryKeys.sharedVolumes.admin).toEqual(['shared-volumes', 'admin']);
-    expect(queryKeys.sharedVolumes.attachable('s1')).toEqual(['shared-volumes', 'attachable', 's1']);
     expect(queryKeys.sharedVolumes.catalogs('v1')).toEqual(['shared-volumes', 'catalogs', 'v1']);
-    expect(queryKeys.sharedVolumes.attachable('s1').slice(0, queryKeys.sharedVolumes.all.length))
+    expect(queryKeys.sharedVolumes.catalogs('v1').slice(0, queryKeys.sharedVolumes.all.length))
       .toEqual(queryKeys.sharedVolumes.all);
+    expect(queryKeys.servers.pools('s1', 'mine').slice(0, queryKeys.servers.poolsAll.length))
+      .toEqual(queryKeys.servers.poolsAll);
+    expect(queryKeys.servers.pools('s1', 'all').slice(0, queryKeys.servers.poolsAll.length))
+      .toEqual(queryKeys.servers.poolsAll);
     expect(queryKeys.images.catalog).toEqual(['images', 'admin', 'catalog']);
     expect(queryKeys.images.userActive).toEqual(['images', 'user', 'active']);
     expect(queryKeys.images.detail('i1')).toEqual(['images', 'admin', 'i1']);

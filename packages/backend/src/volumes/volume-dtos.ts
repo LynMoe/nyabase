@@ -5,7 +5,6 @@ import {
   type SharedVolumeDto,
   type VolumeAttachmentDto,
   type VolumeAttachmentSummaryDto,
-  type IntentAcceptedDto,
   type VolumeDto,
 } from '@nyabase/common';
 import type { Kysely } from 'kysely';
@@ -38,14 +37,8 @@ export type VolumeRow = {
   updated_at: Date | string;
 };
 
-export function isIntentAccepted(
-  result: VolumeDto | SharedVolumeDto | IntentAcceptedDto,
-): result is IntentAcceptedDto {
-  return 'intentId' in result;
-}
-
-export type LocalVolumeDescriptor = { capability: VolumeDto['capability']; poolName: string };
-export type SharedVolumeDescriptor = { name: string; defaultMountPath: string | null; capability: SharedVolumeDto['capability'] };
+export type LocalVolumeDescriptor = { capability: VolumeDto['capability']; poolName: string; mountPath: string | null };
+export type SharedVolumeDescriptor = { name: string; mountPath: string | null; capability: SharedVolumeDto['capability'] };
 
 export function toSharedDto(
   row: VolumeRow,
@@ -57,7 +50,7 @@ export function toSharedDto(
     ownerId: row.owner_id,
     sharedBackendId: row.shared_backend_id!,
     sharedBackendName: descriptor?.name ?? row.shared_backend_id ?? row.name,
-    defaultMountPath: descriptor?.defaultMountPath ?? null,
+    mountPath: descriptor?.mountPath ?? null,
     name: row.name,
     incusName: row.incus_name,
     sizeBytes: numberValue(row.size_bytes),
@@ -80,7 +73,7 @@ export function toSharedDto(
 
 export function toDto(
   row: VolumeRow,
-  descriptor: { capability: VolumeDto['capability']; poolName: string } | undefined,
+  descriptor: LocalVolumeDescriptor | undefined,
   attachments: VolumeAttachmentSummaryDto[],
 ): VolumeDto {
   return {
@@ -94,6 +87,7 @@ export function toDto(
     sizeBytes: numberValue(row.size_bytes),
     usedBytes: row.used_bytes === null ? null : numberValue(row.used_bytes),
     scope: { kind: 'local', serverId: row.server_id!, poolId: row.pool_id! },
+    mountPath: descriptor?.mountPath ?? null,
     capability: descriptor?.capability ?? {
       growOnline: true,
       shrinkOnline: false,
@@ -125,7 +119,7 @@ export function toAttachmentDto(
     updated_at: Date | string;
   },
   volumeName: string,
-  extra: { kind: 'local' | 'shared'; catalogState: string | null },
+  extra: { kind: 'local' | 'shared'; maintenance: boolean },
 ): VolumeAttachmentDto {
   return {
     id: row.id,
@@ -137,7 +131,7 @@ export function toAttachmentDto(
     readOnly: row.read_only,
     bindState: row.bind_state,
     kind: extra.kind,
-    onlineCancelAllowed: row.bind_state === 'attaching' && extra.catalogState !== 'present',
+    maintenance: extra.maintenance,
     createdAt: isoDate(row.created_at) ?? new Date(0).toISOString(),
     updatedAt: isoDate(row.updated_at) ?? new Date(0).toISOString(),
   };
@@ -165,6 +159,7 @@ export class VolumeDtoAssembler {
           pool.block_filesystem,
         ),
         poolName: poolLabel(pool.display_name, pool.incus_name),
+        mountPath: pool.mount_path,
       });
     }
     return result;
@@ -214,7 +209,7 @@ export class VolumeDtoAssembler {
     if (ids.length === 0) return result;
     const backends = await this.database
       .selectFrom('infra.shared_backends')
-      .select(['id', 'name', 'display_name', 'default_mount_path'])
+      .select(['id', 'name', 'display_name', 'mount_path'])
       .where('id', 'in', ids)
       .execute();
     const pools = await this.pools.listRegisteredSharedPools({ backendIds: ids });
@@ -231,7 +226,7 @@ export class VolumeDtoAssembler {
       const quotaEffective = hasPool ? quotaByBackend.get(backend.id) === true : true;
       result.set(backend.id, {
         name: poolLabel(backend.display_name, backend.name),
-        defaultMountPath: backend.default_mount_path,
+        mountPath: backend.mount_path,
         capability: storagePoolCapability(StoragePoolResizeFamily.QuotaOnline, quotaEffective),
       });
     }
@@ -264,7 +259,7 @@ export class VolumeDtoAssembler {
     ));
     return filtered.map((row) => toAttachmentDto(row, row.volume_name, {
       kind,
-      catalogState: row.catalog_state,
+      maintenance: row.maintenance === true,
     }));
   }
 }

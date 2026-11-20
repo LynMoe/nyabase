@@ -28,8 +28,8 @@ export class SharedBackendsRepository {
         'backend.used_bytes',
         'backend.overcommit_ratio',
         'backend.note',
-        'backend.max_volumes_per_user',
-        'backend.default_mount_path',
+        'backend.mount_path',
+        'backend.maintenance',
         'backend.revision',
         'backend.created_at',
         'backend.updated_at',
@@ -58,8 +58,8 @@ export class SharedBackendsRepository {
         'backend.used_bytes',
         'backend.overcommit_ratio',
         'backend.note',
-        'backend.max_volumes_per_user',
-        'backend.default_mount_path',
+        'backend.mount_path',
+        'backend.maintenance',
         'backend.revision',
         'backend.created_at',
         'backend.updated_at',
@@ -111,8 +111,7 @@ export class SharedBackendsRepository {
     cephFsid: string;
     overcommitRatio: number;
     note: string | null;
-    maxVolumesPerUser: number | null;
-    defaultMountPath: string | null;
+    mountPath: string | null;
   }, executor: SharedBackendExecutor = this.database) {
     return executor
       .insertInto('infra.shared_backends')
@@ -126,8 +125,7 @@ export class SharedBackendsRepository {
         used_bytes: null,
         overcommit_ratio: input.overcommitRatio,
         note: input.note,
-        max_volumes_per_user: input.maxVolumesPerUser,
-        default_mount_path: input.defaultMountPath,
+        mount_path: input.mountPath,
         revision: 1,
       })
       .returningAll()
@@ -142,8 +140,8 @@ export class SharedBackendsRepository {
       ceph_fsid?: string;
       overcommit_ratio?: number;
       note?: string | null;
-      max_volumes_per_user?: number | null;
-      default_mount_path?: string | null;
+      mount_path?: string | null;
+      maintenance?: boolean;
     },
     executor: SharedBackendExecutor = this.database,
   ) {

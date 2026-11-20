@@ -1,33 +1,24 @@
+import { Body, Controller, Delete, Get, HttpCode, HttpStatus, Param, Post, Query } from '@nestjs/common';
 import {
-  Body,
-  BadRequestException,
-  Controller,
-  Delete,
-  Get,
-  HttpCode,
-  HttpStatus,
-  Param,
-  Patch,
-  Post,
-  Query,
-} from '@nestjs/common';
-import {
-  FailureCode,
-  zAttachVolumeRequest,
-  zCreateVolumeRequest,
+  Role,
   zListScope,
+  zListSharedVolumesQuery,
   zListVolumesQuery,
-  zPatchVolumeRequest,
+  zStorageMountPreviewRequest,
 } from '@nyabase/common';
-import { CurrentActor } from '../iam/decorators.js';
+import { CurrentActor, RequireRole } from '../iam/decorators.js';
 import type { Actor } from '../iam/actor.js';
-import { LocalVolumesService } from './local-volumes.service.js';
-import { VolumeAttachmentsService } from './volume-attachments.service.js';
+import { SharedVolumeCatalogInspectService } from './shared-volume-catalog.service.js';
+import { VolumeProvisioner } from './volume-provisioner.service.js';
+import { VolumesService } from './volumes.service.js';
 
-/** Local volumes: owners and admins share one surface; admins act on others' rows with `?scope=all`. */
+/**
+ * Local volumes, read-only: the platform creates, sizes and mounts them.
+ * Owners and admins share one surface; admins see others' rows with `?scope=all`.
+ */
 @Controller('volumes')
 export class VolumesController {
-  constructor(private readonly service: LocalVolumesService) {}
+  constructor(private readonly service: VolumesService) {}
 
   @Get()
   list(@CurrentActor() actor: Actor, @Query() query: Record<string, unknown>) {
@@ -39,41 +30,18 @@ export class VolumesController {
     return this.service.get(actor, id, zListScope.parse(scope));
   }
 
-  @Post()
-  @HttpCode(HttpStatus.ACCEPTED)
-  create(@CurrentActor() actor: Actor, @Body() body: unknown) {
-    const kind = (body as { scope?: { kind?: string } } | null)?.scope?.kind;
-    if (kind === 'shared') {
-      throw new BadRequestException({
-        code: FailureCode.InvalidInput,
-        message: 'Shared volumes must be created via /shared-volumes',
-      });
-    }
-    const input = zCreateVolumeRequest.parse(body);
-    return this.service.create(actor, input);
-  }
-
-  @Patch(':id')
-  @HttpCode(HttpStatus.ACCEPTED)
-  patch(
-    @Param('id') id: string,
-    @CurrentActor() actor: Actor,
-    @Body() body: unknown,
-    @Query('scope') scope?: string,
-  ) {
-    return this.service.patch(actor, id, zPatchVolumeRequest.parse(body), zListScope.parse(scope));
-  }
-
+  /** A volume no grant covers any more (user admins). */
   @Delete(':id')
+  @RequireRole(Role.UserAdmin)
   @HttpCode(HttpStatus.ACCEPTED)
-  delete(@Param('id') id: string, @CurrentActor() actor: Actor, @Query('scope') scope?: string) {
-    return this.service.delete(actor, id, zListScope.parse(scope));
+  delete(@Param('id') id: string, @CurrentActor() actor: Actor) {
+    return this.service.delete(actor, id, 'local');
   }
 }
 
 @Controller('servers/:serverId/storage-capacity')
 export class StorageCapacityController {
-  constructor(private readonly service: LocalVolumesService) {}
+  constructor(private readonly service: VolumesService) {}
 
   /** `scope=mine` is the caller's grant view; `scope=all` is server-wide (user admin). */
   @Get()
@@ -86,35 +54,68 @@ export class StorageCapacityController {
   }
 }
 
-@Controller('containers/:containerId/volumes')
-export class ContainerVolumesController {
-  constructor(private readonly service: VolumeAttachmentsService) {}
+/** What enabling a disk at a mount path would do now: the volumes created, the containers mounted into. */
+@Controller()
+export class StorageMountPreviewController {
+  constructor(private readonly provisioner: VolumeProvisioner) {}
 
-  @Post()
-  @HttpCode(HttpStatus.ACCEPTED)
-  attach(
-    @Param('containerId') containerId: string,
-    @CurrentActor() actor: Actor,
-    @Body() body: unknown,
-    @Query('scope') scope?: string,
-  ) {
-    return this.service.attach(
-      actor,
-      containerId,
-      zAttachVolumeRequest.parse(body),
-      'local',
-      zListScope.parse(scope),
-    );
+  @Post('servers/:serverId/storage-pools/:poolId/mount-preview')
+  @RequireRole(Role.Admin)
+  @HttpCode(HttpStatus.OK)
+  pool(@Param('serverId') serverId: string, @Param('poolId') poolId: string, @Body() body: unknown) {
+    const { mountPath } = zStorageMountPreviewRequest.parse(body);
+    return this.provisioner.preview({ kind: 'pool', id: poolId, serverId }, mountPath);
   }
 
-  @Delete(':attachmentId')
+  @Post('shared-backends/:backendId/mount-preview')
+  @RequireRole(Role.Admin)
+  @HttpCode(HttpStatus.OK)
+  backend(@Param('backendId') backendId: string, @Body() body: unknown) {
+    const { mountPath } = zStorageMountPreviewRequest.parse(body);
+    return this.provisioner.preview({ kind: 'backend', id: backendId }, mountPath);
+  }
+}
+
+/** Shared volumes, read-only (the platform creates, sizes and mounts them); admins see others' rows with `?scope=all`. */
+@Controller('shared-volumes')
+export class SharedVolumesController {
+  constructor(
+    private readonly service: VolumesService,
+    private readonly inspector: SharedVolumeCatalogInspectService,
+  ) {}
+
+  @Get()
+  list(@CurrentActor() actor: Actor, @Query() query: Record<string, unknown>) {
+    return this.service.listShared(actor, zListSharedVolumesQuery.parse(query));
+  }
+
+  @Get(':id/catalogs')
+  @RequireRole(Role.Admin)
+  inspect(@Param('id') id: string) {
+    return this.inspector.inspectSharedVolumeCatalogs(id);
+  }
+
+  @Get(':id')
+  get(@Param('id') id: string, @CurrentActor() actor: Actor, @Query('scope') scope?: string) {
+    return this.service.getShared(actor, id, zListScope.parse(scope));
+  }
+
+  /** A volume no grant covers any more (user admins). */
+  @Delete(':id')
+  @RequireRole(Role.UserAdmin)
   @HttpCode(HttpStatus.ACCEPTED)
-  detach(
-    @Param('containerId') containerId: string,
-    @Param('attachmentId') attachmentId: string,
-    @CurrentActor() actor: Actor,
-    @Query('scope') scope?: string,
-  ) {
-    return this.service.detach(actor, attachmentId, containerId, 'local', zListScope.parse(scope));
+  delete(@Param('id') id: string, @CurrentActor() actor: Actor) {
+    return this.service.delete(actor, id, 'shared');
+  }
+}
+
+@Controller('shared-backends')
+export class SharedBackendCatalogInspectController {
+  constructor(private readonly inspector: SharedVolumeCatalogInspectService) {}
+
+  @Get(':id/catalog-inspect')
+  @RequireRole(Role.Admin)
+  inspect(@Param('id') id: string) {
+    return this.inspector.inspectSharedBackendCatalogs(id);
   }
 }

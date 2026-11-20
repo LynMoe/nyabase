@@ -116,12 +116,15 @@ export function quotaSummaryParts(
   ];
 }
 
-/** The data disks under a server grant, summed: 数据盘 2 个 · 共 500 GiB (不限 when any is). */
-export function dataDiskSummary(pools: ReadonlyArray<{ limitBytes: number | null }>): string {
-  if (pools.length === 0) return '无数据盘';
-  const unlimited = pools.some((pool) => pool.limitBytes === null);
-  const total = pools.reduce((sum, pool) => sum + (pool.limitBytes ?? 0), 0);
-  return `数据盘 ${pools.length} 个 · ${unlimited ? '不限' : `共 ${formatGrantBytes(total)}`}`;
+/**
+ * The data-disk grants under a server grant, summed: 数据盘 3 块 · 共 1.5 TiB
+ * (each grant is a group of disks sharing one quota; the quotas add up).
+ */
+export function dataDiskSummary(grants: ReadonlyArray<{ poolIds: readonly string[]; limitBytes: number }>): string {
+  const disks = grants.reduce((sum, grant) => sum + grant.poolIds.length, 0);
+  if (grants.length === 0 || disks === 0) return '无数据盘';
+  const total = grants.reduce((sum, grant) => sum + grant.limitBytes, 0);
+  return `数据盘 ${disks} 块 · 共 ${formatGrantBytes(total)}`;
 }
 
 export function quotasToTexts(quotas: GrantBundleQuotas): QuotaTexts {

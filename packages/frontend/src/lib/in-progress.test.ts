@@ -97,6 +97,8 @@ describe('other resource progress', () => {
   it('treats attaching as in progress and attached as settled', () => {
     expect(bindInProgress('attaching')).toBe(true);
     expect(bindInProgress('attached')).toBe(false);
+    // Parked until its path is empty: nothing to poll for.
+    expect(bindInProgress('blocked')).toBe(false);
   });
 
   it('keeps a clean pending intent unsettled', () => {

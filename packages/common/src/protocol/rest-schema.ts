@@ -294,14 +294,52 @@ export const zRunPreflightRequest = z.object({
 }).strict();
 
 // Storage pools, shared backends, volumes, and attachments.
+/**
+ * Where a disk (a local data pool or a shared backend) mounts in every
+ * container of its users. On top of the volume path rules it must not cover a
+ * system directory: mounting over /etc or /root would hide the guest's own
+ * files in every container at once.
+ */
+export const zStorageMountPath = zContainerPath
+  .transform((value) => `/${value.split('/').filter((part) => part !== '').join('/')}`)
+  .refine((value) => !isSystemMountPath(value), 'Mount path must not cover a system directory');
+
+/** System directories a disk mount must not cover (equal to or under). */
+export const SYSTEM_MOUNT_ROOTS = [
+  '/proc', '/sys', '/dev', '/etc', '/usr', '/bin', '/sbin', '/lib', '/lib32', '/lib64', '/libx32',
+  '/boot', '/run', '/var',
+] as const;
+/** Directories a disk mount must not replace outright (mounting below them is fine). */
+export const SYSTEM_MOUNT_EXACT = ['/root', '/home', '/tmp', '/opt', '/srv', '/mnt', '/media'] as const;
+
+/** True for a normalized absolute path a disk must not be mounted at. */
+export function isSystemMountPath(path: string): boolean {
+  return SYSTEM_MOUNT_ROOTS.some((root) => path === root || path.startsWith(`${root}/`))
+    || (SYSTEM_MOUNT_EXACT as readonly string[]).includes(path);
+}
+
+/** True when two normalized mount paths are equal or one contains the other. */
+export function mountPathsOverlap(left: string, right: string): boolean {
+  return left === right || left.startsWith(`${right}/`) || right.startsWith(`${left}/`);
+}
+
 export const zPatchStoragePoolRequest = z.object({
   expectedRevision: zExpectedRevision,
   registered: z.boolean().optional(),
   displayName: zOptionalText(128),
+  /** Enables the pool as a data disk mounted here in every container of its users; null disables. */
+  mountPath: zStorageMountPath.nullable().optional(),
+  /** A disk under maintenance is left out of every container (they start without it). */
+  maintenance: z.boolean().optional(),
 }).strict().refine(
-  (value) => value.registered !== undefined || value.displayName !== undefined,
+  (value) => Object.keys(value).some((key) => key !== 'expectedRevision'),
   'At least one storage pool field is required',
 );
+
+/** What enabling a disk at `mountPath` would do now. */
+export const zStorageMountPreviewRequest = z.object({
+  mountPath: zStorageMountPath,
+}).strict();
 
 export const zPatchSharedBackendExecutorRequest = z.object({
   expectedRevision: zExpectedRevision,
@@ -319,10 +357,8 @@ export const zCreateSharedBackendRequest = z.object({
   cephFsid: z.string().regex(/^[0-9a-f-]{36}$/i),
   overcommitRatio: z.number().finite().min(1).max(MAX_STORAGE_OVERCOMMIT_RATIO),
   note: zOptionalNote(MAX_SHARED_BACKEND_NOTE_LENGTH),
-  /** Shared volumes one user may own on the backend; null = no cap. */
-  maxVolumesPerUser: z.number().int().positive().max(10_000).nullable().optional(),
-  /** Filled into the mount form for this backend's volumes; null = `/data`. */
-  defaultMountPath: zContainerPath.nullable().optional(),
+  /** Where every user's volume on the backend mounts; null = not enabled (no volumes are created). */
+  mountPath: zStorageMountPath.nullable().optional(),
 }).strict();
 
 export const zPatchSharedBackendRequest = z.object({
@@ -331,8 +367,8 @@ export const zPatchSharedBackendRequest = z.object({
   cephFsid: z.string().regex(/^[0-9a-f-]{36}$/i).optional(),
   overcommitRatio: z.number().finite().min(1).max(MAX_STORAGE_OVERCOMMIT_RATIO).optional(),
   note: zOptionalNote(MAX_SHARED_BACKEND_NOTE_LENGTH),
-  maxVolumesPerUser: z.number().int().positive().max(10_000).nullable().optional(),
-  defaultMountPath: zContainerPath.nullable().optional(),
+  mountPath: zStorageMountPath.nullable().optional(),
+  maintenance: z.boolean().optional(),
 }).strict().refine(
   (value) => Object.keys(value).some((key) => key !== 'expectedRevision'),
   'At least one shared backend field is required',
@@ -392,18 +428,6 @@ export const zVolumeScope = z.discriminatedUnion('kind', [
   zSharedVolumeScope,
 ]);
 
-export const zCreateVolumeRequest = z.object({
-  name: zName,
-  sizeBytes: zPositiveBytes,
-  scope: zLocalVolumeScope,
-}).strict();
-
-export const zCreateSharedVolumeRequest = z.object({
-  name: zName,
-  sizeBytes: zPositiveBytes,
-  scope: zSharedVolumeScope,
-}).strict();
-
 /**
  * Which rows a list endpoint returns: `mine` (default) is the caller's own;
  * `all` is every row and requires the resource's administrator capability.
@@ -430,7 +454,6 @@ export function onlyWithScopeAll<K extends string>(...keys: readonly K[]) {
 
 export const zListSharedVolumesQuery = z.object({
   scope: zListScope,
-  attachableOnServerId: zResourceIdentity.optional(),
 }).strict();
 
 export const zListVolumesQuery = z.object({
@@ -442,15 +465,6 @@ export const zListContainersQuery = z.object({
   scope: zListScope,
   serverId: zResourceIdentity.optional(),
 });
-
-export const zPatchVolumeRequest = z.object({
-  expectedRevision: zExpectedRevision,
-  name: zName.optional(),
-  sizeBytes: zPositiveBytes.optional(),
-}).strict().refine(
-  (value) => Object.keys(value).some((key) => key !== 'expectedRevision'),
-  'At least one volume field is required',
-);
 
 /**
  * Kernel pseudo-filesystems a tenant-writable volume must never shadow: a
@@ -466,12 +480,6 @@ export function isForbiddenContainerMountPath(path: string): boolean {
   return FORBIDDEN_CONTAINER_MOUNT_ROOTS.some((root) => normalized === root || normalized.startsWith(`${root}/`));
 }
 
-export const zAttachVolumeRequest = z.object({
-  volumeId: zResourceIdentity,
-  containerPath: zContainerPath,
-  readOnly: z.boolean(),
-}).strict();
-
 // Container desired state and console session requests.
 export const zCreateContainerRequest = z.object({
   serverId: zResourceIdentity,
@@ -486,7 +494,6 @@ export const zCreateContainerRequest = z.object({
    */
   gpuPciAddresses: z.array(z.string()).optional(),
   powerIntent: z.nativeEnum(ContainerPowerIntent),
-  volumes: z.array(zAttachVolumeRequest).max(32).optional(),
 }).strict();
 
 export const zPatchContainerLimitsRequest = z.object({
@@ -601,13 +608,30 @@ export const zPatchServerGrantRequest = z.object({
   'At least one grant field is required',
 );
 
-/** A data-disk quota on one pool of a server the user holds a grant for. */
-export const zPutStoragePoolGrantRequest = z.object({
-  limitBytes: zNullableBytes,
+/** Data disks of one server the user holds a grant for, sharing one quota. */
+const zDataDiskPoolIds = z.array(zResourceIdentity).min(1).max(64)
+  .refine((ids) => new Set(ids).size === ids.length, 'Data disks must not repeat');
+
+export const zCreateDataDiskGrantRequest = z.object({
+  serverId: zResourceIdentity,
+  poolIds: zDataDiskPoolIds,
+  limitBytes: zPositiveBytes,
+  /** Take disks that belong to another data-disk grant of the user out of it. */
+  movePools: z.boolean().optional(),
 }).strict();
 
+export const zPatchDataDiskGrantRequest = z.object({
+  limitBytes: zPositiveBytes.optional(),
+  /** The complete new set of disks: disks left out are revoked unless another grant takes them. */
+  poolIds: zDataDiskPoolIds.optional(),
+  movePools: z.boolean().optional(),
+}).strict().refine(
+  (value) => value.limitBytes !== undefined || value.poolIds !== undefined,
+  'At least one data-disk grant field is required',
+);
+
 export const zPutSharedBackendGrantRequest = z.object({
-  limitBytes: zNullableBytes,
+  limitBytes: zPositiveBytes,
   expiresAt: zIsoDateTime.nullable(),
 }).strict();
 
@@ -718,11 +742,8 @@ export type PatchIpPoolRequest = z.infer<typeof zPatchIpPoolRequest>;
 export type LocalVolumeScope = z.infer<typeof zLocalVolumeScope>;
 export type SharedVolumeScope = z.infer<typeof zSharedVolumeScope>;
 export type VolumeScope = z.infer<typeof zVolumeScope>;
-export type CreateVolumeRequest = z.infer<typeof zCreateVolumeRequest>;
-export type CreateSharedVolumeRequest = z.infer<typeof zCreateSharedVolumeRequest>;
 export type ListSharedVolumesQuery = z.infer<typeof zListSharedVolumesQuery>;
-export type PatchVolumeRequest = z.infer<typeof zPatchVolumeRequest>;
-export type AttachVolumeRequest = z.infer<typeof zAttachVolumeRequest>;
+export type StorageMountPreviewRequest = z.infer<typeof zStorageMountPreviewRequest>;
 export type CreateContainerRequest = z.infer<typeof zCreateContainerRequest>;
 export type PatchContainerLimitsRequest = z.infer<typeof zPatchContainerLimitsRequest>;
 export type PatchContainerRootSizeRequest = z.infer<typeof zPatchContainerRootSizeRequest>;
@@ -739,7 +760,8 @@ export type PatchGrantBundleRequest = z.infer<typeof zPatchGrantBundleRequest>;
 export type ServerGrantOverrides = z.infer<typeof zServerGrantOverrides>;
 export type PutServerGrantRequest = z.input<typeof zPutServerGrantRequest>;
 export type PatchServerGrantRequest = z.infer<typeof zPatchServerGrantRequest>;
-export type PutStoragePoolGrantRequest = z.infer<typeof zPutStoragePoolGrantRequest>;
+export type CreateDataDiskGrantRequest = z.infer<typeof zCreateDataDiskGrantRequest>;
+export type PatchDataDiskGrantRequest = z.infer<typeof zPatchDataDiskGrantRequest>;
 export type PutSharedBackendGrantRequest = z.infer<typeof zPutSharedBackendGrantRequest>;
 export type IntentListQuery = z.infer<typeof zIntentListQuery>;
 export type ListScope = z.infer<typeof zListScope>;

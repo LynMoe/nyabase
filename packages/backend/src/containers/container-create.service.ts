@@ -5,7 +5,6 @@ import {
   FailureCode,
   IntentKind,
   IntentResourceType,
-  type AttachVolumeRequest,
   type CreateContainerRequest,
 } from '@nyabase/common';
 import { sql, type Transaction } from 'kysely';
@@ -20,7 +19,7 @@ import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.
 import { IntentRepository } from '../reconcile/intent.repository.js';
 import { lockOwnerServerQuota } from '../platform/persistence-pg/advisory-locks.js';
 import { committedVolumeBytesSql } from '../platform/persistence-pg/committed-bytes.js';
-import { VolumeAttachmentsService } from '../volumes/volume-attachments.service.js';
+import { VolumeProvisioner } from '../volumes/volume-provisioner.service.js';
 import { overcommitAvailableBytes } from '../volumes/volume-rules.js';
 import {
   ContainerControlRepository,
@@ -118,7 +117,7 @@ export class ContainerCreateService {
     private readonly intents: IntentRepository,
     private readonly audit: AuditService,
     private readonly ipPools: IpPoolsRepository,
-    private readonly volumes: VolumeAttachmentsService,
+    private readonly volumes: VolumeProvisioner,
     private readonly gpuClaims: GpuClaimsRepository,
   ) {}
 
@@ -328,7 +327,7 @@ export class ContainerCreateService {
   /**
    * Admit a new container inside the caller's serializable transaction: validate
    * the target and the user's access, reserve storage and an address, insert the
-   * row (with GPU claims and create-time volumes) and queue the create intent.
+   * row (with GPU claims and the owner's volumes mounted) and queue the create intent.
    */
   async admit(
     transaction: Tx,
@@ -401,14 +400,12 @@ export class ContainerCreateService {
       enabled: gpuEnabled,
     });
     if (state) row = await this.repository.setGpuState(row.id, state, transaction);
-    if (request.volumes && request.volumes.length > 0) {
-      await this.volumes.bindCreateTimeVolumes(
-        transaction,
-        actor,
-        { id: row.id, owner_id: row.owner_id, server_id: row.server_id },
-        request.volumes as AttachVolumeRequest[],
-      );
-    }
+    // The owner's volumes on the server's disks come up with the container.
+    await this.volumes.bindNewContainer(transaction, {
+      id: row.id,
+      owner_id: row.owner_id,
+      server_id: row.server_id,
+    });
     const intent = await createContainerIntent(this.intents, {
       kind: IntentKind.ContainerCreate,
       resourceType: IntentResourceType.Container,

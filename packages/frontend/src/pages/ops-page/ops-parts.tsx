@@ -7,6 +7,7 @@ import { queryKeys } from '../../lib/query-keys.js';
 import {
   failureCodeLabel,
   intentKindLabel,
+  intentLabel,
   intentResourceTypeLabel,
   intentStatusLabel,
 } from '../../lib/status-labels.js';
@@ -133,7 +134,7 @@ export function IntentsTable({
                   onClick={() => onSelect(intent)}
                 >
                   <TableCell>{new Date(intent.createdAt).toLocaleString()}</TableCell>
-                  <TableCell>{intentKindLabel(intent.kind)}</TableCell>
+                  <TableCell>{intentLabel(intent)}</TableCell>
                   <TableCell>
                     <StatusBadge
                       label={intentStatusLabel(intent.status)}

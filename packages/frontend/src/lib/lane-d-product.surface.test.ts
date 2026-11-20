@@ -58,12 +58,9 @@ describe('lane D product UI copy', () => {
     expect(src).toMatch(/编辑规格/);
     expect(src).toMatch(/调整容量/);
     expect(src).not.toMatch(/\['spec', '规格'/);
-    expect(src).toMatch(/需要「管理本地数据卷」权限/);
-    expect(src).toMatch(/需要「管理共享卷」权限/);
     expect(src).toMatch(/retryIntent/);
     expect(src).toMatch(/formatIntentAttempt/);
-    expect(src).toMatch(/filterAttachableVolumes/);
-    expect(src).toMatch(/filterAttachableSharedVolumes/);
+    expect(src).not.toMatch(/filterAttachableVolumes|filterAttachableSharedVolumes/);
   });
 
   it('shows typed volume attachments and a layout cert expiry banner', () => {
@@ -158,16 +155,17 @@ describe('lane D product UI copy', () => {
     expect(page).toMatch(/enabled: canManageVolumes,/);
   });
 
-  it('volume remount waits for attachment after 202 and blocks quota-ineffective create', () => {
-    const remount = read('components/storage/volume-shrink-orchestration-dialog.tsx');
-    expect(remount).toMatch(/等待挂回/);
-    expect(remount).toMatch(/lookupLatestIntentFailure/);
-    const volumes = [
-      read('pages/volumes-page.tsx'),
-      read('components/storage/local-volume-form-dialog.tsx'),
-    ].join('\n');
-    expect(volumes).toMatch(/quotaEffective !== true/);
-    expect(volumes).toMatch(/quotaIneffectiveCreateHint/);
+  it('container storage lists the platform\'s mounts read-only, with blocked and maintenance reasons', () => {
+    const storage = read('components/containers/storage-panel.tsx');
+    expect(storage).toMatch(/mountStatus\(attachment\)/);
+    expect(storage).not.toMatch(/api\.(post|delete)/);
+    expect(storage).not.toMatch(/MountDialog|DetachVolumeDialog|LocalVolumeFormDialog|attachableOnServerId/);
+    expect(storage).toMatch(/自动挂载/);
+    const status = read('lib/data-disks.ts');
+    expect(status).toMatch(/挂载点在容器里已有文件：清空或移走后重启容器即可挂载/);
+    expect(status).toMatch(/盘维护中，暂未挂载/);
+    expect(read('components/containers/create-container-dialog.tsx')).not.toMatch(/volumes:/);
+    expect(read('components/containers/create-container-dialog.tsx')).toMatch(/自动挂载到新容器/);
     const detail = [
       read('pages/container-detail-page.tsx'),
       read('components/containers/spec-panel.tsx'),
@@ -181,57 +179,39 @@ describe('lane D product UI copy', () => {
     const volumes = [
       read('pages/volumes-page.tsx'),
       read('components/storage/local-volume-table.tsx'),
-      read('components/storage/local-volume-table.tsx'),
     ].join('\n');
     const shared = [
       read('pages/shared-volumes-page.tsx'),
       read('components/storage/shared-volume-table.tsx'),
-      read('components/storage/shared-volume-table.tsx'),
     ].join('\n');
-    const localForm = read('components/storage/local-volume-form-dialog.tsx');
-    const sharedForm = [
-      read('components/storage/shared-volume-form-dialog.tsx'),
-      read('lib/storage-shrink.ts'),
-    ].join('\n');
-    const storage = read('components/containers/storage-panel.tsx');
     const inspect = read('components/storage/shared-volume-catalog-inspect.tsx');
     const grants = readDir('components/grants');
     const backends = [
       read('pages/shared-backends-page.tsx'),
       read('pages/shared-backend-detail-page.tsx'),
       read('components/storage/shared-volume-table.tsx'),
-      read('components/storage/shared-volume-table.tsx'),
     ].join('\n');
-    const detail = [read('pages/container-detail-page.tsx'), read('components/containers/storage-panel.tsx')].join('\n');
     expect(read('pages/volumes-page.tsx')).toMatch(/testId="volumes"/);
-    expect(read('pages/volumes-page.tsx')).toMatch(/LocalVolumeTable/);
+    expect(read('pages/volumes-page.tsx')).toMatch(/ServerDataDisks/);
+    expect(read('pages/volumes-page.tsx')).toMatch(/任一盘都可写/);
     expect(read('pages/shared-volumes-page.tsx')).toMatch(/testId="shared-volumes"/);
+    // Users never create, resize, delete or mount volumes: the platform does.
+    for (const page of [read('pages/volumes-page.tsx'), read('pages/shared-volumes-page.tsx')]) {
+      expect(page).not.toMatch(/api\.(post|patch|delete)/);
+      expect(page).not.toMatch(/新建|编辑\/扩缩|DeleteVolumeDialog/);
+    }
     expect(volumes).not.toMatch(/锚定存储池/);
     expect(volumes).toMatch(/ResourceIntentHistory/);
-    expect(shared).toMatch(/SharedVolumeFormDialog/);
     expect(shared).toMatch(/ResourceIntentHistory/);
     expect(shared).toMatch(/resourceIntentsPath\(scope, IntentResourceType\.Volume, volume\.id\)/);
     expect(shared).toMatch(/formatObservedUsage/);
     expect(shared).not.toMatch(/usedBytes \?\? 0/);
+    expect(shared).toMatch(/已用 \/ 额度/);
     expect(backends).toMatch(/formatObservedUsage/);
     expect(backends).not.toMatch(/usedBytes \?\? 0/);
-    expect(localForm).toMatch(/volume-server/);
-    expect(localForm).toMatch(/volume-pool/);
-    expect(localForm).not.toMatch(/volume-shared-backend/);
-    expect(localForm).not.toMatch(/\/shared-volumes/);
-    expect(sharedForm).toMatch(/volume-shared-backend/);
-    expect(sharedForm).not.toMatch(/volume-server/);
-    expect(sharedForm).not.toMatch(/volume-pool/);
-    expect(sharedForm).not.toMatch(/锚定存储池/);
-    expect(sharedForm).toMatch(/已创建/);
-    expect(sharedForm).toMatch(/现在还不能挂载或销毁已有目录/);
-    expect(sharedForm).toMatch(/queryKeys\.sharedVolumes\.all/);
-    expect(shared).toMatch(/queryKeys\.sharedVolumes\.all/);
-    expect(storage).not.toMatch(/热卸载/);
-    expect(storage).not.toMatch(/热挂载/);
-    expect(storage).toMatch(/先停止容器/);
-    expect(storage).toMatch(/取消挂载/);
-    expect(storage).toMatch(/onlineCancelAllowed/);
+    expect(backends).not.toMatch(/maxVolumesPerUser|defaultMountPath/);
+    expect(backends).toMatch(/DiskMountDialog/);
+    expect(backends).toMatch(/mount-preview/);
     expect(inspect).toMatch(/catalogOccupancyLabel/);
     expect(inspect).toMatch(/shouldSkipCatalogInspectRow/);
     expect(inspect).not.toMatch(/强制/);
@@ -247,12 +227,11 @@ describe('lane D product UI copy', () => {
     expect(backends).toMatch(/\/shared-volumes\?scope=all/);
     expect(backends).toMatch(/enabled: canManageVolumes,/);
     expect(backends).not.toMatch(/api\.get<SharedVolumeDto\[\]>\('\/shared-volumes'\)/);
-    expect(sharedForm).toMatch(/backendLacksOnlineExecutor/);
-    expect(sharedForm).toMatch(/hasOnlineExecutor/);
-    expect(detail).toMatch(/确认取消/);
-    expect(detail).not.toMatch(/卸载前请先停止容器/);
     expect(backends).toMatch(/排障/);
     expect(backends).toMatch(/SharedVolumeCatalogInspectDialog/);
+    expect(read('components/servers/pools-card.tsx')).toMatch(/DiskMountDialog/);
+    expect(read('components/servers/pools-card.tsx')).toMatch(/mountUnsupportedReason/);
+    expect(read('components/storage/disk-mount-dialog.tsx')).toMatch(/每个获得授权的用户在这块盘上自动得到一个卷/);
     expect(read('pages/shared-backend-detail-page.tsx')).toMatch(/shared-backend-executors/);
     expect(read('pages/shared-backends-page.tsx')).toMatch(/to: '\/shared-backends\/\$id'/);
     expect(read('pages/image-detail-page.tsx')).toMatch(/image-fingerprint-assignment/);
@@ -328,7 +307,9 @@ describe('lane D product UI copy', () => {
     expect(grants).toMatch(/replace: true/);
     expect(grants).toMatch(/替换后立即生效/);
     expect(grants).toMatch(/\/server-grants\//);
-    expect(grants).toMatch(/\/storage-pool-grants\//);
+    expect(grants).toMatch(/\/data-disk-grants/);
+    expect(grants).not.toMatch(/\/storage-pool-grants\//);
+    expect(grants).toMatch(/movePools/);
     // GPUs are a count now; no card picker in the grant editor.
     expect(grants).not.toMatch(/GpuPicker|ServerGrantGpu/);
     expect(grants).not.toMatch(/\btoolbar=/);
@@ -373,8 +354,6 @@ describe('lane D product UI copy', () => {
     const quotaPage = read('components/quota/quota-summary.tsx');
     const dashboard = read('pages/dashboard-page.tsx');
     const create = read('components/containers/create-container-dialog.tsx');
-    const local = read('components/storage/local-volume-form-dialog.tsx');
-    const shared = read('components/storage/shared-volume-form-dialog.tsx');
     const volumes = read('pages/volumes-page.tsx');
     const sharedPage = read('pages/shared-volumes-page.tsx');
     // 配额 is a section of 概览, not a separate destination.
@@ -410,14 +389,14 @@ describe('lane D product UI copy', () => {
     expect(create).not.toMatch(/nvidia-gpu/);
     expect(create).not.toMatch(/pciAddresses/);
     expect(create).not.toMatch(/GpuGrantMode/);
-    expect(local).toMatch(/queryKeys\.storageCapacity/);
-    expect(local).toMatch(/storage-capacity/);
-    expect(shared).toMatch(/剩余/);
-    expect(shared).toMatch(/额度/);
-    expect(shared).toMatch(/sharedBackends/);
-    expect(volumes).not.toMatch(/queryKeys\.storageCapacity/);
+    expect(quotaPage).toMatch(/dataDisks/);
+    expect(quotaPage).not.toMatch(/storagePools/);
+    // The storage pages read the grant groups and the data on the volumes, not committed sizes.
+    expect(volumes).toMatch(/总额度/);
+    expect(volumes).toMatch(/剩余/);
     expect(volumes).not.toMatch(/storage-capacity/);
-    expect(sharedPage).not.toMatch(/sharedBackends/);
+    expect(sharedPage).toMatch(/sharedBackends/);
+    expect(sharedPage).toMatch(/剩余/);
     expect(sharedPage).not.toMatch(/formatRemainingBytes/);
   });
 });

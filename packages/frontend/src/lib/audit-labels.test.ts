@@ -17,6 +17,9 @@ describe('audit labels', () => {
 
   it('maps grant, container, volume, user, http proxy, ip pool and ssh proxy actions', () => {
     expect(auditActionLabel(AuditAction.UpsertStoragePoolGrant)).toBe('更新存储池授权');
+    expect(auditActionLabel(AuditAction.CreateDataDiskGrant)).toBe('添加数据盘授权');
+    expect(auditActionLabel(AuditAction.UpdateDataDiskGrant)).toBe('修改数据盘授权');
+    expect(auditActionLabel(AuditAction.DeleteDataDiskGrant)).toBe('删除数据盘授权');
     expect(auditActionLabel(AuditAction.CreateContainer)).toBe('创建容器');
     expect(auditActionLabel(AuditAction.CreateVolume)).toBe('创建数据卷');
     expect(auditActionLabel(AuditAction.CreateUser)).toBe('创建用户');

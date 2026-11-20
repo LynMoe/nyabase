@@ -1,6 +1,5 @@
 import type * as React from 'react';
-import { GIB, cn, formatBytes } from '../../lib/utils.js';
-import { type SizeScale, type SizeScaleKind, sizeScale } from '../../lib/size-ladder.js';
+import { cn, formatBytes } from '../../lib/utils.js';
 
 /** What a create form knows about one byte quota on the chosen target. */
 export type QuotaLineQuota =
@@ -20,36 +19,6 @@ export function quotaFrom(limitBytes: number | null | undefined, remainingBytes:
   if (limitBytes === null || limitBytes === 0) return { kind: 'unlimited' };
   if (remainingBytes === null || remainingBytes === undefined) return { kind: 'loading' };
   return { kind: 'limited', remainingBytes: Math.max(0, remainingBytes), limitBytes };
-}
-
-/**
- * Slider range for a byte quota: a limited quota runs to its limit and stops at
- * what is left (`over` when the selection exceeds it); otherwise the range is
- * `unlimitedMaxBytes` (e.g. the pool's free space) or the kind's default ladder.
- */
-export function quotaSliderLimits(
-  kind: SizeScaleKind,
-  quota: QuotaLineQuota,
-  unlimitedMaxBytes: number | null,
-  selectedBytes: number | null,
-): { scale: SizeScale; availableGib: number | null; over: boolean } {
-  if (quota.kind === 'limited') {
-    return {
-      scale: sizeScale(kind, quota.limitBytes / GIB),
-      availableGib: quota.remainingBytes / GIB,
-      over: selectedBytes !== null && selectedBytes > quota.remainingBytes,
-    };
-  }
-  return {
-    scale: sizeScale(kind, unlimitedMaxBytes === null ? null : unlimitedMaxBytes / GIB),
-    availableGib: null,
-    over: false,
-  };
-}
-
-/** Field error for a selection above what is left: "超出剩余额度 12 GiB". */
-export function overQuotaMessage(quota: QuotaLineQuota): string {
-  return quota.kind === 'limited' ? `超出剩余额度 ${formatBytes(quota.remainingBytes)}` : '超出剩余额度';
 }
 
 function quotaText(quota: QuotaLineQuota): string {

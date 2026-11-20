@@ -21,7 +21,7 @@ import {
 } from '../../lib/intent-visibility.js';
 import {
   failureCodeLabel,
-  intentKindLabel,
+  intentLabel,
   intentResourceTypeLabel,
   intentStatusLabel,
 } from '../../lib/status-labels.js';
@@ -144,7 +144,7 @@ export function IntentDetailDialog({
               <p className="text-xs text-muted-foreground">刷新中...</p>
             )}
             <section className="grid gap-3 sm:grid-cols-2">
-              <Field label="类型" value={intentKindLabel(view.kind)} />
+              <Field label="类型" value={intentLabel(view)} />
               <Field
                 label="状态"
                 value={(

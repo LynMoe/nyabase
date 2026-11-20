@@ -1513,6 +1513,28 @@ matches its SQL file`). Recreate it: stop the stack, remove the
 servers. Incus instances and volumes created by the old database are orphans
 to the new one; clean them up on the hosts.
 
+#### Before applying 000012 (singleton volumes)
+
+`000012_singleton-volumes` refuses to run (the Backend does not start, the
+database is left as it was) while any data-disk or shared-backend grant is
+unlimited, or while a user holds several live volumes on one pool or shared
+backend. Before the upgrade, with the old release still running:
+
+1. List them (read-only) and give every unlimited grant a size in the panel:
+   `SELECT user_id, pool_id FROM iam.storage_pool_grants WHERE limit_bytes IS NULL;`
+   `SELECT user_id, shared_backend_id FROM iam.shared_backend_grants WHERE limit_bytes IS NULL;`
+2. Compare each user's shared volume size with their backend grant: after the
+   upgrade the platform sizes every volume to its grant (a grant below the
+   data makes the volume read/delete-only, it never stops anything).
+3. Record `SELECT user_id, pool_id, limit_bytes, expires_at FROM
+   iam.effective_pool_access ORDER BY 1, 2` and compare it after the upgrade:
+   the migration converts every data-disk grant into a one-pool group and checks
+   the effective coverage is unchanged, so no access lapse opens.
+
+Shared backends come out of the migration disabled (no mount path): enable
+each one (Shared backends → mount path, after its mount preview) when ready;
+local data pools likewise, one disk at a time.
+
 ### Upgrading the proxies
 
 `deploy/install-proxy.sh` restarts the proxy on every upgrade. Restarting the

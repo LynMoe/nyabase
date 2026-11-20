@@ -10,6 +10,13 @@ import {
   ContainerStatus,
   type ContainerDto,
   type CreateContainerRequest,
+  type CreateDataDiskGrantRequest,
+  type DataDiskGrantChangeDto,
+  type SharedBackendDto,
+  type SharedVolumeDto,
+  type StoragePoolDto,
+  type VolumeAttachmentDto,
+  type VolumeDto,
   type GrantBundleDto,
   type GrantBundleQuotas,
   type IntentAcceptedDto,
@@ -98,7 +105,11 @@ export class Harness {
       displayName: `e2e ${label}`,
       ...(role ? { role } : {}),
     });
-    this.defer(`delete user ${username}`, () => this.api.delete(`/users/${created.id}`));
+    // Runs after everything deferred later (grants, containers): the user's volumes go first.
+    this.defer(`delete user ${username}`, async () => {
+      await this.deleteUserVolumes(created.id);
+      await this.api.delete(`/users/${created.id}`);
+    });
     return { id: created.id, username, password, session: await login(this.state.baseUrl, username, password) };
   }
 
@@ -131,11 +142,111 @@ export class Harness {
     return bundle;
   }
 
-  /** A data-disk quota (null = unlimited) under the user's grant on the pool's server. */
-  async grantPool(user: Pick<TestUser, 'id'>, poolId: string, limitBytes: number | null = null): Promise<void> {
-    await this.api.put(`/users/${user.id}/storage-pool-grants/${poolId}`, { limitBytes });
-    this.defer(`revoke pool grant ${user.id}/${poolId}`, () =>
-      this.api.delete(`/users/${user.id}/storage-pool-grants/${poolId}`));
+  /**
+   * A data-disk grant of `poolIds` (pools of `server`) sharing `limitBytes`,
+   * under the user's grant on the server (taking the pools from any other
+   * grant of the user); revoked again on cleanup. Returns the grant id.
+   */
+  async grantDataDisks(
+    user: Pick<TestUser, 'id'>,
+    server: RunServer,
+    poolIds: readonly string[],
+    limitBytes: number,
+  ): Promise<string> {
+    const body: CreateDataDiskGrantRequest = { serverId: server.id, poolIds: [...poolIds], limitBytes, movePools: true };
+    const change = await this.api.post<DataDiskGrantChangeDto>(`/users/${user.id}/data-disk-grants`, body);
+    const id = change.grant!.id;
+    this.defer(`revoke data-disk grant ${user.id}/${id}`, async () => {
+      try {
+        await this.api.delete(`/users/${user.id}/data-disk-grants/${id}`);
+      } catch (error) {
+        if (!(error instanceof ApiError && error.status === 404)) throw error;
+      }
+    });
+    return id;
+  }
+
+  /** The user's grant on the run's shared backend (always sized); revoked again on cleanup. */
+  async grantBackend(user: Pick<TestUser, 'id'>, limitBytes: number): Promise<void> {
+    const backendId = this.state.sharedBackendId!;
+    await this.api.put(`/users/${user.id}/shared-backend-grants/${backendId}`, { limitBytes, expiresAt: null });
+    this.defer(`revoke shared backend grant ${user.id}`, () =>
+      this.api.delete(`/users/${user.id}/shared-backend-grants/${backendId}`));
+  }
+
+  /**
+   * Enables the server's data pool as a data disk at `mountPath` (every
+   * covered user gets a volume there, mounted in all their containers);
+   * disabled again on cleanup.
+   */
+  async enableDataDisk(server: RunServer, mountPath: string): Promise<StoragePoolDto> {
+    const path = `/servers/${server.id}/storage-pools/${server.dataPoolId}`;
+    const current = await this.dataPool(server);
+    const enabled = await this.api.patch<StoragePoolDto>(path, { expectedRevision: current.revision, mountPath });
+    this.defer(`disable data disk ${server.slug}`, async () => {
+      const now = await this.dataPool(server);
+      await this.api.patch(path, { expectedRevision: now.revision, mountPath: null, maintenance: false });
+    });
+    return enabled;
+  }
+
+  /** The server's data pool as the administrator sees it (revision, mount path, maintenance). */
+  async dataPool(server: RunServer): Promise<StoragePoolDto> {
+    const pools = await this.api.get<StoragePoolDto[]>(`/servers/${server.id}/storage-pools`, { scope: 'all' });
+    const pool = pools.find((entry) => entry.id === server.dataPoolId);
+    if (!pool) throw new Error(`data pool ${server.dataPoolId} not listed on ${server.slug}`);
+    return pool;
+  }
+
+  /** Enables the run's shared backend at `mountPath`; disabled again on cleanup. */
+  async enableSharedBackend(mountPath: string): Promise<SharedBackendDto> {
+    const path = `/shared-backends/${this.state.sharedBackendId}`;
+    const current = await this.api.get<SharedBackendDto>(path, { scope: 'all' });
+    const enabled = await this.api.patch<SharedBackendDto>(path, { expectedRevision: current.revision, mountPath });
+    this.defer('disable shared backend', async () => {
+      const now = await this.api.get<SharedBackendDto>(path, { scope: 'all' });
+      await this.api.patch(path, { expectedRevision: now.revision, mountPath: null, maintenance: false });
+    });
+    return enabled;
+  }
+
+  /** Waits until the container mounts a volume at `path` (`bindState` as given, `attached` by default). */
+  async waitMount(
+    api: Api,
+    containerId: string,
+    kind: 'volumes' | 'shared-volumes',
+    path: string,
+    bindState: VolumeAttachmentDto['bindState'] = 'attached',
+  ): Promise<VolumeAttachmentDto> {
+    return pollUntil(async () => {
+      const mounts = await api.get<VolumeAttachmentDto[]>(this.scoped(api, `/containers/${containerId}/${kind}`));
+      return mounts.find((mount) => mount.containerPath === path && mount.bindState === bindState);
+    }, { what: `${kind} at ${path} in ${containerId} to be ${bindState}`, timeoutMs: 300_000 });
+  }
+
+  /**
+   * Deletes every volume of the user (administrator, once no grant covers it
+   * and it is unmounted: revoking unmounts it shortly) and waits until gone.
+   */
+  async deleteUserVolumes(userId: string): Promise<void> {
+    const local = (await this.api.get<VolumeDto[]>('/volumes', { scope: 'all' })).filter((v) => v.ownerId === userId);
+    const shared = (await this.api.get<SharedVolumeDto[]>('/shared-volumes', { scope: 'all' }))
+      .filter((v) => v.ownerId === userId);
+    for (const [collection, id] of [
+      ...local.map((v) => ['volumes', v.id] as const),
+      ...shared.map((v) => ['shared-volumes', v.id] as const),
+    ]) {
+      await pollUntil(async () => {
+        try {
+          await this.deleteVolume(this.api, id, collection);
+          return true;
+        } catch (error) {
+          if (error instanceof ApiError && error.status === 409
+            && (error.code === 'VOLUME_REQUIRES_UNBIND' || error.code === 'VOLUME_STILL_GRANTED')) return undefined;
+          throw error;
+        }
+      }, { what: `volume ${id} to become deletable`, timeoutMs: 300_000 });
+    }
   }
 
   async addSshKey(user: TestUser): Promise<SshPublicKeyDto> {

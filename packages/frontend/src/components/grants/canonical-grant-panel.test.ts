@@ -1,15 +1,15 @@
 import { describe, expect, it } from 'vitest';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { GRANT_EXPIRY_GRACE_DAYS, type ServerGrantDto, type StoragePoolDto } from '@nyabase/common';
+import { GRANT_EXPIRY_GRACE_DAYS } from '@nyabase/common';
 import { readSourceDir } from '../../lib/read-source.test-helper.js';
 import { GIB } from '../../lib/utils.js';
 import {
-  addablePools,
   expiryLabel,
   expiryMinuteOptions,
   expiryPhase,
   gibQuotaText,
+  parseGibLimit,
   parseGibQuotaKeeping,
   remainingLabel,
   toDatetimeLocalValue,
@@ -65,23 +65,6 @@ describe('expiryMinuteOptions', () => {
   });
 });
 
-describe('addablePools', () => {
-  const pool = (id: string, serverId: string, extra: Partial<StoragePoolDto> = {}) =>
-    ({ id, serverId, registered: true, shareable: false, ...extra }) as StoragePoolDto;
-  const grant = { serverId: 's1', storagePools: [{ poolId: 'p1' }] } as unknown as ServerGrantDto;
-
-  it('offers only registered local pools of the grant\'s server without a data disk yet', () => {
-    const pools = [
-      pool('p1', 's1'),
-      pool('p2', 's1'),
-      pool('p3', 's2'),
-      pool('p4', 's1', { registered: false }),
-      pool('p5', 's1', { shareable: true }),
-    ];
-    expect(addablePools(pools, grant).map((row) => row.id)).toEqual(['p2']);
-  });
-});
-
 describe('parseGibQuotaKeeping', () => {
   it('keeps the stored limit while its text is untouched and parses anything typed', () => {
     const stored = GIB + 3;
@@ -92,6 +75,13 @@ describe('parseGibQuotaKeeping', () => {
     expect(parseGibQuotaKeeping('1', undefined)).toBe(GIB);
     expect(parseGibQuotaKeeping('0', stored)).toBeUndefined();
   });
+
+  it('requires a size for storage grants: empty is invalid, not 不限', () => {
+    expect(parseGibLimit('')).toBeUndefined();
+    expect(parseGibLimit('0')).toBeUndefined();
+    expect(parseGibLimit('2')).toBe(2 * GIB);
+    expect(parseGibLimit('1', GIB + 3)).toBe(GIB + 3);
+  });
 });
 
 describe('grant panel copy', () => {
@@ -101,8 +91,23 @@ describe('grant panel copy', () => {
     expect(source).toContain('容器立即停止，${GRANT_EXPIRY_GRACE_DAYS} 天后清除');
   });
 
-  it('warns that deleting a data disk force-detaches its volumes and deletes them after the grace', () => {
-    expect(source).toContain('该池上的数据卷立即从容器强制卸载，${GRANT_EXPIRY_GRACE_DAYS} 天后删除');
+  it('warns that deleting a data-disk grant unmounts its volumes and deletes them after the grace', () => {
+    expect(source).toContain("上的数据卷立即从所有容器卸载，${GRANT_EXPIRY_GRACE_DAYS} 天后删除");
+    expect(source).toContain('data-disk-grants');
+    expect(source).not.toContain('storage-pool-grants');
+  });
+
+  it('confirms disks moved out of another grant and warns in red about revoked ones', () => {
+    expect(source).toContain('将从「');
+    expect(source).toContain('」中移出');
+    expect(source).toContain('movePools');
+    expect(source).toContain('variant="destructive" data-testid="data-disk-revoked"');
+    expect(source).toContain('超出部分只能删除，不会停机或卸载');
+  });
+
+  it('gives shared storage grants a required size', () => {
+    expect(source).toContain('label="额度（GiB）"');
+    expect(source).not.toContain('留空为不限');
   });
 
   it('asks before replacing the bundle a user already holds on a server', () => {

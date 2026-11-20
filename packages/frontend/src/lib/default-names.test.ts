@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { zCreateContainerRequest, zCreateVolumeRequest } from '@nyabase/common';
+import { zCreateContainerRequest } from '@nyabase/common';
 import { CONTAINER_NAME_MAX_LENGTH, CONTAINER_NAME_RE } from '@nyabase/common';
 import { dateStamp, defaultContainerName, defaultResourceName } from './default-names.js';
 
@@ -27,11 +27,9 @@ describe('defaultResourceName', () => {
     expect(defaultResourceName('vol', [' VOL-261025 ', 'Vol-261025-2'], OCT_25)).toBe('vol-261025-3');
   });
 
-  it('passes the container and volume name validation', () => {
+  it('passes the container name validation', () => {
     const container = defaultResourceName('ins', ['ins-261025'], OCT_25);
     expect(zCreateContainerRequest.shape.name.safeParse(container).success).toBe(true);
-    const volume = defaultResourceName('vol', [], OCT_25);
-    expect(zCreateVolumeRequest.shape.name.safeParse(volume).success).toBe(true);
   });
 });
 

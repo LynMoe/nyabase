@@ -35,7 +35,6 @@ describe('SSH connection history', () => {
     const servers = h.state.servers.length > 1 ? h.state.servers.slice(0, 2) : [h.server, h.server];
     for (const server of new Set(servers)) {
       await h.grantServer(user, server);
-      await h.grantPool(user, server.poolId);
     }
     containers = [];
     for (const server of servers) containers.push(await h.createContainer(user, server));

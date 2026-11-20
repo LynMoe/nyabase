@@ -115,6 +115,9 @@ export interface InfrastructureStoragePoolTable {
   source: ColumnType<string | null, string | null | undefined, string | null | undefined>;
   display_name: string | null;
   registered: boolean;
+  /** Where the pool mounts as a data disk; NULL = not a data disk. */
+  mount_path: string | null;
+  maintenance: ColumnType<boolean, boolean | undefined, boolean>;
   last_observed_at: InfrastructureTimestamp | null;
   revision: InfrastructureBigInt;
   created_at: InfrastructureGeneratedTimestamp;
@@ -131,8 +134,9 @@ export interface InfrastructureSharedBackendTable {
   used_bytes: InfrastructureBigInt | null;
   overcommit_ratio: InfrastructureNumeric;
   note: string | null;
-  max_volumes_per_user: number | null;
-  default_mount_path: string | null;
+  /** Where every user's volume on the backend mounts; NULL = not enabled. */
+  mount_path: string | null;
+  maintenance: ColumnType<boolean, boolean | undefined, boolean>;
   revision: InfrastructureBigInt;
   created_at: InfrastructureGeneratedTimestamp;
   updated_at: InfrastructureGeneratedTimestamp;

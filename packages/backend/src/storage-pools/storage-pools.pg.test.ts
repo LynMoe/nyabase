@@ -1,3 +1,4 @@
+import { DiskChangeNotifier } from './disk-mounts.js';
 import { randomUUID } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
 import { FailureCode, ServerStatus } from '@nyabase/common';
@@ -56,7 +57,7 @@ function makeService(
   const repository = new StoragePoolsRepository(database);
   const transactions = new PgTransactionManager(database);
   const discovery = new StoragePoolDiscoveryService(repository, transactions, clients as never);
-  const pools = new StoragePoolsService(repository, transactions, database, discovery, FAKE_AUDIT);
+  const pools = new StoragePoolsService(repository, transactions, database, discovery, FAKE_AUDIT, new DiskChangeNotifier());
   const executors = new SharedBackendExecutorsService(repository, transactions, discovery, FAKE_AUDIT);
   // One handle for pool and executor operations, as the flows below mix both.
   return Object.assign(pools, {

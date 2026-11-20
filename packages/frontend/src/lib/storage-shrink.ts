@@ -1,22 +1,13 @@
 import {
   FailureCode,
-  type SharedBackendDto,
   type StorageDiscoverIssueDto,
   type StoragePoolCapabilityDto,
   StoragePoolDriver,
 } from '@nyabase/common';
 import { ApiError, apiErrorDetails } from './api-error.js';
-import { formatBytes, formatCapacity, GIB } from './utils.js';
+import { formatBytes, formatCapacity } from './utils.js';
 
 export type ShrinkPath = 'grow' | 'unchanged' | 'online' | 'requires_stop' | 'never';
-
-export interface VolumeShrinkAttachmentRef {
-  attachmentId: string;
-  containerId: string;
-  containerPath: string;
-  readOnly?: boolean;
-  containerName?: string;
-}
 
 /**
  * Classify a size change using the pool capability descriptor only.
@@ -35,19 +26,6 @@ export function classifySizeChange(
   // Quota-online pools with shrinkOnline:false cannot shrink (quota ineffective).
   if (!capability.shrinkOnline) return 'never';
   return 'online';
-}
-
-/** Quota-online family when the pool cannot enforce custom quotas. */
-export function isQuotaIneffectiveCapability(capability: StoragePoolCapabilityDto): boolean {
-  return !capability.shrinkOnline && !capability.shrinkRequiresStop && !capability.shrinkNever;
-}
-
-export function quotaIneffectiveCreateHint(): string {
-  return '所选存储池配额未生效或未知，无法创建数据卷。';
-}
-
-export function quotaIneffectiveResizeHint(): string {
-  return '此存储池配额未生效，无法调整数据卷容量。';
 }
 
 /**
@@ -87,37 +65,6 @@ export function validateShrinkFloor(
 
 export function shrinkNeverTooltip(): string {
   return '此存储池不支持缩容；可新建更小卷并迁移数据。';
-}
-
-export function parseVolumeShrinkAttachments(error: unknown): VolumeShrinkAttachmentRef[] {
-  if (!(error instanceof ApiError) || error.code !== FailureCode.VolumeShrinkRequiresDetach) {
-    return [];
-  }
-  const details = apiErrorDetails(error);
-  const raw = details?.attachments;
-  if (!Array.isArray(raw)) return [];
-  const attachments: VolumeShrinkAttachmentRef[] = [];
-  for (const item of raw) {
-    if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
-    const row = item as Record<string, unknown>;
-    if (
-      typeof row.attachmentId !== 'string'
-      || typeof row.containerId !== 'string'
-      || typeof row.containerPath !== 'string'
-    ) {
-      continue;
-    }
-    attachments.push({
-      attachmentId: row.attachmentId,
-      containerId: row.containerId,
-      containerPath: row.containerPath,
-      ...(typeof row.readOnly === 'boolean' ? { readOnly: row.readOnly } : {}),
-      ...(typeof row.containerName === 'string' && row.containerName.length > 0
-        ? { containerName: row.containerName }
-        : {}),
-    });
-  }
-  return attachments;
 }
 
 export interface SharedBackendFsidConflict {
@@ -204,24 +151,6 @@ export async function waitUntil(
   throw new Error(`${label}超时，请检查容器状态后重试`);
 }
 
-export function formatDetachProgress(
-  succeeded: number,
-  total: number,
-  failureIndex: number | null,
-  failureMessage: string | null,
-): string {
-  if (failureIndex === null) {
-    return `已卸载 ${succeeded}/${total}`;
-  }
-  return `卸载成功 ${succeeded} 个，第 ${failureIndex + 1} 个失败${failureMessage ? `：${failureMessage}` : ''}`;
-}
-
-export function backendLacksOnlineExecutor(
-  backend: Pick<SharedBackendDto, 'hasOnlineExecutor'>,
-): boolean {
-  return backend.hasOnlineExecutor !== true;
-}
-
 export function storagePoolSourceKind(driver: StoragePoolDriver): '挂载点' | '设备' {
   return driver === StoragePoolDriver.Dir ? '挂载点' : '设备';
 }
@@ -235,35 +164,4 @@ export function isLocalStoragePool(pool: {
   return pool.shareable === false
     && pool.driver !== StoragePoolDriver.CephFs
     && pool.sharedBackendId === null;
-}
-
-/** One-line shrink capability of a volume, for detail dialogs. */
-export function shrinkLabel(volume: { capability: StoragePoolCapabilityDto }): string {
-  if (volume.capability.shrinkNever) return '不可缩容';
-  if (volume.capability.shrinkRequiresStop) return '缩容需卸载';
-  if (volume.capability.shrinkOnline) return '可在线缩容';
-  return '缩容受用量约束';
-}
-
-/**
- * What a typed GiB size means for an existing volume (or for a new one when
- * `editing` is undefined): the byte size, the kind of change, the usage-floor
- * problem and whether the pool cannot enforce quotas for a resize.
- */
-export function deriveSizeChange(
-  editing: { capability: StoragePoolCapabilityDto; sizeBytes: number; usedBytes: number | null } | undefined,
-  sizeGiB: string,
-) {
-  const parsedGiB = Number(sizeGiB);
-  const nextSize = Number.isFinite(parsedGiB) && parsedGiB > 0 ? Math.round(parsedGiB * GIB) : NaN;
-  const path = editing && Number.isFinite(nextSize)
-    ? classifySizeChange(editing.capability, editing.sizeBytes, nextSize)
-    : 'unchanged';
-  const floorError = editing && (path === 'online' || path === 'requires_stop')
-    ? validateShrinkFloor(editing.capability, nextSize, editing.usedBytes, editing.sizeBytes)
-    : null;
-  const editQuotaBlocked = editing != null
-    && path !== 'unchanged'
-    && isQuotaIneffectiveCapability(editing.capability);
-  return { nextSize, path, floorError, editQuotaBlocked };
 }

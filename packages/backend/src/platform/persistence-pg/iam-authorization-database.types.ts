@@ -41,14 +41,25 @@ export interface IamServerGrantTable extends IamQuotaColumns {
   updated_at: IamGeneratedTimestamp;
 }
 
-/** A data-disk quota on one pool of the server grant's server; current while the server grant is. */
-export interface IamStoragePoolGrantTable {
+/** Local pools of one server sharing one quota; current while the server grant is (000012). */
+export interface IamDataDiskGrantTable {
   id: string;
   server_grant_id: string;
   user_id: string;
   server_id: string;
+  limit_bytes: IamBigInt;
+  created_at: IamGeneratedTimestamp;
+  updated_at: IamGeneratedTimestamp;
+}
+
+/** Membership: the data-disk grant one pool of the user belongs to (at most one per pool). */
+export interface IamStoragePoolGrantTable {
+  id: string;
+  server_grant_id: string;
+  data_disk_grant_id: string;
+  user_id: string;
+  server_id: string;
   pool_id: string;
-  limit_bytes: IamBigInt | null;
   created_at: IamGeneratedTimestamp;
   updated_at: IamGeneratedTimestamp;
 }
@@ -57,7 +68,7 @@ export interface IamSharedBackendGrantTable {
   id: string;
   user_id: string;
   shared_backend_id: string;
-  limit_bytes: IamBigInt | null;
+  limit_bytes: IamBigInt;
   expires_at: IamNullableTimestamp;
   created_at: IamGeneratedTimestamp;
   updated_at: IamGeneratedTimestamp;
@@ -82,17 +93,17 @@ export interface IamEffectiveServerAccessView {
 export interface IamEffectivePoolAccessView {
   user_id: string;
   pool_id: string;
-  /** NULL = unlimited. */
-  limit_bytes: string | null;
+  /** The quota of the pool's data-disk grant, shared by every pool of that grant. */
+  limit_bytes: string;
   /** The server grant's expiry. */
   expires_at: Date | null;
+  data_disk_grant_id: string;
 }
 
 export interface IamEffectiveSharedBackendAccessView {
   user_id: string;
   shared_backend_id: string;
-  /** NULL = unlimited. */
-  limit_bytes: string | null;
+  limit_bytes: string;
   expires_at: Date | null;
 }
 
@@ -110,6 +121,7 @@ export interface AccessLapseTable {
 export interface IamAuthorizationDatabase {
   'iam.grant_bundles': IamGrantBundleTable;
   'iam.server_grants': IamServerGrantTable;
+  'iam.data_disk_grants': IamDataDiskGrantTable;
   'iam.storage_pool_grants': IamStoragePoolGrantTable;
   'iam.shared_backend_grants': IamSharedBackendGrantTable;
   'iam.effective_server_access': IamEffectiveServerAccessView;

@@ -96,7 +96,7 @@ describe('grant bundles', () => {
   });
 
   it('asks before replacing the bundle on a server, keeps the data disks, and never lapses', async () => {
-    await h.grantPool(user, server.poolId, 5 * GIB);
+    await h.grantDataDisks(user, server, [server.poolId], 5 * GIB);
     const larger = await h.newBundle(server, { cpuCores: null, memBytes: 2 * GIB, rootDiskBytes: 40 * GIB });
     const refused = await assign({ bundleId: larger.id }).then(() => undefined, (error: unknown) => error);
     assert.ok(refused instanceof ApiError);
@@ -110,11 +110,11 @@ describe('grant bundles', () => {
     assert.equal(psql(h.state.databaseUrl, `
       SELECT 1 FROM control.access_lapses WHERE user_id = '${uuid(user.id)}'
     `).length, 0, 'coverage never lapsed');
-    assert.deepEqual(replaced.storagePools.map((pool) => [pool.poolId, pool.limitBytes]), [[server.poolId, 5 * GIB]]);
+    assert.deepEqual(replaced.dataDisks.map((grant) => [grant.poolIds, grant.limitBytes]), [[[server.poolId], 5 * GIB]]);
     const access = (await effective())!;
     assert.equal(access.cpuCores, null, 'null CPU is unlimited');
     assert.equal(access.memBytes, 2 * GIB);
-    assert.deepEqual(access.storagePools.map((pool) => pool.limitBytes), [5 * GIB]);
+    assert.deepEqual(access.dataDisks.map((grant) => grant.limitBytes), [5 * GIB]);
 
     assert.equal(await h.api.status('DELETE', `/admin/grant-bundles/${larger.id}`), 409, 'a bundle in use stays');
     assert.equal(await h.api.status('POST', '/admin/grant-bundles', {
@@ -124,8 +124,13 @@ describe('grant bundles', () => {
 
   it('takes data-disk grants only under a server grant', async () => {
     const other = await h.newUser('no-server');
-    const status = await h.api.status('PUT', `/users/${other.id}/storage-pool-grants/${server.poolId}`, { limitBytes: null });
+    const status = await h.api.status('POST', `/users/${other.id}/data-disk-grants`, {
+      serverId: server.id, poolIds: [server.poolId], limitBytes: GIB,
+    });
     assert.equal(status, 409);
+    assert.equal(await h.api.status('POST', `/users/${other.id}/data-disk-grants`, {
+      serverId: server.id, poolIds: [server.poolId], limitBytes: null,
+    }), 400, 'storage grants always have a size');
   });
 
   it('picks the cards of a GPU count when a GPU host is configured', async (t) => {

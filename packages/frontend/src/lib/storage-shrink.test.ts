@@ -3,14 +3,10 @@ import { FailureCode, type StoragePoolCapabilityDto } from '@nyabase/common';
 import { ApiError } from './api-error.js';
 import {
   classifySizeChange,
-  formatDetachProgress,
   formatObservedUsage,
-  isQuotaIneffectiveCapability,
   observedRootUsedBytes,
   identityConflictFromDiscoverIssue,
   parseSharedBackendFsidConflict,
-  parseVolumeShrinkAttachments,
-  quotaIneffectiveCreateHint,
   shrinkNeverTooltip,
   validateShrinkFloor,
   waitUntil,
@@ -58,10 +54,8 @@ describe('classifySizeChange', () => {
   });
 
   it('classifies quota-online shrinkOnline:false as never, not online', () => {
-    expect(isQuotaIneffectiveCapability(quotaOnlineIneffective)).toBe(true);
     expect(classifySizeChange(quotaOnlineIneffective, 10, 8)).toBe('never');
     expect(classifySizeChange(quotaOnlineIneffective, 10, 20)).toBe('grow');
-    expect(quotaIneffectiveCreateHint()).toMatch(/配额未生效/);
   });
 });
 
@@ -106,24 +100,6 @@ describe('shrinkNeverTooltip', () => {
   it('stays capability-driven without hardcoding XFS', () => {
     expect(shrinkNeverTooltip()).not.toMatch(/XFS/i);
     expect(shrinkNeverTooltip()).toMatch(/不支持缩容/);
-  });
-});
-
-describe('parseVolumeShrinkAttachments', () => {
-  it('reads VOLUME_SHRINK_REQUIRES_DETACH attachment details', () => {
-    const error = new ApiError(409, FailureCode.VolumeShrinkRequiresDetach, 'detach first', {
-      code: FailureCode.VolumeShrinkRequiresDetach,
-      message: 'detach first',
-      details: {
-        attachments: [
-          { attachmentId: 'a1', containerId: 'c1', containerPath: '/data' },
-          { attachmentId: 'bad' },
-        ],
-      },
-    });
-    expect(parseVolumeShrinkAttachments(error)).toEqual([
-      { attachmentId: 'a1', containerId: 'c1', containerPath: '/data' },
-    ]);
   });
 });
 
@@ -193,13 +169,6 @@ describe('identityConflictFromDiscoverIssue', () => {
       incusName: null,
       poolId: null,
     })).toBeNull();
-  });
-});
-
-describe('formatDetachProgress', () => {
-  it('renders partial failure progress explicitly', () => {
-    expect(formatDetachProgress(3, 4, null, null)).toBe('已卸载 3/4');
-    expect(formatDetachProgress(3, 4, 3, 'busy')).toBe('卸载成功 3 个，第 4 个失败：busy');
   });
 });
 

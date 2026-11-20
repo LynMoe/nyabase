@@ -1,7 +1,6 @@
-import { Pencil, Trash2 } from 'lucide-react';
+import { Trash2 } from 'lucide-react';
 import { IntentResourceType, type ListScope, type VolumeDto } from '@nyabase/common';
 import { Button } from '../ui/button.js';
-import { shrinkLabel } from '../../lib/storage-shrink.js';
 import { StatusBadge } from '../layout/status-badge.js';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../ui/table.js';
 import { ResourceRef } from '../refs/resource-ref.js';
@@ -28,7 +27,6 @@ export function LocalVolumeTable({
   showPoolColumn,
   showServerColumn = false,
   serverNameById,
-  onEdit,
   onDelete,
   testId = 'server-volume-table',
   poolId,
@@ -39,7 +37,7 @@ export function LocalVolumeTable({
   showPoolColumn: boolean;
   showServerColumn?: boolean;
   serverNameById?: ReadonlyMap<string, string>;
-  onEdit?: (volume: VolumeDto) => void;
+  /** Administrators only: delete a volume no grant covers any more. */
   onDelete?: (volume: VolumeDto) => void;
   testId?: string;
   poolId?: string;
@@ -47,8 +45,8 @@ export function LocalVolumeTable({
   detailFocus?: VolumeDetailFocus;
 }) {
   const [detail, setDetail] = useVolumeDetail(volumes, detailFocus);
-  const showActions = Boolean(onEdit || onDelete);
-  const columnCount = 5
+  const showActions = Boolean(onDelete);
+  const columnCount = 6
     + (scope === 'all' ? 1 : 0)
     + (showServerColumn ? 1 : 0)
     + (showPoolColumn ? 1 : 0)
@@ -63,6 +61,7 @@ export function LocalVolumeTable({
           {scope === 'all' ? <TableHead>所有者</TableHead> : null}
           {showServerColumn ? <TableHead>服务器</TableHead> : null}
           {showPoolColumn ? <TableHead>存储池</TableHead> : null}
+          <TableHead>挂载点</TableHead>
           <TableHead>容量</TableHead>
           <TableHead>已用</TableHead>
           <TableHead>挂载</TableHead>
@@ -87,7 +86,6 @@ export function LocalVolumeTable({
             serverName={serverNameById?.get(volume.serverId) ?? '未知服务器'}
             showActions={showActions}
             onOpenDetail={() => setDetail(volume)}
-            onEdit={onEdit}
             onDelete={onDelete}
           />
         ))}
@@ -111,7 +109,6 @@ function VolumeRow({
   serverName,
   showActions,
   onOpenDetail,
-  onEdit,
   onDelete,
 }: {
   volume: VolumeDto;
@@ -121,7 +118,6 @@ function VolumeRow({
   serverName: string;
   showActions: boolean;
   onOpenDetail: () => void;
-  onEdit?: (volume: VolumeDto) => void;
   onDelete?: (volume: VolumeDto) => void;
 }) {
   const phaseLabel = volume.needsAttention
@@ -150,6 +146,7 @@ function VolumeRow({
           <ResourceRef kind="pool" id={volume.poolId} name={volume.poolName} serverId={volume.serverId} />
         </TableCell>
       ) : null}
+      <TableCell className="font-mono text-xs">{volume.mountPath ?? '未启用'}</TableCell>
       <TableCell>{formatCapacity(volume.sizeBytes)}</TableCell>
       <TableCell>{volume.usedBytes === null ? '未知' : formatCapacity(volume.usedBytes)}</TableCell>
       <TableCell className="max-w-[16rem] whitespace-normal">
@@ -173,11 +170,6 @@ function VolumeRow({
       {showActions ? (
         <TableCell className="text-right" onClick={(event) => event.stopPropagation()}>
           <div className="flex justify-end gap-2">
-            {onEdit ? (
-              <Button size="sm" variant="outline" onClick={() => onEdit(volume)}>
-                <Pencil className="h-3.5 w-3.5" />编辑/扩缩
-              </Button>
-            ) : null}
             {onDelete ? (
               <Button size="sm" variant="ghost-destructive" onClick={() => onDelete(volume)}>
                 <Trash2 className="h-3.5 w-3.5" />删除
@@ -226,9 +218,9 @@ export function LocalVolumeDetailDialog({
             label="存储池"
             value={<ResourceRef kind="pool" id={volume.poolId} name={volume.poolName} serverId={volume.serverId} />}
           />
-          <Field label="容量" value={formatCapacity(volume.sizeBytes)} />
+          <Field label="挂载点" value={volume.mountPath ?? '盘未启用'} />
+          <Field label="容量（平台自动调整）" value={formatCapacity(volume.sizeBytes)} />
           <Field label="已用" value={volume.usedBytes === null ? '未知' : formatCapacity(volume.usedBytes)} />
-          <Field label="缩容能力" value={shrinkLabel(volume)} />
           <Field label="最近更新" value={relativeTime(volume.updatedAt)} />
           <div className="sm:col-span-2">
             <p className="text-xs text-muted-foreground">状态</p>

@@ -9,6 +9,7 @@ import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.
 import type { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
 import type { IntentRepository } from '../reconcile/intent.repository.js';
 import type { VolumeAttachmentsService } from '../volumes/volume-attachments.service.js';
+import type { VolumeProvisioner } from '../volumes/volume-provisioner.service.js';
 import type { ConsoleSessionService } from './console-session.service.js';
 import type { ContainerControlRepository } from './container-control.repository.js';
 import { ContainerControlService } from './container-control.service.js';
@@ -30,6 +31,8 @@ export function makeContainerControlService(
   sshConvergence: ContainerSshConvergenceService,
   volumes: VolumeAttachmentsService,
   gpuClaims: GpuClaimsRepository,
+  /** Mounts the owner's volumes into a new container; none by default. */
+  provisioner: Pick<VolumeProvisioner, 'bindNewContainer'> = { bindNewContainer: async () => undefined },
 ): ContainerControlService {
   return new ContainerControlService(
     transactions,
@@ -42,7 +45,7 @@ export function makeContainerControlService(
     volumes,
     gpuClaims,
     new ContainerDtoAssembler(database, repository, config),
-    new ContainerCreateService(repository, access, intents, audit, ipPools, volumes, gpuClaims),
+    new ContainerCreateService(repository, access, intents, audit, ipPools, provisioner as VolumeProvisioner, gpuClaims),
     { invalidate: () => undefined } as unknown as ProxySnapshotNotifierService,
   );
 }

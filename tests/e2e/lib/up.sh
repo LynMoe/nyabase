@@ -155,7 +155,7 @@ cmd_up() {
       printf 'export %s=%q\n' "$name" "${!name:-}"
     done
     for idx in $E2E_SERVERS; do
-      for suffix in SSH PARENT DNS POOL SHARED_POOL GPU_PCI RESERVED_CPUS; do
+      for suffix in SSH PARENT DNS POOL DATA_POOL SHARED_POOL GPU_PCI RESERVED_CPUS; do
         name="E2E_SERVER_${idx}_${suffix}"
         printf 'export %s=%q\n' "$name" "${!name:-}"
       done

@@ -238,19 +238,20 @@ describePg('iam.effective_server_access', () => {
 });
 
 describePg('iam.effective_pool_access and iam.effective_shared_backend_access', () => {
-  it('makes a data-disk grant current exactly while its server grant is, with its own quota', async () => {
+  it('makes a data-disk grant current exactly while its server grant is, its pools sharing its quota', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const userId = await seedUser(database);
       const serverId = await seedServer(database);
       const poolId = await seedPool(database, serverId);
       const otherPoolId = await seedPool(database, serverId);
       const grantId = await grantServer(database, { user: userId }, serverId, { expiresAt: days(7) });
-      await grantPool(database, { user: userId }, poolId, 500);
-      await grantPool(database, { user: userId }, otherPoolId, null);
+      const shared = await grantPool(database, { user: userId }, [poolId, otherPoolId], 500);
 
-      await expect(resolvePoolAccess(database, userId, poolId)).resolves.toMatchObject({ limitBytes: 500 });
-      expect((await listPoolAccess(database, userId)).map((access) => access.limitBytes).sort())
-        .toEqual([500, null]);
+      // Both pools are covered by one grant and share its quota.
+      await expect(resolvePoolAccess(database, userId, poolId))
+        .resolves.toMatchObject({ limitBytes: 500, dataDiskGrantId: shared });
+      expect((await listPoolAccess(database, userId)).map((access) => [access.limitBytes, access.dataDiskGrantId]))
+        .toEqual([[500, shared], [500, shared]]);
 
       await database.updateTable('iam.server_grants')
         .set({ expires_at: days(-1) })
@@ -262,6 +263,7 @@ describePg('iam.effective_pool_access and iam.effective_shared_backend_access', 
       await database.updateTable('iam.server_grants').set({ expires_at: null }).where('id', '=', grantId).execute();
       await database.deleteFrom('iam.server_grants').where('id', '=', grantId).execute();
       await expect(database.selectFrom('iam.storage_pool_grants').select('id').execute()).resolves.toEqual([]);
+      await expect(database.selectFrom('iam.data_disk_grants').select('id').execute()).resolves.toEqual([]);
     });
   });
 
@@ -277,8 +279,8 @@ describePg('iam.effective_pool_access and iam.effective_shared_backend_access', 
         server_grant_id: grantId,
         user_id: userId,
         server_id: serverId,
+        data_disk_grant_id: randomUUID(),
         pool_id: foreignPool,
-        limit_bytes: null,
       }).execute()).rejects.toMatchObject({ code: '23503' });
     });
   });
@@ -294,18 +296,14 @@ describePg('iam.effective_pool_access and iam.effective_shared_backend_access', 
     });
   });
 
-  it('reads one shared-backend grant per user, NULL meaning unlimited', async () => {
+  it('reads one shared-backend grant per user, always sized', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const userId = await seedUser(database);
       const backendId = await seedBackend(database);
-      const unlimitedBackendId = await seedBackend(database);
       await grantBackend(database, { user: userId }, backendId, 300);
-      await grantBackend(database, { user: userId }, unlimitedBackendId, null);
 
       await expect(resolveSharedBackendAccess(database, userId, backendId))
         .resolves.toMatchObject({ limitBytes: 300, expiresAt: null });
-      await expect(resolveSharedBackendAccess(database, userId, unlimitedBackendId))
-        .resolves.toMatchObject({ limitBytes: null });
       await expect(grantBackend(database, { user: userId }, backendId, 5)).rejects.toMatchObject({ code: '23505' });
     });
   });

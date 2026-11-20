@@ -7,7 +7,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '../ui/card.js';
 import { StatusBadge } from '../layout/status-badge.js';
 import { toast } from '../../hooks/use-toast.js';
 import { intentPending } from '../../lib/in-progress.js';
-import { intentKindLabel, intentStatusLabel } from '../../lib/status-labels.js';
+import { intentLabel, intentStatusLabel } from '../../lib/status-labels.js';
 import {
   currentOutstandingIntents,
   formatIntentAttempt,
@@ -81,7 +81,7 @@ export function IntentRow({
   return (
     <div className="space-y-1 px-3 py-3 text-sm">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <span className="font-medium">{intentKindLabel(intent.kind)}</span>
+        <span className="font-medium">{intentLabel(intent)}</span>
         <StatusBadge
           label={intentStatusLabel(intent.status)}
           raw={intent.status}

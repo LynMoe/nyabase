@@ -59,7 +59,6 @@ function makeService(database: Kysely<NyabaseDatabase>) {
     new IntentRepository(database, noopWake()),
     database,
     { append: vi.fn().mockResolvedValue(undefined) } as never,
-    { get: vi.fn().mockRejectedValue(new Error('Incus is unavailable in this test')), listServerIds: vi.fn() } as never,
   );
 }
 
@@ -192,9 +191,50 @@ describePg('local volume actor scope', () => {
       await expect(service.get(volumeAdmin, volumeId)).rejects.toMatchObject({ status: 404 });
       await expect(service.get(other, volumeId, 'all')).rejects.toMatchObject({ status: 403 });
       await expect(service.get(other, volumeId)).rejects.toMatchObject({ status: 404 });
-      await expect(service.delete(other, volumeId)).rejects.toMatchObject({ status: 404 });
-      await expect(service.patch(other, volumeId, { expectedRevision: 1, name: 'x' }))
-        .rejects.toMatchObject({ status: 404 });
+    });
+  });
+});
+
+describePg('shared volume actor scope', () => {
+  it('shows a shared volume to its owner and to user admins with scope=all, never to others', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const ownerId = randomUUID();
+      const otherId = randomUUID();
+      const backendId = randomUUID();
+      await database.insertInto('iam.users').values(userValues(ownerId)).execute();
+      await database.insertInto('iam.users').values(userValues(otherId, 2)).execute();
+      await database.insertInto('infra.shared_backends').values({
+        id: backendId,
+        name: 'scope-shared',
+        display_name: null,
+        identity_key: `cephfs:ceph/fs-${backendId.slice(0, 8)}/data`,
+        ceph_fsid: randomUUID(),
+        total_bytes: 2000,
+        used_bytes: 0,
+        overcommit_ratio: 1,
+        mount_path: '/meowfs',
+        revision: 1,
+      }).execute();
+      const volumeId = await insertVolume(database, ownerId, null, null, backendId, 'scoped');
+      const service = makeService(database);
+      const owner = testActor(ownerId);
+      const other = testActor(otherId);
+      const userAdmin = testActor(randomUUID(), Role.UserAdmin);
+
+      const [listed] = await service.listShared(owner, {});
+      expect(listed).toMatchObject({ id: volumeId, mountPath: '/meowfs' });
+      expect(await service.listShared(other, {})).toEqual([]);
+      expect(await service.listShared(volumeAdmin, {})).toEqual([]);
+      expect((await service.listShared(volumeAdmin, { scope: 'all' })).map((row) => row.id)).toEqual([volumeId]);
+      await expect(service.listShared(owner, { scope: 'all' })).rejects.toMatchObject({ status: 403 });
+      expect((await service.listShared(userAdmin, { scope: 'all' })).map((row) => row.id)).toEqual([volumeId]);
+
+      await expect(service.getShared(volumeAdmin, volumeId, 'all')).resolves.toMatchObject({ id: volumeId });
+      await expect(service.getShared(volumeAdmin, volumeId)).rejects.toMatchObject({ status: 404 });
+      await expect(service.getShared(other, volumeId, 'all')).rejects.toMatchObject({ status: 403 });
+      await expect(service.getShared(other, volumeId)).rejects.toMatchObject({ status: 404 });
+      // Local reads never return a shared volume.
+      await expect(service.get(owner, volumeId)).rejects.toMatchObject({ status: 404 });
     });
   });
 });

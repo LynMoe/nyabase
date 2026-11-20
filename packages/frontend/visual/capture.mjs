@@ -119,6 +119,8 @@ const pool = {
   usedBytes: 120 * 1024 ** 3,
   quotaEffective: true,
   registered: true,
+  mountPath: '/data1',
+  maintenance: false,
   capability,
   lastObservedAt: ISO,
   revision: 2,
@@ -155,8 +157,8 @@ const container = {
   },
   volumes: [{
     id: 'att-1', containerId: 'ctr-1', volumeId: 'vol-1', volumeName: 'data',
-    deviceName: 'vol-data', containerPath: '/data', readOnly: false,
-    kind: 'local', bindState: 'attached', onlineCancelAllowed: false,
+    deviceName: 'vol-data', containerPath: '/data1', readOnly: false,
+    kind: 'local', bindState: 'attached', maintenance: false,
     detachDrainedAt: null, createdAt: ISO, updatedAt: ISO,
   }],
   sharedVolumes: [],
@@ -203,6 +205,7 @@ const volume = {
   sizeBytes: 50 * 1024 ** 3,
   usedBytes: 12 * 1024 ** 3,
   scope: { kind: 'local', serverId: 'srv-1', poolId: 'pool-1' },
+  mountPath: '/data1',
   capability,
   lifecyclePhase: 'active',
   revision: 2,
@@ -213,7 +216,7 @@ const volume = {
   updatedAt: ISO,
   attachments: [{
     attachmentId: 'att-1', containerId: 'ctr-1',
-    containerName: 'dev-workspace', containerPath: '/data',
+    containerName: 'dev-workspace', containerPath: '/data1', bindState: 'attached',
   }],
 };
 
@@ -257,6 +260,7 @@ const backend = {
   id: 'be-1', name: 'ceph-lab', displayName: '实验室 Ceph',
   identityKey: 'ceph:lab', cephFsid: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
   totalBytes: 2 * 1024 ** 4, usedBytes: 400 * 1024 ** 3, overcommitRatio: 1,
+  note: null, mountPath: '/meowfs', maintenance: false,
   serverIds: ['srv-1'], hasOnlineExecutor: true, revision: 1, createdAt: ISO, updatedAt: ISO,
 };
 
@@ -535,10 +539,15 @@ function mockApi(urlString, method) {
     return json([{
       id: 'sg-1', userId: 'user-alice', serverId: 'srv-1', bundleId: 'bundle-1', bundleName: '标准',
       overrides: {}, cpuCores: 4, memBytes: 8 * 1024 ** 3, rootDiskBytes: 100 * 1024 ** 3, gpuCount: 0,
-      expiresAt: GRANT_EXPIRY, storagePools: [], createdAt: ISO, updatedAt: ISO,
+      expiresAt: GRANT_EXPIRY,
+      dataDisks: [{
+        id: 'ddg-1', serverGrantId: 'sg-1', userId: 'user-alice', serverId: 'srv-1',
+        poolIds: ['pool-1'], limitBytes: 500 * 1024 ** 3, createdAt: ISO, updatedAt: ISO,
+      }],
+      createdAt: ISO, updatedAt: ISO,
     }]);
   }
-  if (p.includes('/storage-pool-grants')) return json([]);
+  if (p.includes('/data-disk-grants')) return json([]);
   if (p.includes('/shared-backend-grants')) return json([]);
   if (p.includes('/effective-access')) {
     return json({
@@ -560,6 +569,8 @@ function mockApi(urlString, method) {
         poolId: 'pool-1', displayName: '本地盘', driver: 'dir', shareable: false,
         totalBytes: pool.totalBytes, committedBytes: 70 * 1024 ** 3,
         availableBytes: 130 * 1024 ** 3, quotaEffective: true, overcommitRatio: 1, capability,
+        mountPath: '/data1', maintenance: false,
+        grant: { grantId: 'ddg-1', poolIds: ['pool-1'], limitBytes: 500 * 1024 ** 3, usedBytes: 12 * 1024 ** 3, availableBytes: 488 * 1024 ** 3 },
       }],
     });
   }
@@ -573,7 +584,7 @@ function mockApi(urlString, method) {
         rootDiskBytes: 200 * 1024 ** 3,
         gpuCount: 1,
         gpuPciAddresses: ['0000:01:00.0'],
-        storagePools: [{ poolId: 'pool-1', limitBytes: 500 * 1024 ** 3, usedBytes: 40 * 1024 ** 3 }],
+        dataDisks: [{ grantId: 'ddg-1', poolIds: ['pool-1'], limitBytes: 500 * 1024 ** 3, usedBytes: 12 * 1024 ** 3, availableBytes: 488 * 1024 ** 3 }],
         expiresAt: GRANT_EXPIRY,
         accessPhase: 'live',
         allowedImageIds: ['img-1'],
@@ -696,6 +707,7 @@ const PAGES = [
   { name: 'container-overview', path: '/containers/ctr-1?tab=overview' },
   { name: 'volumes', path: '/volumes' },
   { name: 'shared-volumes', path: '/shared-volumes' },
+  { name: 'manage-volumes', path: '/manage/volumes' },
   { name: 'http-proxy', path: '/http-proxy' },
   { name: 'profile', path: '/profile' },
   { name: 'servers', path: '/servers' },
@@ -740,19 +752,12 @@ const DIALOGS = [
   { name: 'dialog-disable-user', path: '/users/user-alice', open: (p) => clickByText(p, '停用') },
   { name: 'dialog-create-group', path: '/groups', open: (p) => clickByText(p, '新建用户组') },
   { name: 'dialog-create-container', path: '/containers', open: (p) => clickByText(p, '新建容器') },
-  { name: 'dialog-create-volume', path: '/volumes', open: async (p) => {
-    if (!await clickByText(p, '新建数据卷')) return false;
-    await selectFirstOption(p, 'volume-server');
-    await p.getByText(/剩余|额度 不限/).first().waitFor({ timeout: 5_000 });
-    return true;
+  { name: 'dialog-delete-volume', path: '/manage/volumes', open: (p) => clickByText(p, '删除') },
+  { name: 'dialog-data-disk-grant', path: '/users/user-alice', open: async (p) => {
+    if (!await clickByText(p, 'lab-node-a')) return false;
+    return clickByText(p, '编辑');
   } },
-  { name: 'dialog-create-shared-volume', path: '/shared-volumes', open: async (p) => {
-    if (!await clickByText(p, '新建共享卷')) return false;
-    await selectFirstOption(p, 'volume-shared-backend');
-    await p.getByText(/剩余 .* · 额度/).first().waitFor({ timeout: 5_000 });
-    return true;
-  } },
-  { name: 'dialog-delete-volume', path: '/volumes', open: (p) => clickByText(p, '删除') },
+  { name: 'dialog-disk-mount', path: '/servers/srv-1?tab=storage', open: (p) => clickByText(p, '数据盘') },
   { name: 'dialog-server-onboarding', path: '/servers', open: (p) => clickByText(p, '添加服务器') },
   { name: 'dialog-add-catalog-image', path: '/images', open: (p) => clickByText(p, '添加镜像') },
   { name: 'dialog-ip-pool', path: '/network?tab=ip-pools', open: (p) => clickByText(p, '创建 IP 池') },

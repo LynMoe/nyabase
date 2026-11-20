@@ -34,6 +34,8 @@ export const queryKeys = {
     user: ['servers', 'user'] as const,
     rejectedAgents: ['servers', 'rejected-agents'] as const,
     detail: (serverId: string) => ['server', serverId] as const,
+    /** Prefix of every server's `pools`, either scope. */
+    poolsAll: ['storage-pools'] as const,
     pools: (serverId: string, scope: ListScope) => ['storage-pools', scope, serverId] as const,
     preflight: (serverId: string) => ['server-preflight', serverId] as const,
   },
@@ -90,15 +92,8 @@ export const queryKeys = {
     all: ['shared-volumes'] as const,
     user: ['shared-volumes', 'user'] as const,
     admin: ['shared-volumes', 'admin'] as const,
-    attachable: (serverId: string) => ['shared-volumes', 'attachable', serverId] as const,
     catalogs: (volumeId: string) => ['shared-volumes', 'catalogs', volumeId] as const,
     backendInspect: (backendId: string) => ['shared-backends', 'catalog-inspect', backendId] as const,
-  },
-  volumeForm: {
-    servers: ['volume-form', 'servers'] as const,
-    /** Prefix of every server's `pools`. */
-    poolsAll: ['volume-form', 'pools'] as const,
-    pools: (serverId: string) => ['volume-form', 'pools', serverId] as const,
   },
   sharedBackends: {
     user: ['shared-backends', 'user'] as const,

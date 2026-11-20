@@ -19,13 +19,13 @@ import type {
   NodeMetricsHealth,
   PreflightReport,
 } from './rest-schema.js';
+import type { DataDiskUsageDto } from './grants.js';
 import type { GpuContainerState, GpuHealthDto } from '../gpu/dto.js';
 import type { ConfigSourceName, ConfigValueKind } from '../config/definition.js';
 import type { SshProxyLineDto } from './ssh-proxy.js';
 
 export type {
   AddSshKeyRequest,
-  AttachVolumeRequest,
   RotateServerEnrollmentRequest,
   CreateContainerRequest,
   AddCatalogImageRequest,
@@ -34,8 +34,6 @@ export type {
   CreateServerRequest,
   CreateSharedBackendRequest,
   CreateUserRequest,
-  CreateVolumeRequest,
-  CreateSharedVolumeRequest,
   ErrorResponse,
   CreateExecSessionRequest,
   IntentListQuery,
@@ -54,7 +52,6 @@ export type {
   PatchStoragePoolRequest,
   DiscoverSharedExecutorsRequest,
   PatchSystemSettingsRequest,
-  PatchVolumeRequest,
   PreflightReport,
   PutImageAssignmentRequest,
   PutServerGrantRequest,
@@ -65,7 +62,9 @@ export type {
   PatchGrantBundleRequest,
   ServerGrantOverrides,
   PutSharedBackendGrantRequest,
-  PutStoragePoolGrantRequest,
+  CreateDataDiskGrantRequest,
+  PatchDataDiskGrantRequest,
+  StorageMountPreviewRequest,
   RetryIntentRequest,
   RotateRefreshTokenRequest,
   RunPreflightRequest,
@@ -328,6 +327,10 @@ export interface StoragePoolDto {
   usedBytes: number | null;
   quotaEffective: boolean | null;
   registered: boolean;
+  /** Where the pool mounts as a data disk in every container of its users; null = not a data disk. */
+  mountPath: string | null;
+  /** A disk under maintenance is left out of every container. */
+  maintenance: boolean;
   capability: StoragePoolCapabilityDto;
   lastObservedAt: string | null;
   revision: number;
@@ -344,12 +347,13 @@ export interface StorageCapacityPoolDto {
   quotaEffective: boolean | null;
   overcommitRatio: number;
   capability: StoragePoolCapabilityDto;
+  mountPath: string | null;
+  maintenance: boolean;
   /**
-   * `scope=mine`: the caller's data-disk quota on this pool and the committed
-   * size of their volumes there; null when they hold no grant for it (and always
-   * in the `scope=all` view).
+   * `scope=mine`: the caller's data-disk grant covering this pool, for its whole
+   * group of disks; null without one (and always in the `scope=all` view).
    */
-  grant: { limitBytes: number | null; usedBytes: number; availableBytes: number | null } | null;
+  grant: DataDiskUsageDto | null;
 }
 
 export interface StorageCapacityDto {
@@ -410,12 +414,12 @@ export interface SharedBackendDto {
   totalBytes: number | null;
   usedBytes: number | null;
   overcommitRatio: number;
-  /** Shown to users when they create a shared volume; null = none. */
+  /** Shown to users next to their volume on the backend; null = none. */
   note: string | null;
-  /** Shared volumes one user may own on the backend; null = no cap. */
-  maxVolumesPerUser: number | null;
-  /** Filled into the mount form for this backend's volumes; null = `/data`. */
-  defaultMountPath: string | null;
+  /** Where every user's volume on the backend mounts; null = not enabled. */
+  mountPath: string | null;
+  /** A backend under maintenance is left out of every container. */
+  maintenance: boolean;
   serverIds: string[];
   /** True when any registered shareable cephfs pool's server is online. */
   hasOnlineExecutor: boolean;
@@ -443,7 +447,12 @@ export interface IpPoolDto {
   updatedAt: string;
 }
 
-export type VolumeBindState = 'attaching' | 'attached' | 'detaching';
+/**
+ * `blocked`: the mount path already holds files in the container, so the
+ * volume is not mounted over them; it mounts on a later pass once the path is
+ * empty or gone.
+ */
+export type VolumeBindState = 'attaching' | 'attached' | 'detaching' | 'blocked';
 
 export interface VolumeDto {
   id: string;
@@ -457,6 +466,8 @@ export interface VolumeDto {
   sizeBytes: number;
   usedBytes: number | null;
   scope: LocalVolumeScope;
+  /** The disk's mount path in containers; null once the disk is no longer enabled. */
+  mountPath: string | null;
   /** Pool capability descriptor; UI must not hardcode driver tables. */
   capability: StoragePoolCapabilityDto;
   lifecyclePhase: ResourceLifecyclePhase;
@@ -475,8 +486,8 @@ export interface SharedVolumeDto {
   ownerId: string;
   sharedBackendId: string;
   sharedBackendName: string;
-  /** The backend's default mount point; null = `/data`. */
-  defaultMountPath: string | null;
+  /** The backend's mount path in containers; null once it is no longer enabled. */
+  mountPath: string | null;
   name: string;
   incusName: string;
   sizeBytes: number;
@@ -553,7 +564,8 @@ export interface VolumeAttachmentDto {
   readOnly: boolean;
   bindState: VolumeBindState;
   kind: 'local' | 'shared';
-  onlineCancelAllowed: boolean;
+  /** The disk is under maintenance: left out of the container for now. */
+  maintenance: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -625,8 +637,8 @@ export interface LiveServerAccessDto {
   gpuCount: number | null;
   /** The cards picked for the user from the server's observed GPUs; empty means no GPU access. */
   gpuPciAddresses: string[];
-  /** Data-disk quotas on the server's pools, with the committed size of the user's volumes. */
-  storagePools: Array<{ poolId: string; limitBytes: number | null; usedBytes: number }>;
+  /** The user's data-disk grants on the server, with the data on their disks. */
+  dataDisks: DataDiskUsageDto[];
   expiresAt: string | null;
   allowedImageIds: string[];
 }
@@ -644,9 +656,8 @@ export type EffectiveServerAccessDto = LiveServerAccessDto | GraceServerAccessDt
 
 export interface EffectiveSharedBackendAccessDto {
   sharedBackendId: string;
-  /** null = unlimited. */
-  limitBytes: number | null;
-  /** Committed sum(size_bytes); 0 = nothing booked, not unlimited. */
+  limitBytes: number;
+  /** Observed data on the user's volume (0 when none or unknown). */
   usedBytes: number;
   expiresAt: string | null;
 }

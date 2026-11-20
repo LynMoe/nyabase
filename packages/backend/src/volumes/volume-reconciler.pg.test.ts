@@ -89,7 +89,11 @@ function catalogClient(serverId: string, present: Set<string>, incusName: string
     present.add(serverId);
     return { status: 200, envelope: { type: 'sync' } };
   });
-  return { getStorageVolume, deleteStorageVolume, createStorageVolume, getOperationWait: vi.fn() };
+  // The container pass's mount-path check: no instance yet (being created).
+  const getInstanceFull = vi.fn(async () => {
+    throw new IncusError('INCUS_NOT_FOUND', 'managed_failure');
+  });
+  return { getStorageVolume, deleteStorageVolume, createStorageVolume, getInstanceFull, getOperationWait: vi.fn() };
 }
 
 describePg('volume reconciler equal-node destroy', () => {
@@ -417,9 +421,12 @@ describePg('volume reconciler catalogs imported by incus admin recover', () => {
       const client = {
         getStorageVolume: vi.fn(async () => ({ metadata: { name: fixture.incusName, config } })),
         createStorageVolume: vi.fn(),
+        getInstanceFull: vi.fn(async () => {
+          throw new IncusError('INCUS_NOT_FOUND', 'managed_failure');
+        }),
       };
       const pass = () => prepareAttachments(
-        { store: containerStore, logger: { log: vi.fn() }, notReady: new NotReadyPasses() },
+        { store: containerStore, logger: { log: vi.fn(), warn: vi.fn() }, notReady: new NotReadyPasses() },
         { intent: { id: randomUUID(), kind: 'container.update', request: {}, resourceId: containerId, targetRevision: 1 } } as never,
         client as never,
         { id: containerId, server_id: fixture.serverB } as never,
@@ -638,7 +645,7 @@ describePg('volume reconciler shrink reservation release', () => {
       }) as never);
 
       const prepared = await prepareAttachments(
-        { store: containerStore, logger: { log: vi.fn() }, notReady: new NotReadyPasses() },
+        { store: containerStore, logger: { log: vi.fn(), warn: vi.fn() }, notReady: new NotReadyPasses() },
         { intent: { id: randomUUID(), kind: 'container.update', request: {}, resourceId: containerId, targetRevision: 1 } } as never,
         containerClient as never,
         { id: containerId, server_id: fixture.serverB } as never,

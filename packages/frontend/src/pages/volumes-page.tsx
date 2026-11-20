@@ -1,23 +1,20 @@
-import { useMemo, useState } from 'react';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Plus, RefreshCw } from 'lucide-react';
-import type { UserServerDto, VolumeDto } from '@nyabase/common';
+import { useQuery } from '@tanstack/react-query';
+import { RefreshCw } from 'lucide-react';
+import type { EffectiveAccessDto, UserServerDto, VolumeDto } from '@nyabase/common';
 import { api } from '../lib/api.js';
-import { errorMessage } from '../lib/api-error.js';
 import { Button } from '../components/ui/button.js';
-import { ConfirmDialog } from '../components/layout/confirm-dialog.js';
 import { EmptyState } from '../components/layout/empty-state.js';
 import { Page, PageHeader } from '../components/layout/page-header.js';
 import { QueryView } from '../components/layout/query-view.js';
 import { SectionCard } from '../components/layout/section-card.js';
-import { LocalVolumeFormDialog } from '../components/storage/local-volume-form-dialog.js';
-import { LocalVolumeTable } from '../components/storage/local-volume-table.js';
+import { LocalVolumeDetailDialog, LocalVolumeTable } from '../components/storage/local-volume-table.js';
+import { liveServerAccess } from '../lib/effective-access.js';
 import { volumeInProgress } from '../lib/in-progress.js';
 import { queryKeys } from '../lib/query-keys.js';
 import { refetchWhileInProgress } from '../lib/query-lifecycle.js';
-import { toast } from '../hooks/use-toast.js';
 import { useNavigate, useSearch } from '@tanstack/react-router';
 import type { VolumeDetailFocus } from '../components/storage/volume-detail-focus.js';
+import { ServerDataDisks } from './volumes-page/server-data-disks.js';
 
 function useVolumeFocus(): VolumeDetailFocus {
   const search = useSearch({ from: '/volumes/' });
@@ -28,12 +25,16 @@ function useVolumeFocus(): VolumeDetailFocus {
   };
 }
 
+/**
+ * The user's data disks, read-only: per server, each data-disk grant (disks
+ * sharing one quota) with its disks; the platform creates, sizes and mounts
+ * the volume on each. Volumes no grant covers any more are listed apart.
+ */
 export default function VolumesPage() {
-  const queryClient = useQueryClient();
-  const [createOpen, setCreateOpen] = useState(false);
-  const [lockedServerId, setLockedServerId] = useState<string | undefined>(undefined);
-  const [editTarget, setEditTarget] = useState<VolumeDto | null>(null);
-  const [deleteTarget, setDeleteTarget] = useState<VolumeDto | null>(null);
+  const accessQuery = useQuery({
+    queryKey: queryKeys.meAccess,
+    queryFn: () => api.get<EffectiveAccessDto>('/me/access'),
+  });
   const volumesQuery = useQuery({
     queryKey: queryKeys.volumes.user,
     queryFn: () => api.get<VolumeDto[]>('/volumes'),
@@ -46,132 +47,103 @@ export default function VolumesPage() {
     queryKey: queryKeys.servers.user,
     queryFn: () => api.get<UserServerDto[]>('/servers'),
   });
-  const deleteVolume = useMutation({
-    mutationFn: (volumeId: string) => api.delete<unknown>(`/volumes/${volumeId}`),
-    onSuccess: () => {
-      toast({ title: '删除已提交' });
-      setDeleteTarget(null);
-      void queryClient.invalidateQueries({ queryKey: queryKeys.volumes.user });
-    },
-    onError: (error) => toast({ title: '删除失败', description: errorMessage(error), variant: 'destructive' }),
-  });
-
-  const openCreate = (serverId?: string) => {
-    setLockedServerId(serverId);
-    setCreateOpen(true);
-  };
 
   return (
     <Page testId="volumes">
       <PageHeader
-        title="数据卷"
+        title="数据盘"
+        description="管理员授权的数据盘由平台自动建卷、挂载到你在该服务器上的所有容器，容量随额度自动调整。"
         actions={
-          <>
-            <Button
-              variant="outline"
-              size="icon"
-              onClick={() => {
-                void volumesQuery.refetch();
-                void serversQuery.refetch();
-              }}
-              aria-label="刷新数据卷"
-            >
-              <RefreshCw className="h-4 w-4" />
-            </Button>
-            <Button onClick={() => openCreate()}><Plus className="h-4 w-4" />新建数据卷</Button>
-          </>
+          <Button
+            variant="outline"
+            size="icon"
+            onClick={() => {
+              void accessQuery.refetch();
+              void volumesQuery.refetch();
+              void serversQuery.refetch();
+            }}
+            aria-label="刷新数据盘"
+          >
+            <RefreshCw className="h-4 w-4" />
+          </Button>
         }
       />
       <QueryView
-        queries={[volumesQuery, serversQuery]}
-        resourceNames={['数据卷', '服务器']}
-        loadingLabel="加载数据卷..."
+        queries={[accessQuery, volumesQuery, serversQuery]}
+        resourceNames={['授权', '数据卷', '服务器']}
+        loadingLabel="加载数据盘..."
       >
         {() => (
-          <VolumeList
+          <DataDiskList
+            access={accessQuery.data}
             volumes={volumesQuery.data ?? []}
             servers={serversQuery.data ?? []}
-            onCreate={openCreate}
-            onEdit={setEditTarget}
-            onDelete={setDeleteTarget}
           />
         )}
       </QueryView>
-      <LocalVolumeFormDialog
-        open={createOpen}
-        onOpenChange={(open) => {
-          setCreateOpen(open);
-          if (!open) setLockedServerId(undefined);
-        }}
-        lockedServerId={lockedServerId}
-      />
-      {editTarget && (
-        <LocalVolumeFormDialog
-          volume={editTarget}
-          open
-          onOpenChange={(open) => { if (!open) setEditTarget(null); }}
-        />
-      )}
-      <ConfirmDialog
-        open={Boolean(deleteTarget)}
-        title="删除数据卷？"
-        description={
-          <>
-            <p>将删除「{deleteTarget?.name}」。</p>
-          </>
-        }
-        confirmLabel="确认删除"
-        pendingLabel="提交中..."
-        pending={deleteVolume.isPending}
-        onConfirm={() => { if (deleteTarget) deleteVolume.mutate(deleteTarget.id); }}
-        onOpenChange={(open) => { if (!open) setDeleteTarget(null); }}
-      />
     </Page>
   );
 }
 
-function VolumeList({
+function DataDiskList({
+  access,
   volumes,
   servers,
-  onCreate,
-  onEdit,
-  onDelete,
 }: {
+  access: EffectiveAccessDto | undefined;
   volumes: VolumeDto[];
   servers: UserServerDto[];
-  onCreate: (serverId?: string) => void;
-  onEdit: (volume: VolumeDto) => void;
-  onDelete: (volume: VolumeDto) => void;
 }) {
   const detailFocus = useVolumeFocus();
-  const serverNameById = useMemo(() => {
-    const map = new Map<string, string>();
-    for (const server of servers) map.set(server.id, server.name);
-    return map;
-  }, [servers]);
+  const live = liveServerAccess(access?.servers).filter((server) => server.dataDisks.length > 0);
+  const covered = new Set(live.flatMap((server) => server.dataDisks.flatMap((group) => group.poolIds)));
+  const uncovered = volumes.filter((volume) => !covered.has(volume.poolId));
+  const coveredDetail = volumes.find((volume) => volume.id === detailFocus.id && covered.has(volume.poolId)) ?? null;
+  const serverNameById = new Map(servers.map((server) => [server.id, server.name]));
 
-  if (servers.length === 0 && volumes.length === 0) {
+  if (live.length === 0 && volumes.length === 0) {
     return (
       <EmptyState
-        title="暂无本地数据卷。"
-        action={<Button onClick={() => onCreate()}><Plus className="h-4 w-4" />新建数据卷</Button>}
+        title="暂无数据盘。"
+        description="数据盘由管理员授权；授权后平台自动建卷并挂载到你在该服务器上的所有容器。"
       />
     );
   }
-
   return (
-    <SectionCard flush>
-      <LocalVolumeTable
-        volumes={volumes}
+    <div className="space-y-6" data-testid="volume-server-table">
+      {live.map((server) => (
+        <ServerDataDisks
+          key={server.serverId}
+          access={server}
+          serverName={serverNameById.get(server.serverId)}
+          volumes={volumes.filter((volume) => volume.serverId === server.serverId)}
+          onOpenVolume={(volume) => detailFocus.onChange(volume.id)}
+        />
+      ))}
+      {uncovered.length > 0 ? (
+        <SectionCard
+          title="不在授权内的数据卷"
+          description="授权撤销或到期后，数据卷从容器卸载，宽限期满后删除。需要保留数据请联系管理员。"
+          flush
+          testId="volumes-uncovered"
+        >
+          <LocalVolumeTable
+            volumes={uncovered}
+            scope="mine"
+            showPoolColumn
+            showServerColumn
+            serverNameById={serverNameById}
+            testId="volumes-uncovered-table"
+            detailFocus={detailFocus}
+          />
+        </SectionCard>
+      ) : null}
+      <LocalVolumeDetailDialog
+        volume={coveredDetail}
         scope="mine"
-        showPoolColumn
-        showServerColumn
-        serverNameById={serverNameById}
-        onEdit={onEdit}
-        onDelete={onDelete}
-        testId="volume-server-table"
-        detailFocus={detailFocus}
+        open={Boolean(coveredDetail)}
+        onOpenChange={(open) => { if (!open) detailFocus.onChange(null); }}
       />
-    </SectionCard>
+    </div>
   );
 }

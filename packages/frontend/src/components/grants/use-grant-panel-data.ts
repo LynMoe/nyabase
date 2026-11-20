@@ -8,7 +8,6 @@ import {
   type ServerGrantDto,
   type SharedBackendDto,
   type SharedBackendGrantDto,
-  type StoragePoolDto,
   type UserServerDto,
 } from '@nyabase/common';
 import { api } from '../../lib/api.js';
@@ -58,6 +57,11 @@ export function useLiveServerAccess(userId: string, serverId: string): LiveServe
   return liveServerAccess(useEffectiveAccess(userId).data?.servers).find((access) => access.serverId === serverId);
 }
 
+/** The user's current shared-storage access (quota and the data on the volume), by backend. */
+export function useBackendAccess(userId: string, backendId: string) {
+  return useEffectiveAccess(userId).data?.sharedBackends.find((access) => access.sharedBackendId === backendId);
+}
+
 /** Every bundle, of every server. */
 export function useGrantBundles() {
   return useQuery({
@@ -83,13 +87,15 @@ export function useGrantBackends() {
 
 /**
  * What a grant change can move for the signed-in administrator too (their own
- * grant, or a bundle they follow): their access, storage quotas and the pools
- * the volume form offers them.
+ * grant, or a bundle they follow): their access, storage quotas, the pools
+ * they see and their volumes (the platform creates them for new grants).
  */
 export function invalidateOwnAccess(queryClient: QueryClient): void {
   void queryClient.invalidateQueries({ queryKey: queryKeys.meAccess });
   void queryClient.invalidateQueries({ queryKey: queryKeys.storageCapacityAll });
-  void queryClient.invalidateQueries({ queryKey: queryKeys.volumeForm.poolsAll });
+  void queryClient.invalidateQueries({ queryKey: queryKeys.servers.poolsAll });
+  void queryClient.invalidateQueries({ queryKey: queryKeys.volumes.user });
+  void queryClient.invalidateQueries({ queryKey: queryKeys.sharedVolumes.user });
 }
 
 /** Refresh the user's grants, bundle counts and the current user's access after a change. */
@@ -135,6 +141,11 @@ export function parseGibQuotaKeeping(value: string, stored: number | null | unde
   return parseGibQuota(value);
 }
 
+/** A required GiB quota (storage grants have no 不限): a positive amount → bytes, anything else → undefined. */
+export function parseGibLimit(value: string, stored?: number): number | undefined {
+  return parseGibQuotaKeeping(value, stored) ?? undefined;
+}
+
 export function gibHint(value: string): string | undefined {
   const bytes = parseGibQuota(value);
   if (bytes == null) return undefined;
@@ -149,20 +160,6 @@ export function isoOrNull(value: string): string | null {
 
 export function serverName(id: string, servers: UserServerDto[]): string {
   return servers.find((server) => server.id === id)?.name ?? truncateId(id);
-}
-
-export function poolLabel(pool: Pick<StoragePoolDto, 'displayName' | 'incusName'>): string {
-  return pool.displayName ?? pool.incusName;
-}
-
-/** Registered local pools of one server that the grant has no data disk on yet. */
-export function addablePools(pools: StoragePoolDto[], grant: ServerGrantDto): StoragePoolDto[] {
-  return pools.filter((pool) => (
-    pool.registered
-    && !pool.shareable
-    && pool.serverId === grant.serverId
-    && !grant.storagePools.some((row) => row.poolId === pool.id)
-  ));
 }
 
 export function backendDisplayName(id: string, backends: SharedBackendDto[]): string | undefined {

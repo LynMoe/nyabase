@@ -1,20 +1,17 @@
 import { useState, type ReactNode } from 'react';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useQuery } from '@tanstack/react-query';
 import { Role, type VolumeDto } from '@nyabase/common';
 import { api } from '../../lib/api.js';
-import { scopedPath } from '../../lib/scoped-paths.js';
-import { errorMessage } from '../../lib/api-error.js';
-import { ConfirmDialog } from '../layout/confirm-dialog.js';
 import { SectionCard } from '../layout/section-card.js';
 import { QueryErrorState, QueryLoadingState } from '../query-state.js';
-import { LocalVolumeFormDialog } from '../storage/local-volume-form-dialog.js';
+import { DeleteVolumeDialog, type DeleteVolumeTarget } from '../storage/delete-volume-dialog.js';
 import { LocalVolumeTable } from '../storage/local-volume-table.js';
 import { volumeInProgress } from '../../lib/in-progress.js';
 import { queryKeys } from '../../lib/query-keys.js';
 import { refetchWhileInProgress } from '../../lib/query-lifecycle.js';
-import { toast } from '../../hooks/use-toast.js';
 import { useHasRole } from '../../lib/use-role.js';
 
+/** The server's storage pools (children) and every user's volumes on it, read-only but for deleting uncovered ones. */
 export function ServerStorageTab({
   serverId,
   children,
@@ -22,11 +19,8 @@ export function ServerStorageTab({
   serverId: string;
   children: ReactNode;
 }) {
-  const queryClient = useQueryClient();
   const canManageVolumes = useHasRole(Role.Admin);
-  const [formOpen, setFormOpen] = useState(false);
-  const [formVolume, setFormVolume] = useState<VolumeDto | undefined>(undefined);
-  const [deleteTarget, setDeleteTarget] = useState<VolumeDto | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<DeleteVolumeTarget | null>(null);
 
   const volumesQuery = useQuery({
     queryKey: queryKeys.volumes.adminByServer(serverId),
@@ -37,21 +31,6 @@ export function ServerStorageTab({
       isSettled: (volumes) => volumes.every((volume) => !volumeInProgress(volume)),
     }),
   });
-
-  const deleteVolume = useMutation({
-    mutationFn: (volumeId: string) => api.delete<unknown>(scopedPath(`/volumes/${volumeId}`, 'all')),
-    onSuccess: () => {
-      toast({ title: '删除已提交' });
-      setDeleteTarget(null);
-      void queryClient.invalidateQueries({ queryKey: queryKeys.volumes.admin });
-    },
-    onError: (error) => toast({ title: '删除失败', description: errorMessage(error), variant: 'destructive' }),
-  });
-
-  const openEdit = (volume: VolumeDto) => {
-    setFormVolume(volume);
-    setFormOpen(true);
-  };
 
   return (
     <div className="space-y-6">
@@ -76,34 +55,12 @@ export function ServerStorageTab({
             volumes={volumesQuery.data}
             scope="all"
             showPoolColumn
-            onEdit={openEdit}
-            onDelete={setDeleteTarget}
+            onDelete={(volume) => setDeleteTarget({ kind: 'local', volume })}
             testId="server-volume-table"
           />
         </SectionCard>
       )}
-      <LocalVolumeFormDialog
-        volume={formVolume}
-        open={formOpen && Boolean(formVolume)}
-        onOpenChange={(open) => {
-          setFormOpen(open);
-          if (!open) {
-            setFormVolume(undefined);
-          }
-        }}
-        scope="all"
-        lockedServerId={serverId}
-      />
-      <ConfirmDialog
-        open={Boolean(deleteTarget)}
-        title="删除数据卷？"
-        description={`将删除「${deleteTarget?.name}」。`}
-        confirmLabel="确认删除"
-        pendingLabel="提交中..."
-        pending={deleteVolume.isPending}
-        onConfirm={() => { if (deleteTarget) deleteVolume.mutate(deleteTarget.id); }}
-        onOpenChange={(open) => { if (!open) setDeleteTarget(null); }}
-      />
+      <DeleteVolumeDialog target={deleteTarget} onClose={() => setDeleteTarget(null)} />
     </div>
   );
 }

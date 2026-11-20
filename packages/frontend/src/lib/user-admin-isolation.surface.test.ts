@@ -14,18 +14,6 @@ function readSrc(rel: string): string {
   return readSource(srcRoot, rel);
 }
 
-function assertScopeAllOnly(src: string, pattern: RegExp) {
-  const global = new RegExp(pattern.source, pattern.flags.includes('g') ? pattern.flags : `${pattern.flags}g`);
-  const matches = [...src.matchAll(global)];
-  expect(matches.length).toBeGreaterThan(0);
-  for (const match of matches) {
-    const start = match.index ?? 0;
-    const window = src.slice(Math.max(0, start - 280), start);
-    const last = [...window.matchAll(/scope === '(all|mine)'/g)].pop();
-    expect(last?.[1], `${match[0]} must sit in scope === 'all'`).toBe('all');
-  }
-}
-
 describe('user panel pages stay on scope=mine', () => {
   it('volumes-page never calls /admin/*, scope=all or the ManageVolumes switch', () => {
     const src = readPage('volumes-page.tsx');
@@ -55,14 +43,23 @@ describe('user panel pages stay on scope=mine', () => {
     expect(src).toMatch(/resourceIntentsPath\(scope, IntentResourceType\.Volume, volume\.id\)/);
   });
 
-  it('local-volume-form-dialog uses one volumes route and gates scope=all by scope', () => {
-    const src = [readSrc('components/storage/local-volume-form-dialog.tsx')].join('\n');
-    expect(src).not.toMatch(/['`]\/admin\//);
-    assertScopeAllOnly(src, /\?scope=all/);
-    expect(src).not.toMatch(/api\.post<unknown>\('\/volumes\?/);
-    expect(src).toMatch(/api\.patch<IntentAcceptedDto \| VolumeDto>\(scopedPath\(`\/volumes\/\$\{volumeId\}`, scope\)/);
-    expect(src).not.toMatch(/ownerId/);
-    expect(src).not.toMatch(/所有者 UUID/);
+  it('only the scope=all volume views can delete a volume, through one dialog', () => {
+    const dialog = readSrc('components/storage/delete-volume-dialog.tsx');
+    expect(dialog).toMatch(/api\.delete<IntentAcceptedDto>\(/);
+    expect(dialog).toMatch(/`\/volumes\/\$\{volume\.id\}`/);
+    expect(dialog).toMatch(/`\/shared-volumes\/\$\{volume\.id\}`/);
+    expect(dialog).toMatch(/无法恢复/);
+    for (const admin of [
+      readPage('manage-volumes-page.tsx'),
+      readSrc('components/servers/server-storage-tab.tsx'),
+      readPage('shared-backend-detail-page.tsx'),
+    ]) {
+      expect(admin).toMatch(/DeleteVolumeDialog/);
+      expect(admin).toMatch(/scope="all"/);
+    }
+    for (const mine of [readPage('volumes-page.tsx'), readPage('shared-volumes-page.tsx')]) {
+      expect(mine).not.toMatch(/DeleteVolumeDialog|onDelete=/);
+    }
   });
 
   it('manage-containers-page lists and operates without admin create', () => {

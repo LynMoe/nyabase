@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { FailureCode } from '@nyabase/common';
-import { failureCodeLabel } from './status-labels.js';
+import { failureCodeLabel, intentLabel } from './status-labels.js';
 
 describe('failureCodeLabel GPU codes', () => {
   it('renders GPU failure codes in Chinese', () => {
@@ -14,5 +14,22 @@ describe('failureCodeLabel GPU codes', () => {
   it('keeps unknown codes verbatim', () => {
     expect(failureCodeLabel('NO_SUCH_CODE')).toBe('NO_SUCH_CODE');
     expect(failureCodeLabel(null)).toBeNull();
+  });
+});
+
+describe('storage labels', () => {
+  it('renders the data-disk and mount failure codes in Chinese', () => {
+    expect(failureCodeLabel(FailureCode.DataDiskPoolGranted)).toBe('部分盘已属于该用户的其他数据盘授权');
+    expect(failureCodeLabel(FailureCode.StorageMountPathConflict)).toMatch(/挂载点/);
+    expect(failureCodeLabel(FailureCode.StorageMountUnsupported)).toMatch(/不能作为数据盘/);
+    expect(failureCodeLabel(FailureCode.VolumeStillGranted)).toBe('仍有授权覆盖该盘，请先撤销授权');
+  });
+
+  it('names the platform\'s storage intents by their request', () => {
+    expect(intentLabel({ kind: 'container.update', requestSummary: { operation: 'mount_volumes' } })).toBe('挂载数据盘');
+    expect(intentLabel({ kind: 'container.update', requestSummary: { operation: 'storage_maintenance' } })).toBe('数据盘维护');
+    expect(intentLabel({ kind: 'volume.resize', requestSummary: { source: 'quota_balancer' } })).toBe('自动调整数据卷额度');
+    expect(intentLabel({ kind: 'volume.resize', requestSummary: {} })).toBe('调整数据卷');
+    expect(intentLabel({ kind: 'container.update', requestSummary: { operation: 'limits' } })).toBe('更新容器');
   });
 });

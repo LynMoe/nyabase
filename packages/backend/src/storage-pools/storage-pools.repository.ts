@@ -271,6 +271,8 @@ export class StoragePoolsRepository {
       display_name?: string | null;
       shared_backend_id?: string | null;
       shareable?: boolean;
+      mount_path?: string | null;
+      maintenance?: boolean;
     },
     executor: StorageExecutor = this.database,
   ) {

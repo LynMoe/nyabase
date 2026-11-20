@@ -312,9 +312,14 @@ const NOT_READY_FAILURES: Readonly<Record<string, { code: string; message: strin
 export interface AttachmentDeps {
   readonly store: Pick<
     ContainerReconcileStore,
-    'rereadDesired' | 'markCatalogPresent' | 'requeueResizeAfterCatalogPost' | 'requeueEnsureForUnshiftedCatalog'
+    | 'rereadDesired'
+    | 'markCatalogPresent'
+    | 'requeueResizeAfterCatalogPost'
+    | 'requeueEnsureForUnshiftedCatalog'
+    | 'readPendingMounts'
+    | 'setPendingMountState'
   >;
-  readonly logger: Pick<Logger, 'log'>;
+  readonly logger: Pick<Logger, 'log' | 'warn'>;
   readonly notReady: NotReadyPasses;
 }
 
@@ -331,6 +336,7 @@ export async function prepareAttachments(
   row: ContainerRow,
 ): Promise<{ outcome: ReconcileOutcome } | { attachments: ContainerAttachment[] }> {
   const intentId = context.intent.id;
+  await checkPendingMountPaths(deps, client, row.id);
   let prepared: Awaited<ReturnType<typeof readyAttachments>>;
   try {
     prepared = await readyAttachments(deps, context, client, row);
@@ -436,5 +442,71 @@ async function ensureDesiredCatalogs(
       }
       throw error;
     }
+  }
+}
+
+// --- mount paths ------------------------------------------------------------------
+
+export interface MountPathDeps {
+  readonly store: Pick<ContainerReconcileStore, 'readPendingMounts' | 'setPendingMountState'>;
+  readonly logger: Pick<Logger, 'warn'>;
+}
+
+/**
+ * Volumes are mounted into containers by the platform, at their disk's path:
+ * a mount must not hide what the guest already keeps there. Before the
+ * instance gets a new mount, its path is looked up in the container (the
+ * Incus file API, which also works on a stopped container): a file, or a
+ * directory with entries, parks the attachment as `blocked` (left out of the
+ * instance). A blocked attachment is looked at again on every pass of the
+ * container (start, restart, any update), and mounts once the path is empty
+ * or gone. A container being created has no files yet: nothing to check.
+ * A lookup that fails otherwise mounts as before (it hides, never removes).
+ */
+export async function checkPendingMountPaths(
+  deps: MountPathDeps,
+  client: IncusClientPort,
+  containerId: string,
+): Promise<void> {
+  const pending = await deps.store.readPendingMounts(containerId);
+  if (pending.length === 0) return;
+  const instanceName = deriveInstanceName(containerId);
+  let devices: Record<string, unknown>;
+  try {
+    devices = (await client.getInstanceFull(instanceName)).metadata.devices ?? {};
+  } catch (error) {
+    if (isNotFound(error)) return;
+    throw error;
+  }
+  for (const mount of pending) {
+    // Already on the instance: the path shows the volume itself.
+    const occupied = Object.prototype.hasOwnProperty.call(devices, mount.device_name)
+      ? false
+      : await pathOccupied(deps, client, instanceName, mount.container_path);
+    const next = occupied ? 'blocked' : 'attaching';
+    if (next !== mount.bind_state) await deps.store.setPendingMountState(mount.id, mount.bind_state, next);
+  }
+}
+
+async function pathOccupied(
+  deps: MountPathDeps,
+  client: IncusClientPort,
+  instanceName: string,
+  path: string,
+): Promise<boolean> {
+  let file;
+  try {
+    file = await client.getFile(instanceName, path);
+  } catch (error) {
+    if (isNotFound(error)) return false;
+    deps.logger.warn(`instance=${instanceName} could not look up mount path ${path}: ${String(error)}`);
+    return false;
+  }
+  if (file.type !== 'directory') return true;
+  try {
+    const listing = JSON.parse(file.body.toString('utf8')) as { metadata?: unknown };
+    return !Array.isArray(listing.metadata) || listing.metadata.length > 0;
+  } catch {
+    return true;
   }
 }

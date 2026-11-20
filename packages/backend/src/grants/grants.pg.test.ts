@@ -10,7 +10,6 @@ import {
   grantBackend,
   observeGpus,
   seedBackend,
-  seedBackendPool,
   seedBundle,
   seedContainer,
   seedImage,
@@ -24,6 +23,7 @@ import { withPostgresTestDatabase } from '../platform/persistence-pg/postgres-te
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
 import { GrantBundlesService } from './grant-bundles.service.js';
 import { pickGrantGpus } from './grant-fields.js';
+import { DataDiskGrantsService } from './data-disk-grants.service.js';
 import { GrantsService } from './grants.service.js';
 
 const describePg = process.env.NYABASE_TEST_DATABASE_URL ? describe : describe.skip;
@@ -39,6 +39,7 @@ function services(database: Db) {
   const claims = new GpuClaimsRepository(database);
   return {
     grants: new GrantsService(database, transactions, audit, claims, changes),
+    dataDisks: new DataDiskGrantsService(database, transactions, audit, changes),
     bundles: new GrantBundlesService(database, transactions, audit, claims, changes),
     signals: () => signals,
   };
@@ -76,7 +77,7 @@ describePg('GrantsService', () => {
         userId, serverId, bundleId, bundleName: 'GPU A',
         overrides: { rootDiskBytes: 300, memBytes: null },
         cpuCores: 16, memBytes: null, rootDiskBytes: 300, gpuCount: 0,
-        expiresAt: null, storagePools: [],
+        expiresAt: null, dataDisks: [],
       });
       await expect(grants.listServerGrants(userId)).resolves.toEqual([grant]);
       await expect(resolveServerAccess(database, userId, serverId))
@@ -107,7 +108,7 @@ describePg('GrantsService', () => {
 
   it('refuses a second bundle on the same server unless replacing, which keeps the grant and its data disks', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
-      const { grants, signals } = services(database);
+      const { grants, dataDisks, signals } = services(database);
       const actor = await manager(database);
       const userId = await seedUser(database);
       const serverId = await seedServer(database);
@@ -118,7 +119,7 @@ describePg('GrantsService', () => {
       const first = await grants.putServerGrant(actor, userId, serverId, assignment(small, {
         overrides: { memBytes: 8 },
       }));
-      await grants.putStoragePoolGrant(actor, userId, poolId, 500);
+      await dataDisks.create(actor, userId, { serverId, poolIds: [poolId], limitBytes: 500 });
       const before = signals();
       await expect(grants.putServerGrant(actor, userId, serverId, assignment(large)))
         .rejects.toMatchObject({
@@ -131,7 +132,7 @@ describePg('GrantsService', () => {
 
       const replaced = await grants.putServerGrant(actor, userId, serverId, assignment(large, { replace: true }));
       expect(replaced).toMatchObject({ id: first.id, bundleId: large, cpuCores: 32, overrides: {}, memBytes: null });
-      expect(replaced.storagePools).toMatchObject([{ poolId, limitBytes: 500 }]);
+      expect(replaced.dataDisks).toMatchObject([{ poolIds: [poolId], limitBytes: 500 }]);
       expect(signals()).toBe(before + 1);
       await expect(resolvePoolAccess(database, userId, poolId)).resolves.toMatchObject({ limitBytes: 500 });
     });
@@ -175,13 +176,13 @@ describePg('GrantsService', () => {
 
   it('deletes a server grant with its data disks, so both kinds of coverage lapse', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
-      const { grants, signals } = services(database);
+      const { grants, dataDisks, signals } = services(database);
       const actor = await manager(database);
       const userId = await seedUser(database);
       const serverId = await seedServer(database);
       const poolId = await seedPool(database, serverId);
       await grants.putServerGrant(actor, userId, serverId, assignment(await seedBundle(database, serverId)));
-      await grants.putStoragePoolGrant(actor, userId, poolId, null);
+      await dataDisks.create(actor, userId, { serverId, poolIds: [poolId], limitBytes: 100 });
       const before = signals();
 
       await grants.deleteServerGrant(actor, userId, serverId);
@@ -189,35 +190,10 @@ describePg('GrantsService', () => {
       await expect(resolveServerAccess(database, userId, serverId)).resolves.toBeNull();
       await expect(resolvePoolAccess(database, userId, poolId)).resolves.toBeNull();
       await expect(database.selectFrom('iam.storage_pool_grants').select('id').execute()).resolves.toEqual([]);
+      await expect(database.selectFrom('iam.data_disk_grants').select('id').execute()).resolves.toEqual([]);
       // Deleting a grant that does not exist changes nothing.
       await grants.deleteServerGrant(actor, userId, serverId);
       expect(signals()).toBe(before + 1);
-    });
-  });
-
-  it('grants data disks only on local pools of a server the user holds a bundle on', async () => {
-    await withPostgresTestDatabase(async ({ database }) => {
-      const { grants } = services(database);
-      const actor = await manager(database);
-      const userId = await seedUser(database);
-      const serverId = await seedServer(database);
-      const poolId = await seedPool(database, serverId);
-      const otherServer = await seedServer(database);
-      const otherPool = await seedPool(database, otherServer);
-      const sharedPool = await seedBackendPool(database, serverId, await seedBackend(database));
-      await grants.putServerGrant(actor, userId, serverId, assignment(await seedBundle(database, serverId)));
-
-      await expect(grants.putStoragePoolGrant(actor, userId, otherPool, 10))
-        .rejects.toMatchObject({ status: 409, response: { code: FailureCode.ServerGrantRequired } });
-      await expect(grants.putStoragePoolGrant(actor, userId, sharedPool, 10)).rejects.toMatchObject({ status: 404 });
-      await expect(grants.putStoragePoolGrant(actor, userId, randomUUID(), 10)).rejects.toMatchObject({ status: 404 });
-
-      const created = await grants.putStoragePoolGrant(actor, userId, poolId, 10);
-      const updated = await grants.putStoragePoolGrant(actor, userId, poolId, null);
-      expect(updated).toMatchObject({ id: created.id, poolId, serverId, limitBytes: null });
-      await grants.deleteStoragePoolGrant(actor, userId, poolId);
-      await expect(resolvePoolAccess(database, userId, poolId)).resolves.toBeNull();
-      await expect(resolveServerAccess(database, userId, serverId)).resolves.not.toBeNull();
     });
   });
 
@@ -265,15 +241,15 @@ describePg('GrantsService', () => {
       const userId = await seedUser(database);
       const backendId = await seedBackend(database);
       const first = await grants.putSharedBackendGrant(actor, userId, backendId, { limitBytes: 10, expiresAt: null });
-      const second = await grants.putSharedBackendGrant(actor, userId, backendId, { limitBytes: null, expiresAt: null });
-      expect(second).toMatchObject({ id: first.id, userId, sharedBackendId: backendId, limitBytes: null });
+      const second = await grants.putSharedBackendGrant(actor, userId, backendId, { limitBytes: 20, expiresAt: null });
+      expect(second).toMatchObject({ id: first.id, userId, sharedBackendId: backendId, limitBytes: 20 });
       await expect(grants.listSharedBackendGrants(userId)).resolves.toHaveLength(1);
       await grants.deleteSharedBackendGrant(actor, userId, backendId);
       await expect(resolveSharedBackendAccess(database, userId, backendId)).resolves.toBeNull();
     });
   });
 
-  it('rejects zero quotas in the database: NULL is the only unlimited', async () => {
+  it('rejects zero quotas in the database (bundles: NULL is the only unlimited; storage grants always have a size)', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const serverId = await seedServer(database);
       await expect(seedBundle(database, serverId, { memBytes: 0 })).rejects.toThrow(/grant_bundles_mem_bytes_check/);
@@ -284,6 +260,13 @@ describePg('GrantsService', () => {
       const userId = await seedUser(database);
       await expect(grantBackend(database, { user: userId }, await seedBackend(database), 0))
         .rejects.toThrow(/shared_backend_grants_limit_check/);
+      await expect(database.insertInto('iam.shared_backend_grants').values({
+        id: randomUUID(),
+        user_id: userId,
+        shared_backend_id: await seedBackend(database),
+        limit_bytes: null as never,
+        expires_at: null,
+      }).execute()).rejects.toMatchObject({ code: '23502' });
     });
   });
 });

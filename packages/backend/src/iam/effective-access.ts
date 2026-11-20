@@ -26,19 +26,23 @@ export interface ServerAccess {
   expiresAt: Date | null;
 }
 
-/** A data-disk quota on a pool; it expires with its server grant. */
+/**
+ * Coverage of a pool by a data-disk grant; it expires with its server grant.
+ * `limitBytes` is the grant's quota, shared by every pool of the grant.
+ */
 export interface PoolAccess {
-  /** null = unlimited */
-  limitBytes: number | null;
+  limitBytes: number;
   expiresAt: Date | null;
+  dataDiskGrantId: string;
 }
 
 export interface SharedBackendAccess {
-  /** null = unlimited */
-  limitBytes: number | null;
+  limitBytes: number;
   expiresAt: Date | null;
 }
 
+function bytes(value: string | number): number;
+function bytes(value: string | number | null): number | null;
 function bytes(value: string | number | null): number | null {
   if (value === null) return null;
   const result = Number(value);
@@ -89,11 +93,13 @@ export async function resolvePoolAccess(
   poolId: string,
 ): Promise<PoolAccess | null> {
   const row = await executor.selectFrom('iam.effective_pool_access')
-    .select(['limit_bytes', 'expires_at'])
+    .select(['limit_bytes', 'expires_at', 'data_disk_grant_id'])
     .where('user_id', '=', userId)
     .where('pool_id', '=', poolId)
     .executeTakeFirst();
-  return row ? { limitBytes: bytes(row.limit_bytes), expiresAt: row.expires_at } : null;
+  return row
+    ? { limitBytes: bytes(row.limit_bytes), expiresAt: row.expires_at, dataDiskGrantId: row.data_disk_grant_id }
+    : null;
 }
 
 export async function resolveSharedBackendAccess(
@@ -127,7 +133,7 @@ export async function listPoolAccess(
   userId: string,
 ): Promise<Array<PoolAccess & { poolId: string }>> {
   const rows = await executor.selectFrom('iam.effective_pool_access')
-    .select(['pool_id', 'limit_bytes', 'expires_at'])
+    .select(['pool_id', 'limit_bytes', 'expires_at', 'data_disk_grant_id'])
     .where('user_id', '=', userId)
     .orderBy('pool_id')
     .execute();
@@ -135,6 +141,7 @@ export async function listPoolAccess(
     poolId: row.pool_id,
     limitBytes: bytes(row.limit_bytes),
     expiresAt: row.expires_at,
+    dataDiskGrantId: row.data_disk_grant_id,
   }));
 }
 

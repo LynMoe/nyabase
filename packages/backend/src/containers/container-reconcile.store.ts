@@ -56,7 +56,15 @@ export interface ContainerAttachment {
   shared: boolean;
   /** The owning shared backend of a shared volume (its catalog label). */
   shared_backend_id?: string | null;
-  bind_state: 'attaching' | 'attached' | 'detaching';
+  bind_state: 'attaching' | 'attached' | 'detaching' | 'blocked';
+}
+
+/** An attachment the instance may not carry yet, with what the mount-path check needs. */
+export interface PendingMount {
+  id: string;
+  device_name: string;
+  container_path: string;
+  bind_state: 'attaching' | 'blocked';
 }
 
 export interface SshFileObservation {
@@ -256,7 +264,10 @@ export class ContainerReconcileStore {
         .onRef('pl.volume_id', '=', 'a.volume_id')
         .on('pl.server_id', '=', serverId))
       .leftJoin('infra.storage_pools as pp', 'pp.id', 'pl.pool_id')
+      .leftJoin('infra.storage_pools as disk_pool', 'disk_pool.id', 'v.pool_id')
+      .leftJoin('infra.shared_backends as disk_backend', 'disk_backend.id', 'v.shared_backend_id')
       .select([
+        sql<boolean>`coalesce(disk_pool.maintenance, disk_backend.maintenance, false)`.as('maintenance'),
         'a.id as id',
         'a.container_path as container_path',
         'a.read_only as read_only',
@@ -275,6 +286,9 @@ export class ContainerReconcileStore {
       .execute();
     const result: ContainerAttachment[] = [];
     for (const row of rows) {
+      // Not mounted while its path holds files in the container, or its disk is under maintenance.
+      if (row.bind_state === 'blocked') continue;
+      if (row.maintenance && row.bind_state !== 'detaching') continue;
       const shared = row.shared_backend_id !== null;
       const base = {
         id: row.id,
@@ -338,6 +352,32 @@ export class ContainerReconcileStore {
       stale: (current?.revision ?? targetRevision) > targetRevision,
       desired,
     };
+  }
+
+  /** Attachments still to be mounted (`attaching`) or waiting on their path (`blocked`). */
+  async readPendingMounts(containerId: string): Promise<PendingMount[]> {
+    const rows = await this.database
+      .selectFrom('control.volume_attachments')
+      .select(['id', 'device_name', 'container_path', 'bind_state'])
+      .where('container_id', '=', containerId)
+      .where('bind_state', 'in', ['attaching', 'blocked'])
+      .orderBy('id')
+      .execute();
+    return rows as PendingMount[];
+  }
+
+  /** Moves a pending mount between `attaching` and `blocked` (CAS on the state read). */
+  async setPendingMountState(
+    attachmentId: string,
+    from: PendingMount['bind_state'],
+    to: PendingMount['bind_state'],
+  ): Promise<void> {
+    await this.database
+      .updateTable('control.volume_attachments')
+      .set({ bind_state: to })
+      .where('id', '=', attachmentId)
+      .where('bind_state', '=', from)
+      .execute();
   }
 
   /** Device names of the attachments being removed from the container. */

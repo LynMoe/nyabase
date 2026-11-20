@@ -141,6 +141,12 @@ export enum FailureCode {
   ServerGrantExists = 'SERVER_GRANT_EXISTS',
   /** A data-disk grant needs the user's server grant on the pool's server. */
   ServerGrantRequired = 'SERVER_GRANT_REQUIRED',
+  /** A requested disk already belongs to another data-disk grant of the user; resend with `movePools: true`. */
+  DataDiskPoolGranted = 'DATA_DISK_POOL_GRANTED',
+  /** The mount path collides with (equals or nests in) another disk's mount path. */
+  StorageMountPathConflict = 'STORAGE_MOUNT_PATH_CONFLICT',
+  /** The pool cannot be a data disk (not a registered local pool with an effective online quota). */
+  StorageMountUnsupported = 'STORAGE_MOUNT_UNSUPPORTED',
   GrantBundleConflict = 'GRANT_BUNDLE_CONFLICT',
   GrantBundleInUse = 'GRANT_BUNDLE_IN_USE',
   MemoryGrantExceeded = 'MEMORY_GRANT_EXCEEDED',
@@ -171,6 +177,8 @@ export enum FailureCode {
   VolumeShrinkUnsupported = 'VOLUME_SHRINK_UNSUPPORTED',
   VolumeUsageUnknown = 'VOLUME_USAGE_UNKNOWN',
   VolumeRequiresUnbind = 'VOLUME_REQUIRES_UNBIND',
+  /** A grant still covers the volume's disk (it would only be created again): revoke it first. */
+  VolumeStillGranted = 'VOLUME_STILL_GRANTED',
   VolumeDeleteBackendUnreachable = 'VOLUME_DELETE_BACKEND_UNREACHABLE',
   VolumeDetachRequiresStop = 'VOLUME_DETACH_REQUIRES_STOP',
   VolumeCrossServerDenied = 'VOLUME_CROSS_SERVER_DENIED',
@@ -266,8 +274,12 @@ export enum AuditAction {
   DeleteGrantBundle = 'grant_bundle.delete',
   UpsertServerGrant = 'grant.server.upsert',
   DeleteServerGrant = 'grant.server.delete',
+  /** Before 000012: one data-disk quota per pool (kept for the audit history). */
   UpsertStoragePoolGrant = 'grant.storage_pool.upsert',
   DeleteStoragePoolGrant = 'grant.storage_pool.delete',
+  CreateDataDiskGrant = 'grant.data_disk.create',
+  UpdateDataDiskGrant = 'grant.data_disk.update',
+  DeleteDataDiskGrant = 'grant.data_disk.delete',
   UpsertSharedBackendGrant = 'grant.shared_backend.upsert',
   DeleteSharedBackendGrant = 'grant.shared_backend.delete',
   GrantExpired = 'grant.expired',

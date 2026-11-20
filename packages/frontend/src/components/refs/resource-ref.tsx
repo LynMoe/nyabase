@@ -298,11 +298,7 @@ function PoolRef({ id, name, serverId }: { id: string; name?: string; serverId?:
   const queryClient = useQueryClient();
   const explicit = providedName(name);
   const cached = queryClient.getQueriesData<StoragePoolDto[]>({
-    predicate: (query) => {
-      const root = query.queryKey[0];
-      return root === 'storage-pools'
-        || (root === 'volume-form' && query.queryKey[1] === 'pools');
-    },
+    predicate: (query) => query.queryKey[0] === queryKeys.servers.poolsAll[0],
   });
   const fromCached = cached
     .flatMap(([, list]) => (Array.isArray(list) ? list : []))

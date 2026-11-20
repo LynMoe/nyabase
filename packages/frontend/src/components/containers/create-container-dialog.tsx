@@ -90,6 +90,9 @@ function CreateContainerBody({ open, onOpenChange, defaultServerId }: CreateCont
           <PlacementFields form={form} />
           <SpecFields form={form} />
           <GpuAndStartFields form={form} />
+          <p className="text-xs text-muted-foreground" data-testid="create-auto-mount-note">
+            你的数据盘和共享存储会自动挂载到新容器，无需在这里选择。
+          </p>
           {sshKeys.missing ? <SshKeyNotice variant="inline" onNavigate={() => onOpenChange(false)} /> : null}
           {form.submitError ? <p className="text-sm text-destructive" role="alert">{form.submitError}</p> : null}
           <DialogFooter>

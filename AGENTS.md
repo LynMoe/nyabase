@@ -71,12 +71,16 @@ Vite 通过 alias 将 `@nyabase/common` 指向 `src/index.ts`，但 `index.ts` �
   - **服务器授权（`iam.server_grants`）** = 用户在一台服务器上的唯一 bundle（复合外键保证 bundle 属于该服务器）+ 可选 override（`overridden` 列出覆盖的字段，值在同名列，NULL = 不限；未覆盖的列恒为 NULL，CHECK 保证）+ 到期。
     未覆盖的字段**实时跟随** bundle：改 bundle 立即作用于所有未覆盖该字段的授权（视图读 bundle，没有同步写入）；`POST /admin/grant-bundles/:id/preview` 先列出会变的用户、被 override 挡住的用户和用量警告，`PATCH` 带 `expectedRevision`。
     同一服务器已有授权时再分配（任何 bundle，含同一个）返回 409 `SERVER_GRANT_EXISTS`，带 `replace: true` 才在原行上替换：bundle、override 与到期都取自本次请求（未给即无 override、永久），数据盘授权保留，覆盖不中断。仍被授权引用的 bundle 不能删（409 `GRANT_BUNDLE_IN_USE`）。
-  - **数据盘授权（`iam.storage_pool_grants`）** 在服务器授权之下按池给额度（`limit_bytes`，该用户在此池上本地卷之和），只能给该服务器的本地池（复合外键），没有自己的到期：随服务器授权生效、到期、删除（级联）。没有服务器授权时 409 `SERVER_GRANT_REQUIRED`。
-  - **共享后端授权** 独立，不属于任何 bundle。共享后端自带 `default_mount_path`（挂载表单选中其共享卷时预填，可改，NULL = `/data`，只是建议值）、`note`（用户新建共享卷时显示）与 `max_volumes_per_user`（每用户在该后端上 live 共享卷数上限，NULL = 不限；
-    新建时在 serializable 的创建事务（`VOLUME_TX`）里准入（并发抢最后一个名额由 40001 重试解决），超出 409 `SHARED_BACKEND_VOLUME_LIMIT_REACHED`；`failed` / `deleting` 的卷不计；调低不影响已有的卷）。
+  - **数据盘授权（`iam.data_disk_grants`，000012）** 在服务器授权之下，把该服务器的 1..n 个本地池编成一组共用一个额度 `limit_bytes`（必填，没有"不限"）；
+    `iam.storage_pool_grants` 是成员表，每（用户, 池）至多一行（`UNIQUE (user_id, pool_id)`），所以每个池同时只属于一个授权。复合外键保证组内的池属于同一用户、同一服务器；
+    没有自己的到期：随服务器授权生效、到期、删除（级联）。没有服务器授权时 409 `SERVER_GRANT_REQUIRED`。路由 `POST/PATCH/DELETE /users/:userId/data-disk-grants`（`grants/data-disk-grants.service.ts`）：
+    写入里点到别的授权持有的池，没带 `movePools: true` 返回 409 `DATA_DISK_POOL_GRANTED`（`details.pools`）；带上则在同一事务里搬过来（覆盖不中断，不开台账），被搬空的授权一并删除；
+    PATCH 的 `poolIds` 是完整新集合，去掉的池即撤销（走失效流程），DELETE 撤销组内全部池。响应 `DataDiskGrantChangeDto` 列出搬移、删除与撤销。
+  - **共享后端授权** 独立，不属于任何 bundle，额度必填。共享后端自带 `mount_path`（启用后每个被授权用户的共享卷挂载在此，NULL = 未启用）、`maintenance` 与 `note`（显示在用户的共享卷旁）。
   - GPU 不由管理员挑卡：视图按 `md5(用户 id, PCI 地址)` 从服务器最近观测到的卡（`infra.servers.observed_gpu_pci_addresses`，agent 连接与全量扫描时由 Incus resources 刷新）里取前 N 张（NULL = 全部）。
     结果只取决于用户和卡列表：张数增加保留已有的卡，减少去掉排名最低的；卡消失只影响排到它的用户。`grants/grant-fields.ts` 的 `pickGrantGpus` 是预览用的同一规则（pg 测试固定两者一致）。
-  `iam.effective_*_access` 只含**当前有效**（未过期）的授权，且只含 active 用户；配额 NULL = 不限，**0 不是"不限"**（DB CHECK 要求 `> 0`，GPU 张数 0 = 无卡）。
+  `iam.effective_*_access` 只含**当前有效**（未过期）的授权，且只含 active 用户；bundle 配额 NULL = 不限，**0 不是"不限"**（DB CHECK 要求 `> 0`，GPU 张数 0 = 无卡）；
+  数据盘与共享后端额度没有 NULL（000012 遇到 NULL 拒绝迁移）。`effective_pool_access` 每（用户, 池）一行，带所属 `data_disk_grant_id` 与组的额度。
   所有授权判断只读这些视图（`iam/effective-access.ts` 每类资源一个解析函数）；没有授权缓存、epoch 或 `authz_version`。
 - 用户管理员（user_admin）管人和人的资源：用户、授权模板、所有授权（含给自己）、所有容器（含控制台）与数据卷、清除；
   能看审计、容器 / 卷的 intents、全平台用量、SSH 连接历史；HTTP 绑定的 `scope=all`（列出 / 删除他人的绑定）也是 user_admin，但只经 API（HTTP 代理页仅 admin）。
@@ -113,7 +117,7 @@ Vite 通过 alias 将 `@nyabase/common` 指向 `src/index.ts`，但 `index.ts` �
 - 存储超分（服务器 `storage_overcommit_ratio` 作用于其本地池，共享后端 `overcommit_ratio`）只在用户之间生效：池 / 后端上所有承诺量合计 ≤ 物理总量 × 比例，
   单个用户在其上的承诺量（本地池 = 他的系统盘 + 本地卷，共享后端 = 他的共享卷）≤ 物理总量，不论授权是否不限、是否管理员 `scope=all` 操作
   （`volumes/volume-rules.ts` 的 `overcommitAvailableBytes`，准入与 `scope=mine` 容量报告共用；前端 `sharedBackendAvailableBytes` 带上用户已用量算同一规则）。
-- 宽限中（无当前覆盖）的用户不能新建、启动、挂载、扩容；已停机的容器在覆盖恢复后不会自动启动。所有者扩容本地卷要同时有服务器授权和该池的数据盘授权（在缩容预留内重新扩容、不占新额度也一样）；本地卷按池计入数据盘额度，系统盘只计入服务器授权的系统盘配额，两者互不占用。
+- 宽限中（无当前覆盖）的用户不能新建、启动容器；已停机的容器在覆盖恢复后不会自动启动，但卷会被平台重新挂上（见下节）。本地卷只计入数据盘额度，系统盘只计入服务器授权的系统盘配额，两者互不占用。
 - 重试耗尽的 40001 / 40P01 返回 409 `TRANSACTION_CONFLICT`（`PgTransactionConflictFilter`），不是 500。
   管理员 `scope=all` 的容器动作与管理员清除跑 read committed（不做配额准入），这样事务内 `assertActorRole` 能看到等锁期间提交的降级。
 - intent 重试归属重试者（`requested_by`，system 为 NULL）并记审计 `intent.retry`；重试 `volume.resize` 只能把 `size_bytes` 调小，不会绕过配额重新扩容。
@@ -132,6 +136,29 @@ Vite 通过 alias 将 `@nyabase/common` 指向 `src/index.ts`，但 `index.ts` �
   复核时的其他错误（DB 抖动）保留当前截止时间、按退避重试同一 token。socket 从建立起只有一个消息分发器（`console-bridge.gateway.ts` 的 `ConsoleFrameDispatcher`），
   exec 打开前到达的 `auth` 照常复核，输入 / resize 有界暂存（超出先发 `CONSOLE_INPUT_OVERFLOW` 错误帧再 1009 关闭，前端按错误码 / 关闭码显示原因）后按序转发。
   控制台先按会话登记再读会话行，所以与并发登出不会互相错过。
+
+## 数据盘与共享盘（单例卷，`volumes/`，000012）
+
+用户不建卷、不删卷、不挂载、不改大小：每个（用户, 盘）至多一个卷（部分唯一索引，不含 `deleting`），由平台创建、挂载并按额度定大小。
+- **盘** = 本地数据池（`infra.storage_pools.mount_path`）或共享后端（`infra.shared_backends.mount_path`）。有挂载路径即启用，NULL 未启用（000012 把共享后端的旧建议路径清空，须显式启用）。
+  只有已登记、本地、`quota_online` 且 `quota_effective` 的池能启用（否则 409 `STORAGE_MOUNT_UNSUPPORTED`）；同一容器可能看到的盘（同服务器的本地池 + 所有共享后端）路径不得相同或嵌套（409 `STORAGE_MOUNT_PATH_CONFLICT`），
+  系统目录由 common `zStorageMountPath` 拒绝（`isSystemMountPath`）。`maintenance` 的盘不出现在任何容器的实例文档里（`ContainerReconcileStore.readAttachments` 跳过），容器照常启动；
+  翻转维护时 `VolumeProvisioner.rewriteContainersOnDisk` 给挂了它的容器排更新（`storage_maintenance`）。启用前可预览：`POST .../storage-pools/:id/mount-preview`、`POST /shared-backends/:id/mount-preview`（admin）。
+  盘的路径 / 维护变化经 `storage-pools/disk-mounts.ts` 的 `DiskChangeNotifier`（`afterCommit`）通知。停用（路径置 NULL）只停止新建卷与新增挂载，已有的卷和挂载保留；
+  改路径只影响之后的挂载，已在容器里的挂载保留原路径（规划按（容器, 卷）判断已挂，不按路径重挂）。
+- **规划**（`volume-provisioning.ts`，纯函数，读 `storage-provisioning.read-model.ts` 的快照）：授权覆盖的已启用、非维护的盘上没有卷就建（本地卷 `provisioning` + `volume.ensure`；共享卷直接 `active`，目录在第一次挂载时建）；
+  用户每个 `active` 容器都挂上他能到达的 `active` 卷（本地卷在本服务器；共享卷经该后端在本服务器上唯一的已登记执行池），路径为盘的挂载路径；容器在该路径已挂了别的卷则跳过（`pathConflicts`）。
+  `failed` 的卷不动也不替换；没有授权覆盖的盘上的卷归失效流程（宽限内覆盖恢复则被重新挂上）。新建容器在创建事务里由 `VolumeProvisioner.bindNewContainer` 挂上已有的卷（请求里没有 `volumes` 字段）。
+- **弹性额度**（`allocateQuotas`）：一个授权的卷共用额度 L。`R = L − Σ已用`；`R > 0` 时每卷配额 = 已用 + R/n（按盘的物理余量封顶，余下的分给其他盘）；`R ≤ 0` 时按已用量等比缩到 L。
+  能把配额设到已用量以下的文件系统（dir + 项目配额、CephFS，Incus 7.6 实测：之后只能读和删）直接设到目标；其他（ZFS 拒绝低于 used）走棘轮：配额降到已用量并跟着删除往下走，从不回升。
+  每卷最低 1 GiB（0 在 Incus / XFS 里是不限）。单卷组配额就是 L，不需要用量；多卷组用量未知（服务器不可达）时整组本轮不动。先缩后扩：缩小保留预留（`shrinkReservation`），扩大只用 L 减去各卷承诺量后的余量。
+  `decideVolumeResize` 的 `belowUsage`（`quotaBelowUsage`）让这类缩容不受用量下限阻拦。
+- **执行**：`StorageBalancer` 每 30 s 一轮（另由 `AccessChangeNotifier`、`DiskChangeNotifier` 唤醒，单飞）：经 agent 读需要的用量（`volumesNeedingUsage`），交给 `VolumeProvisioner.run`；
+  每个动作单独事务并复核（覆盖、盘仍启用、卷 revision），快照过时只损失一轮。系统写入，审计 actor 为 NULL；平衡器的缩放（intent `request.source = 'quota_balancer'`）不写 `volume.resize` 审计，其 Incus 写入也不逐条记 `incus.mutate`。
+  Backend 停着时配额停在原值，Σ 配额 ≤ L 仍成立。
+- **挂载路径检查**（`container-reconcile-steps.ts` 的 `checkPendingMountPaths`）：实例上还没有的挂载，先经 Incus 文件 API 看路径；是文件或非空目录则挂载行置 `blocked`（不进实例文档），
+  之后该容器每次 pass（启动、重启、任何更新）复查，路径空了或没了再挂；建容器时实例不存在，不查；查询本身出错则照常挂载（只遮盖、不删除）。
+- **删除**：用户只读（`GET /volumes`、`/shared-volumes`、容器的挂载列表、容量）。user_admin 可 `DELETE /volumes/:id`、`/shared-volumes/:id`，仅当没有授权覆盖该盘（否则 409 `VOLUME_STILL_GRANTED`，会被马上重建）且已卸载（409 `VOLUME_REQUIRES_UNBIND`）。
 
 ## 后端结构规则（`packages/backend/src`）
 

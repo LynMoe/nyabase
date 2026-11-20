@@ -11,8 +11,7 @@ import { PerformanceQueryService } from './metrics/performance-query.service.js'
 import { zSeriesQuery, zUsageQuery } from './metrics/performance.controller.js';
 import { ServersService } from './servers/servers.service.js';
 import { StoragePoolsService } from './storage-pools/storage-pools.service.js';
-import { LocalVolumesService } from './volumes/local-volumes.service.js';
-import { SharedVolumesService } from './volumes/shared-volumes.service.js';
+import { VolumesService } from './volumes/volumes.service.js';
 
 const user = testActor('user-a');
 
@@ -106,10 +105,9 @@ describe('scope=all needs the resource role', () => {
   });
 
   it('volumes: local, shared and capacity need the user admin role', async () => {
-    const volumes = bare(LocalVolumesService, 8);
-    const shared = bare(SharedVolumesService, 8);
+    const volumes = bare(VolumesService, 8);
     await expect(volumes.list(user, { scope: 'all' })).rejects.toBeInstanceOf(ForbiddenException);
-    await expect(shared.list(user, { scope: 'all' })).rejects.toBeInstanceOf(ForbiddenException);
+    await expect(volumes.listShared(user, { scope: 'all' })).rejects.toBeInstanceOf(ForbiddenException);
     await expect(volumes.capacity(user, 's1', 'all')).rejects.toBeInstanceOf(ForbiddenException);
   });
 });

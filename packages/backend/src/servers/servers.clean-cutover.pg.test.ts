@@ -442,7 +442,8 @@ describePg('server agent onboarding and removal', () => {
         },
         {
           id: sharedOnlySId,
-          owner_id: ownerId,
+          // One volume per user and backend: other owners for the other shared volumes.
+          owner_id: await seedUser(database),
           pool_id: null,
           server_id: null,
           shared_backend_id: backendId,
@@ -460,7 +461,7 @@ describePg('server agent onboarding and removal', () => {
         },
         {
           id: sharedClaimedId,
-          owner_id: ownerId,
+          owner_id: await seedUser(database),
           pool_id: null,
           server_id: null,
           shared_backend_id: backendId,

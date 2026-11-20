@@ -8,7 +8,6 @@ import {
   type LiveServerAccessDto,
 } from '@nyabase/common';
 import { numberValue } from '../platform/domain-utils.js';
-import { committedVolumeBytesSql } from '../platform/persistence-pg/committed-bytes.js';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
@@ -176,7 +175,7 @@ export class AccessResolverService {
       return [row.id, topology.length === 0 ? null : cores] as const;
     }));
 
-    const poolsByServer = await this.livePoolAccess(userId);
+    const dataDisksByServer = await this.liveDataDisks(userId);
 
     return [
       ...live.map((access): EffectiveServerAccessDto => ({
@@ -187,7 +186,7 @@ export class AccessResolverService {
         rootDiskBytes: access.rootDiskBytes,
         gpuCount: access.gpuCount,
         gpuPciAddresses: access.gpuPciAddresses,
-        storagePools: poolsByServer.get(access.serverId) ?? [],
+        dataDisks: dataDisksByServer.get(access.serverId) ?? [],
         expiresAt: access.expiresAt?.toISOString() ?? null,
         accessPhase: 'live',
         allowedImageIds: imagesByServer.get(access.serverId) ?? [],
@@ -201,12 +200,12 @@ export class AccessResolverService {
     ];
   }
 
-  /** Current data-disk quotas by server, with the committed size of the user's local volumes on each pool. */
-  private async livePoolAccess(
+  /** Current data-disk grants by server, with the data observed on their volumes. */
+  private async liveDataDisks(
     userId: string,
-  ): Promise<Map<string, LiveServerAccessDto['storagePools']>> {
+  ): Promise<Map<string, LiveServerAccessDto['dataDisks']>> {
     const pools = await listPoolAccess(this.database, userId);
-    const result = new Map<string, LiveServerAccessDto['storagePools']>();
+    const result = new Map<string, LiveServerAccessDto['dataDisks']>();
     if (pools.length === 0) return result;
     const poolIds = pools.map((pool) => pool.poolId);
     const [servers, usedRows] = await Promise.all([
@@ -215,7 +214,7 @@ export class AccessResolverService {
         .where('id', 'in', poolIds)
         .execute(),
       this.database.selectFrom('control.volumes')
-        .select(['pool_id', sql<string>`coalesce(sum(${committedVolumeBytesSql()}), 0)`.as('used')])
+        .select(['pool_id', sql<string>`coalesce(sum(coalesce(used_bytes, 0)), 0)`.as('used')])
         .where('owner_id', '=', userId)
         .where('pool_id', 'in', poolIds)
         .where('shared_backend_id', 'is', null)
@@ -225,31 +224,38 @@ export class AccessResolverService {
     ]);
     const serverByPool = new Map(servers.map((row) => [row.id, row.server_id]));
     const usedByPool = new Map(usedRows.map((row) => [row.pool_id, numberValue(row.used)]));
+    const byGrant = new Map<string, LiveServerAccessDto['dataDisks'][number] & { serverId: string }>();
     for (const pool of pools) {
       const serverId = serverByPool.get(pool.poolId);
       if (!serverId) continue;
-      const list = result.get(serverId) ?? [];
-      list.push({
-        poolId: pool.poolId,
+      const grant = byGrant.get(pool.dataDiskGrantId) ?? {
+        serverId,
+        grantId: pool.dataDiskGrantId,
+        poolIds: [],
         limitBytes: pool.limitBytes,
-        usedBytes: usedByPool.get(pool.poolId) ?? 0,
-      });
+        usedBytes: 0,
+        availableBytes: 0,
+      };
+      grant.poolIds.push(pool.poolId);
+      grant.usedBytes += usedByPool.get(pool.poolId) ?? 0;
+      byGrant.set(pool.dataDiskGrantId, grant);
+    }
+    for (const { serverId, ...grant } of byGrant.values()) {
+      const list = result.get(serverId) ?? [];
+      list.push({ ...grant, availableBytes: Math.max(0, grant.limitBytes - grant.usedBytes) });
       result.set(serverId, list);
     }
     return result;
   }
 
-  /**
-   * Current shared-backend coverage with booked usage, counted as admission
-   * counts it (`committedVolumeBytesSql`); grace backends are omitted.
-   */
+  /** Current shared-backend coverage with the data observed on the user's volume; grace backends are omitted. */
   async getEffectiveSharedAccess(userId: string): Promise<EffectiveSharedBackendAccessDto[]> {
     const live = await listSharedBackendAccess(this.database, userId);
     if (live.length === 0) return [];
     const usedRows = await this.database.selectFrom('control.volumes')
       .select([
         'shared_backend_id',
-        sql<string>`coalesce(sum(${committedVolumeBytesSql()}), 0)`.as('used'),
+        sql<string>`coalesce(sum(coalesce(used_bytes, 0)), 0)`.as('used'),
       ])
       .where('owner_id', '=', userId)
       .where('shared_backend_id', 'in', live.map((access) => access.sharedBackendId))

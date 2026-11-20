@@ -174,9 +174,11 @@ describe('grant summaries', () => {
       .toEqual(['CPU 不限', '内存 不限', '系统盘 不限', '无 GPU']);
   });
 
-  it('sums the data disks, unlimited when any is', () => {
+  it('counts the disks of every data-disk grant and sums their quotas', () => {
     expect(dataDiskSummary([])).toBe('无数据盘');
-    expect(dataDiskSummary([{ limitBytes: 100 * GIB }, { limitBytes: 400 * GIB }])).toBe('数据盘 2 个 · 共 500 GiB');
-    expect(dataDiskSummary([{ limitBytes: 100 * GIB }, { limitBytes: null }])).toBe('数据盘 2 个 · 不限');
+    expect(dataDiskSummary([
+      { poolIds: ['a', 'b'], limitBytes: 100 * GIB },
+      { poolIds: ['c'], limitBytes: 400 * GIB },
+    ])).toBe('数据盘 3 块 · 共 500 GiB');
   });
 });

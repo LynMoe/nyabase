@@ -87,8 +87,9 @@ describePg('AccessResolverService', () => {
       await grantServer(database, { user: userId }, serverId, {
         cpuCores: 4, memBytes: 8, rootDiskBytes: 300, gpuCount: 0,
       });
-      await grantPool(database, { user: userId }, poolId, 500);
-      await seedVolume(database, { ownerId: userId, poolId, serverId });
+      const dataDiskGrantId = await grantPool(database, { user: userId }, poolId, 500);
+      const volumeId = await seedVolume(database, { ownerId: userId, poolId, serverId });
+      await database.updateTable('control.volumes').set({ used_bytes: 70 }).where('id', '=', volumeId).execute();
       await grantServer(database, { user: await seedUser(database) }, otherServer);
       const topology = [0, 1, 2, 3].map((id) => ({ id, core: id, socket: 0, numa: 0 }));
       await database.updateTable('infra.servers')
@@ -104,7 +105,8 @@ describePg('AccessResolverService', () => {
         rootDiskBytes: 300,
         gpuCount: 0,
         gpuPciAddresses: [],
-        storagePools: [{ poolId, limitBytes: 500, usedBytes: 100 }],
+        // The data on the volume, not its quota: the platform sizes the quota.
+        dataDisks: [{ grantId: dataDiskGrantId, poolIds: [poolId], limitBytes: 500, usedBytes: 70, availableBytes: 430 }],
         expiresAt: null,
         accessPhase: 'live',
         allowedImageIds: [image],
@@ -144,32 +146,29 @@ describePg('AccessResolverService', () => {
     });
   });
 
-  it('projects shared-backend coverage with limits and booked usage; expired ones disappear', async () => {
+  it('projects shared-backend coverage with limits and the data on the volume; expired ones disappear', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const access = resolver(database);
       const userId = await seedUser(database);
-      const limited = await seedBackend(database);
-      const unlimited = await seedBackend(database);
+      const used = await seedBackend(database);
+      const empty = await seedBackend(database);
       const expired = await seedBackend(database);
-      await grantBackend(database, { user: userId }, limited, 1_000);
-      await grantBackend(database, { user: userId }, unlimited, null);
+      await grantBackend(database, { user: userId }, used, 1_000);
+      await grantBackend(database, { user: userId }, empty, 2_000);
       await grantBackend(database, { user: userId }, expired, 5, days(-1));
-      await seedVolume(database, {
-        ownerId: userId, poolId: null, serverId: null, sharedBackendId: limited,
+      const volumeId = await seedVolume(database, {
+        ownerId: userId, poolId: null, serverId: null, sharedBackendId: used,
       });
-      const shrinking = await seedVolume(database, {
-        ownerId: userId, poolId: null, serverId: null, sharedBackendId: limited,
-      });
-      // A shrink not yet verified still books the larger size, as admission counts it.
-      await database.updateTable('control.volumes').set({ shrink_reserved_bytes: 400 })
-        .where('id', '=', shrinking).execute();
+      // A pending shrink reservation is not data.
+      await database.updateTable('control.volumes').set({ used_bytes: 300, shrink_reserved_bytes: 900 })
+        .where('id', '=', volumeId).execute();
 
       const shared = await access.getEffectiveSharedAccess(userId);
-      expect(shared.map((row) => row.sharedBackendId).sort()).toEqual([limited, unlimited].sort());
-      expect(shared.find((row) => row.sharedBackendId === limited))
-        .toMatchObject({ limitBytes: 1_000, usedBytes: 500 });
-      expect(shared.find((row) => row.sharedBackendId === unlimited))
-        .toMatchObject({ limitBytes: null, usedBytes: 0 });
+      expect(shared.map((row) => row.sharedBackendId).sort()).toEqual([used, empty].sort());
+      expect(shared.find((row) => row.sharedBackendId === used))
+        .toMatchObject({ limitBytes: 1_000, usedBytes: 300 });
+      expect(shared.find((row) => row.sharedBackendId === empty))
+        .toMatchObject({ limitBytes: 2_000, usedBytes: 0 });
     });
   });
 });

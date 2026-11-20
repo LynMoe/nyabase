@@ -5,25 +5,29 @@ import {
   Get,
   Param,
   Patch,
+  Post,
   Put,
 } from '@nestjs/common';
 import {
   zPatchServerGrantRequest,
   zPutServerGrantRequest,
+  zCreateDataDiskGrantRequest,
+  zPatchDataDiskGrantRequest,
   zPutSharedBackendGrantRequest,
-  zPutStoragePoolGrantRequest,
   type EffectiveAccessDto,
   Role,
 } from '@nyabase/common';
 import { RequireRole, CurrentActor } from '../iam/decorators.js';
 import type { Actor } from '../iam/actor.js';
 import { AccessResolverService } from '../iam/access-resolver.service.js';
+import { DataDiskGrantsService } from './data-disk-grants.service.js';
 import { GrantsService } from './grants.service.js';
 
 @Controller('users/:userId')
 export class UserGrantsController {
   constructor(
     private readonly grants: GrantsService,
+    private readonly dataDisks: DataDiskGrantsService,
     private readonly access: AccessResolverService,
   ) {}
 
@@ -65,30 +69,41 @@ export class UserGrantsController {
     return this.grants.deleteServerGrant(actor, userId, serverId);
   }
 
-  @Put('storage-pool-grants/:poolId')
+  @Get('data-disk-grants')
   @RequireRole(Role.UserAdmin)
-  putStoragePoolGrant(
+  listDataDiskGrants(@Param('userId') userId: string) {
+    return this.dataDisks.list(userId);
+  }
+
+  @Post('data-disk-grants')
+  @RequireRole(Role.UserAdmin)
+  createDataDiskGrant(
     @Param('userId') userId: string,
-    @Param('poolId') poolId: string,
     @Body() body: unknown,
     @CurrentActor() actor: Actor,
   ) {
-    return this.grants.putStoragePoolGrant(
-      actor,
-      userId,
-      poolId,
-      zPutStoragePoolGrantRequest.parse(body).limitBytes,
-    );
+    return this.dataDisks.create(actor, userId, zCreateDataDiskGrantRequest.parse(body));
   }
 
-  @Delete('storage-pool-grants/:poolId')
+  @Patch('data-disk-grants/:grantId')
   @RequireRole(Role.UserAdmin)
-  deleteStoragePoolGrant(
+  patchDataDiskGrant(
     @Param('userId') userId: string,
-    @Param('poolId') poolId: string,
+    @Param('grantId') grantId: string,
+    @Body() body: unknown,
     @CurrentActor() actor: Actor,
   ) {
-    return this.grants.deleteStoragePoolGrant(actor, userId, poolId);
+    return this.dataDisks.patch(actor, userId, grantId, zPatchDataDiskGrantRequest.parse(body));
+  }
+
+  @Delete('data-disk-grants/:grantId')
+  @RequireRole(Role.UserAdmin)
+  deleteDataDiskGrant(
+    @Param('userId') userId: string,
+    @Param('grantId') grantId: string,
+    @CurrentActor() actor: Actor,
+  ) {
+    return this.dataDisks.delete(actor, userId, grantId);
   }
 
   @Get('shared-backend-grants')

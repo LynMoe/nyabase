@@ -15,7 +15,6 @@ import {
   type ServerGrantDto,
   type ServerGrantOverrides,
   type SharedBackendGrantDto,
-  type StoragePoolGrantDto,
   Role,
 } from '@nyabase/common';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
@@ -26,9 +25,9 @@ import { AccessChangeNotifier } from '../iam/access-resolver.service.js';
 import type { Actor } from '../iam/actor.js';
 import { AuditService } from '../iam/audit.service.js';
 import { GpuClaimsRepository } from '../gpu/gpu-claims.repository.js';
-import { isLocalPoolRow } from '../storage-pools/storage-pool-capability.js';
-import { assertActorRole } from '../iam/administration.js';
-import { hasRole, requireUserId } from '../iam/actor.js';
+import { hasRole } from '../iam/actor.js';
+import { loadDataDiskGrantDtos } from './data-disk-grants.service.js';
+import { beginGrantMutation, requireGrantUser } from './grant-mutation.js';
 import {
   effectiveQuotas,
   overrideColumns,
@@ -51,31 +50,10 @@ function iso(value: Date | string | null): string | null {
   return value ? new Date(value).toISOString() : null;
 }
 
-function poolGrantDto(row: {
-  id: string;
-  server_grant_id: string;
-  user_id: string;
-  server_id: string;
-  pool_id: string;
-  limit_bytes: string | number | null;
-  created_at: Date;
-  updated_at: Date;
-}): StoragePoolGrantDto {
-  return {
-    id: row.id,
-    serverGrantId: row.server_grant_id,
-    userId: row.user_id,
-    serverId: row.server_id,
-    poolId: row.pool_id,
-    limitBytes: row.limit_bytes === null ? null : Number(row.limit_bytes),
-    createdAt: row.created_at.toISOString(),
-    updatedAt: row.updated_at.toISOString(),
-  };
-}
-
 /**
  * A user's grants: one bundle per server (with overrides), the data-disk
- * quotas under each server grant, and shared-backend grants. Deleting a grant
+ * grants under each server grant (`DataDiskGrantsService`), and
+ * shared-backend grants. Deleting a grant
  * never refuses because the user owns resources: it is an immediate lapse,
  * handled by the access-lapse processor after commit. Replacing a server
  * grant's bundle keeps the grant (and its data disks), so coverage never
@@ -240,85 +218,6 @@ export class GrantsService {
     });
   }
 
-  // Data-disk grants ---------------------------------------------------------
-
-  /** Create or change the user's quota on a local pool; needs their grant on the pool's server. */
-  async putStoragePoolGrant(
-    actor: Actor,
-    userId: string,
-    poolId: string,
-    limitBytes: number | null,
-  ): Promise<StoragePoolGrantDto> {
-    const row = await this.transactions.run(async (transaction) => {
-      await this.beginMutation(transaction, actor, userId);
-      const pool = await transaction.selectFrom('infra.storage_pools')
-        .select(['id', 'server_id', 'shareable', 'driver', 'shared_backend_id'])
-        .where('id', '=', poolId)
-        .forShare()
-        .executeTakeFirst();
-      if (!pool || !isLocalPoolRow(pool)) throw new NotFoundException('Storage pool not found');
-      const serverGrant = await transaction.selectFrom('iam.server_grants')
-        .select('id')
-        .where('user_id', '=', userId)
-        .where('server_id', '=', pool.server_id)
-        .forShare()
-        .executeTakeFirst();
-      if (!serverGrant) {
-        throw new ConflictException({
-          code: FailureCode.ServerGrantRequired,
-          message: 'Assign a bundle on the pool\'s server first',
-          details: { serverId: pool.server_id, poolId },
-        });
-      }
-      const saved = await transaction.insertInto('iam.storage_pool_grants')
-        .values({
-          id: randomUUID(),
-          server_grant_id: serverGrant.id,
-          user_id: userId,
-          server_id: pool.server_id,
-          pool_id: poolId,
-          limit_bytes: limitBytes,
-        })
-        .onConflict((conflict) => conflict
-          .columns(['user_id', 'pool_id'])
-          .doUpdateSet({ limit_bytes: limitBytes }))
-        .returningAll()
-        .executeTakeFirstOrThrow();
-      await this.audit.append(
-        transaction,
-        actor.userId,
-        AuditAction.UpsertStoragePoolGrant,
-        poolId,
-        'user',
-        { scopeId: userId, poolId, serverId: pool.server_id, limitBytes },
-      );
-      afterCommit(transaction, () => this.changes.notify());
-      return saved;
-    });
-    return poolGrantDto(row);
-  }
-
-  async deleteStoragePoolGrant(actor: Actor, userId: string, poolId: string): Promise<void> {
-    await this.transactions.run(async (transaction) => {
-      await this.beginMutation(transaction, actor, userId);
-      const deleted = await transaction.deleteFrom('iam.storage_pool_grants')
-        .where('user_id', '=', userId)
-        .where('pool_id', '=', poolId)
-        .returning('server_id')
-        .executeTakeFirst();
-      if (!deleted) return;
-      await this.audit.append(
-        transaction,
-        actor.userId,
-        AuditAction.DeleteStoragePoolGrant,
-        poolId,
-        'user',
-        { scopeId: userId, poolId, serverId: deleted.server_id },
-      );
-      afterCommit(transaction, () => this.changes.notify());
-    });
-  }
-
   // Shared backend grants (capacity limit) -------------------------------------
 
   async listSharedBackendGrants(userId: string): Promise<SharedBackendGrantDto[]> {
@@ -335,7 +234,7 @@ export class GrantsService {
     actor: Actor,
     userId: string,
     backendId: string,
-    input: { limitBytes: number | null; expiresAt: string | null },
+    input: { limitBytes: number; expiresAt: string | null },
   ): Promise<SharedBackendGrantDto> {
     const row = await this.transactions.run(async (transaction) => {
       await this.beginMutation(transaction, actor, userId);
@@ -389,18 +288,12 @@ export class GrantsService {
 
   // Shared helpers -----------------------------------------------------------
 
-  /** Every grant mutation needs the user admin role (re-read in the transaction) and an existing user. */
-  private async beginMutation(transaction: Tx, actor: Actor, userId: string): Promise<void> {
-    await assertActorRole(transaction, requireUserId(actor), Role.UserAdmin);
-    await this.requireUser(transaction, userId);
+  private beginMutation(transaction: Tx, actor: Actor, userId: string): Promise<void> {
+    return beginGrantMutation(transaction, actor, userId);
   }
 
-  private async requireUser(executor: Executor, userId: string): Promise<void> {
-    const user = await executor.selectFrom('iam.users')
-      .select(['id', 'status'])
-      .where('id', '=', userId)
-      .executeTakeFirst();
-    if (!user || user.status === UserStatus.Deleted) throw new NotFoundException('User not found');
+  private requireUser(executor: Executor, userId: string): Promise<void> {
+    return requireGrantUser(executor, userId);
   }
 
   /** GPUs can only be granted (a count other than 0) where the server has GPU enabled. */
@@ -460,17 +353,7 @@ export class GrantsService {
     }
     const rows = await query.orderBy('grant.user_id').orderBy('grant.server_id').execute();
     if (rows.length === 0) return [];
-    const pools = await executor.selectFrom('iam.storage_pool_grants')
-      .selectAll()
-      .where('server_grant_id', 'in', rows.map((row) => row.id))
-      .orderBy('pool_id')
-      .execute();
-    const poolsByGrant = new Map<string, StoragePoolGrantDto[]>();
-    for (const pool of pools) {
-      const list = poolsByGrant.get(pool.server_grant_id) ?? [];
-      list.push(poolGrantDto(pool));
-      poolsByGrant.set(pool.server_grant_id, list);
-    }
+    const dataDisksByGrant = await loadDataDiskGrantDtos(executor, rows.map((row) => row.id));
     return rows.map((row) => {
       const overrides = overridesFromColumns(row);
       const bundle: QuotaColumns = {
@@ -488,7 +371,7 @@ export class GrantsService {
         overrides,
         ...effectiveQuotas(quotasFromColumns(bundle), overrides),
         expiresAt: iso(row.expires_at),
-        storagePools: poolsByGrant.get(row.id) ?? [],
+        dataDisks: dataDisksByGrant.get(row.id) ?? [],
         createdAt: row.created_at.toISOString(),
         updatedAt: row.updated_at.toISOString(),
       };
@@ -499,7 +382,7 @@ export class GrantsService {
     id: string;
     user_id: string;
     shared_backend_id: string;
-    limit_bytes: string | number | null;
+    limit_bytes: string | number;
     expires_at: Date | string | null;
     created_at: Date;
     updated_at: Date;
@@ -508,7 +391,7 @@ export class GrantsService {
       id: row.id,
       userId: row.user_id,
       sharedBackendId: row.shared_backend_id,
-      limitBytes: row.limit_bytes === null ? null : Number(row.limit_bytes),
+      limitBytes: Number(row.limit_bytes),
       expiresAt: iso(row.expires_at),
       createdAt: row.created_at.toISOString(),
       updatedAt: row.updated_at.toISOString(),

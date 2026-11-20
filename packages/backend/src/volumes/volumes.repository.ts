@@ -7,12 +7,7 @@ import {
   committedVolumeBytesSql,
   releaseSettledShrinkReservations,
 } from '../platform/persistence-pg/committed-bytes.js';
-import {
-  resolvePoolAccess,
-  resolveServerAccess,
-  type PoolAccess,
-  resolveSharedBackendAccess,
-} from '../iam/effective-access.js';
+import { resolveServerAccess } from '../iam/effective-access.js';
 import { numberValue } from '../platform/domain-utils.js';
 import type {
   CreatePendingIntentInput,
@@ -224,17 +219,6 @@ export class VolumesRepository {
       .execute();
   }
 
-  async dropPlacement(
-    volumeId: string,
-    serverId: string,
-    executor: VolumeExecutor = this.database,
-  ): Promise<void> {
-    await executor.deleteFrom('control.volume_placements')
-      .where('volume_id', '=', volumeId)
-      .where('server_id', '=', serverId)
-      .execute();
-  }
-
   /** `releaseSettledShrinkReservations` for one volume: whether its reservation was released. */
   async releaseSettledShrinkReservation(volumeId: string, executor: VolumeExecutor): Promise<boolean> {
     return (await releaseSettledShrinkReservations(executor, [volumeId])).length > 0;
@@ -317,22 +301,6 @@ export class VolumesRepository {
     return numberValue(row.bytes);
   }
 
-  /** Live (not failed or deleting) shared volumes of one owner on one backend. */
-  async countLiveSharedVolumes(
-    ownerId: string,
-    sharedBackendId: string,
-    executor: VolumeExecutor = this.database,
-  ): Promise<number> {
-    const row = await executor
-      .selectFrom('control.volumes')
-      .select(sql<number>`count(*)::integer`.as('count'))
-      .where('owner_id', '=', ownerId)
-      .where('shared_backend_id', '=', sharedBackendId)
-      .where('lifecycle_phase', 'not in', ['failed', 'deleting'])
-      .executeTakeFirstOrThrow();
-    return row.count;
-  }
-
   listSharedBackendVolumes(backendId: string, executor: VolumeExecutor = this.database) {
     return executor
       .selectFrom('control.volumes')
@@ -353,11 +321,14 @@ export class VolumesRepository {
       .leftJoin('control.volume_placements as p', (join) => join
         .onRef('p.volume_id', '=', 'a.volume_id')
         .on('p.server_id', '=', serverId))
+      .leftJoin('infra.storage_pools as disk_pool', 'disk_pool.id', 'v.pool_id')
+      .leftJoin('infra.shared_backends as disk_backend', 'disk_backend.id', 'v.shared_backend_id')
       .selectAll('a')
       .select([
         'v.name as volume_name',
         'v.shared_backend_id as shared_backend_id',
         'p.catalog_state as catalog_state',
+        sql<boolean>`coalesce(disk_pool.maintenance, disk_backend.maintenance, false)`.as('maintenance'),
       ])
       .where('a.container_id', '=', containerId)
       .orderBy('a.created_at')
@@ -429,35 +400,6 @@ export class VolumesRepository {
       .execute();
   }
 
-  /** Placements on servers that can still be asked for live usage. */
-  listPlacementsWithPool(volumeId: string, executor: VolumeExecutor = this.database) {
-    return executor
-      .selectFrom('control.volume_placements as pl')
-      .innerJoin('infra.storage_pools as p', 'p.id', 'pl.pool_id')
-      .innerJoin('infra.servers as s', 's.id', 'pl.server_id')
-      .select([
-        'pl.server_id as server_id',
-        'pl.catalog_state as catalog_state',
-        'p.incus_name as pool_name',
-        'p.driver as driver',
-        'p.resize_family as resize_family',
-        's.status as server_status',
-      ])
-      .where('pl.volume_id', '=', volumeId)
-      .orderBy('pl.server_id', 'asc')
-      .execute();
-  }
-
-  async listPendingIntentIds(volumeId: string, executor: VolumeExecutor): Promise<string[]> {
-    const rows = await executor
-      .selectFrom('control.intents')
-      .select('id')
-      .where('resource_type', '=', 'volume')
-      .where('resource_id', '=', volumeId)
-      .where('status', '=', 'pending')
-      .execute();
-    return rows.map((row) => row.id);
-  }
 }
 
 // --- eligible destroy executors -------------------------------------------------
@@ -522,36 +464,6 @@ export async function requireServerAccess(
   const access = await resolveServerAccess(executor, ownerId, serverId);
   if (!access) throw new ForbiddenException('Server storage access is not granted');
   return access;
-}
-
-/** The owner's current data-disk grant on a pool (its quota); 403 without one. */
-export async function assertPoolGrant(
-  executor: VolumeExecutor,
-  ownerId: string,
-  poolId: string,
-): Promise<PoolAccess> {
-  const access = await resolvePoolAccess(executor, ownerId, poolId);
-  if (!access) throw new ForbiddenException('Storage pool access is not granted');
-  return access;
-}
-
-/** Capacity limit of the owner's current backend coverage: null = unlimited, undefined = none. */
-export async function effectiveSharedGrant(
-  executor: VolumeExecutor,
-  ownerId: string,
-  backendId: string,
-): Promise<number | null | undefined> {
-  const access = await resolveSharedBackendAccess(executor, ownerId, backendId);
-  return access ? access.limitBytes : undefined;
-}
-
-export async function assertSharedGrant(
-  executor: VolumeExecutor,
-  ownerId: string,
-  backendId: string,
-): Promise<void> {
-  const row = await effectiveSharedGrant(executor, ownerId, backendId);
-  if (row === undefined) throw new ForbiddenException('Shared backend access is not granted');
 }
 
 // --- intent creation with target validation -------------------------------------

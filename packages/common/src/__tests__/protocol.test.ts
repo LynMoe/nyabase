@@ -14,15 +14,14 @@ import {
   zBrowserToConsole,
   zConsoleToBrowser,
   zCreateContainerRequest,
-  zAttachVolumeRequest,
+  zStorageMountPath,
+  mountPathsOverlap,
   zPatchSharedBackendRequest,
   isForbiddenContainerMountPath,
   zAddCatalogImageRequest,
   zCreateImageRequest,
   zCreateIpPoolRequest,
   zCreateServerRequest,
-  zCreateSharedVolumeRequest,
-  zCreateVolumeRequest,
   zErrorResponse,
   zCreateExecSessionRequest,
   zIntentAcceptedDto,
@@ -152,7 +151,7 @@ describe('canonical container and volume contracts', () => {
       powerIntent: ContainerPowerIntent.Running,
       ownerId: id,
     }).success).toBe(false);
-    expect(zCreateContainerRequest.parse({
+    expect(zCreateContainerRequest.safeParse({
       serverId,
       imageId,
       name: 'work',
@@ -160,32 +159,41 @@ describe('canonical container and volume contracts', () => {
       memBytes: 2_000_000_000,
             powerIntent: ContainerPowerIntent.Running,
       volumes: [{ volumeId: id, containerPath: '/data', readOnly: false }],
-    }).volumes).toEqual([{ volumeId: id, containerPath: '/data', readOnly: false }]);
+    }).success).toBe(false);
   });
 
-  it('refuses volume mounts over kernel pseudo-filesystems', () => {
-    const attach = (containerPath: string) => zAttachVolumeRequest.safeParse({
-      volumeId: '11111111-1111-4111-8111-111111111111',
-      containerPath,
-      readOnly: false,
-    }).success;
-    for (const path of ['/proc', '/proc/self', '/sys', '/sys/fs/cgroup', '/dev', '/dev/shm', '//proc', '/dev/', '/sys//kernel']) {
-      expect(attach(path), path).toBe(false);
+  it('refuses disk mounts over kernel pseudo-filesystems and system directories', () => {
+    const mount = (path: string) => zStorageMountPath.safeParse(path).success;
+    for (const path of [
+      '/proc', '/proc/self', '/sys', '/sys/fs/cgroup', '/dev', '/dev/shm', '//proc', '/dev/', '/sys//kernel',
+      '/etc', '/usr/local', '/var/lib', '/root', '/home', '/tmp', '/mnt', '/', 'data', '/a/../b',
+    ]) {
+      expect(mount(path), path).toBe(false);
     }
-    for (const path of ['/data', '/procfs', '/srv/proc', '/device', '/system']) {
-      expect(attach(path), path).toBe(true);
+    for (const path of ['/data', '/data1', '/procfs', '/srv/proc', '/device', '/system', '/mnt/data', '/home/shared']) {
+      expect(mount(path), path).toBe(true);
     }
+    expect(zStorageMountPath.parse('/data//x/')).toBe('/data/x');
     expect(isForbiddenContainerMountPath('/./proc')).toBe(true);
   });
 
-  it('holds a shared backend default mount point to the same rules as a mount', () => {
-    const patch = (defaultMountPath: string | null) => zPatchSharedBackendRequest.safeParse({
+  it('tells overlapping mount paths apart from siblings', () => {
+    expect(mountPathsOverlap('/data', '/data')).toBe(true);
+    expect(mountPathsOverlap('/data', '/data/x')).toBe(true);
+    expect(mountPathsOverlap('/data/x', '/data')).toBe(true);
+    expect(mountPathsOverlap('/data', '/data1')).toBe(false);
+    expect(mountPathsOverlap('/data1', '/data2')).toBe(false);
+  });
+
+  it('holds a shared backend mount path to the disk mount rules', () => {
+    const patch = (mountPath: string | null) => zPatchSharedBackendRequest.safeParse({
       expectedRevision: 1,
-      defaultMountPath,
+      mountPath,
     }).success;
     expect(patch('/meowfs')).toBe(true);
     expect(patch(null)).toBe(true);
-    for (const path of ['meowfs', '/', '/proc/x', '/a/../b']) expect(patch(path), path).toBe(false);
+    for (const path of ['meowfs', '/', '/proc/x', '/a/../b', '/root']) expect(patch(path), path).toBe(false);
+    expect(zPatchSharedBackendRequest.safeParse({ expectedRevision: 1, maxVolumesPerUser: 1 }).success).toBe(false);
   });
 
   it('rejects old physical identity and address fields', () => {
@@ -284,44 +292,6 @@ describe('canonical container and volume contracts', () => {
       sharedBackendId: id,
       poolId: id,
     }).success).toBe(false);
-    expect(zCreateVolumeRequest.safeParse({
-      name: 'data',
-      sizeBytes: 1_024,
-      scope: { kind: 'shared', sharedBackendId: id },
-    }).success).toBe(false);
-    expect(zCreateSharedVolumeRequest.parse({
-      name: 'data',
-      sizeBytes: 1_024,
-      scope: { kind: 'shared', sharedBackendId: id },
-    })).toEqual({
-      name: 'data',
-      sizeBytes: 1_024,
-      scope: { kind: 'shared', sharedBackendId: id },
-    });
-    expect(zCreateVolumeRequest.safeParse({
-      ownerId: id,
-      name: 'data',
-      sizeBytes: 1_024,
-      scope: { kind: 'local', serverId, poolId: id },
-    }).success).toBe(false);
-    expect(zCreateSharedVolumeRequest.safeParse({
-      ownerId: id,
-      name: 'data',
-      sizeBytes: 1_024,
-      scope: { kind: 'shared', sharedBackendId: id },
-    }).success).toBe(false);
-    expect(zCreateSharedVolumeRequest.safeParse({
-      name: 'data',
-      sizeBytes: 1_024,
-      scope: { kind: 'shared', sharedBackendId: id, poolId: id },
-    }).success).toBe(false);
-    const legacySourceField = ['source', 'Kind'].join('');
-    expect(zCreateVolumeRequest.safeParse({
-      name: 'data',
-      sizeBytes: 1_024,
-      scope: { kind: 'shared', sharedBackendId: id, poolId: id },
-      [legacySourceField]: 'local',
-    }).success).toBe(false);
   });
 
   it('includes typed volume attachment summaries on VolumeDto', () => {
@@ -336,6 +306,7 @@ describe('canonical container and volume contracts', () => {
       sizeBytes: 1_024,
       usedBytes: 1_024,
       scope: { kind: 'local', serverId, poolId: id },
+      mountPath: '/data1',
       capability: {
         growOnline: true,
         shrinkOnline: true,
@@ -373,7 +344,7 @@ describe('canonical container and volume contracts', () => {
       ownerId: id,
       sharedBackendId: id,
       sharedBackendName: 'ceph',
-      defaultMountPath: null,
+      mountPath: null,
       name: 'data',
       incusName: 'nyv-data',
       sizeBytes: 1_024,

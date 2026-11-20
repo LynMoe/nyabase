@@ -39,16 +39,10 @@ import {
   volumeOwnerScope,
 } from './volume-ops.js';
 import {
-  VolumeReconcileStore,
-  type CatalogRow,
-  type VolumeAttachmentRow,
-  type VolumeRecord,
-  type VolumeRow,
+  VolumeReconcileStore, type CatalogRow, type VolumeAttachmentRow, type VolumeRecord, type VolumeRow,
 } from './volume-reconcile.store.js';
 import {
-  decideVolumeResize,
-  MANAGED_VOLUME_NAME,
-  retriesUnknownCephfsUsage,
+  decideVolumeResize, MANAGED_VOLUME_NAME, QUOTA_BALANCER_SOURCE, quotaBelowUsage,
 } from './volume-rules.js';
 
 type Executor = { server_id: string; pool_name: string };
@@ -256,12 +250,10 @@ export class VolumeReconciler implements ManagedReconciler, OnModuleInit {
       usedBytes,
       attached,
       allConsumersStopped: attachments.every((item) => item.power_intent !== 'running'),
+      belowUsage: quotaBelowUsage(row.driver, row.quota_effective),
     });
     if (decision.action === 'blocked') {
       const failure = blockedResizeFailure(decision, row.id, desiredSize, usedBytes, attachments);
-      if (retriesUnknownCephfsUsage(decision.reason, row.driver, context.intent.attemptCount)) {
-        return { outcome: 'retry', failure };
-      }
       const current = decision.reason === 'usage_floor' || decision.reason === 'usage_unknown'
         ? await this.store.revertImpossibleShrink(row, currentSize, usedBytes, failure.code)
         : await this.store.isCurrentRevision(row.id, row.revision);
@@ -787,6 +779,8 @@ export class VolumeReconciler implements ManagedReconciler, OnModuleInit {
     path: string,
     instanceName: string,
   ): Promise<void> {
+    // The quota balancer resizes as usage moves: its writes are not audited one by one.
+    if (intent.request?.source === QUOTA_BALANCER_SOURCE) return;
     await this.audit.log(
       intent.requestedBy,
       AuditAction.IncusMutate,

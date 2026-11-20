@@ -31,20 +31,6 @@ export function formatCapacity(bytes: number | null, empty = '未知'): string {
 }
 
 /**
- * Capacity "available" label for grant-backed storage.
- * Unlimited grant + null available ⇒ 「不限」 (not 「未知」).
- */
-export function grantAvailableLabel(
-  availableBytes: number | null,
-  grantLimitBytes: number | null,
-): string {
-  const unlimited = grantLimitBytes === null;
-  if (availableBytes === null && unlimited) return '不限';
-  if (availableBytes === null) return '未知';
-  return formatBytes(availableBytes);
-}
-
-/**
  * Shared-backend available bytes: total × overcommit − used when computable.
  * With `ownerUsedBytes`, what that owner can still add: overcommit is shared
  * across owners, one owner's volumes never exceed the physical total.

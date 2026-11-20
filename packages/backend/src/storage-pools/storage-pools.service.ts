@@ -17,6 +17,8 @@ import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
 import { AuditService } from '../iam/audit.service.js';
 import { isLocalPoolDto, isLocalPoolRow } from './storage-pool-capability.js';
+import { afterCommit } from '../platform/post-commit.js';
+import { assertMountPathFree, assertPoolMountable, DiskChangeNotifier } from './disk-mounts.js';
 import { StoragePoolDiscoveryService } from './storage-pool-discovery.service.js';
 import { optionalByteCount } from './storage-pool-discovery.service.js';
 import { toAdminPoolDto, toUserPoolDto } from './storage-pool-dtos.js';
@@ -31,6 +33,7 @@ export class StoragePoolsService {
     @Inject(PG_DATABASE) private readonly database: Kysely<NyabaseDatabase>,
     private readonly discovery: StoragePoolDiscoveryService,
     private readonly audit: AuditService,
+    private readonly diskChanges: DiskChangeNotifier,
   ) {}
 
   /** Records observed used/total bytes for every registered pool of one server. */
@@ -152,12 +155,23 @@ export class StoragePoolsService {
             });
           }
         }
+        const registered = input.registered ?? current.registered;
+        // An unregistered pool is no data disk any more.
+        const mountPath = registered ? input.mountPath : null;
+        if (mountPath) {
+          assertPoolMountable({ ...current, registered });
+          await assertMountPathFree(transaction, mountPath, { kind: 'pool', id, serverId: current.server_id });
+        }
+        const mountChanged = mountPath !== undefined && mountPath !== current.mount_path;
+        const maintenanceChanged = input.maintenance !== undefined && input.maintenance !== current.maintenance;
         const updated = await this.repository.patch(id, input.expectedRevision, {
           shareable: false,
           ...(input.registered === undefined ? {} : { registered: input.registered }),
           ...(input.displayName === undefined
             ? {}
             : { display_name: input.displayName?.trim() ? input.displayName.trim() : null }),
+          ...(mountChanged ? { mount_path: mountPath } : {}),
+          ...(maintenanceChanged ? { maintenance: input.maintenance } : {}),
         }, transaction);
         if (!updated) throw new ConflictException({ code: FailureCode.RevisionConflict });
         await this.audit.append(
@@ -172,8 +186,16 @@ export class StoragePoolsService {
             serverId: current.server_id,
             ...(input.registered === undefined ? {} : { registered: input.registered }),
             ...(input.displayName === undefined ? {} : { displayName: input.displayName }),
+            ...(mountChanged ? { mountPath, previousMountPath: current.mount_path } : {}),
+            ...(maintenanceChanged ? { maintenance: input.maintenance } : {}),
           },
         );
+        if (mountChanged || maintenanceChanged) {
+          afterCommit(transaction, () => this.diskChanges.notify({
+            disk: { kind: 'pool', id, serverId: current.server_id },
+            maintenanceChanged,
+          }));
+        }
         return updated;
       },
       { isolationLevel: 'serializable', maxAttempts: 5 },

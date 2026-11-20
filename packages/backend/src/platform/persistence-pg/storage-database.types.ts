@@ -43,9 +43,9 @@ export interface VolumeAttachmentTable {
   container_path: string;
   read_only: boolean;
   bind_state: ColumnType<
-    'attaching' | 'attached' | 'detaching',
-    'attaching' | 'attached' | 'detaching' | undefined,
-    'attaching' | 'attached' | 'detaching'
+    'attaching' | 'attached' | 'detaching' | 'blocked',
+    'attaching' | 'attached' | 'detaching' | 'blocked' | undefined,
+    'attaching' | 'attached' | 'detaching' | 'blocked'
   >;
   created_at: StorageGeneratedTimestamp;
   updated_at: StorageGeneratedTimestamp;

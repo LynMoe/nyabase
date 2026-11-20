@@ -785,19 +785,11 @@ describe('volume reconciler scan and shifted policy', () => {
       });
     });
 
-    it('puts a pending shrink through the usage check against the reserved size', async () => {
-      const { db, client, run } = recoveredPass({ size_bytes: '10', shrink_reserved_bytes: '20' }, '15');
+    it('applies a pending shrink below the data at once (CephFS takes the quota as is)', async () => {
+      const { client, run } = recoveredPass({ size_bytes: '10', shrink_reserved_bytes: '20' }, '15');
 
-      await expect(run()).resolves.toMatchObject({
-        outcome: 'failed',
-        failure: { code: 'VOLUME_SHRINK_BELOW_USAGE' },
-      });
-      expect(client.updateStorageVolume).not.toHaveBeenCalled();
-      const sets = (db.updateTable as ReturnType<typeof vi.fn>).mock.results.flatMap((result) => {
-        const query = result.value as { set: ReturnType<typeof vi.fn> };
-        return query.set.mock.calls.map((call) => call[0] as Record<string, unknown>);
-      });
-      expect(sets).toEqual(expect.arrayContaining([expect.objectContaining({ size_bytes: '20' })]));
+      await expect(run()).resolves.toMatchObject({ outcome: 'succeeded' });
+      expect(client.updateStorageVolume.mock.calls[0]?.[3]).toMatchObject({ config: { size: '10' } });
     });
   });
 
@@ -899,7 +891,7 @@ describe('volume reconciler scan and shifted policy', () => {
     expect(wheres).toContainEqual(['revision', '=', 2]);
   });
 
-  it('retries an accepted CephFS shrink while its usage cannot be read, without undoing it', async () => {
+  it('shrinks a CephFS volume whose usage cannot be read: the quota does not need it', async () => {
     const db = volumeExistsDb();
     const reconciler = new VolumeReconciler(new VolumeReconcileStore(db as never, {} as never),
       { log: vi.fn().mockResolvedValue(undefined) } as never,
@@ -918,8 +910,8 @@ describe('volume reconciler scan and shifted policy', () => {
       storeOf(reconciler) as unknown as { readAttachments: () => Promise<unknown[]> },
       'readAttachments',
     ).mockResolvedValue([]);
-    const updateStorageVolume = vi.fn();
-    const outcome = await reconciler.reconcile(runContext({
+    const updateStorageVolume = vi.fn().mockResolvedValue({ status: 200, envelope: { type: 'sync' } });
+    await reconciler.reconcile(runContext({
       kind: 'volume.resize',
       attemptCount: 1,
       client: {
@@ -931,13 +923,8 @@ describe('volume reconciler scan and shifted policy', () => {
         updateStorageVolume,
       },
     }));
-    expect(outcome).toMatchObject({ outcome: 'retry', failure: { code: 'VOLUME_USAGE_UNKNOWN' } });
-    expect(updateStorageVolume).not.toHaveBeenCalled();
-    const sets = (db.updateTable as ReturnType<typeof vi.fn>).mock.results.flatMap((result) => {
-      const query = result.value as { set: ReturnType<typeof vi.fn> };
-      return query.set.mock.calls.map((call) => call[0] as Record<string, unknown>);
-    });
-    expect(sets).not.toEqual(expect.arrayContaining([expect.objectContaining({ needs_attention: true })]));
+    expect(updateStorageVolume).toHaveBeenCalled();
+    expect(updateStorageVolume.mock.calls[0]?.[3]).toMatchObject({ config: { size: '5' } });
   });
 
   it('shrinks a CephFS volume down to the agent-read usage', async () => {
@@ -973,62 +960,6 @@ describe('volume reconciler scan and shifted policy', () => {
       },
     }));
     expect(updateStorageVolume).toHaveBeenCalled();
-  });
-
-  it('reverts desired size and writes used_bytes NULL once retries of an unreadable CephFS usage run out', async () => {
-    const db = volumeExistsDb();
-    const reconciler = new VolumeReconciler(new VolumeReconcileStore(db as never, {} as never),
-      { log: vi.fn().mockResolvedValue(undefined) } as never,
-      { get: vi.fn().mockResolvedValue(undefined), listServerIds: vi.fn() } as never,
-      { register: vi.fn() } as never,
-    );
-    vi.spyOn(
-      storeOf(reconciler) as unknown as { readVolume: () => Promise<unknown> },
-      'readVolume',
-    ).mockResolvedValue({
-      ...ensureRow(),
-      size_bytes: '5',
-      driver: 'cephfs',
-    });
-    vi.spyOn(
-      storeOf(reconciler) as unknown as { readAttachments: () => Promise<unknown[]> },
-      'readAttachments',
-    ).mockResolvedValue([]);
-    const updateStorageVolume = vi.fn();
-    const outcome = await reconciler.reconcile(runContext({
-      kind: 'volume.resize',
-      attemptCount: 5,
-      client: {
-        getStorageVolume: vi.fn().mockResolvedValue({
-          metadata: {
-            config: { size: '20', 'security.shifted': 'true' },
-            content_type: 'filesystem',
-          },
-        }),
-        getStorageVolumeState: vi.fn().mockResolvedValue({
-          metadata: { usage: { used: '20', total: '20' } },
-        }),
-        updateStorageVolume,
-      },
-    }));
-
-    expect(outcome).toMatchObject({
-      outcome: 'failed',
-      failure: { code: 'VOLUME_USAGE_UNKNOWN' },
-    });
-    expect(updateStorageVolume).not.toHaveBeenCalled();
-    const sets = (db.updateTable as ReturnType<typeof vi.fn>).mock.results.flatMap((result) => {
-      const query = result.value as { set: ReturnType<typeof vi.fn> };
-      return query.set.mock.calls.map((call) => call[0] as Record<string, unknown>);
-    });
-    expect(sets).toEqual(expect.arrayContaining([
-      expect.objectContaining({
-        size_bytes: '20',
-        used_bytes: null,
-        needs_attention: true,
-        failure_code: 'VOLUME_USAGE_UNKNOWN',
-      }),
-    ]));
   });
 
   it('does not revert desired size when block-backed shrink needs detach', async () => {

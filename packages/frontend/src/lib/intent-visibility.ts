@@ -1,6 +1,5 @@
 import {
   IntentStatus,
-  type CursorPaginatedResponse,
   type IntentAcceptedDto,
   type IntentDto,
   type IntentResourceType,
@@ -8,7 +7,6 @@ import {
 } from '@nyabase/common';
 import { api } from './api.js';
 import { scopedPath } from './scoped-paths.js';
-import { waitUntil } from './storage-shrink.js';
 import { failureCodeLabel } from './status-labels.js';
 
 /** `scope=all` is the administrator override for retrying someone else's intent. */
@@ -92,31 +90,6 @@ export function isIntentAccepted(value: unknown): value is IntentAcceptedDto {
     && typeof (value as IntentAcceptedDto).intentId === 'string'
     && (value as IntentAcceptedDto).intentId.length > 0,
   );
-}
-
-export async function waitForResourceIntent(
-  listPath: string,
-  intentId: string,
-): Promise<IntentDto> {
-  let latest: IntentDto | null = null;
-  await waitUntil(async () => {
-    const page = await api.get<CursorPaginatedResponse<IntentDto>>(
-      `${listPath}${listPath.includes('?') ? '&' : '?'}limit=50`,
-    );
-    latest = (page.items ?? []).find((intent) => intent.id === intentId) ?? null;
-    if (!latest) return false;
-    if (latest.status === IntentStatus.Failed) {
-      throw new Error(formatIntentFailureMessage(latest) ?? '操作失败');
-    }
-    return latest.status === IntentStatus.Succeeded;
-  }, {
-    timeoutMs: 120_000,
-    intervalMs: 1_000,
-    label: '数据卷操作',
-    onTimeout: async () => lookupLatestIntentFailure(listPath),
-  });
-  if (!latest) throw new Error('操作没有返回结果');
-  return latest;
 }
 
 export async function lookupLatestIntentFailure(listPath: string): Promise<string | null> {

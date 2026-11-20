@@ -50,7 +50,7 @@ export const NAV_SECTIONS: NavSection[] = [
     items: [
       { to: '/', icon: LayoutDashboard, label: '概览' },
       { to: '/containers', icon: Box, label: '容器' },
-      { to: '/volumes', icon: HardDrive, label: '数据卷' },
+      { to: '/volumes', icon: HardDrive, label: '数据盘' },
       { to: '/shared-volumes', icon: FolderTree, label: '共享卷' },
       { to: '/http-proxy', icon: Globe, label: 'HTTP 发布' },
       { to: '/usage', icon: Activity, label: '使用情况' },

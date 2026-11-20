@@ -13,15 +13,8 @@ import {
 import { createCustomVolume, isNotFound } from './volume-ops.js';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
-import {
-  assertSharedExists,
-  MANAGED_VOLUME_NAME,
-  isCephRbytesUsage,
-  normalizeObservedVolumeUsage,
-  type VolumeDriver,
-} from './volume-rules.js';
-import type { VolumeRow } from './volume-dtos.js';
-import { listEligibleDestroyExecutors, VolumesRepository } from './volumes.repository.js';
+import { assertSharedExists, MANAGED_VOLUME_NAME } from './volume-rules.js';
+import { VolumesRepository } from './volumes.repository.js';
 
 /** Attempts after which a volume adoption that keeps failing is given up on. */
 export const VOLUME_ADOPT_FAIL_AFTER_ATTEMPTS = 8;
@@ -81,25 +74,6 @@ export function occupancyForCatalogItem(input: {
   throw new Error('shared catalog occupancy matcher is not exhaustive');
 }
 
-export type UsageObservation =
-  | { status: 'unavailable' }
-  | { status: 'observed'; usedBytes: bigint | null };
-
-interface UsageCandidate {
-  serverId: string;
-  poolName: string;
-  driver: VolumeDriver;
-  resizeFamily: 'quota_online' | 'block_backed';
-}
-
-function incusUsageToBigint(value: unknown): bigint | null {
-  if (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0) return BigInt(value);
-  if (typeof value === 'string' && /^(?:0|[1-9][0-9]*)$/.test(value.trim())) {
-    return BigInt(value.trim());
-  }
-  return null;
-}
-
 const INSPECT_TIMEOUT_MS = 5_000;
 
 async function withInspectTimeout<T>(work: (signal: AbortSignal) => Promise<T>): Promise<T> {
@@ -114,7 +88,7 @@ async function withInspectTimeout<T>(work: (signal: AbortSignal) => Promise<T>):
 
 /**
  * Read-only view of the shared catalog: compares the control-plane catalog with what
- * Incus servers actually hold, and asks reachable servers for a shared volume's live usage.
+ * Incus servers actually hold.
  */
 @Injectable()
 export class SharedVolumeCatalogInspectService {
@@ -275,97 +249,5 @@ export class SharedVolumeCatalogInspectService {
       }
     }
     return { sharedBackendId: backendId, items };
-  }
-
-  private async usageCandidates(
-    volume: VolumeRow,
-  ): Promise<UsageCandidate[]> {
-    const candidates: UsageCandidate[] = [];
-    const seen = new Set<string>();
-    const placementRows = await this.repository.listPlacementsWithPool(volume.id);
-    for (const row of placementRows) {
-      if (
-        (row.catalog_state === 'present' || row.catalog_state === 'ensuring')
-        && row.server_status === 'online'
-      ) {
-        candidates.push({
-          serverId: row.server_id,
-          poolName: row.pool_name,
-          driver: row.driver,
-          resizeFamily: row.resize_family === 'block_backed' ? 'block_backed' : 'quota_online',
-        });
-        seen.add(row.server_id);
-      }
-    }
-    if (volume.shared_backend_id) {
-      const eligible = await listEligibleDestroyExecutors(this.database, volume.shared_backend_id);
-      for (const executor of eligible) {
-        if (seen.has(executor.server_id)) continue;
-        candidates.push({
-          serverId: executor.server_id,
-          poolName: executor.pool_name,
-          driver: 'cephfs',
-          resizeFamily: 'quota_online',
-        });
-        seen.add(executor.server_id);
-      }
-    }
-    return candidates;
-  }
-
-  private async readVolumeStateUsage(
-    candidate: UsageCandidate,
-    volume: VolumeRow,
-  ): Promise<{ status: 'observed'; usedBytes: bigint | null } | { status: 'error' }> {
-    let client;
-    try {
-      client = await this.clients.get(candidate.serverId);
-    } catch {
-      return { status: 'error' };
-    }
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 5_000);
-    try {
-      const state = (await client.getStorageVolumeState(
-        candidate.poolName,
-        'custom',
-        volume.incus_name,
-        { signal: controller.signal },
-      )).metadata;
-      return {
-        status: 'observed',
-        usedBytes: normalizeObservedVolumeUsage({
-          resizeFamily: candidate.resizeFamily,
-          driver: candidate.driver,
-          usedBytes: incusUsageToBigint(state.usage?.used),
-          totalBytes: incusUsageToBigint(state.usage?.total),
-          usedFromCephRbytes: isCephRbytesUsage(state.usage),
-        }),
-      };
-    } catch {
-      return { status: 'error' };
-    } finally {
-      clearTimeout(timer);
-    }
-  }
-
-  /**
-   * Ask the servers that can reach a shared volume for its live usage; the
-   * first known figure wins. An answer without one (a CephFS executor whose
-   * agent did not read ceph.dir.rbytes) does not stop the search, and only
-   * stands when no other server knows better.
-   */
-  async observeUsage(
-    volume: VolumeRow,
-  ): Promise<UsageObservation> {
-    const candidates = await this.usageCandidates(volume);
-    let answeredUnknown = false;
-    for (const candidate of candidates) {
-      const result = await this.readVolumeStateUsage(candidate, volume);
-      if (result.status !== 'observed') continue;
-      if (result.usedBytes !== null) return result;
-      answeredUnknown = true;
-    }
-    return answeredUnknown ? { status: 'observed', usedBytes: null } : { status: 'unavailable' };
   }
 }

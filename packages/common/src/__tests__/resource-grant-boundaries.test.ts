@@ -13,7 +13,8 @@ import {
   zPatchSharedBackendRequest,
   zPutServerGrantRequest,
   zPutSharedBackendGrantRequest,
-  zPutStoragePoolGrantRequest,
+  zCreateDataDiskGrantRequest,
+  zPatchDataDiskGrantRequest,
 } from '@nyabase/common';
 
 const serverId = '22222222-2222-4222-8222-222222222222';
@@ -50,9 +51,14 @@ describe('grant resource bounds', () => {
     expect(zCreateGrantBundleRequest.safeParse({ ...base, rootDiskBytes: 0 }).success).toBe(false);
     expect(zCreateGrantBundleRequest.safeParse({ ...base, gpuCount: 0 }).success).toBe(true);
     expect(zServerGrantOverrides.safeParse({ memBytes: 0 }).success).toBe(false);
-    expect(zPutStoragePoolGrantRequest.safeParse({ limitBytes: 0 }).success).toBe(false);
+    expect(zCreateDataDiskGrantRequest.safeParse({ serverId, poolIds: [poolId], limitBytes: 0 }).success).toBe(false);
     expect(zPutSharedBackendGrantRequest.safeParse({ limitBytes: 0, expiresAt: null }).success).toBe(false);
-    expect(zPutSharedBackendGrantRequest.safeParse({ limitBytes: null, expiresAt: null }).success).toBe(true);
+  });
+
+  it('always sizes storage grants: there is no unlimited data disk or shared backend', () => {
+    expect(zCreateDataDiskGrantRequest.safeParse({ serverId, poolIds: [poolId], limitBytes: null }).success).toBe(false);
+    expect(zPatchDataDiskGrantRequest.safeParse({ limitBytes: null }).success).toBe(false);
+    expect(zPutSharedBackendGrantRequest.safeParse({ limitBytes: null, expiresAt: null }).success).toBe(false);
   });
 
   it('keeps an override key with null (unlimited) apart from an absent key (follow the bundle)', () => {
@@ -89,7 +95,13 @@ describe('grant resource bounds', () => {
   });
 
   it('uses independent pool and shared-backend grant bodies', () => {
-    expect(zPutStoragePoolGrantRequest.parse({ limitBytes: 10_000 })).toEqual({ limitBytes: 10_000 });
+    expect(zCreateDataDiskGrantRequest.parse({ serverId, poolIds: [poolId], limitBytes: 10_000 }))
+      .toEqual({ serverId, poolIds: [poolId], limitBytes: 10_000 });
+    expect(zCreateDataDiskGrantRequest.safeParse({ serverId, poolIds: [], limitBytes: 10_000 }).success).toBe(false);
+    expect(zCreateDataDiskGrantRequest.safeParse({ serverId, poolIds: [poolId, poolId], limitBytes: 10_000 }).success)
+      .toBe(false);
+    expect(zPatchDataDiskGrantRequest.safeParse({}).success).toBe(false);
+    expect(zPatchDataDiskGrantRequest.safeParse({ movePools: true }).success).toBe(false);
     expect(zPutSharedBackendGrantRequest.parse({
       limitBytes: 10_000,
       expiresAt: '2026-12-01T00:00:00.000Z',
@@ -97,8 +109,8 @@ describe('grant resource bounds', () => {
       limitBytes: 10_000,
       expiresAt: '2026-12-01T00:00:00.000Z',
     });
-    expect(zPutStoragePoolGrantRequest.safeParse({ limitBytes: 10_000, expiresAt: null }).success)
-      .toBe(false);
+    expect(zCreateDataDiskGrantRequest.safeParse({ serverId, poolIds: [poolId], limitBytes: 10_000, expiresAt: null })
+      .success).toBe(false);
   });
 });
 

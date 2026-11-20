@@ -28,15 +28,17 @@ import { expiryLabel, remainingLabel } from '../grants/use-grant-panel-data.js';
 import { formatQuotaDimension, runningMemBytes } from '../../lib/grant-quota.js';
 import { sharedUnitPair } from '../../lib/container-usage.js';
 import { cpuGrantLabel } from '../../lib/cpu-set.js';
+import { poolDisplayName } from '../../lib/data-disks.js';
 import { graceServerAccess, liveServerAccess } from '../../lib/effective-access.js';
 import { queryKeys } from '../../lib/query-keys.js';
 import { queryPollInterval } from '../../lib/query-lifecycle.js';
 import { ResourceRef } from '../refs/resource-ref.js';
 
 /**
- * What the signed-in user is granted and how much of it is already allocated.
- * Allocation is what containers and volumes reserve, not live usage; live
- * usage is on the 使用情况 page.
+ * What the signed-in user is granted and how much of it is already taken:
+ * memory and system disks as allocated by containers (已分配, not live usage,
+ * which is on the 使用情况 page); data disks and shared storage as the data
+ * on the volumes, since the platform sizes those volumes itself.
  */
 export function QuotaSummary() {
   const serversQuery = useQuery({
@@ -146,7 +148,7 @@ function QuotaBody({
             <TableHeader>
               <TableRow>
                 <TableHead>共享存储</TableHead>
-                <TableHead>已分配 / 额度</TableHead>
+                <TableHead>已用 / 额度</TableHead>
                 <TableHead>到期</TableHead>
               </TableRow>
             </TableHeader>
@@ -239,24 +241,28 @@ function QuotaExpiry({ expiresAt }: { expiresAt: string | null }) {
   );
 }
 
-/** One meter per pool the user holds a data-disk quota on. */
+/** One meter per data-disk grant: the disks sharing the quota and the data on them. */
 function DataDiskQuotas({ grant }: { grant: LiveServerAccessDto }) {
   const poolsQuery = useQuery({
-    queryKey: queryKeys.volumeForm.pools(grant.serverId),
+    queryKey: queryKeys.servers.pools(grant.serverId, 'mine'),
     queryFn: () => api.get<StoragePoolDto[]>(`/servers/${grant.serverId}/storage-pools`),
-    enabled: grant.storagePools.length > 0,
+    enabled: grant.dataDisks.length > 0,
   });
-  if (grant.storagePools.length === 0) return <span className="text-muted-foreground">无</span>;
+  if (grant.dataDisks.length === 0) return <span className="text-muted-foreground">无</span>;
+  const nameOf = (poolId: string) => {
+    const row = poolsQuery.data?.find((item) => item.id === poolId);
+    return row ? poolDisplayName(row) : truncateId(poolId);
+  };
   return (
     <div className="space-y-2" data-testid="quota-data-disks">
-      {grant.storagePools.map((pool) => {
-        const disk = formatQuotaDimension(pool.limitBytes, pool.usedBytes);
-        const row = poolsQuery.data?.find((item) => item.id === pool.poolId);
-        const name = row ? (row.displayName ?? row.incusName) : truncateId(pool.poolId);
+      {grant.dataDisks.map((group) => {
+        const disk = formatQuotaDimension(group.limitBytes, group.usedBytes);
         return (
-          <div key={pool.poolId} className="space-y-0.5">
-            <p className="text-xs text-muted-foreground">{name}</p>
-            <QuotaCell used={disk.used} limit={disk.limit} remaining={disk.remaining} grant={pool.limitBytes} consumed={pool.usedBytes} />
+          <div key={group.grantId} className="space-y-0.5">
+            <p className="text-xs text-muted-foreground">
+              {group.poolIds.map(nameOf).join(' + ')}{group.poolIds.length > 1 ? '（共用）' : ''}
+            </p>
+            <QuotaCell used={disk.used} limit={disk.limit} remaining={disk.remaining} grant={group.limitBytes} consumed={group.usedBytes} />
           </div>
         );
       })}

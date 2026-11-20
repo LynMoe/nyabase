@@ -13,9 +13,9 @@ function readSrc(relativeFromBackendSrc: string): string {
 describe('actor-scoped API surface', () => {
   it('volume services take the actor first and expose no admin flags or wrappers', () => {
     const methods: Record<string, string[]> = {
-      'volumes/local-volumes.service.ts': ['list', 'get', 'create', 'patch', 'delete', 'capacity'],
-      'volumes/shared-volumes.service.ts': ['list', 'get', 'create', 'patch', 'delete'],
-      'volumes/volume-attachments.service.ts': ['attach', 'detach'],
+      // Users read their volumes; the platform creates, sizes and mounts them.
+      'volumes/volumes.service.ts': ['list', 'get', 'listShared', 'getShared', 'capacity'],
+      'volumes/volume-attachments.service.ts': ['forceDetach'],
     };
     for (const [file, names] of Object.entries(methods)) {
       const src = readSrc(file);
@@ -43,15 +43,15 @@ describe('actor-scoped API surface', () => {
   });
 
   it('there is a single controller per resource and it resolves the actor', () => {
-    for (const file of ['volumes/volumes.controller.ts', 'volumes/shared-volumes.controller.ts',
+    for (const file of ['volumes/volumes.controller.ts',
       'containers/containers.controller.ts', 'reconcile/intents.controller.ts']) {
       const src = readSrc(file);
       expect(src).toMatch(/@CurrentActor\(\)/);
       expect(src).not.toMatch(/@Controller\('admin\//);
       expect(src).not.toMatch(/\.(create|list)\([^)]+,\s*true\s*\)/);
     }
-    expect(readSrc('volumes/shared-volumes.controller.ts')).toMatch(/RequireRole\(Role\.Admin\)/);
-    expect(readSrc('volumes/shared-volumes.controller.ts'))
+    expect(readSrc('volumes/volumes.controller.ts')).toMatch(/RequireRole\(Role\.Admin\)/);
+    expect(readSrc('volumes/volumes.controller.ts'))
       .not.toMatch(/RequireRole\(Role\.Operator\)/);
   });
 });

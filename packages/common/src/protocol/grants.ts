@@ -24,17 +24,32 @@ export interface GrantBundleDto {
 
 export type GrantBundleField = 'cpuCores' | 'memBytes' | 'rootDiskBytes' | 'gpuCount';
 
-/** A data-disk quota on one local pool; current exactly while its server grant is. */
-export interface StoragePoolGrantDto {
+/**
+ * Disks (local pools of one server) sharing one quota. Each pool belongs to at
+ * most one grant of the user; the grant is current exactly while its server
+ * grant is.
+ */
+export interface DataDiskGrantDto {
   id: string;
   serverGrantId: string;
   userId: string;
   serverId: string;
-  poolId: string;
-  /** null = unlimited. */
-  limitBytes: number | null;
+  poolIds: string[];
+  limitBytes: number;
   createdAt: string;
   updatedAt: string;
+}
+
+/** What a data-disk grant write did besides the grant itself. */
+export interface DataDiskGrantChangeDto {
+  /** The grant written; null after a delete. */
+  grant: DataDiskGrantDto | null;
+  /** Disks taken out of other grants of the user. */
+  movedPools: Array<{ poolId: string; fromGrantId: string }>;
+  /** Grants left without disks by the move, and deleted. */
+  deletedGrantIds: string[];
+  /** Disks no grant covers any more: their volumes lapse (unmounted now, deleted after the grace). */
+  revokedPoolIds: string[];
 }
 
 /** A user's bundle on one server (at most one per server). */
@@ -53,7 +68,7 @@ export interface ServerGrantDto {
   gpuCount: number | null;
   /** null = never expires. */
   expiresAt: string | null;
-  storagePools: StoragePoolGrantDto[];
+  dataDisks: DataDiskGrantDto[];
   createdAt: string;
   updatedAt: string;
 }
@@ -62,8 +77,7 @@ export interface SharedBackendGrantDto {
   id: string;
   userId: string;
   sharedBackendId: string;
-  /** null = unlimited. */
-  limitBytes: number | null;
+  limitBytes: number;
   expiresAt: string | null;
   createdAt: string;
   updatedAt: string;
@@ -138,4 +152,25 @@ export interface GrantServerProfileDto {
     /** NVIDIA cards: live with their model, else the last observed list without one. */
     cards: Array<{ pciAddress: string; model: string | null }>;
   };
+}
+
+/** One data-disk grant of the caller: the disks sharing `limitBytes`, and their data. */
+export interface DataDiskUsageDto {
+  grantId: string;
+  poolIds: string[];
+  limitBytes: number;
+  /** Observed data on the group's volumes (unknown usage counts as 0). */
+  usedBytes: number;
+  /** max(0, limitBytes − usedBytes). */
+  availableBytes: number;
+}
+
+/** What enabling a disk at a mount path would do now (no Incus calls: path checks in containers happen when mounting). */
+export interface StorageMountPreviewDto {
+  /** Users who get a volume on the disk. */
+  volumes: Array<{ userId: string; username: string }>;
+  /** Containers the disk would be mounted into. */
+  mounts: Array<{ containerId: string; containerName: string; ownerId: string; serverId: string }>;
+  /** Containers skipped because another of their volumes already mounts at the path. */
+  pathConflicts: Array<{ containerId: string; containerName: string; ownerId: string; serverId: string }>;
 }

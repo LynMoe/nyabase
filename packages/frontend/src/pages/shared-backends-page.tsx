@@ -27,7 +27,8 @@ import { SectionCard } from '../components/layout/section-card.js';
 import { TechnicalId } from '../components/refs/technical-id.js';
 import { FsidConflictAlert } from '../components/storage/fsid-conflict-alert.js';
 import { SharedBackendPolicyFields } from '../components/storage/shared-backend-policy-fields.js';
-import { maxVolumesPerUserLabel, parseMaxVolumesPerUser } from '../lib/shared-backend-form.js';
+import { parseMountPathInput } from '../lib/data-disks.js';
+import { Badge } from '../components/ui/badge.js';
 import { formatCapacity, formatPercent, sharedBackendAvailableBytes } from '../lib/utils.js';
 import { toast } from '../hooks/use-toast.js';
 import { queryKeys } from '../lib/query-keys.js';
@@ -86,7 +87,7 @@ export default function SharedBackendsPage() {
                   <TableHead>已用</TableHead>
                   <TableHead>可用</TableHead>
                   <TableHead>超分</TableHead>
-                  <TableHead>每用户卷数</TableHead>
+                  <TableHead>挂载点</TableHead>
                   <TableHead>在线执行端</TableHead>
                   <TableHead>服务器</TableHead>
                 </TableRow>
@@ -138,7 +139,10 @@ function BackendRow({ backend }: { backend: SharedBackendDto }) {
       <TableCell>{formatCapacity(backend.usedBytes)}</TableCell>
       <TableCell>{formatCapacity(available)}</TableCell>
       <TableCell>{formatPercent(backend.overcommitRatio)}</TableCell>
-      <TableCell>{maxVolumesPerUserLabel(backend.maxVolumesPerUser)}</TableCell>
+      <TableCell className="whitespace-nowrap">
+        {backend.mountPath ? <span className="font-mono text-xs">{backend.mountPath}</span> : <span className="text-muted-foreground">未启用</span>}
+        {backend.maintenance ? <Badge variant="warning" className="ml-2">维护中</Badge> : null}
+      </TableCell>
       <TableCell>{backend.hasOnlineExecutor ? '有' : '无'}</TableCell>
       <TableCell>{backend.serverIds.length} 台</TableCell>
     </TableRow>
@@ -164,8 +168,7 @@ function CreateSharedBackendDialog({
     overcommitRatio: '1',
   });
   const [note, setNote] = useState('');
-  const [maxVolumes, setMaxVolumes] = useState('');
-  const [defaultMountPath, setDefaultMountPath] = useState('');
+  const [mountPath, setMountPath] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [conflict, setConflict] = useState<SharedBackendFsidConflict | null>(null);
   const create = useMutation({
@@ -188,8 +191,9 @@ function CreateSharedBackendDialog({
     },
   });
   const submit = () => {
-    if (parseMaxVolumesPerUser(maxVolumes) === undefined) {
-      setError('每用户最多共享卷须为 1 到 10000 的整数');
+    const mount = parseMountPathInput(mountPath);
+    if (!mount.ok) {
+      setError(mount.error);
       return;
     }
     const parsed = zCreateSharedBackendRequest.safeParse({
@@ -197,8 +201,7 @@ function CreateSharedBackendDialog({
       displayName: form.displayName || null,
       overcommitRatio: Number(form.overcommitRatio),
       note: note.trim() || null,
-      maxVolumesPerUser: parseMaxVolumesPerUser(maxVolumes),
-      defaultMountPath: defaultMountPath.trim() || null,
+      mountPath: mount.value,
     });
     if (!parsed.success) {
       setError(parsed.error.issues[0]?.message ?? '请检查共享后端参数');
@@ -246,15 +249,19 @@ function CreateSharedBackendDialog({
               />
             </FormField>
           ))}
-          <SharedBackendPolicyFields
-            idPrefix="shared-backend"
-            note={note}
-            onNoteChange={setNote}
-            maxVolumes={maxVolumes}
-            onMaxVolumesChange={setMaxVolumes}
-            defaultMountPath={defaultMountPath}
-            onDefaultMountPathChange={setDefaultMountPath}
-          />
+          <SharedBackendPolicyFields idPrefix="shared-backend" note={note} onNoteChange={setNote} />
+          <FormField
+            id="shared-backend-mount-path"
+            label="挂载点（可选）"
+            hint="设置即启用：每个获得该存储授权的用户自动得到一个共享卷，挂载到这个路径，出现在他所有服务器上的容器里。留空则先不启用，之后可在详情页启用。"
+          >
+            <Input
+              id="shared-backend-mount-path"
+              value={mountPath}
+              placeholder="不启用"
+              onChange={(event) => { setMountPath(event.target.value); setError(null); }}
+            />
+          </FormField>
           {conflict && <FsidConflictAlert conflict={conflict} />}
           {error && <p className="text-sm text-destructive">{error}</p>}
         </div>

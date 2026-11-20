@@ -13,7 +13,7 @@ import {
   retryIntent,
 } from '../../lib/intent-visibility.js';
 import { intentListSettled, intentPending } from '../../lib/in-progress.js';
-import { intentKindLabel, intentStatusLabel } from '../../lib/status-labels.js';
+import { intentLabel, intentStatusLabel } from '../../lib/status-labels.js';
 import { Button } from '../ui/button.js';
 import { toast } from '../../hooks/use-toast.js';
 import { IntentsPanel } from '../containers/intents-panel.js';
@@ -133,7 +133,7 @@ export function ResourceIntentFailures({
         return (
           <div key={intent.id} className="space-y-1 text-sm">
             <div className="flex flex-wrap items-center justify-between gap-2">
-              <span className="font-medium">{intentKindLabel(intent.kind)}</span>
+              <span className="font-medium">{intentLabel(intent)}</span>
               <span className="inline-flex flex-wrap items-center gap-1 text-xs text-muted-foreground">
                 <StatusBadge
                   label={intentStatusLabel(intent.status)}

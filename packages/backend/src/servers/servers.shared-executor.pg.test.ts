@@ -110,7 +110,7 @@ describePg('server removal and shared backend executors', () => {
       const cephS = await seedBackendPool(database, serverS, backendId);
       const liveId = await seedVolume(database, { ownerId, poolId: null, serverId: null, sharedBackendId: backendId });
       const deletingId = await seedVolume(database, {
-        ownerId,
+        ownerId: await seedUser(database),
         poolId: null,
         serverId: null,
         sharedBackendId: backendId,

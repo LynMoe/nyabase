@@ -112,7 +112,7 @@ export function ServerGrantList({
                       {phase === 'live' ? null : <PhaseBadge phase={phase} />}
                     </span>
                     <span className="mt-1 block text-sm text-muted-foreground tabular-nums">
-                      {[...quotaSummaryParts(grant, server ?? {}), dataDiskSummary(grant.storagePools)].join(' · ')}
+                      {[...quotaSummaryParts(grant, server ?? {}), dataDiskSummary(grant.dataDisks)].join(' · ')}
                     </span>
                   </span>
                   <span className="hidden shrink-0 text-sm text-muted-foreground sm:inline">

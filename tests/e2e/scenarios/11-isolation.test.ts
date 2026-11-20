@@ -10,13 +10,12 @@ import {
   type CursorPaginatedResponse,
   type HttpDomainPoolDto,
   type HttpProxyBindingDto,
-  type IntentAcceptedDto,
   type IntentDto,
   type VolumeDto,
 } from '@nyabase/common';
 import { Api } from '../client/api.js';
 import { GIB, Harness, type TestUser } from '../client/harness.js';
-import { waitIntent } from '../client/poll.js';
+import { pollUntil } from '../client/poll.js';
 
 type Case = [method: string, path: string, expected: number, body?: unknown];
 
@@ -25,7 +24,7 @@ describe('cross-user isolation', () => {
   let a: TestUser;
   let b: TestUser;
   let container: ContainerDto;
-  let volumeId: string;
+  let volumeId: string | undefined;
   let intentId: string;
   let binding: HttpProxyBindingDto;
 
@@ -42,19 +41,15 @@ describe('cross-user isolation', () => {
     h = await Harness.start();
     a = await h.newUser('owner');
     b = await h.newUser('other');
-    for (const user of [a, b]) {
-      await h.grantServer(user, h.server);
-      await h.grantPool(user, h.server.poolId);
+    for (const user of [a, b]) await h.grantServer(user, h.server);
+    // With a data disk, the owner gets a volume the other user must not reach.
+    if (h.server.dataPoolId) {
+      await h.enableDataDisk(h.server, '/iso-e2e');
+      await h.grantDataDisks(a, h.server, [h.server.dataPoolId], GIB);
+      volumeId = (await pollUntil(async () => (await a.session.api.get<VolumeDto[]>('/volumes'))[0],
+        { what: 'the owner\'s volume' })).id;
     }
     container = await h.createContainer(a, h.server, { powerIntent: ContainerPowerIntent.Stopped });
-    const volume = await a.session.api.post<IntentAcceptedDto>('/volumes', {
-      name: h.name('vol'),
-      sizeBytes: GIB,
-      scope: { kind: 'local', serverId: h.server.id, poolId: h.server.poolId },
-    });
-    volumeId = volume.resourceId;
-    h.defer('delete volume', () => h.deleteVolume(h.api, volumeId));
-    await waitIntent(a.session.api, volume);
     const intents = await a.session.api.get<CursorPaginatedResponse<IntentDto>>('/intents');
     intentId = intents.items.find((intent) => intent.resourceId === container.id)!.id;
 
@@ -100,13 +95,15 @@ describe('cross-user isolation', () => {
     assert.equal(await h.api.status('GET', c), 404, 'the role alone does not reach another user\'s container');
   });
 
-  it('answers 404 for volumes and unknown ids, and for attaching foreign volumes', async () => {
+  it('answers 404 for another user\'s volume and unknown ids; only user admins delete volumes', async (t) => {
+    if (!volumeId) {
+      t.skip('no data pool on the first server (E2E_SERVER_<n>_DATA_POOL)');
+      return;
+    }
     const v = `/volumes/${volumeId}`;
     await expectStatuses(b.session.api, [
       ['GET', v, 404],
-      ['PATCH', v, 404, { expectedRevision: 1, name: 'x' }],
-      ['DELETE', v, 404],
-      ['POST', `/containers/${container.id}/volumes`, 404, { volumeId, containerPath: '/mnt/x', readOnly: false }],
+      ['DELETE', v, 403],
       ['GET', '/volumes?scope=all', 403],
       ['GET', `/containers/${randomUUID()}`, 404],
       ['GET', `/volumes/${randomUUID()}`, 404],

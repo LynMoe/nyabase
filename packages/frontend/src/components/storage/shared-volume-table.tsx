@@ -1,10 +1,10 @@
-import { Pencil, Search, Trash2 } from 'lucide-react';
+import { Search, Trash2 } from 'lucide-react';
 import { IntentResourceType, type ListScope, type SharedVolumeDto } from '@nyabase/common';
 import { StatusBadge } from '../layout/status-badge.js';
 import { Button } from '../ui/button.js';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../ui/table.js';
 import { ResourceRef } from '../refs/resource-ref.js';
-import { formatObservedUsage, shrinkLabel } from '../../lib/storage-shrink.js';
+import { formatObservedUsage } from '../../lib/storage-shrink.js';
 import { formatCapacity, relativeTime } from '../../lib/utils.js';
 import { volumeInProgress } from '../../lib/in-progress.js';
 import { failureCodeLabel, volumeAttentionHint, volumeLifecycleLabel } from '../../lib/status-labels.js';
@@ -26,7 +26,6 @@ export function SharedVolumeTable({
   volumes,
   scope,
   showBackendColumn,
-  onEdit,
   onDelete,
   onInspect,
   testId = 'shared-volume-table',
@@ -36,7 +35,7 @@ export function SharedVolumeTable({
   volumes: SharedVolumeDto[];
   scope: ListScope;
   showBackendColumn?: boolean;
-  onEdit?: (volume: SharedVolumeDto) => void;
+  /** Administrators only: delete a volume no grant covers any more. */
   onDelete?: (volume: SharedVolumeDto) => void;
   onInspect?: (volume: SharedVolumeDto) => void;
   testId?: string;
@@ -45,8 +44,8 @@ export function SharedVolumeTable({
   detailFocus?: VolumeDetailFocus;
 }) {
   const [detail, setDetail] = useVolumeDetail(volumes, detailFocus);
-  const showActions = Boolean(onEdit || onDelete || onInspect);
-  const columnCount = 5
+  const showActions = Boolean(onDelete || onInspect);
+  const columnCount = 6
     + (scope === 'all' ? 1 : 0)
     + (showBackendColumn ? 1 : 0)
     + (showActions ? 1 : 0);
@@ -59,6 +58,7 @@ export function SharedVolumeTable({
             <TableHead>名称</TableHead>
             {scope === 'all' ? <TableHead>所有者</TableHead> : null}
             {showBackendColumn ? <TableHead>后端</TableHead> : null}
+            <TableHead>挂载点</TableHead>
             <TableHead>容量</TableHead>
             <TableHead>已用</TableHead>
             <TableHead>挂载</TableHead>
@@ -81,7 +81,6 @@ export function SharedVolumeTable({
               showBackendColumn={Boolean(showBackendColumn)}
               showActions={showActions}
               onOpenDetail={() => setDetail(volume)}
-              onEdit={onEdit}
               onDelete={onDelete}
               onInspect={onInspect}
             />
@@ -104,7 +103,6 @@ function SharedVolumeRow({
   showBackendColumn,
   showActions,
   onOpenDetail,
-  onEdit,
   onDelete,
   onInspect,
 }: {
@@ -113,7 +111,6 @@ function SharedVolumeRow({
   showBackendColumn: boolean;
   showActions: boolean;
   onOpenDetail: () => void;
-  onEdit?: (volume: SharedVolumeDto) => void;
   onDelete?: (volume: SharedVolumeDto) => void;
   onInspect?: (volume: SharedVolumeDto) => void;
 }) {
@@ -138,6 +135,7 @@ function SharedVolumeRow({
           <ResourceRef kind="shared-backend" id={volume.sharedBackendId} name={volume.sharedBackendName} />
         </TableCell>
       ) : null}
+      <TableCell className="font-mono text-xs">{volume.mountPath ?? '未启用'}</TableCell>
       <TableCell>{formatCapacity(volume.sizeBytes)}</TableCell>
       <TableCell>{formatObservedUsage(volume.usedBytes)}</TableCell>
       <TableCell className="max-w-[16rem] whitespace-normal">
@@ -164,11 +162,6 @@ function SharedVolumeRow({
             {onInspect ? (
               <Button size="sm" variant="outline" onClick={() => onInspect(volume)}>
                 <Search className="h-3.5 w-3.5" />排障
-              </Button>
-            ) : null}
-            {onEdit ? (
-              <Button size="sm" variant="outline" onClick={() => onEdit(volume)}>
-                <Pencil className="h-3.5 w-3.5" />编辑/扩缩
               </Button>
             ) : null}
             {onDelete ? (
@@ -219,9 +212,9 @@ export function SharedVolumeDetailDialog({
             label="共享后端"
             value={<ResourceRef kind="shared-backend" id={volume.sharedBackendId} name={volume.sharedBackendName} />}
           />
-          <Field label="容量" value={formatCapacity(volume.sizeBytes)} />
+          <Field label="挂载点" value={volume.mountPath ?? '共享存储未启用'} />
+          <Field label="容量（平台自动调整）" value={formatCapacity(volume.sizeBytes)} />
           <Field label="已用" value={formatObservedUsage(volume.usedBytes)} />
-          <Field label="缩容能力" value={shrinkLabel(volume)} />
           <Field label="目录" value={volume.dirEnsured ? '已在机器上落地' : '尚未挂载过'} />
           <Field label="最近更新" value={relativeTime(volume.updatedAt)} />
           <div className="sm:col-span-2">

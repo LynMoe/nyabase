@@ -117,6 +117,20 @@ async function main(): Promise<void> {
       expectedRevision: server.revision,
       systemPoolId: pool.id,
     });
+    // Optional data disk: registered here, enabled (given a mount path) by the scenarios.
+    let dataPoolId: string | null = null;
+    const dataPoolName = opt(`${prefix}DATA_POOL`);
+    if (dataPoolName) {
+      const data = discovered.pools.find((entry) => entry.incusName === dataPoolName);
+      if (!data) throw new Error(`data pool ${dataPoolName} not found on ${slug}`);
+      if (data.quotaEffective !== true) {
+        throw new Error(`data pool ${dataPoolName} on ${slug} has no effective quota (see lab.env.example)`);
+      }
+      dataPoolId = (await api.patch<StoragePoolDto>(`/servers/${server.id}/storage-pools/${data.id}`, {
+        expectedRevision: data.revision,
+        registered: true,
+      })).id;
+    }
     servers.push({
       index,
       id: server.id,
@@ -124,6 +138,7 @@ async function main(): Promise<void> {
       ssh,
       poolId: pool.id,
       poolName: pool.incusName,
+      dataPoolId,
       sharedPoolId: null,
       gpuPci: opt(`${prefix}GPU_PCI`) || null,
     });

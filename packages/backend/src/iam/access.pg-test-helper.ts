@@ -254,32 +254,52 @@ export async function ensureServerGrant(database: Db, userId: string, serverId: 
   return existing?.id ?? grantServer(database, { user: userId }, serverId);
 }
 
-/** A data-disk quota on the pool, under the user's existing grant on the pool's server. */
+/** Default quota of test grants that do not care about one. */
+export const LARGE_GRANT_BYTES = 2 ** 50;
+
+/**
+ * A data-disk grant of the given pools (all on one server) sharing
+ * `limitBytes`, under the user's existing grant on that server. Returns the
+ * data-disk grant id.
+ */
 export async function grantPool(
   database: Db,
   who: Subject,
-  poolId: string,
-  limitBytes: number | null = null,
+  poolIds: string | readonly string[],
+  limitBytes: number = LARGE_GRANT_BYTES,
 ): Promise<string> {
-  const pool = await database.selectFrom('infra.storage_pools')
-    .select('server_id')
-    .where('id', '=', poolId)
-    .executeTakeFirstOrThrow();
+  const ids = typeof poolIds === 'string' ? [poolIds] : [...poolIds];
+  const pools = await database.selectFrom('infra.storage_pools')
+    .select(['id', 'server_id'])
+    .where('id', 'in', ids)
+    .execute();
+  const serverIds = new Set(pools.map((pool) => pool.server_id));
+  if (pools.length !== ids.length || serverIds.size !== 1) throw new Error('grantPool needs pools of one server');
+  const serverId = pools[0]!.server_id;
   const serverGrant = await database.selectFrom('iam.server_grants')
     .select('id')
     .where('user_id', '=', who.user)
-    .where('server_id', '=', pool.server_id)
+    .where('server_id', '=', serverId)
     .executeTakeFirst();
   if (!serverGrant) throw new Error('grantPool needs the user\'s server grant on the pool\'s server first');
   const id = randomUUID();
-  await database.insertInto('iam.storage_pool_grants').values({
+  await database.insertInto('iam.data_disk_grants').values({
     id,
     server_grant_id: serverGrant.id,
     user_id: who.user,
-    server_id: pool.server_id,
-    pool_id: poolId,
+    server_id: serverId,
     limit_bytes: limitBytes,
   }).execute();
+  for (const poolId of ids) {
+    await database.insertInto('iam.storage_pool_grants').values({
+      id: randomUUID(),
+      server_grant_id: serverGrant.id,
+      data_disk_grant_id: id,
+      user_id: who.user,
+      server_id: serverId,
+      pool_id: poolId,
+    }).execute();
+  }
   return id;
 }
 
@@ -287,7 +307,7 @@ export async function grantBackend(
   database: Db,
   who: Subject,
   backendId: string,
-  limitBytes: number | null,
+  limitBytes: number = LARGE_GRANT_BYTES,
   expiresAt: Date | null = null,
 ): Promise<void> {
   await database.insertInto('iam.shared_backend_grants').values({

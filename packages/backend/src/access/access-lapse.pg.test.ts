@@ -90,7 +90,6 @@ async function fixture(database: Kysely<NyabaseDatabase>, onDelete?: () => Promi
   // The real force-detach: it only writes rows (attachment, revision, intent).
   const attachments = new VolumeAttachmentsService(
     volumes,
-    {} as never,
     transactions,
     intents,
     database,
@@ -292,7 +291,7 @@ describePg('access lapse processor', () => {
       const backendId = await seedBackend(database);
       await grantServer(database, { user: userId }, serverId);
       await grantPool(database, { user: userId }, poolId);
-      await grantBackend(database, { user: userId }, backendId, null);
+      await grantBackend(database, { user: userId }, backendId);
       await seedBackendPool(database, serverId, backendId);
       const running = await seedContainer(database, {
         ownerId: userId, serverId, poolId, imageId, running: true,
@@ -342,7 +341,7 @@ describePg('access lapse processor', () => {
       const backendId = await seedBackend(database);
       await grantServer(database, { user: userId }, serverId, { expiresAt: days(30) });
       await grantPool(database, { user: userId }, poolId);
-      await grantBackend(database, { user: userId }, backendId, null);
+      await grantBackend(database, { user: userId }, backendId);
       await seedBackendPool(database, serverId, backendId);
       await seedVolume(database, { ownerId: userId, poolId, serverId });
       await seedVolume(database, { ownerId: userId, poolId: null, serverId: null, sharedBackendId: backendId });
@@ -367,7 +366,7 @@ describePg('access lapse processor', () => {
       await grantServer(database, { user: userId }, serverId, { expiresAt: days(-9) });
       // The data-disk grant expired with its server grant.
       await grantPool(database, { user: userId }, poolId);
-      await grantBackend(database, { user: userId }, backendId, null, days(-4));
+      await grantBackend(database, { user: userId }, backendId, undefined, days(-4));
       await seedBackendPool(database, serverId, backendId);
       await seedVolume(database, { ownerId: userId, poolId, serverId });
       await seedVolume(database, { ownerId: userId, poolId: null, serverId: null, sharedBackendId: backendId });
@@ -931,8 +930,8 @@ describePg('access lapse processor', () => {
       await seedBackendPool(database, serverId, backendId);
       await seedBackendPool(database, serverId, otherBackendId);
       await grantServer(database, { user: userId }, serverId);
-      await grantBackend(database, { user: userId }, backendId, null, days(-1));
-      await grantBackend(database, { user: userId }, otherBackendId, null);
+      await grantBackend(database, { user: userId }, backendId, undefined, days(-1));
+      await grantBackend(database, { user: userId }, otherBackendId);
       const mounted = await seedContainer(database, {
         ownerId: userId, serverId, poolId, imageId, running: true,
       });

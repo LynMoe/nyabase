@@ -28,7 +28,7 @@ function ServerGrantBadge({ grant, servers }: { grant: ServerGrantDto; servers: 
         <div className="space-y-0.5">
           <p className="font-medium">{serverName(grant.serverId, servers)} · 模板 {grant.bundleName}</p>
           {quotaSummaryParts(grant, server ?? {}).map((part) => <p key={part}>{part}</p>)}
-          <p>{dataDiskSummary(grant.storagePools)}</p>
+          <p>{dataDiskSummary(grant.dataDisks)}</p>
           <p className="text-muted-foreground">到期 {expiryLabel(grant.expiresAt)}</p>
         </div>
       )}

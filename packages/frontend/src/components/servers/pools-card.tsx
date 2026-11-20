@@ -15,6 +15,8 @@ import { api } from '../../lib/api.js';
 import { errorMessage } from '../../lib/api-error.js';
 import { TechnicalId } from '../refs/technical-id.js';
 import { storagePoolSourceKind } from '../../lib/storage-shrink.js';
+import { mountUnsupportedReason, poolDisplayName as poolLabel } from '../../lib/data-disks.js';
+import { DiskMountDialog } from '../storage/disk-mount-dialog.js';
 import { Badge } from '../ui/badge.js';
 import {
   Dialog,
@@ -32,10 +34,6 @@ import { useHasRole } from '../../lib/use-role.js';
 import { usedTotalLabel } from '../../lib/utils.js';
 import { Label } from '../ui/label.js';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../ui/select.js';
-
-function poolLabel(pool: StoragePoolDto): string {
-  return pool.displayName ?? pool.incusName;
-}
 
 export function PoolsCard({ server }: { server: ServerDto }) {
   const canManageStoragePools = useHasRole(Role.Admin);
@@ -91,9 +89,9 @@ export function PoolsCard({ server }: { server: ServerDto }) {
           <p className="text-sm text-muted-foreground">尚未发现本地存储池。</p>
         ) : (
           <div className="rounded-md border overflow-x-auto">
-            <table className="w-full min-w-[860px] text-sm">
+            <table className="w-full min-w-[980px] text-sm">
               <thead className="bg-muted/50 text-left text-xs text-muted-foreground">
-                <tr><th className="px-3 py-2">池</th><th className="px-3 py-2">位置</th><th className="px-3 py-2">容量</th><th className="px-3 py-2">能力</th><th className="px-3 py-2">登记</th><th className="px-3 py-2">操作</th></tr>
+                <tr><th className="px-3 py-2">池</th><th className="px-3 py-2">位置</th><th className="px-3 py-2">容量</th><th className="px-3 py-2">能力</th><th className="px-3 py-2">数据盘</th><th className="px-3 py-2">登记</th><th className="px-3 py-2">操作</th></tr>
               </thead>
               <tbody>
                 {pools.map((pool) => (
@@ -133,6 +131,7 @@ export function StoragePoolRow({
 }) {
   const [confirmUnregister, setConfirmUnregister] = useState(false);
   const [remarkOpen, setRemarkOpen] = useState(false);
+  const [mountOpen, setMountOpen] = useState(false);
   const [remark, setRemark] = useState(pool.displayName ?? '');
   const patch = useMutation({
     mutationFn: (registered: boolean) => api.patch<StoragePoolDto>(`/servers/${pool.serverId}/storage-pools/${pool.id}`, {
@@ -190,8 +189,17 @@ export function StoragePoolRow({
       </td>
       <td className="px-3 py-2">{usedTotalLabel(pool.usedBytes, pool.totalBytes)}<div className="text-xs text-muted-foreground">{pool.quotaEffective === null ? '配额未知' : pool.quotaEffective ? '配额生效' : '配额未生效'}</div></td>
       <td className="px-3 py-2"><div className="flex flex-wrap gap-1"><Badge variant={capability.growOnline ? 'success' : 'secondary'}>在线扩容</Badge><Badge variant={capability.shrinkOnline ? 'success' : capability.shrinkNever ? 'destructive' : 'warning'}>{capability.shrinkOnline ? '在线缩容' : capability.shrinkNever ? '不可缩容' : '需停机/卸载'}</Badge>{pool.rootDiskCapable && <Badge variant="outline">系统盘</Badge>}</div></td>
+      <td className="px-3 py-2" data-testid="storage-pool-mount">
+        {pool.mountPath ? <span className="font-mono text-xs">{pool.mountPath}</span> : <span className="text-muted-foreground">未启用</span>}
+        {pool.maintenance ? <Badge variant="warning" className="ml-2">维护中</Badge> : null}
+      </td>
       <td className="px-3 py-2">{pool.registered ? '已登记' : '未登记'}</td>
-      <td className="px-3 py-2">
+      <td className="space-x-2 whitespace-nowrap px-3 py-2">
+        {canManageStoragePools && !pool.shareable ? (
+          <Button size="sm" variant="outline" onClick={() => setMountOpen(true)} data-testid="storage-pool-mount-edit">
+            数据盘
+          </Button>
+        ) : null}
         <Button
           size="sm"
           variant={pool.registered ? 'outline' : 'default'}
@@ -205,7 +213,9 @@ export function StoragePoolRow({
             <DialogHeader>
               <DialogTitle>取消登记存储池？</DialogTitle>
               <DialogDescription>
-                已有数据卷不受影响。
+                {pool.mountPath
+                  ? '取消登记会同时停用这块数据盘：平台不再为用户建卷或新增挂载，已有的数据卷保留。'
+                  : '已有数据卷不受影响。'}
               </DialogDescription>
             </DialogHeader>
             <DialogFooter>
@@ -216,6 +226,21 @@ export function StoragePoolRow({
             </DialogFooter>
           </DialogContent>
         </Dialog>
+        {mountOpen ? (
+          <DiskMountDialog
+            title={`数据盘设置：${poolLabel(pool)}`}
+            reach="在这台服务器上"
+            current={pool}
+            unsupportedReason={mountUnsupportedReason(pool)}
+            previewPath={`/servers/${pool.serverId}/storage-pools/${pool.id}/mount-preview`}
+            save={(change) => api.patch<StoragePoolDto>(`/servers/${pool.serverId}/storage-pools/${pool.id}`, {
+              expectedRevision: pool.revision,
+              ...change,
+            })}
+            onSaved={onUpdated}
+            onClose={() => setMountOpen(false)}
+          />
+        ) : null}
         <Dialog open={remarkOpen} onOpenChange={(open) => { if (!open) setRemarkOpen(false); }}>
           <DialogContent>
             <DialogHeader>

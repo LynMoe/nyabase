@@ -24,6 +24,8 @@ interface PoolRowShape {
   used_bytes: string | number | null;
   quota_effective: boolean | null;
   registered: boolean;
+  mount_path: string | null;
+  maintenance: boolean;
   last_observed_at: Date | string | null;
   revision: string | number;
 }
@@ -45,6 +47,8 @@ function toPoolDto(row: PoolRowShape, source: string | null): StoragePoolDto {
     usedBytes: row.used_bytes === null ? null : numberValue(row.used_bytes),
     quotaEffective: row.quota_effective,
     registered: row.registered,
+    mountPath: row.mount_path,
+    maintenance: row.maintenance,
     capability: storagePoolCapability(
       row.resize_family as StoragePoolResizeFamily,
       row.quota_effective,

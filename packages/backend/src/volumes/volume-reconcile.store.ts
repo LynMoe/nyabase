@@ -34,6 +34,7 @@ export interface VolumeRow extends VolumeRecord {
   driver: VolumeDriver;
   resize_family: 'quota_online' | 'block_backed';
   block_filesystem: string | null;
+  quota_effective: boolean | null;
   target_server_id: string;
   catalog_state: 'ensuring' | 'present';
   placement_pool_id: string;
@@ -331,6 +332,7 @@ export class VolumeReconcileStore {
         'pp.driver as driver',
         'pp.resize_family as resize_family',
         'pp.block_filesystem as block_filesystem',
+        'pp.quota_effective as quota_effective',
       ])
       .where('pl.volume_id', '=', volumeId)
       .where('pl.server_id', '=', intentServerId)
@@ -347,6 +349,7 @@ export class VolumeReconcileStore {
       driver: placement.driver,
       resize_family: placement.resize_family,
       block_filesystem: placement.block_filesystem,
+      quota_effective: placement.quota_effective,
       target_server_id: intentServerId,
       catalog_state: placement.catalog_state,
       placement_pool_id: placement.placement_pool_id,

@@ -1,3 +1,4 @@
+import { DiskChangeNotifier } from '../storage-pools/disk-mounts.js';
 import { randomUUID } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
@@ -106,6 +107,7 @@ describePg('ServerHealthService PostgreSQL inventory and status', () => {
           database,
           {} as never,
           { append: vi.fn(), log: vi.fn() } as never,
+          new DiskChangeNotifier(),
         ),
         { registerServerHealth: vi.fn() } as never,
         { watch: vi.fn() } as never,

@@ -1,3 +1,4 @@
+import { DiskChangeNotifier } from '../storage-pools/disk-mounts.js';
 import { describe, expect, it, vi } from 'vitest';
 import { ConflictException, ForbiddenException } from '@nestjs/common';
 import { FailureCode, Role } from '@nyabase/common';
@@ -84,6 +85,7 @@ function createService(
       database as never,
       storagePools as never,
       { append: vi.fn(), log: vi.fn() } as never,
+      new DiskChangeNotifier(),
     ),
     repository,
     transactions,

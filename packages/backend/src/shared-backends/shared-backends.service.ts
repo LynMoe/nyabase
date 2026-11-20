@@ -24,6 +24,8 @@ import { committedVolumeBytesSql } from '../platform/persistence-pg/committed-by
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
 import { listSharedBackendAccess } from '../iam/effective-access.js';
 import { AuditService } from '../iam/audit.service.js';
+import { afterCommit } from '../platform/post-commit.js';
+import { assertMountPathFree, DiskChangeNotifier } from '../storage-pools/disk-mounts.js';
 import { assertListScope, hasRole, type Actor, requireUserId } from '../iam/actor.js';
 
 function normalizedIdentity(value: string): string {
@@ -70,6 +72,7 @@ export class SharedBackendsService {
     @Inject(PG_DATABASE) private readonly database: Kysely<NyabaseDatabase>,
     private readonly storagePools: SharedBackendExecutorsService,
     private readonly audit: AuditService,
+    private readonly diskChanges: DiskChangeNotifier,
   ) {}
 
   /**
@@ -150,8 +153,7 @@ export class SharedBackendsService {
     cephFsid: string;
     overcommitRatio: number;
     note?: string | null;
-    maxVolumesPerUser?: number | null;
-    defaultMountPath?: string | null;
+    mountPath?: string | null;
   }): Promise<SharedBackendDto> {
     const identityKey = normalizedIdentity(input.identityKey);
     const fsid = normalizedFsid(input.cephFsid);
@@ -188,25 +190,31 @@ export class SharedBackendsService {
               },
             });
           }
+          const newId = randomUUID();
+          if (input.mountPath) await assertMountPathFree(transaction, input.mountPath, { kind: 'backend', id: newId });
           const row = await this.repository.insert({
-            id: randomUUID(),
+            id: newId,
             name: input.name,
             displayName: input.displayName ?? null,
             identityKey,
             cephFsid: fsid,
             overcommitRatio: input.overcommitRatio,
             note: input.note ?? null,
-            maxVolumesPerUser: input.maxVolumesPerUser ?? null,
-            defaultMountPath: input.defaultMountPath ?? null,
+            mountPath: input.mountPath ?? null,
           }, transaction);
           await this.audit.append(transaction, actorId, AuditAction.CreateSharedBackend, row.id, 'shared_backend', {
             name: input.name,
             identityKey,
             cephFsid: fsid,
             overcommitRatio: input.overcommitRatio,
-            maxVolumesPerUser: input.maxVolumesPerUser ?? null,
-            defaultMountPath: input.defaultMountPath ?? null,
+            mountPath: input.mountPath ?? null,
           });
+          if (input.mountPath) {
+            afterCommit(transaction, () => this.diskChanges.notify({
+              disk: { kind: 'backend', id: row.id },
+              maintenanceChanged: false,
+            }));
+          }
           return { row, created: true };
         },
         { isolationLevel: 'serializable', maxAttempts: 5 },
@@ -240,8 +248,8 @@ export class SharedBackendsService {
       cephFsid?: string;
       overcommitRatio?: number;
       note?: string | null;
-      maxVolumesPerUser?: number | null;
-      defaultMountPath?: string | null;
+      mountPath?: string | null;
+      maintenance?: boolean;
     },
   ): Promise<SharedBackendDto> {
     const updated = await this.transactions.run(
@@ -273,6 +281,9 @@ export class SharedBackendsService {
             });
           }
         }
+        if (input.mountPath) await assertMountPathFree(transaction, input.mountPath, { kind: 'backend', id });
+        const mountChanged = input.mountPath !== undefined && input.mountPath !== current.mount_path;
+        const maintenanceChanged = input.maintenance !== undefined && input.maintenance !== current.maintenance;
         const row = await this.repository.patch(id, input.expectedRevision, {
           ...(input.displayName !== undefined ? { display_name: input.displayName } : {}),
           ...(input.cephFsid !== undefined ? { ceph_fsid: requestedFsid } : {}),
@@ -280,10 +291,8 @@ export class SharedBackendsService {
             ? { overcommit_ratio: input.overcommitRatio }
             : {}),
           ...(input.note !== undefined ? { note: input.note } : {}),
-          ...(input.maxVolumesPerUser !== undefined
-            ? { max_volumes_per_user: input.maxVolumesPerUser }
-            : {}),
-          ...(input.defaultMountPath !== undefined ? { default_mount_path: input.defaultMountPath } : {}),
+          ...(mountChanged ? { mount_path: input.mountPath } : {}),
+          ...(maintenanceChanged ? { maintenance: input.maintenance } : {}),
         }, transaction);
         if (!row) throw new ConflictException({ code: FailureCode.RevisionConflict });
         await this.audit.append(transaction, actorId, AuditAction.UpdateSharedBackend, id, 'shared_backend', {
@@ -291,13 +300,15 @@ export class SharedBackendsService {
           ...(input.cephFsid !== undefined ? { cephFsid: requestedFsid, previousCephFsid: current.ceph_fsid } : {}),
           ...(input.overcommitRatio !== undefined ? { overcommitRatio: input.overcommitRatio } : {}),
           ...(input.note !== undefined && input.note !== current.note ? { noteChanged: true } : {}),
-          ...(input.maxVolumesPerUser !== undefined && input.maxVolumesPerUser !== current.max_volumes_per_user
-            ? { maxVolumesPerUser: input.maxVolumesPerUser, previousMaxVolumesPerUser: current.max_volumes_per_user }
-            : {}),
-          ...(input.defaultMountPath !== undefined && input.defaultMountPath !== current.default_mount_path
-            ? { defaultMountPath: input.defaultMountPath, previousDefaultMountPath: current.default_mount_path }
-            : {}),
+          ...(mountChanged ? { mountPath: input.mountPath, previousMountPath: current.mount_path } : {}),
+          ...(maintenanceChanged ? { maintenance: input.maintenance } : {}),
         });
+        if (mountChanged || maintenanceChanged) {
+          afterCommit(transaction, () => this.diskChanges.notify({
+            disk: { kind: 'backend', id },
+            maintenanceChanged,
+          }));
+        }
         return row;
       },
       { isolationLevel: 'serializable', maxAttempts: 5 },
@@ -364,8 +375,8 @@ export class SharedBackendsService {
     used_bytes: string | number | null;
     overcommit_ratio: string | number;
     note: string | null;
-    max_volumes_per_user: number | null;
-    default_mount_path: string | null;
+    mount_path: string | null;
+    maintenance: boolean;
     revision: string | number;
     created_at: Date | string;
     updated_at: Date | string;
@@ -386,8 +397,8 @@ export class SharedBackendsService {
       usedBytes,
       overcommitRatio: numberValue(row.overcommit_ratio),
       note: row.note,
-      maxVolumesPerUser: row.max_volumes_per_user,
-      defaultMountPath: row.default_mount_path,
+      mountPath: row.mount_path,
+      maintenance: row.maintenance,
       serverIds: row.server_ids ?? [],
       hasOnlineExecutor: row.has_online_executor === true,
       revision: numberValue(row.revision),

@@ -45,6 +45,9 @@ const FAILURE_CODE_ZH: Partial<Record<string, string>> = {
   [FailureCode.MemoryGrantExceeded]: '内存授权不足',
   [FailureCode.ServerGrantExists]: '该用户在此服务器上已有授权模板',
   [FailureCode.ServerGrantRequired]: '请先为该用户分配这台服务器的授权模板',
+  [FailureCode.DataDiskPoolGranted]: '部分盘已属于该用户的其他数据盘授权',
+  [FailureCode.StorageMountPathConflict]: '挂载点与其他盘的挂载点相同或互相嵌套',
+  [FailureCode.StorageMountUnsupported]: '该存储池不能作为数据盘（需已登记、在线配额且配额生效）',
   [FailureCode.GrantBundleConflict]: '该服务器上已有同名授权模板',
   [FailureCode.GrantBundleInUse]: '授权模板仍有用户在使用',
   [FailureCode.StoragePoolExhausted]: '存储池容量不足',
@@ -66,6 +69,7 @@ const FAILURE_CODE_ZH: Partial<Record<string, string>> = {
   [FailureCode.VolumeShrinkUnsupported]: '该池不支持缩容',
   [FailureCode.VolumeUsageUnknown]: '已用量未知，无法缩容',
   [FailureCode.VolumeRequiresUnbind]: '请先从容器卸载该卷',
+  [FailureCode.VolumeStillGranted]: '仍有授权覆盖该盘，请先撤销授权',
   [FailureCode.VolumeDeleteBackendUnreachable]: '没有在线服务器可以访问该共享存储，请联系管理员',
   [FailureCode.VolumeDetachRequiresStop]: '请先停止容器',
   [FailureCode.VolumeCrossServerDenied]: '不允许跨服务器挂载该卷',
@@ -194,6 +198,27 @@ export function intentStatusLabel(status: string): string {
 
 export function intentKindLabel(kind: string): string {
   return labelOrRaw(INTENT_KIND_ZH, kind);
+}
+
+/** Container updates the platform runs for storage, by their `request.operation`. */
+const INTENT_OPERATION_ZH: Record<string, string> = {
+  mount_volumes: '挂载数据盘',
+  storage_maintenance: '数据盘维护',
+  ensure_attachment: '挂载数据卷',
+  detach_volume: '卸载数据卷',
+};
+
+/**
+ * What an intent does, in words: its kind, sharpened by the request where the
+ * kind alone says little (a container update that mounts the user's disks, a
+ * volume resize made by the quota balancer).
+ */
+export function intentLabel(intent: { kind: string; requestSummary?: Record<string, unknown> | null }): string {
+  const request = intent.requestSummary ?? {};
+  if (intent.kind === 'volume.resize' && request.source === 'quota_balancer') return '自动调整数据卷额度';
+  const operation = typeof request.operation === 'string' ? INTENT_OPERATION_ZH[request.operation] : undefined;
+  if (intent.kind === 'container.update' && operation) return operation;
+  return intentKindLabel(intent.kind);
 }
 
 export function intentResourceTypeLabel(resourceType: string): string {

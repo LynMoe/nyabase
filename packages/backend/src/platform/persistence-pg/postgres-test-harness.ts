@@ -30,6 +30,8 @@ function identifier(value: string): string {
 export async function withPostgresTestDatabase<T>(
   work: (fixture: PostgresTestDatabase) => Promise<T>,
   baseConnectionString = process.env.NYABASE_TEST_DATABASE_URL,
+  /** Another migrations directory (a migration test applies a prefix first). */
+  migrationsDirectory = pgMigrationsDirectory(),
 ): Promise<T> {
   if (!baseConnectionString) {
     throw new Error('NYABASE_TEST_DATABASE_URL is required for PostgreSQL integration tests');
@@ -53,7 +55,7 @@ export async function withPostgresTestDatabase<T>(
     pool.on('connect', (client) => {
       client.on('error', () => undefined);
     });
-    await runSqlMigrations(pool, pgMigrationsDirectory());
+    await runSqlMigrations(pool, migrationsDirectory);
     database = new Kysely<NyabaseDatabase>({
       dialect: new PostgresDialect({ pool }),
     });
