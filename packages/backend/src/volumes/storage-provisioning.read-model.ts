@@ -103,43 +103,69 @@ async function loadDisks(executor: Executor, capacity: boolean) {
   return { disks, pools: new Map(pools.map((pool) => [pool.id, pool])), rootByOwnerPool };
 }
 
-/** Current coverage: one group per data-disk grant, one per shared backend grant. */
+/**
+ * Current coverage: one group per server grant (its data disks share its disk
+ * total less the owner's system disks on the server), one per shared backend
+ * grant.
+ */
 async function loadGrants(executor: Executor, owner: string | undefined): Promise<PlanGrant[]> {
-  const [poolAccess, backendAccess] = await Promise.all([
+  const [poolAccess, serverAccess, roots, backendAccess] = await Promise.all([
     executor.selectFrom('iam.effective_pool_access')
-      .select(['user_id', 'pool_id', 'limit_bytes', 'data_disk_grant_id'])
+      .select(['user_id', 'pool_id', 'cap_bytes', 'server_id', 'server_grant_id'])
       .$if(owner !== undefined, (query) => query.where('user_id', '=', owner!))
-      .orderBy('data_disk_grant_id')
+      .orderBy('server_grant_id')
       .orderBy('pool_id')
+      .execute(),
+    executor.selectFrom('iam.effective_server_access')
+      .select(['user_id', 'server_id', 'disk_bytes'])
+      .$if(owner !== undefined, (query) => query.where('user_id', '=', owner!))
+      .execute(),
+    executor.selectFrom('control.containers')
+      .select(['owner_id', 'server_id', sql<string>`sum(${committedRootBytesSql()})`.as('bytes')])
+      .where('lifecycle_phase', 'not in', ['failed', 'deleting'])
+      .$if(owner !== undefined, (query) => query.where('owner_id', '=', owner!))
+      .groupBy(['owner_id', 'server_id'])
       .execute(),
     executor.selectFrom('iam.effective_shared_backend_access')
       .select(['user_id', 'shared_backend_id', 'limit_bytes'])
       .$if(owner !== undefined, (query) => query.where('user_id', '=', owner!))
       .execute(),
   ]);
-  const grants = new Map<string, PlanGrant>();
+  const totals = new Map(serverAccess.map((row) => [`${row.user_id}\0${row.server_id}`, numberValue(row.disk_bytes)]));
+  const rootBytes = new Map(roots.map((row) => [`${row.owner_id}\0${row.server_id}`, numberValue(row.bytes)]));
+  const grants = new Map<string, PlanGrant & { ceilings: Map<string, number | null> }>();
   for (const row of poolAccess) {
-    const grant = grants.get(row.data_disk_grant_id) ?? {
-      key: row.data_disk_grant_id,
-      userId: row.user_id,
-      limitBytes: numberValue(row.limit_bytes),
-      kind: 'pool' as const,
-      diskIds: [],
-    };
+    const scope = `${row.user_id}\0${row.server_id}`;
+    const total = totals.get(scope);
+    if (total === undefined) continue;
+    let grant = grants.get(row.server_grant_id);
+    if (!grant) {
+      const root = rootBytes.get(scope) ?? 0;
+      grant = {
+        key: row.server_grant_id,
+        userId: row.user_id,
+        limitBytes: Math.max(0, total - root),
+        kind: 'pool',
+        diskIds: [],
+        ceilings: new Map(),
+        quota: { serverId: row.server_id, rootBytes: root },
+      };
+      grants.set(row.server_grant_id, grant);
+    }
     grant.diskIds.push(row.pool_id);
-    grants.set(row.data_disk_grant_id, grant);
+    grant.ceilings.set(row.pool_id, row.cap_bytes === null ? null : numberValue(row.cap_bytes));
   }
+  const result: PlanGrant[] = [...grants.values()];
   for (const row of backendAccess) {
-    const key = backendGrantKey(row.user_id, row.shared_backend_id);
-    grants.set(key, {
-      key,
+    result.push({
+      key: backendGrantKey(row.user_id, row.shared_backend_id),
       userId: row.user_id,
       limitBytes: numberValue(row.limit_bytes),
       kind: 'backend',
       diskIds: [row.shared_backend_id],
     });
   }
-  return [...grants.values()];
+  return result;
 }
 
 /** `${backendId}\0${serverId}` → the backend's executor pool on the server, where it has exactly one. */

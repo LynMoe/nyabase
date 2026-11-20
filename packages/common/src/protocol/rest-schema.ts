@@ -575,14 +575,33 @@ const zGrantCpuCores = z.number().int().min(1).max(MAX_SERVER_LOGICAL_CPU_ID + 1
 /** GPUs picked from the server's cards; null = every card, 0 = none. */
 const zGrantGpuCount = z.number().int().min(0).max(MAX_GPU_DEVICES).nullable();
 
+/** The most data disks one bundle or grant lists. */
+export const MAX_GRANT_DATA_DISKS = 64;
+
+/** A data disk of a bundle or grant: a local pool of its server, with an optional ceiling (null = only the total). */
+export const zGrantDataDisk = z.object({
+  poolId: zResourceIdentity,
+  capBytes: zNullableBytes,
+}).strict();
+
+export const zGrantDataDisks = z.array(zGrantDataDisk).max(MAX_GRANT_DATA_DISKS)
+  .refine((disks) => new Set(disks.map((disk) => disk.poolId)).size === disks.length, 'Data disks must not repeat');
+
 /** The server quotas a bundle defines and a server grant may override. */
 export const zGrantBundleQuotas = z.object({
   /** Whole logical CPUs pinned for the user on this server; null = every unreserved CPU. */
   cpuCores: zGrantCpuCores,
   memBytes: zNullableBytes,
-  /** Sum of the user's system disks on the server. */
+  /**
+   * The user's system disks (committed size) and data disks (their data) on
+   * the server together. Never unlimited.
+   */
+  diskBytes: zPositiveBytes,
+  /** Ceiling of the system disks alone; null = only `diskBytes`. */
   rootDiskBytes: zNullableBytes,
   gpuCount: zGrantGpuCount,
+  /** The data disks: each gets one platform-sized volume of the user, mounted in all their containers on the server. */
+  dataDisks: zGrantDataDisks,
 }).strict();
 
 export const zGrantBundleName = z.string().trim().min(1).max(64);
@@ -604,7 +623,11 @@ export const zPatchGrantBundleRequest = zPreviewGrantBundleRequest.extend({
   'At least one bundle field is required',
 );
 
-/** A key present overrides that bundle field for this user (null = unlimited); an absent key follows the bundle. */
+/**
+ * A key present overrides that bundle field for this user (null = unlimited
+ * where the field allows it); an absent key follows the bundle. `dataDisks`
+ * overrides the whole list.
+ */
 export const zServerGrantOverrides = zGrantBundleQuotas.partial();
 
 export const zPutServerGrantRequest = z.object({
@@ -622,28 +645,6 @@ export const zPatchServerGrantRequest = z.object({
 }).strict().refine(
   (value) => value.overrides !== undefined || value.expiresAt !== undefined,
   'At least one grant field is required',
-);
-
-/** Data disks of one server the user holds a grant for, sharing one quota. */
-const zDataDiskPoolIds = z.array(zResourceIdentity).min(1).max(64)
-  .refine((ids) => new Set(ids).size === ids.length, 'Data disks must not repeat');
-
-export const zCreateDataDiskGrantRequest = z.object({
-  serverId: zResourceIdentity,
-  poolIds: zDataDiskPoolIds,
-  limitBytes: zPositiveBytes,
-  /** Take disks that belong to another data-disk grant of the user out of it. */
-  movePools: z.boolean().optional(),
-}).strict();
-
-export const zPatchDataDiskGrantRequest = z.object({
-  limitBytes: zPositiveBytes.optional(),
-  /** The complete new set of disks: disks left out are revoked unless another grant takes them. */
-  poolIds: zDataDiskPoolIds.optional(),
-  movePools: z.boolean().optional(),
-}).strict().refine(
-  (value) => value.limitBytes !== undefined || value.poolIds !== undefined,
-  'At least one data-disk grant field is required',
 );
 
 export const zPutSharedBackendGrantRequest = z.object({
@@ -776,8 +777,7 @@ export type PatchGrantBundleRequest = z.infer<typeof zPatchGrantBundleRequest>;
 export type ServerGrantOverrides = z.infer<typeof zServerGrantOverrides>;
 export type PutServerGrantRequest = z.input<typeof zPutServerGrantRequest>;
 export type PatchServerGrantRequest = z.infer<typeof zPatchServerGrantRequest>;
-export type CreateDataDiskGrantRequest = z.infer<typeof zCreateDataDiskGrantRequest>;
-export type PatchDataDiskGrantRequest = z.infer<typeof zPatchDataDiskGrantRequest>;
+export type GrantDataDisk = z.infer<typeof zGrantDataDisk>;
 export type PutSharedBackendGrantRequest = z.infer<typeof zPutSharedBackendGrantRequest>;
 export type IntentListQuery = z.infer<typeof zIntentListQuery>;
 export type ListScope = z.infer<typeof zListScope>;

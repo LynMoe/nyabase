@@ -36,9 +36,17 @@ import {
   pickGrantGpus,
   quotaColumns,
   quotasFromColumns,
+  sameDataDisks,
   type BundleRow,
 } from './grant-fields.js';
+import {
+  assertDataDisksOnServer,
+  loadBundleDataDisks,
+  loadGrantDataDisks,
+  writeBundleDataDisks,
+} from './grant-data-disks.js';
 import { loadServerUsageByUser } from './grant-usage.read-model.js';
+import { diskEntryWarnings } from './grant-preview.js';
 
 type Executor = Kysely<NyabaseDatabase> | Transaction<NyabaseDatabase>;
 
@@ -54,10 +62,13 @@ function bundleConflict(): ConflictException {
 }
 
 /**
- * Bundles: named server quotas bound to one server. A server grant follows
- * every bundle field it does not override, so editing a bundle takes effect
- * at once for those grants (the effective view reads the bundle); the preview
- * shows beforehand which grants change and which keep an override.
+ * Bundles: named server quotas and data disks bound to one server. A server
+ * grant follows every bundle field it does not override, so editing a bundle
+ * takes effect at once for those grants (the effective views read the
+ * bundle): a data disk added to the list is provisioned for every follower,
+ * one taken out lapses for them. The preview shows beforehand which grants
+ * change, which keep an override, and what users hold that a smaller bundle
+ * no longer covers.
  */
 @Injectable()
 export class GrantBundlesService {
@@ -79,12 +90,12 @@ export class GrantBundlesService {
         .as('grant_count'));
     if (serverId !== undefined) query = query.where('bundle.server_id', '=', serverId);
     const rows = await query.orderBy('server.name').orderBy('bundle.name').orderBy('bundle.id').execute();
-    return rows.map((row) => bundleDto(row, Number(row.grant_count ?? 0)));
+    const disks = await loadBundleDataDisks(this.database, rows.map((row) => row.id));
+    return rows.map((row) => bundleDto(row, Number(row.grant_count ?? 0), disks.get(row.id) ?? []));
   }
 
   async get(id: string): Promise<GrantBundleDto> {
-    const row = await this.requireBundle(this.database, id);
-    return bundleDto(row, await this.grantCount(this.database, id));
+    return this.dto(this.database, await this.requireBundle(this.database, id));
   }
 
   async create(actor: Actor, input: CreateGrantBundleRequest): Promise<GrantBundleDto> {
@@ -98,6 +109,7 @@ export class GrantBundlesService {
           .executeTakeFirst();
         if (!server) throw new NotFoundException('Server not found');
         await this.assertGpuApplicable(transaction, input.serverId, input.gpuCount);
+        await assertDataDisksOnServer(transaction, input.serverId, input.dataDisks);
         const saved = await transaction.insertInto('iam.grant_bundles')
           .values({
             id: randomUUID(),
@@ -108,6 +120,7 @@ export class GrantBundlesService {
           })
           .returningAll()
           .executeTakeFirstOrThrow();
+        await writeBundleDataDisks(transaction, { id: saved.id, serverId: saved.server_id }, input.dataDisks);
         await this.audit.append(
           transaction,
           actor.userId,
@@ -118,7 +131,7 @@ export class GrantBundlesService {
         );
         return saved;
       });
-      return bundleDto(row, 0);
+      return this.dto(this.database, row);
     } catch (error) {
       if (isUniqueViolation(error)) throw bundleConflict();
       throw error;
@@ -131,38 +144,44 @@ export class GrantBundlesService {
       const row = await this.transactions.run(async (transaction) => {
         await assertActorRole(transaction, requireUserId(actor), Role.UserAdmin);
         const current = await this.requireBundle(transaction, id, { lock: true });
+        const before = await this.dto(transaction, current);
         if (Number(current.revision) !== expectedRevision) {
           throw new ConflictException({
             code: FailureCode.RevisionConflict,
             message: 'The bundle changed; review the preview again',
-            current: bundleDto(current, await this.grantCount(transaction, id)),
+            current: before,
           });
         }
-        const next = { ...quotasFromColumns(current), ...changes };
-        if (changes.gpuCount !== undefined) {
+        const { dataDisks, name, ...scalars } = changes;
+        const next = { ...quotasFromColumns(current), ...scalars };
+        if (scalars.gpuCount !== undefined) {
           await this.assertGpuApplicable(transaction, current.server_id, next.gpuCount);
         }
         const saved = await transaction.updateTable('iam.grant_bundles')
           .set({
-            ...(changes.name === undefined ? {} : { name: changes.name }),
+            ...(name === undefined ? {} : { name }),
             ...quotaColumns(next),
             revision: String(expectedRevision + 1),
           })
           .where('id', '=', id)
           .returningAll()
           .executeTakeFirstOrThrow();
+        if (dataDisks !== undefined) {
+          await assertDataDisksOnServer(transaction, current.server_id, dataDisks);
+          await writeBundleDataDisks(transaction, { id, serverId: current.server_id }, dataDisks);
+        }
         await this.audit.append(
           transaction,
           actor.userId,
           AuditAction.UpdateGrantBundle,
           id,
           'grant_bundle',
-          { serverId: current.server_id, before: bundleDto(current, 0), changes },
+          { serverId: current.server_id, before: { ...before, grantCount: undefined }, changes },
         );
         afterCommit(transaction, () => this.changes.notify());
         return saved;
       });
-      return bundleDto(row, await this.grantCount(this.database, id));
+      return this.dto(this.database, row);
     } catch (error) {
       if (isUniqueViolation(error)) throw bundleConflict();
       throw error;
@@ -203,12 +222,15 @@ export class GrantBundlesService {
   /** What a proposed change would do to every grant of the bundle, without changing anything. */
   async preview(id: string, input: PreviewGrantBundleRequest): Promise<GrantBundlePreviewDto> {
     const current = await this.requireBundle(this.database, id);
-    const before = quotasFromColumns(current);
+    const bundle = await this.dto(this.database, current);
+    const before: GrantBundleQuotas = { ...quotasFromColumns(current), dataDisks: bundle.dataDisks };
     const after: GrantBundleQuotas = { ...before };
     for (const field of GRANT_QUOTA_FIELDS) {
-      if (input[field.key] !== undefined) after[field.key] = input[field.key] ?? null;
+      if (input[field.key] !== undefined) (after as Record<string, unknown>)[field.key] = input[field.key] ?? null;
     }
+    if (input.dataDisks !== undefined) after.dataDisks = input.dataDisks;
     const changed = GRANT_QUOTA_FIELDS.filter((field) => before[field.key] !== after[field.key]);
+    const disksChanged = !sameDataDisks(before.dataDisks, after.dataDisks);
     const grants = await this.database.selectFrom('iam.server_grants as grant')
       .innerJoin('iam.users as user', 'user.id', 'grant.user_id')
       .select([
@@ -217,6 +239,7 @@ export class GrantBundlesService {
         'grant.overridden',
         'grant.cpu_cores',
         'grant.mem_bytes',
+        'grant.disk_bytes',
         'grant.root_disk_bytes',
         'grant.gpu_count',
         'user.username',
@@ -230,14 +253,13 @@ export class GrantBundlesService {
       .select(['cpu_topology', 'reserved_cpus', 'observed_gpu_pci_addresses'])
       .where('id', '=', current.server_id)
       .executeTakeFirstOrThrow();
-    const usage = await loadServerUsageByUser(
-      this.database,
-      current.server_id,
-      grants.map((grant) => grant.user_id),
-    );
+    const [usage, ownDisks] = await Promise.all([
+      loadServerUsageByUser(this.database, current.server_id, grants.map((grant) => grant.user_id)),
+      loadGrantDataDisks(this.database, grants.map((grant) => grant.id)),
+    ]);
     const entries: GrantBundlePreviewEntryDto[] = [];
     for (const grant of grants) {
-      const overrides = overridesFromColumns(grant);
+      const overrides = overridesFromColumns(grant, ownDisks.get(grant.id) ?? []);
       const effectiveBefore = effectiveQuotas(before, overrides);
       const effectiveAfter = effectiveQuotas(after, overrides);
       const entry: GrantBundlePreviewEntryDto = {
@@ -247,8 +269,12 @@ export class GrantBundlesService {
         displayName: grant.display_name,
         changes: [],
         overridden: [],
+        dataDisks: disksChanged ? (overrides.dataDisks === undefined ? 'follows' : 'overridden') : null,
         memBytesInUse: null,
         rootDiskBytesInUse: null,
+        diskBytesInUse: null,
+        dataDisksRevoked: [],
+        dataDisksOverCap: [],
         gpusInUseRemoved: [],
       };
       for (const field of changed) {
@@ -258,17 +284,18 @@ export class GrantBundlesService {
           entry.changes.push({ field: field.key, before: before[field.key], after: after[field.key] });
         }
       }
-      if (entry.changes.length === 0 && entry.overridden.length === 0) continue;
+      if (entry.changes.length === 0 && entry.overridden.length === 0 && entry.dataDisks === null) continue;
       const memory = usage.runningMemBytes.get(grant.user_id) ?? 0;
       if (effectiveAfter.memBytes !== null && memory > effectiveAfter.memBytes
         && effectiveAfter.memBytes !== effectiveBefore.memBytes) {
         entry.memBytesInUse = memory;
       }
-      const roots = usage.rootDiskBytes.get(grant.user_id) ?? 0;
-      if (effectiveAfter.rootDiskBytes !== null && roots > effectiveAfter.rootDiskBytes
-        && effectiveAfter.rootDiskBytes !== effectiveBefore.rootDiskBytes) {
-        entry.rootDiskBytesInUse = roots;
-      }
+      Object.assign(entry, diskEntryWarnings({
+        before: effectiveBefore,
+        after: effectiveAfter,
+        rootBytes: usage.rootDiskBytes.get(grant.user_id) ?? 0,
+        dataByPool: usage.dataBytes.get(grant.user_id) ?? new Map(),
+      }));
       if (effectiveAfter.gpuCount !== effectiveBefore.gpuCount) {
         const allowed = new Set(pickGrantGpus(grant.user_id, server.observed_gpu_pci_addresses, effectiveAfter.gpuCount));
         entry.gpusInUseRemoved = (usage.gpuClaims.get(grant.user_id) ?? [])
@@ -278,11 +305,10 @@ export class GrantBundlesService {
     }
     const reserved = new Set(server.reserved_cpus);
     const topology = server.cpu_topology ?? [];
-    const grantCount = grants.length;
     return {
-      bundle: bundleDto(current, grantCount),
+      bundle,
       proposed: {
-        ...bundleDto(current, grantCount),
+        ...bundle,
         ...(input.name === undefined ? {} : { name: input.name }),
         ...after,
       },
@@ -290,6 +316,14 @@ export class GrantBundlesService {
       serverGpuCount: server.observed_gpu_pci_addresses.length,
       entries,
     };
+  }
+
+  private async dto(executor: Executor, row: BundleRow): Promise<GrantBundleDto> {
+    const [count, disks] = await Promise.all([
+      this.grantCount(executor, row.id),
+      loadBundleDataDisks(executor, [row.id]),
+    ]);
+    return bundleDto(row, count, disks.get(row.id) ?? []);
   }
 
   private async requireBundle(

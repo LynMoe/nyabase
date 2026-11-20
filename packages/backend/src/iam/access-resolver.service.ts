@@ -2,12 +2,14 @@ import { ForbiddenException, Inject, Injectable } from '@nestjs/common';
 import { sql, type Kysely, type Transaction } from 'kysely';
 import {
   GRANT_EXPIRY_GRACE_DAYS,
+  systemDiskRoom,
   type Role,
   type EffectiveServerAccessDto,
   type EffectiveSharedBackendAccessDto,
   type LiveServerAccessDto,
 } from '@nyabase/common';
 import { numberValue } from '../platform/domain-utils.js';
+import { loadServerDiskCharge, type ServerDiskCharge } from '../platform/persistence-pg/disk-charge.js';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
@@ -175,22 +177,33 @@ export class AccessResolverService {
       return [row.id, topology.length === 0 ? null : cores] as const;
     }));
 
-    const dataDisksByServer = await this.liveDataDisks(userId);
+    const disksByServer = await this.liveDisks(userId, live);
 
     return [
-      ...live.map((access): EffectiveServerAccessDto => ({
-        serverId: access.serverId,
-        cpuCores: access.cpuCores,
-        serverCpuCores: serverCpuCores.get(access.serverId) ?? null,
-        memBytes: access.memBytes,
-        rootDiskBytes: access.rootDiskBytes,
-        gpuCount: access.gpuCount,
-        gpuPciAddresses: access.gpuPciAddresses,
-        dataDisks: dataDisksByServer.get(access.serverId) ?? [],
-        expiresAt: access.expiresAt?.toISOString() ?? null,
-        accessPhase: 'live',
-        allowedImageIds: imagesByServer.get(access.serverId) ?? [],
-      })),
+      ...live.map((access): EffectiveServerAccessDto => {
+        const disks = disksByServer.get(access.serverId)!;
+        return {
+          serverId: access.serverId,
+          cpuCores: access.cpuCores,
+          serverCpuCores: serverCpuCores.get(access.serverId) ?? null,
+          memBytes: access.memBytes,
+          diskBytes: access.diskBytes,
+          rootDiskBytes: access.rootDiskBytes,
+          rootDiskCommittedBytes: disks.rootCommittedBytes,
+          rootDiskAvailableBytes: systemDiskRoom({
+            diskBytes: access.diskBytes,
+            rootDiskBytes: access.rootDiskBytes,
+            rootCommittedBytes: disks.rootCommittedBytes,
+            dataUsedBytes: disks.dataUsedBytes,
+          }),
+          gpuCount: access.gpuCount,
+          gpuPciAddresses: access.gpuPciAddresses,
+          dataDisks: disks.dataDisks,
+          expiresAt: access.expiresAt?.toISOString() ?? null,
+          accessPhase: 'live',
+          allowedImageIds: imagesByServer.get(access.serverId) ?? [],
+        };
+      }),
       ...lapses.map((lapse): EffectiveServerAccessDto => ({
         accessPhase: 'grace',
         serverId: lapse.resource_id,
@@ -200,52 +213,20 @@ export class AccessResolverService {
     ];
   }
 
-  /** Current data-disk grants by server, with the data observed on their volumes. */
-  private async liveDataDisks(
+  /** Per live server: what its disk total is charged with, and each covered data disk with the data on it. */
+  private async liveDisks(
     userId: string,
-  ): Promise<Map<string, LiveServerAccessDto['dataDisks']>> {
-    const pools = await listPoolAccess(this.database, userId);
-    const result = new Map<string, LiveServerAccessDto['dataDisks']>();
-    if (pools.length === 0) return result;
-    const poolIds = pools.map((pool) => pool.poolId);
-    const [servers, usedRows] = await Promise.all([
-      this.database.selectFrom('infra.storage_pools')
-        .select(['id', 'server_id'])
-        .where('id', 'in', poolIds)
-        .execute(),
-      this.database.selectFrom('control.volumes')
-        .select(['pool_id', sql<string>`coalesce(sum(coalesce(used_bytes, 0)), 0)`.as('used')])
-        .where('owner_id', '=', userId)
-        .where('pool_id', 'in', poolIds)
-        .where('shared_backend_id', 'is', null)
-        .where('lifecycle_phase', 'not in', ['failed', 'deleting'])
-        .groupBy('pool_id')
-        .execute(),
-    ]);
-    const serverByPool = new Map(servers.map((row) => [row.id, row.server_id]));
-    const usedByPool = new Map(usedRows.map((row) => [row.pool_id, numberValue(row.used)]));
-    const byGrant = new Map<string, LiveServerAccessDto['dataDisks'][number] & { serverId: string }>();
-    for (const pool of pools) {
-      const serverId = serverByPool.get(pool.poolId);
-      if (!serverId) continue;
-      const grant = byGrant.get(pool.dataDiskGrantId) ?? {
-        serverId,
-        grantId: pool.dataDiskGrantId,
-        poolIds: [],
-        limitBytes: pool.limitBytes,
-        usedBytes: 0,
-        availableBytes: 0,
-      };
-      grant.poolIds.push(pool.poolId);
-      grant.usedBytes += usedByPool.get(pool.poolId) ?? 0;
-      byGrant.set(pool.dataDiskGrantId, grant);
-    }
-    for (const { serverId, ...grant } of byGrant.values()) {
-      const list = result.get(serverId) ?? [];
-      list.push({ ...grant, availableBytes: Math.max(0, grant.limitBytes - grant.usedBytes) });
-      result.set(serverId, list);
-    }
-    return result;
+    live: ReadonlyArray<{ serverId: string }>,
+  ): Promise<Map<string, ServerDiskCharge & { dataDisks: LiveServerAccessDto['dataDisks'] }>> {
+    const pools = live.length === 0 ? [] : await listPoolAccess(this.database, userId);
+    const entries = await Promise.all(live.map(async ({ serverId }) => {
+      const charge = await loadServerDiskCharge(this.database, userId, serverId);
+      const dataDisks = pools
+        .filter((pool) => pool.serverId === serverId)
+        .map((pool) => ({ poolId: pool.poolId, capBytes: pool.capBytes, usedBytes: charge.dataByPool.get(pool.poolId) ?? 0 }));
+      return [serverId, { ...charge, dataDisks }] as const;
+    }));
+    return new Map(entries);
   }
 
   /** Current shared-backend coverage with the data observed on the user's volume; grace backends are omitted. */

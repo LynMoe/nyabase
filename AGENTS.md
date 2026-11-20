@@ -67,20 +67,24 @@ Vite 通过 alias 将 `@nyabase/common` 指向 `src/index.ts`，但 `index.ts` �
   没有用户组（000003 已删除，连同旧授权一起清空，不做转换）。不存在系统用户。`users/iam-bootstrap.service.ts` 启动时只在**没有任何 active admin** 时补救：创建保留账号 `admin`，
   或把已存在的 active `admin` 提升为 admin（审计归属 NULL）；已有 active admin 时什么都不做（不会撤销降级），`admin` 被禁用且无其他 admin 则报 `ADMIN_BOOTSTRAP_UNAVAILABLE`。
   资源授权只授给用户，每个（用户, 资源）至多一条：
-  - **授权模板（bundle，`iam.grant_bundles`）** 绑定一台服务器，定义 CPU 核数、内存、**系统盘配额**（该用户在此服务器上所有容器系统盘之和，跨所有系统盘池，不含数据卷）、GPU 张数；一台服务器可有多个 bundle。
-  - **服务器授权（`iam.server_grants`）** = 用户在一台服务器上的唯一 bundle（复合外键保证 bundle 属于该服务器）+ 可选 override（`overridden` 列出覆盖的字段，值在同名列，NULL = 不限；未覆盖的列恒为 NULL，CHECK 保证）+ 到期。
-    未覆盖的字段**实时跟随** bundle：改 bundle 立即作用于所有未覆盖该字段的授权（视图读 bundle，没有同步写入）；`POST /admin/grant-bundles/:id/preview` 先列出会变的用户、被 override 挡住的用户和用量警告，`PATCH` 带 `expectedRevision`。
-    同一服务器已有授权时再分配（任何 bundle，含同一个）返回 409 `SERVER_GRANT_EXISTS`，带 `replace: true` 才在原行上替换：bundle、override 与到期都取自本次请求（未给即无 override、永久），数据盘授权保留，覆盖不中断。仍被授权引用的 bundle 不能删（409 `GRANT_BUNDLE_IN_USE`）。
-  - **数据盘授权（`iam.data_disk_grants`，000012）** 在服务器授权之下，把该服务器的 1..n 个本地池编成一组共用一个额度 `limit_bytes`（必填，没有"不限"）；
-    `iam.storage_pool_grants` 是成员表，每（用户, 池）至多一行（`UNIQUE (user_id, pool_id)`），所以每个池同时只属于一个授权。复合外键保证组内的池属于同一用户、同一服务器；
-    没有自己的到期：随服务器授权生效、到期、删除（级联）。没有服务器授权时 409 `SERVER_GRANT_REQUIRED`。路由 `POST/PATCH/DELETE /users/:userId/data-disk-grants`（`grants/data-disk-grants.service.ts`）：
-    写入里点到别的授权持有的池，没带 `movePools: true` 返回 409 `DATA_DISK_POOL_GRANTED`（`details.pools`）；带上则在同一事务里搬过来（覆盖不中断，不开台账），被搬空的授权一并删除；
-    PATCH 的 `poolIds` 是完整新集合，去掉的池即撤销（走失效流程），DELETE 撤销组内全部池。响应 `DataDiskGrantChangeDto` 列出搬移、删除与撤销。
+  - **授权模板（bundle，`iam.grant_bundles`）** 绑定一台服务器，定义 CPU 核数、内存、**磁盘总额**（`disk_bytes`，必填，没有"不限"）、**系统盘上限**（`root_disk_bytes`，NULL = 只受总额限制）、GPU 张数，
+    以及**数据盘列表**（`iam.grant_bundle_disks`，000014：该服务器的本地池，每块可带自己的上限 `cap_bytes`，NULL = 只受总额限制）；一台服务器可有多个 bundle。
+    磁盘总额由该用户在此服务器上的系统盘（所有容器，跨所有系统盘池，按承诺量）与数据盘（列表里各盘上他的卷，按**已有数据**）共用，规则见下文「磁盘总额」。
+  - **服务器授权（`iam.server_grants`）** = 用户在一台服务器上的唯一 bundle（复合外键保证 bundle 属于该服务器）+ 可选 override（`overridden` 列出覆盖的字段，值在同名列，NULL = 不限；未覆盖的列恒为 NULL，CHECK 保证；
+    `disk` 没有不限，所以 `disk_bytes` 恰在覆盖 `disk` 时非空）+ 到期。数据盘列表整体覆盖（token `data_disks`，API 键 `dataDisks`，`[]` 是真实的"无数据盘"覆盖）：
+    覆盖时该授权自己的列表在 `iam.storage_pool_grants`（每（用户, 池）至多一行，复合外键保证池属于该服务器），视图只在覆盖时读它，取消覆盖时同一事务删掉这些行。
+    未覆盖的字段**实时跟随** bundle：改 bundle 立即作用于所有未覆盖该字段的授权（视图读 bundle，没有同步写入），批量改数据盘就是改模板：列表加盘，跟随者由平衡器建卷挂载；
+    去掉一块盘，跟随者在其上的卷走失效流程。`POST /admin/grant-bundles/:id/preview` 先列出会变的用户、被 override 挡住的用户和用量警告
+    （系统盘超上限、系统盘 + 数据超总额、要失效的卷、数据超新上限：`grants/grant-preview.ts`），`PATCH` 带 `expectedRevision`。
+    同一服务器已有授权时再分配（任何 bundle，含同一个）返回 409 `SERVER_GRANT_EXISTS`，带 `replace: true` 才在原行上替换：bundle、override 与到期都取自本次请求（未给即无 override、永久），
+    数据盘随之跟随新 bundle 的列表（两个 bundle 都有的盘覆盖不中断，只在旧列表里的盘失效）。仍被授权引用的 bundle 不能删（409 `GRANT_BUNDLE_IN_USE`）；仍在某个 bundle / 授权列表里的池不能取消登记。
+    数据盘没有自己的到期：随服务器授权生效、到期、删除（级联）。没有数据盘授权这一层（000014 删除了 `iam.data_disk_grants`、`/users/:userId/data-disk-grants`、`movePools`）。
   - **共享后端授权** 独立，不属于任何 bundle，额度必填。共享后端自带 `mount_path`（启用后每个被授权用户的共享卷挂载在此，NULL = 未启用）、`maintenance` 与 `note`（显示在用户的共享卷旁）。
   - GPU 不由管理员挑卡：视图按 `md5(用户 id, PCI 地址)` 从服务器最近观测到的卡（`infra.servers.observed_gpu_pci_addresses`，agent 连接与全量扫描时由 Incus resources 刷新）里取前 N 张（NULL = 全部）。
     结果只取决于用户和卡列表：张数增加保留已有的卡，减少去掉排名最低的；卡消失只影响排到它的用户。`grants/grant-fields.ts` 的 `pickGrantGpus` 是预览用的同一规则（pg 测试固定两者一致）。
   `iam.effective_*_access` 只含**当前有效**（未过期）的授权，且只含 active 用户；bundle 配额 NULL = 不限，**0 不是"不限"**（DB CHECK 要求 `> 0`，GPU 张数 0 = 无卡）；
-  数据盘与共享后端额度没有 NULL（000012 遇到 NULL 拒绝迁移）。`effective_pool_access` 每（用户, 池）一行，带所属 `data_disk_grant_id` 与组的额度。
+  磁盘总额与共享后端额度没有 NULL（000012 / 000014 遇到 NULL 拒绝迁移）。`effective_server_access.disk_bytes` 是总额，`root_disk_bytes` 是系统盘上限；
+  `effective_pool_access` 每（用户, 池）一行（bundle 的列表或授权自己的），带该盘的上限 `cap_bytes`、`server_id` 与 `server_grant_id`。
   所有授权判断只读这些视图（`iam/effective-access.ts` 每类资源一个解析函数）；没有授权缓存、epoch 或 `authz_version`。
 - 用户管理员（user_admin）管人和人的资源：用户、授权模板、所有授权（含给自己）、所有容器（含控制台）与数据卷、清除；
   能看审计、容器 / 卷的 intents、全平台用量、SSH 连接历史；HTTP 绑定的 `scope=all`（列出 / 删除他人的绑定）也是 user_admin，但只经 API（HTTP 代理页仅 admin）。
@@ -89,7 +93,7 @@ Vite 通过 alias 将 `@nyabase/common` 指向 `src/index.ts`，但 `index.ts` �
   管理（改资料 / 重置密码 / 停用 / 删除 / 删 SSH 公钥）某个 admin 只能是 admin（`assertCanAdministerUser`，`ADMINISTRATOR_PROTECTED`）；
   "最后一个活跃管理员"保护（降级 / 禁用 / 删除 `role='admin' AND status='active'` 的最后一人被拒，`LAST_ACTIVE_ADMINISTRATOR`）。
   所有 IAM 写操作用 `lockIamPolicy`（advisory lock）串行化。
-- 撤销 = 立即到期：删除服务器授权（连带其数据盘授权）/ 删除数据盘授权 / 删除共享后端授权都不会被拒绝，IAM 写操作在 `afterCommit` 里通知 `AccessChangeNotifier`，
+- 撤销 = 立即到期：删除服务器授权（连带其数据盘）/ 从授权的有效数据盘列表里去掉一块盘（改 bundle 或 override）/ 删除共享后端授权都不会被拒绝，IAM 写操作在 `afterCommit` 里通知 `AccessChangeNotifier`，
   `access/access-lapse.processor.ts` 按台账 `control.access_lapses` 走同一条 14 天宽限 → 处置 → 清除流程（租约 `access_lapse`，
   处置/清除复用 `UserServerResourcePurgeService` 的 `SYSTEM_ACTOR` 路径）。处置因资源而异：服务器 = 停止该用户在其上运行的容器
   （含仍在 provisioning 的），期满删容器 + 本地卷；数据盘池 / 共享后端 = 立即把该用户在其上的卷从容器强制卸载
@@ -117,7 +121,12 @@ Vite 通过 alias 将 `@nyabase/common` 指向 `src/index.ts`，但 `index.ts` �
 - 存储超分（服务器 `storage_overcommit_ratio` 作用于其本地池，共享后端 `overcommit_ratio`）只在用户之间生效：池 / 后端上所有承诺量合计 ≤ 物理总量 × 比例，
   单个用户在其上的承诺量（本地池 = 他的系统盘 + 本地卷，共享后端 = 他的共享卷）≤ 物理总量，不论授权是否不限、是否管理员 `scope=all` 操作
   （`volumes/volume-rules.ts` 的 `overcommitAvailableBytes`，准入与 `scope=mine` 容量报告共用；前端 `sharedBackendAvailableBytes` 带上用户已用量算同一规则）。
-- 宽限中（无当前覆盖）的用户不能新建、启动容器；已停机的容器在覆盖恢复后不会自动启动，但卷会被平台重新挂上（见下节）。本地卷只计入数据盘额度，系统盘只计入服务器授权的系统盘配额，两者互不占用。
+- 宽限中（无当前覆盖）的用户不能新建、启动容器；已停机的容器在覆盖恢复后不会自动启动，但卷会被平台重新挂上（见下节）。
+- **磁盘总额**（`platform/persistence-pg/disk-charge.ts` 的 `loadServerDiskCharge` + common 的 `systemDiskRoom`，准入、DTO、预览共用）：服务器授权的总额由系统盘（固定，按承诺量）
+  与数据盘（弹性，按 `control.volumes.used_bytes`，未知按 0）共用。建容器 / 扩系统盘在 `lockOwnerServerQuota` 下准入：
+  `Δ ≤ min(系统盘上限 − Σ系统盘, 总额 − Σ系统盘 − Σ数据)`，否则 409 `STORAGE_GRANT_EXCEEDED`（`details` 带两者的占用）；数据卷的弹性额度 L = 总额 − Σ系统盘（见下节）。
+  系统盘先占、数据盘填剩下的：准入后数据卷由下一轮平衡器（≤ 30 s）缩回；平衡器的扩容在同一把锁下复核系统盘没有在快照之后变多（否则跳过、下一轮重算），
+  所以 Incus 上超出总额只可能是"刚准入的系统盘 + 尚未缩回的数据卷配额"这一轮。总额调到系统盘以下时系统盘不动（同"授权缩小不停容器"），数据卷降到下限。共享卷只计入共享后端额度。
 - 重试耗尽的 40001 / 40P01 返回 409 `TRANSACTION_CONFLICT`（`PgTransactionConflictFilter`），不是 500。
   管理员 `scope=all` 的容器动作与管理员清除跑 read committed（不做配额准入），这样事务内 `assertActorRole` 能看到等锁期间提交的降级。
 - intent 重试归属重试者（`requested_by`，system 为 NULL）并记审计 `intent.retry`；重试 `volume.resize` 只能把 `size_bytes` 调小，不会绕过配额重新扩容。
@@ -149,9 +158,12 @@ Vite 通过 alias 将 `@nyabase/common` 指向 `src/index.ts`，但 `index.ts` �
 - **规划**（`volume-provisioning.ts`，纯函数，读 `storage-provisioning.read-model.ts` 的快照）：授权覆盖的已启用、非维护的盘上没有卷就建（本地卷 `provisioning` + `volume.ensure`；共享卷直接 `active`，目录在第一次挂载时建）；
   用户每个 `active` 容器都挂上他能到达的 `active` 卷（本地卷在本服务器；共享卷经该后端在本服务器上唯一的已登记执行池），路径为盘的挂载路径；容器在该路径已挂了别的卷则跳过（`pathConflicts`）。
   `failed` 的卷不动也不替换；没有授权覆盖的盘上的卷归失效流程（宽限内覆盖恢复则被重新挂上）。新建容器在创建事务里由 `VolumeProvisioner.bindNewContainer` 挂上已有的卷（请求里没有 `volumes` 字段）。
-- **弹性额度**（`allocateQuotas`）：一个授权的卷共用额度 L。`R = L − Σ已用`；`R > 0` 时每卷配额 = 已用 + R/n（按盘的物理余量封顶，余下的分给其他盘）；`R ≤ 0` 时按已用量等比缩到 L。
+- **弹性额度**（`allocateQuotas`）：一个服务器授权的数据卷共用 L = 总额 − 该用户在此服务器的系统盘承诺量（≥ 0；共享后端授权自成一组，L = 其额度）。
+  `R = L − Σ已用`；`R > 0` 时每卷配额 = 已用 + R/n（按盘的物理余量与该盘的上限 `cap_bytes` 封顶，余下的分给其他盘）；`R ≤ 0` 时按已用量等比缩到 L。
+  上限调低到已有数据以下与额度低于数据同样处理（下一句），且到达上限的一步是精确的。
   能把配额设到已用量以下的文件系统（dir + 项目配额、CephFS，Incus 7.6 实测：之后只能读和删）直接设到目标；其他（ZFS 拒绝低于 used）走棘轮：配额降到已用量并跟着删除往下走，从不回升。
-  每卷最低 1 GiB（0 在 Incus / XFS 里是不限）。单卷组配额就是 L，不需要用量；多卷组用量未知（服务器不可达）时整组本轮不动。先缩后扩：缩小保留预留（`shrinkReservation`），扩大只用 L 减去各卷承诺量后的余量。
+  每卷最低 1 GiB（0 在 Incus / XFS 里是不限；不超过该盘上限）。单卷组配额就是 min(L, 上限)；多卷组用量未知（服务器不可达）时本轮只执行调低的上限。先缩后扩：缩小保留预留（`shrinkReservation`），扩大只用 L 减去各卷承诺量后的余量。
+  服务器授权的数据卷每轮都读用量（准入要用），共享卷只在棘轮时读。
   `decideVolumeResize` 的 `belowUsage`（`quotaBelowUsage`）让这类缩容不受用量下限阻拦。
 - **执行**：`StorageBalancer` 每 30 s 一轮（另由 `AccessChangeNotifier`、`DiskChangeNotifier` 唤醒，单飞）：经 agent 读需要的用量（`volumesNeedingUsage`），交给 `VolumeProvisioner.run`；
   每个动作单独事务并复核（覆盖、盘仍启用、卷 revision），快照过时只损失一轮。系统写入，审计 actor 为 NULL；平衡器的缩放（intent `request.source = 'quota_balancer'`）不写 `volume.resize` 审计，其 Incus 写入也不逐条记 `incus.mutate`。
@@ -168,7 +180,7 @@ Vite 通过 alias 将 `@nyabase/common` 指向 `src/index.ts`，但 `index.ts` �
 - 服务器 `root_placement`：`single`（至多一个系统盘池，约束触发器 `servers_root_placement_single` 兜底）或 `random`（按权重随机）；`root_placement_sticky` 只在 random 下可为 true。
   single 下 `PATCH .../storage-pools/:id` 给另一个池开系统盘 = 在同一事务里把角色搬过来（原池关闭、revision +1，审计 `systemDiskMovedTo`）；random → single 时多于一个系统盘池返回 409 `SYSTEM_DISK_NOT_SINGLE`。
   池的系统盘改动与服务器 PATCH 都持服务器行锁。改策略 / 开关只影响之后新建的容器，平台不在池之间搬系统盘。
-- 建容器选池（`chooseRootPool`，服务器行 → 系统盘池按 id `FOR UPDATE`）：先查系统盘配额（每服务器跨池合计），再排除配额未生效、实际用量（`used_bytes`，全量扫描 / agent 连接时刷新）达到水位、超分准入放不下的池；
+- 建容器选池（`chooseRootPool`，服务器行 → 系统盘池按 id `FOR UPDATE`）：先查磁盘总额与系统盘上限（每服务器跨池合计，见授权模型的「磁盘总额」），再排除配额未生效、实际用量（`used_bytes`，全量扫描 / agent 连接时刷新）达到水位、超分准入放不下的池；
   都被排除时全为配额原因返回 `STORAGE_POOL_QUOTA_INEFFECTIVE`，否则 `STORAGE_POOL_EXHAUSTED`（`details.pools` 逐池给原因）。sticky：该用户在本服务器 live 容器（非 failed / deleting）系统盘承诺量最大的池仍可用就用它（不单独记录，同一用户同服务器的创建由 `lockOwnerServerQuota` 串行，所以无竞态），否则照常随机。
   水位只管新系统盘的落点：超分比看承诺量，水位看盘实际有多满（盘上有平台账外的数据时两者差很远）。
 - 预检要求至少一个系统盘池且每个都在 Incus 里；探针默认跑在按名排第一的系统盘池上。管理员的池 DTO 带 `rootDisks`（该池 live 系统盘数与承诺量），用户视图为 null。
@@ -325,6 +337,7 @@ schema 变更一律新增 `NNNNNN_name.sql`（只追加），随版本发布时�
 `000001_initial.sql` 随上线版本冻结；上线前用旧版 000001 建的库（试运行 / staging）必须重建。
 2026-10-26 把 000001–000007 压缩成了新的 `000001_initial.sql`（与旧的 7 个迁移依次应用后的 schema 逐字节相同，`pg_dump --schema-only` 比对过），
 正式库的 `system.schema_migrations` 已手工改写成只剩这一行；之后的 schema 变更照旧从 `000002_*.sql` 起只追加。
+`000014_disk-quota.sql` 把数据盘授权并进服务器授权（总额 + 数据盘列表进 bundle），转换不缩小任何人的空间、不开失效（迁移内校验有效覆盖不变），遇到不限的系统盘配额拒绝迁移；步骤见 OPERATIONS.md。
 `000003_grant-bundles.sql` 删除用户组并**清空**服务器 / 数据盘授权（不转换；共享后端授权保留，经组获得的展开给各成员并按旧规则合并）：上线后所有用户失去服务器与数据盘覆盖、进入 14 天宽限（立即停机、卸载卷），管理员须在宽限内按 bundle 重新分配。
 
 ## 本地开发后端

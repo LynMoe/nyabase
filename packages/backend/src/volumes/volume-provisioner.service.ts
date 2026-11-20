@@ -11,6 +11,8 @@ import { AuditService } from '../iam/audit.service.js';
 import { resolvePoolAccess, resolveSharedBackendAccess } from '../iam/effective-access.js';
 import { deterministicName, nullableNumber, numberValue } from '../platform/domain-utils.js';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
+import { lockOwnerServerQuota } from '../platform/persistence-pg/advisory-locks.js';
+import { loadServerDiskCharge } from '../platform/persistence-pg/disk-charge.js';
 import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
 import { IntentRepository } from '../reconcile/intent.repository.js';
@@ -343,11 +345,20 @@ export class VolumeProvisioner {
    */
   private async applyResize(resize: PlannedResize): Promise<boolean> {
     return this.transactions.run(async (transaction) => {
+      // A data disk's grow takes what the owner's system disks left of the
+      // total when the snapshot was read: under the lock root admission
+      // takes, it waits a pass if they grew since (the next plan shrinks
+      // instead).
+      if (resize.quota) await lockOwnerServerQuota(transaction, resize.quota.ownerId, resize.quota.serverId);
       const locked = await this.repository.findByIdForUpdate(resize.volumeId, transaction);
       if (!locked || locked.revision !== resize.revision) return false;
       if (locked.lifecycle_phase === 'deleting' || locked.lifecycle_phase === 'failed') return false;
       const current = numberValue(locked.size_bytes);
       if (current === resize.sizeBytes) return false;
+      if (resize.quota && resize.sizeBytes > current) {
+        const charge = await loadServerDiskCharge(transaction, resize.quota.ownerId, resize.quota.serverId);
+        if (charge.rootCommittedBytes > resize.quota.rootBytes) return false;
+      }
       const reservation = shrinkReservation({
         currentBytes: current,
         reservedBytes: nullableNumber(locked.shrink_reserved_bytes),

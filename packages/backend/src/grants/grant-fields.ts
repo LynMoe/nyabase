@@ -1,26 +1,36 @@
 import { createHash } from 'node:crypto';
 import type {
   GrantBundleDto,
-  GrantBundleField,
   GrantBundleQuotas,
+  GrantBundleScalarField,
+  GrantDataDisk,
   ServerGrantOverrides,
 } from '@nyabase/common';
 
 /**
- * The four server quotas a bundle defines and a grant may override: the DTO
- * key, the token stored in `iam.server_grants.overridden`, and the column
- * (same name on `iam.grant_bundles` and `iam.server_grants`).
+ * The server quotas holding one number that a bundle defines and a grant may
+ * override: the DTO key, the token stored in `iam.server_grants.overridden`,
+ * and the column (same name on `iam.grant_bundles` and `iam.server_grants`).
+ * The data-disk list (`dataDisks`, token `data_disks`) is the one field kept
+ * in rows: `iam.grant_bundle_disks` and `iam.storage_pool_grants`.
  */
 export const GRANT_QUOTA_FIELDS = [
   { key: 'cpuCores', token: 'cpu', column: 'cpu_cores' },
   { key: 'memBytes', token: 'mem', column: 'mem_bytes' },
+  { key: 'diskBytes', token: 'disk', column: 'disk_bytes' },
   { key: 'rootDiskBytes', token: 'root_disk', column: 'root_disk_bytes' },
   { key: 'gpuCount', token: 'gpu', column: 'gpu_count' },
-] as const satisfies ReadonlyArray<{ key: GrantBundleField; token: string; column: string }>;
+] as const satisfies ReadonlyArray<{ key: GrantBundleScalarField; token: string; column: string }>;
+
+export const DATA_DISKS_TOKEN = 'data_disks';
+
+export type ScalarQuotas = Omit<GrantBundleQuotas, 'dataDisks'>;
 
 export type QuotaColumns = {
   cpu_cores: number | null;
   mem_bytes: string | number | null;
+  /** Never null on a bundle; on a grant, set exactly when `disk` is overridden. */
+  disk_bytes: string | number | null;
   root_disk_bytes: string | number | null;
   gpu_count: number | null;
 };
@@ -29,54 +39,78 @@ function quota(value: string | number | null): number | null {
   return value === null ? null : Number(value);
 }
 
-export function quotasFromColumns(row: QuotaColumns): GrantBundleQuotas {
+/** A bundle's scalar quotas (its `disk_bytes` is never null). */
+export function quotasFromColumns(row: QuotaColumns): ScalarQuotas {
+  if (row.disk_bytes === null) throw new Error('A bundle always has a disk total');
   return {
     cpuCores: row.cpu_cores,
     memBytes: quota(row.mem_bytes),
+    diskBytes: Number(row.disk_bytes),
     rootDiskBytes: quota(row.root_disk_bytes),
     gpuCount: row.gpu_count,
   };
 }
 
-export function quotaColumns(quotas: GrantBundleQuotas): QuotaColumns {
+export function quotaColumns(quotas: ScalarQuotas): QuotaColumns & { disk_bytes: number } {
   return {
     cpu_cores: quotas.cpuCores,
     mem_bytes: quotas.memBytes,
+    disk_bytes: quotas.diskBytes,
     root_disk_bytes: quotas.rootDiskBytes,
     gpu_count: quotas.gpuCount,
   };
 }
 
-/** The `overridden` tokens and override columns of a grant; a field not overridden stores NULL. */
+/**
+ * The `overridden` tokens and override columns of a grant; a field not
+ * overridden stores NULL. `dataDisks` only adds its token: its list goes to
+ * `iam.storage_pool_grants` (`writeGrantDataDisks`).
+ */
 export function overrideColumns(overrides: ServerGrantOverrides): QuotaColumns & { overridden: string[] } {
-  const columns: QuotaColumns = { cpu_cores: null, mem_bytes: null, root_disk_bytes: null, gpu_count: null };
+  const columns: QuotaColumns = {
+    cpu_cores: null, mem_bytes: null, disk_bytes: null, root_disk_bytes: null, gpu_count: null,
+  };
   const overridden: string[] = [];
   for (const field of GRANT_QUOTA_FIELDS) {
     if (!(field.key in overrides)) continue;
     overridden.push(field.token);
     (columns as Record<string, number | null>)[field.column] = overrides[field.key] ?? null;
   }
+  if (overrides.dataDisks !== undefined) overridden.push(DATA_DISKS_TOKEN);
   return { ...columns, overridden };
 }
 
-export function overridesFromColumns(row: QuotaColumns & { overridden: string[] }): ServerGrantOverrides {
-  const values = quotasFromColumns(row);
+/** A grant's overrides from its row and, when it overrides `data_disks`, its own list. */
+export function overridesFromColumns(
+  row: QuotaColumns & { overridden: string[] },
+  ownDataDisks: GrantDataDisk[] = [],
+): ServerGrantOverrides {
   const overrides: ServerGrantOverrides = {};
+  const values: Record<GrantBundleScalarField, number | null> = {
+    cpuCores: row.cpu_cores,
+    memBytes: quota(row.mem_bytes),
+    diskBytes: quota(row.disk_bytes),
+    rootDiskBytes: quota(row.root_disk_bytes),
+    gpuCount: row.gpu_count,
+  };
   for (const field of GRANT_QUOTA_FIELDS) {
-    if (row.overridden.includes(field.token)) overrides[field.key] = values[field.key];
+    if (!row.overridden.includes(field.token)) continue;
+    (overrides as Record<string, number | null>)[field.key] = values[field.key];
   }
+  if (row.overridden.includes(DATA_DISKS_TOKEN)) overrides.dataDisks = ownDataDisks;
   return overrides;
 }
 
-/** A grant's effective quotas: its override where it has one, else the bundle's (as the effective view computes). */
-export function effectiveQuotas(
-  bundle: GrantBundleQuotas,
+/** A grant's effective quotas: its override where it has one, else the bundle's (as the effective views compute). */
+export function effectiveQuotas<T extends ScalarQuotas & { dataDisks?: GrantDataDisk[] }>(
+  bundle: T,
   overrides: ServerGrantOverrides,
-): GrantBundleQuotas {
+): T {
   const result = { ...bundle };
   for (const field of GRANT_QUOTA_FIELDS) {
-    if (field.key in overrides) result[field.key] = overrides[field.key] ?? null;
+    if (field.key in overrides) (result as unknown as Record<string, number | null>)[field.key] = overrides[field.key] ?? null;
   }
+  if (overrides.dataDisks !== undefined) result.dataDisks = overrides.dataDisks;
   return result;
 }
 
@@ -89,17 +123,25 @@ export type BundleRow = QuotaColumns & {
   updated_at: Date;
 };
 
-export function bundleDto(row: BundleRow, grantCount: number): GrantBundleDto {
+export function bundleDto(row: BundleRow, grantCount: number, dataDisks: GrantDataDisk[]): GrantBundleDto {
   return {
     id: row.id,
     serverId: row.server_id,
     name: row.name,
     ...quotasFromColumns(row),
+    dataDisks,
     revision: Number(row.revision),
     grantCount,
     createdAt: row.created_at.toISOString(),
     updatedAt: row.updated_at.toISOString(),
   };
+}
+
+/** The same data disks with the same ceilings, in any order. */
+export function sameDataDisks(left: readonly GrantDataDisk[], right: readonly GrantDataDisk[]): boolean {
+  if (left.length !== right.length) return false;
+  const caps = new Map(left.map((disk) => [disk.poolId, disk.capBytes]));
+  return right.every((disk) => caps.has(disk.poolId) && caps.get(disk.poolId) === disk.capBytes);
 }
 
 /**

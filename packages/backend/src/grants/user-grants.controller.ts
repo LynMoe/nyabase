@@ -5,14 +5,11 @@ import {
   Get,
   Param,
   Patch,
-  Post,
   Put,
 } from '@nestjs/common';
 import {
   zPatchServerGrantRequest,
   zPutServerGrantRequest,
-  zCreateDataDiskGrantRequest,
-  zPatchDataDiskGrantRequest,
   zPutSharedBackendGrantRequest,
   type EffectiveAccessDto,
   Role,
@@ -20,14 +17,12 @@ import {
 import { RequireRole, CurrentActor } from '../iam/decorators.js';
 import type { Actor } from '../iam/actor.js';
 import { AccessResolverService } from '../iam/access-resolver.service.js';
-import { DataDiskGrantsService } from './data-disk-grants.service.js';
 import { GrantsService } from './grants.service.js';
 
 @Controller('users/:userId')
 export class UserGrantsController {
   constructor(
     private readonly grants: GrantsService,
-    private readonly dataDisks: DataDiskGrantsService,
     private readonly access: AccessResolverService,
   ) {}
 
@@ -67,43 +62,6 @@ export class UserGrantsController {
     @CurrentActor() actor: Actor,
   ) {
     return this.grants.deleteServerGrant(actor, userId, serverId);
-  }
-
-  @Get('data-disk-grants')
-  @RequireRole(Role.UserAdmin)
-  listDataDiskGrants(@Param('userId') userId: string) {
-    return this.dataDisks.list(userId);
-  }
-
-  @Post('data-disk-grants')
-  @RequireRole(Role.UserAdmin)
-  createDataDiskGrant(
-    @Param('userId') userId: string,
-    @Body() body: unknown,
-    @CurrentActor() actor: Actor,
-  ) {
-    return this.dataDisks.create(actor, userId, zCreateDataDiskGrantRequest.parse(body));
-  }
-
-  @Patch('data-disk-grants/:grantId')
-  @RequireRole(Role.UserAdmin)
-  patchDataDiskGrant(
-    @Param('userId') userId: string,
-    @Param('grantId') grantId: string,
-    @Body() body: unknown,
-    @CurrentActor() actor: Actor,
-  ) {
-    return this.dataDisks.patch(actor, userId, grantId, zPatchDataDiskGrantRequest.parse(body));
-  }
-
-  @Delete('data-disk-grants/:grantId')
-  @RequireRole(Role.UserAdmin)
-  deleteDataDiskGrant(
-    @Param('userId') userId: string,
-    @Param('grantId') grantId: string,
-    @CurrentActor() actor: Actor,
-  ) {
-    return this.dataDisks.delete(actor, userId, grantId);
   }
 
   @Get('shared-backend-grants')

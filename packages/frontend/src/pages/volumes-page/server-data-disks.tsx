@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query';
-import type { DataDiskUsageDto, LiveServerAccessDto, StoragePoolDto, VolumeDto } from '@nyabase/common';
+import type { LiveServerAccessDto, StoragePoolDto, VolumeDto } from '@nyabase/common';
 import { SectionCard } from '../../components/layout/section-card.js';
 import { StatusBadge } from '../../components/layout/status-badge.js';
 import { ResourceRef } from '../../components/refs/resource-ref.js';
@@ -7,6 +7,7 @@ import { truncateId } from '../../components/refs/technical-id.js';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../../components/ui/table.js';
 import { api } from '../../lib/api.js';
 import { poolDisplayName, userDiskState } from '../../lib/data-disks.js';
+import { formatDiskCap } from '../../lib/grant-data-disks.js';
 import { queryKeys } from '../../lib/query-keys.js';
 import { formatBytes } from '../../lib/utils.js';
 
@@ -16,7 +17,11 @@ export function volumeOnPool(volumes: readonly VolumeDto[], poolId: string): Vol
     ?? volumes.find((volume) => volume.poolId === poolId);
 }
 
-/** One server's data disks, one block per data-disk grant (disks sharing one quota). */
+/**
+ * One server's data disks. They share the server grant's disk total with the
+ * user's system disks (系统盘 by allocated size, data disks by their data), so
+ * any disk takes writes until the total, or that disk's own ceiling, is reached.
+ */
 export function ServerDataDisks({
   access,
   serverName,
@@ -33,84 +38,80 @@ export function ServerDataDisks({
     queryFn: () => api.get<StoragePoolDto[]>(`/servers/${access.serverId}/storage-pools`),
   });
   const pools = poolsQuery.data ?? [];
+  const data = access.dataDisks.reduce((sum, disk) => sum + disk.usedBytes, 0);
+  const left = Math.max(0, access.diskBytes - access.rootDiskCommittedBytes - data);
   return (
     <SectionCard
       title={<ResourceRef kind="server" id={access.serverId} name={serverName} />}
       flush
       testId={`data-disks-${access.serverId}`}
     >
-      <div className="divide-y">
-        {access.dataDisks.map((group) => (
-          <DataDiskGroup
-            key={group.grantId}
-            group={group}
-            pools={pools}
-            volumes={volumes}
-            onOpenVolume={onOpenVolume}
-          />
-        ))}
-      </div>
-    </SectionCard>
-  );
-}
-
-function DataDiskGroup({
-  group,
-  pools,
-  volumes,
-  onOpenVolume,
-}: {
-  group: DataDiskUsageDto;
-  pools: readonly StoragePoolDto[];
-  volumes: readonly VolumeDto[];
-  onOpenVolume: (volume: VolumeDto) => void;
-}) {
-  const several = group.poolIds.length > 1;
-  return (
-    <div data-testid={`data-disk-group-${group.grantId}`}>
-      <p className="px-4 pt-3 text-sm font-medium sm:px-6">
-        数据盘（总额度 {formatBytes(group.limitBytes)}，剩余 {formatBytes(group.availableBytes)}
-        {several ? '，任一盘都可写' : ''}）
+      <p className="px-4 pt-3 text-sm sm:px-6" data-testid={`data-disk-total-${access.serverId}`}>
+        磁盘总额度 {formatBytes(access.diskBytes)}，与系统盘共用：系统盘已分配 {formatBytes(access.rootDiskCommittedBytes)}，
+        数据盘数据 {formatBytes(data)}，剩余 {formatBytes(left)}。任一盘都可写，直到总额度或该盘的上限。
       </p>
-      <Table className="min-w-[640px]">
+      <Table className="min-w-[720px]">
         <TableHeader>
           <TableRow>
             <TableHead>盘</TableHead>
             <TableHead>挂载点</TableHead>
             <TableHead>已用数据</TableHead>
+            <TableHead>上限</TableHead>
             <TableHead>状态</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
-          {group.poolIds.map((poolId) => {
-            const pool = pools.find((row) => row.id === poolId);
-            const volume = volumeOnPool(volumes, poolId);
-            const state = userDiskState(pool, volume);
-            const mountPath = pool?.mountPath ?? volume?.mountPath ?? null;
-            return (
-              <TableRow
-                key={poolId}
-                className={volume ? 'cursor-pointer' : undefined}
-                onClick={volume ? () => onOpenVolume(volume) : undefined}
-              >
-                <TableCell className="font-medium">
-                  {pool ? poolDisplayName(pool) : volume?.poolName ?? truncateId(poolId)}
-                </TableCell>
-                <TableCell className="font-mono text-xs">{mountPath ?? '—'}</TableCell>
-                <TableCell>{volume?.usedBytes == null ? '—' : formatBytes(volume.usedBytes)}</TableCell>
-                <TableCell className="whitespace-normal">
-                  <StatusBadge label={state.label} pending={state.pending} variant={state.variant} />
-                  {state.hint ? (
-                    <p className={state.variant === 'destructive' ? 'mt-1 text-xs text-destructive' : 'mt-1 text-xs text-muted-foreground'}>
-                      {state.hint}
-                    </p>
-                  ) : null}
-                </TableCell>
-              </TableRow>
-            );
-          })}
+          {access.dataDisks.map((disk) => (
+            <DataDiskRow
+              key={disk.poolId}
+              poolId={disk.poolId}
+              capBytes={disk.capBytes}
+              pool={pools.find((row) => row.id === disk.poolId)}
+              volume={volumeOnPool(volumes, disk.poolId)}
+              onOpenVolume={onOpenVolume}
+            />
+          ))}
         </TableBody>
       </Table>
-    </div>
+    </SectionCard>
+  );
+}
+
+function DataDiskRow({
+  poolId,
+  capBytes,
+  pool,
+  volume,
+  onOpenVolume,
+}: {
+  poolId: string;
+  capBytes: number | null;
+  pool: StoragePoolDto | undefined;
+  volume: VolumeDto | undefined;
+  onOpenVolume: (volume: VolumeDto) => void;
+}) {
+  const state = userDiskState(pool, volume);
+  const mountPath = pool?.mountPath ?? volume?.mountPath ?? null;
+  return (
+    <TableRow
+      className={volume ? 'cursor-pointer' : undefined}
+      onClick={volume ? () => onOpenVolume(volume) : undefined}
+      data-testid={`data-disk-${poolId}`}
+    >
+      <TableCell className="font-medium">
+        {pool ? poolDisplayName(pool) : volume?.poolName ?? truncateId(poolId)}
+      </TableCell>
+      <TableCell className="font-mono text-xs">{mountPath ?? '—'}</TableCell>
+      <TableCell>{volume?.usedBytes == null ? '—' : formatBytes(volume.usedBytes)}</TableCell>
+      <TableCell className="text-muted-foreground">{formatDiskCap(capBytes)}</TableCell>
+      <TableCell className="whitespace-normal">
+        <StatusBadge label={state.label} pending={state.pending} variant={state.variant} />
+        {state.hint ? (
+          <p className={state.variant === 'destructive' ? 'mt-1 text-xs text-destructive' : 'mt-1 text-xs text-muted-foreground'}>
+            {state.hint}
+          </p>
+        ) : null}
+      </TableCell>
+    </TableRow>
   );
 }

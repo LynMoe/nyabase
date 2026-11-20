@@ -3,82 +3,17 @@ import {
   FailureCode,
   ResourceLifecyclePhase,
   StoragePoolResizeFamily,
-  type DataDiskGrantDto,
   type StoragePoolDto,
 } from '@nyabase/common';
 import { ApiError } from './api-error.js';
 import {
-  dataDiskGroupLabel,
-  dataDiskPatch,
   grantablePools,
   mountStatus,
   mountUnsupportedReason,
   parseMountPathInput,
-  planDataDiskChange,
   storageErrorMessage,
   userDiskState,
 } from './data-disks.js';
-import { GIB } from './utils.js';
-
-const TIB = 1024 * GIB;
-
-function grant(id: string, poolIds: string[], limitBytes = TIB): DataDiskGrantDto {
-  return {
-    id,
-    serverGrantId: 'sg',
-    userId: 'u',
-    serverId: 's1',
-    poolIds,
-    limitBytes,
-    createdAt: '',
-    updatedAt: '',
-  };
-}
-
-const names: Record<string, string> = { a: 'A', b: 'B', c: 'C', d: 'D' };
-const nameOf = (id: string) => names[id] ?? id;
-
-describe('dataDiskGroupLabel', () => {
-  it('names the disks sharing a quota', () => {
-    expect(dataDiskGroupLabel(grant('g', ['a', 'b', 'c']), nameOf)).toBe('A+B+C 共用 1 TiB');
-    expect(dataDiskGroupLabel(grant('g', ['a'], 500 * GIB), nameOf)).toBe('A 500 GiB');
-  });
-});
-
-describe('planDataDiskChange', () => {
-  const others = [grant('g1', ['a', 'b', 'c']), grant('g2', ['d'])];
-
-  it('finds the disks a new grant takes from the user\'s other grants', () => {
-    const plan = planDataDiskChange(others, ['a', 'd']);
-    expect(plan.revoked).toEqual([]);
-    expect(plan.moves.map((move) => [move.from.id, move.poolIds, move.emptied])).toEqual([
-      ['g1', ['a'], false],
-      ['g2', ['d'], true],
-    ]);
-  });
-
-  it('takes nothing for disks no grant holds', () => {
-    expect(planDataDiskChange(others, ['x'])).toEqual({ moves: [], revoked: [] });
-  });
-
-  it('revokes the disks an edit leaves out and ignores the edited grant itself', () => {
-    const editing = others[0]!;
-    const plan = planDataDiskChange(others, ['a', 'd'], editing);
-    expect(plan.revoked).toEqual(['b', 'c']);
-    expect(plan.moves.map((move) => move.from.id)).toEqual(['g2']);
-  });
-});
-
-describe('dataDiskPatch', () => {
-  const editing = grant('g', ['a', 'b'], TIB);
-
-  it('sends only what changed, and movePools only with a new disk set', () => {
-    expect(dataDiskPatch(editing, ['b', 'a'], TIB, false)).toBeNull();
-    expect(dataDiskPatch(editing, ['a', 'b'], 2 * TIB, true)).toEqual({ limitBytes: 2 * TIB });
-    expect(dataDiskPatch(editing, ['a'], TIB, false)).toEqual({ poolIds: ['a'] });
-    expect(dataDiskPatch(editing, ['a', 'b', 'd'], TIB, true)).toEqual({ poolIds: ['a', 'b', 'd'], movePools: true });
-  });
-});
 
 describe('grantablePools', () => {
   const pool = (id: string, extra: Partial<StoragePoolDto> = {}) =>
@@ -166,7 +101,6 @@ describe('storageErrorMessage', () => {
     new ApiError(409, code, 'english', { code, message: 'english', details });
 
   it('words the storage refusals in Chinese', () => {
-    expect(storageErrorMessage(error(FailureCode.DataDiskPoolGranted))).toMatch(/其他数据盘授权/);
     expect(storageErrorMessage(error(FailureCode.StorageMountPathConflict, { mountPath: '/data' }))).toMatch(/\/data .*嵌套/);
     expect(storageErrorMessage(error(FailureCode.StorageMountUnsupported))).toMatch(/不能作为数据盘/);
     expect(storageErrorMessage(error(FailureCode.VolumeStillGranted))).toBe('仍有授权覆盖该盘，请先撤销授权。');

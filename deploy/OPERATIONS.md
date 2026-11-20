@@ -1535,6 +1535,30 @@ Shared backends come out of the migration disabled (no mount path): enable
 each one (Shared backends → mount path, after its mount preview) when ready;
 local data pools likewise, one disk at a time.
 
+#### Before applying 000014 (disk quota)
+
+`000014_disk-quota` replaces data-disk grants by one disk total per server
+grant (system disks by committed size plus the data on the data disks) and
+moves the data-disk list into bundles. It refuses to run (the Backend does not
+start, the database is left as it was) while any bundle or grant override has
+an unlimited system-disk quota, because the total has no unlimited value.
+Before the upgrade, with the old release still running:
+
+1. List them (read-only) and give each a size in the panel:
+   `SELECT id, server_id, name FROM iam.grant_bundles WHERE root_disk_bytes IS NULL;`
+   `SELECT id, user_id, server_id FROM iam.server_grants WHERE 'root_disk' = ANY (overridden) AND root_disk_bytes IS NULL;`
+2. Nothing loses room or coverage: bundles get `disk_bytes = root_disk_bytes`
+   (the system-disk quota stays as the system disks' own ceiling); a grant that
+   overrode its system-disk quota overrides the total with the same value; a
+   grant with data-disk grants overrides the total with its system-disk quota
+   (or its live system disks, where they are over it) plus every group's
+   limit, and its data-disk list with its pools, each capped at its group's
+   limit. The migration checks the effective server and pool coverage is
+   unchanged, so no access lapse opens, and no data volume gets a smaller quota.
+3. Afterwards those grants carry overrides. To manage data disks in bulk, put
+   the disks (and a total) into bundles and reassign the users with
+   `replace` (or switch the overrides off): a disk both lists hold never lapses.
+
 ### Upgrading the proxies
 
 `deploy/install-proxy.sh` restarts the proxy on every upgrade. Restarting the

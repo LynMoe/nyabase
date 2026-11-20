@@ -8,6 +8,7 @@ import {
   type PatchGrantBundleRequest,
   zGrantBundleName,
 } from '@nyabase/common';
+import { DataDiskEditor } from '../../components/grants/data-disk-editor.js';
 import { BundleQuotaFields } from '../../components/grants/grant-form-parts.js';
 import { invalidateOwnAccess, serverName, useGrantServers } from '../../components/grants/use-grant-panel-data.js';
 import { FormField, SelectField } from '../../components/layout/form-field.js';
@@ -27,6 +28,7 @@ import {
   quotasToTexts,
   rebaseBundleDraft,
 } from '../../lib/grant-bundle-form.js';
+import { type DataDiskDraft, dataDiskDraftFrom, parseDataDiskDraft } from '../../lib/grant-data-disks.js';
 import { queryKeys } from '../../lib/query-keys.js';
 import { failureCodeLabel } from '../../lib/status-labels.js';
 import { BundlePreview } from './bundle-preview.js';
@@ -64,18 +66,57 @@ function NameField({ id, value, onChange }: { id: string; value: string; onChang
   );
 }
 
-/** A new bundle on one server: name and the four quotas (empty = 不限; GPUs start at none). */
+/** The bundle's data disks: local pools of its server, each with an optional ceiling under the disk total. */
+function BundleDataDisks({
+  id,
+  serverId,
+  draft,
+  onChange,
+  known,
+}: {
+  id: string;
+  serverId: string;
+  draft: DataDiskDraft;
+  onChange: (draft: DataDiskDraft) => void;
+  known?: GrantBundleDto['dataDisks'];
+}) {
+  if (!serverId) return null;
+  return (
+    <section className="space-y-2" aria-label="数据盘">
+      <div>
+        <h3 className="text-sm font-medium">数据盘</h3>
+        <p className="text-xs text-muted-foreground">
+          勾选的盘上，平台为每个用户建一个卷并挂载到他在这台服务器上的所有容器；卷按数据弹性伸缩，
+          与系统盘共用磁盘总额（系统盘按分配大小计，数据盘按已有数据计），单盘上限可选。
+        </p>
+      </div>
+      <DataDiskEditor id={id} serverId={serverId} draft={draft} onChange={onChange} known={[known]} />
+    </section>
+  );
+}
+
+/**
+ * A new bundle on one server: name, the quotas (empty = 不限; GPUs start at
+ * none; the disk total must be filled in) and the data disks.
+ */
 export function BundleCreateDialog({ defaultServerId, onClose }: { defaultServerId: string; onClose: () => void }) {
   const serversQuery = useGrantServers();
   const invalidate = useInvalidateBundles();
-  const [serverId, setServerId] = useState(defaultServerId);
+  const [serverId, setServerIdState] = useState(defaultServerId);
   const [name, setName] = useState('');
   const [texts, setTexts] = useState<QuotaTexts>(NEW_BUNDLE_QUOTA_TEXTS);
+  const [disks, setDisks] = useState<DataDiskDraft>([]);
+  // Data disks are pools of one server: another server starts over.
+  const setServerId = (next: string) => {
+    if (next !== serverId) setDisks([]);
+    setServerIdState(next);
+  };
   const gpuEnabled = serversQuery.data?.find((server) => server.id === serverId)?.gpuEnabled;
   // A server without GPU passthrough has no cards to give: GPUs stay at none.
   const shownTexts = gpuEnabled === false ? { ...texts, gpuCount: '0' } : texts;
   const [error, setError] = useState<string | null>(null);
   const quotas = parseQuotaTexts(shownTexts);
+  const dataDisks = parseDataDiskDraft(disks);
   const create = useMutation({
     mutationFn: (body: CreateGrantBundleRequest) => api.post<GrantBundleDto>('/admin/grant-bundles', body),
     onSuccess: () => {
@@ -85,13 +126,13 @@ export function BundleCreateDialog({ defaultServerId, onClose }: { defaultServer
     },
     onError: (mutationError) => setError(bundleErrorText(mutationError)),
   });
-  const ready = Boolean(serverId) && quotas !== undefined && nameError(name) === null;
+  const ready = Boolean(serverId) && quotas !== undefined && dataDisks !== undefined && nameError(name) === null;
   return (
     <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}>
       <DialogContent className="sm:max-w-2xl">
         <DialogHeader>
           <DialogTitle>新建授权模板</DialogTitle>
-          <DialogDescription>模板绑定一台服务器；数据盘额度不在模板里，在用户的授权页按存储池添加。</DialogDescription>
+          <DialogDescription>模板绑定一台服务器，定义额度、磁盘总额和数据盘；在用户的授权页分配，可逐项修改。</DialogDescription>
         </DialogHeader>
         <div className="space-y-3">
           <SelectField
@@ -112,12 +153,13 @@ export function BundleCreateDialog({ defaultServerId, onClose }: { defaultServer
             onChange={setTexts}
             gpuEnabled={gpuEnabled}
           />
+          <BundleDataDisks id="grant-bundle-data-disks" serverId={serverId} draft={disks} onChange={setDisks} />
           {error ? <p className="text-sm text-destructive">{error}</p> : null}
         </div>
         <DialogFooter>
           <Button variant="outline" onClick={onClose}>取消</Button>
           <Button
-            onClick={() => { if (quotas) create.mutate({ serverId, name: name.trim(), ...quotas }); }}
+            onClick={() => { if (quotas && dataDisks) create.mutate({ serverId, name: name.trim(), ...quotas, dataDisks }); }}
             disabled={!ready || create.isPending}
           >
             {create.isPending ? '创建中...' : '创建'}
@@ -139,9 +181,12 @@ export function BundleEditDialog({ bundle, onClose }: { bundle: GrantBundleDto; 
   const [base, setBase] = useState(bundle);
   const [name, setName] = useState(bundle.name);
   const [texts, setTexts] = useState<QuotaTexts>(() => quotasToTexts(bundle));
+  const [disks, setDisks] = useState<DataDiskDraft>(() => dataDiskDraftFrom(bundle.dataDisks));
   const [preview, setPreview] = useState<GrantBundlePreviewDto | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  const changes = nameError(name) === null ? bundleChanges(base, name, texts) : undefined;
+  const changes = nameError(name) === null ? bundleChanges(base, name, texts, disks) : undefined;
+  // Saving a list that drops disks some users hold volumes on lapses those volumes.
+  const revokes = preview?.entries.some((entry) => entry.dataDisksRevoked.length > 0) ?? false;
   const changed = changes !== undefined && Object.keys(changes).length > 0;
 
   const runPreview = useMutation({
@@ -164,10 +209,11 @@ export function BundleEditDialog({ bundle, onClose }: { bundle: GrantBundleDto; 
       if (error instanceof ApiError && error.code === FailureCode.RevisionConflict) {
         if (current) {
           // Keep what this administrator changed; take everything else from the newer revision.
-          const rebased = rebaseBundleDraft(base, current, name, texts);
+          const rebased = rebaseBundleDraft(base, current, name, texts, disks);
           setBase(current);
           setName(rebased.name);
           setTexts(rebased.texts);
+          setDisks(rebased.disks);
         }
         invalidate();
         setPreview(null);
@@ -203,13 +249,25 @@ export function BundleEditDialog({ bundle, onClose }: { bundle: GrantBundleDto; 
               onChange={setTexts}
               gpuEnabled={servers.find((server) => server.id === base.serverId)?.gpuEnabled}
             />
+            <BundleDataDisks
+              id={`grant-bundle-${base.id}-data-disks`}
+              serverId={base.serverId}
+              draft={disks}
+              onChange={setDisks}
+              known={base.dataDisks}
+            />
           </div>
         )}
         <DialogFooter>
           {preview ? (
             <>
               <Button variant="outline" onClick={() => setPreview(null)} disabled={save.isPending}>返回修改</Button>
-              <Button onClick={() => save.mutate()} disabled={save.isPending} data-testid="grant-bundle-save">
+              <Button
+                variant={revokes ? 'destructive' : 'default'}
+                onClick={() => save.mutate()}
+                disabled={save.isPending}
+                data-testid="grant-bundle-save"
+              >
                 {save.isPending ? '保存中...' : '确认保存'}
               </Button>
             </>

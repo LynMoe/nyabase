@@ -19,7 +19,6 @@ describe('failureCodeLabel GPU codes', () => {
 
 describe('storage labels', () => {
   it('renders the data-disk and mount failure codes in Chinese', () => {
-    expect(failureCodeLabel(FailureCode.DataDiskPoolGranted)).toBe('部分盘已属于该用户的其他数据盘授权');
     expect(failureCodeLabel(FailureCode.StorageMountPathConflict)).toMatch(/挂载点/);
     expect(failureCodeLabel(FailureCode.StorageMountUnsupported)).toMatch(/不能作为数据盘/);
     expect(failureCodeLabel(FailureCode.VolumeStillGranted)).toBe('仍有授权覆盖该盘，请先撤销授权');

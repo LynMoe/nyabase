@@ -1,7 +1,13 @@
 import { useState } from 'react';
 import { useMutation } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
-import { FailureCode, type GrantBundleDto, type PutServerGrantRequest, type ServerGrantDto } from '@nyabase/common';
+import {
+  FailureCode,
+  GRANT_EXPIRY_GRACE_DAYS,
+  type GrantBundleDto,
+  type PutServerGrantRequest,
+  type ServerGrantDto,
+} from '@nyabase/common';
 import { ApiError, apiErrorDetails, errorMessage } from '../../lib/api-error.js';
 import { api } from '../../lib/api.js';
 import {
@@ -15,7 +21,8 @@ import { ConfirmDialog } from '../layout/confirm-dialog.js';
 import { SelectField } from '../layout/form-field.js';
 import { SectionCard } from '../layout/section-card.js';
 import { Button } from '../ui/button.js';
-import { GrantExpiryInput, OverrideQuotaFields } from './grant-form-parts.js';
+import { useUserPoolData } from './data-disk-editor.js';
+import { GrantExpiryInput, OverrideDataDisks, OverrideQuotaFields } from './grant-form-parts.js';
 import {
   isoOrNull,
   serverName,
@@ -32,9 +39,10 @@ interface ReplacePrompt {
 }
 
 /**
- * Give the user a bundle: pick it (grouped by server), keep or
- * override each of its quotas, set the expiry. A user holds one bundle per
- * server, so assigning onto a server they already have asks before replacing.
+ * Give the user a bundle: pick it (grouped by server), keep or override each
+ * of its quotas and its data-disk list, set the expiry. A user holds one
+ * bundle per server, so assigning onto a server they already have asks
+ * before replacing.
  */
 export function AssignBundleCard({ userId, grants }: { userId: string; grants: ServerGrantDto[] }) {
   const bundlesQuery = useGrantBundles();
@@ -49,6 +57,7 @@ export function AssignBundleCard({ userId, grants }: { userId: string; grants: S
   const existing = bundle ? grants.find((grant) => grant.serverId === bundle.serverId) : undefined;
   const overrides = parseOverrideDraft(draft, { bundle });
   const gpuEnabled = bundle ? servers.find((server) => server.id === bundle.serverId)?.gpuEnabled : undefined;
+  const usedByPool = useUserPoolData(userId, bundle?.serverId ?? '');
   // Overrides are relative to one bundle (and server): picking another starts over.
   const pickBundle = (next: string) => {
     if (next === bundleId) return;
@@ -97,7 +106,7 @@ export function AssignBundleCard({ userId, grants }: { userId: string; grants: S
   return (
     <SectionCard
       title="分配授权模板"
-      description="每台服务器上一个用户只能有一个授权模板；数据盘在下方服务器授权的详情里添加。"
+      description="每台服务器上一个用户只能有一个授权模板；磁盘总额与数据盘随模板，也可以逐项修改。"
       testId="grant-assign"
     >
       {noBundles ? (
@@ -129,6 +138,14 @@ export function AssignBundleCard({ userId, grants }: { userId: string; grants: S
                 onChange={setDraft}
                 gpuEnabled={gpuEnabled}
               />
+              <OverrideDataDisks
+                idPrefix="grant-assign"
+                serverId={bundle.serverId}
+                bundle={bundle}
+                draft={draft}
+                onChange={setDraft}
+                usedByPool={usedByPool}
+              />
               <GrantExpiryInput id="grant-assign-expires-at" value={expiresAt} onChange={setExpiresAt} />
               <div className="flex justify-end gap-2">
                 <Button variant="outline" onClick={reset} disabled={assign.isPending}>清空</Button>
@@ -148,7 +165,7 @@ export function AssignBundleCard({ userId, grants }: { userId: string; grants: S
         open={replacePrompt !== null}
         title="替换授权模板？"
         description={replacePrompt
-          ? `该用户在 ${replacePrompt.serverName} 上已有授权模板「${replacePrompt.currentBundleName}」，是否替换为「${replacePrompt.nextBundleName}」？替换后立即生效，已有的数据盘额度保留。`
+          ? `该用户在 ${replacePrompt.serverName} 上已有授权模板「${replacePrompt.currentBundleName}」，是否替换为「${replacePrompt.nextBundleName}」？替换后立即生效：额度和数据盘改为跟随新模板（本次「修改」的除外），只在原授权里的数据盘会撤销，卷立即卸载、${GRANT_EXPIRY_GRACE_DAYS} 天后删除。`
           : ''}
         confirmLabel="替换"
         pendingLabel="替换中..."

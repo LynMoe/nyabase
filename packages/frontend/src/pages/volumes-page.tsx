@@ -96,7 +96,7 @@ function DataDiskList({
 }) {
   const detailFocus = useVolumeFocus();
   const live = liveServerAccess(access?.servers).filter((server) => server.dataDisks.length > 0);
-  const covered = new Set(live.flatMap((server) => server.dataDisks.flatMap((group) => group.poolIds)));
+  const covered = new Set(live.flatMap((server) => server.dataDisks.map((disk) => disk.poolId)));
   const uncovered = volumes.filter((volume) => !covered.has(volume.poolId));
   const coveredDetail = volumes.find((volume) => volume.id === detailFocus.id && covered.has(volume.poolId)) ?? null;
   const serverNameById = new Map(servers.map((server) => [server.id, server.name]));

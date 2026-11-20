@@ -65,7 +65,10 @@ interface SeedOptions {
 }
 
 interface GrantOptions {
+  /** The system disks' own ceiling. */
   rootDiskBytes: number | null;
+  /** The disk total (system disks and data); large unless a test is about it. */
+  diskBytes?: number;
   gpuPciAddresses?: string[];
 }
 
@@ -359,6 +362,47 @@ describePg('PostgreSQL container create admission and capacity', () => {
         })),
         FailureCode.StorageGrantExceeded,
       );
+    });
+  });
+
+  it('charges the disk total with system disks and the data on the grant\'s data disks', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const fixture = await seedFixture(database, {
+        poolTotalBytes: 10_000 * DISK_UNIT,
+        minimumRootSizeBytes: 1 * DISK_UNIT,
+      });
+      // The grant covers the pool as a data disk: its volume's data counts, not its size.
+      await grantServer(database, { user: fixture.userId }, fixture.serverId, {
+        dataDisks: [{ poolId: fixture.poolId, capBytes: null }],
+      });
+      const volumeId = await seedVolume(database, {
+        ownerId: fixture.userId, poolId: fixture.poolId, serverId: fixture.serverId,
+      });
+      await database.updateTable('control.volumes').set({ size_bytes: 1_000 * DISK_UNIT, used_bytes: 30 * DISK_UNIT })
+        .where('id', '=', volumeId).execute();
+      const service = containerService(database, { rootDiskBytes: null, diskBytes: 200 * DISK_UNIT });
+      await service.service.create(testActor(fixture.userId), request(fixture, 'total-first', {
+        rootSizeBytes: 100 * DISK_UNIT,
+      }));
+      await expect(service.service.create(testActor(fixture.userId), request(fixture, 'total-second', {
+        rootSizeBytes: 80 * DISK_UNIT,
+      }))).rejects.toMatchObject({
+        response: {
+          code: FailureCode.StorageGrantExceeded,
+          details: {
+            requestedBytes: 80 * DISK_UNIT,
+            availableBytes: 70 * DISK_UNIT,
+            grantLimitBytes: 200 * DISK_UNIT,
+            rootDiskBytes: 100 * DISK_UNIT,
+            dataDiskBytes: 30 * DISK_UNIT,
+          },
+        },
+      });
+      // Data deleted from the volume gives the room back to system disks.
+      await database.updateTable('control.volumes').set({ used_bytes: 0 }).where('id', '=', volumeId).execute();
+      await service.service.create(testActor(fixture.userId), request(fixture, 'total-fits', {
+        rootSizeBytes: 80 * DISK_UNIT,
+      }));
     });
   });
 
@@ -950,12 +994,14 @@ async function enableGpu(
 function grant(options: GrantOptions): {
   cpuCores: number;
   memBytes: number;
+  diskBytes: number;
   rootDiskBytes: number | null;
   gpuPciAddresses: string[];
 } {
   return {
     cpuCores: 10,
     memBytes: 10_000,
+    diskBytes: options.diskBytes ?? 2 ** 50,
     rootDiskBytes: options.rootDiskBytes,
     gpuPciAddresses: options.gpuPciAddresses ?? [],
   };

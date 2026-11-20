@@ -1,9 +1,17 @@
 import { useState } from 'react';
 import { ChevronDown } from 'lucide-react';
-import type { GrantBundleDto, PatchServerGrantRequest, ServerGrantDto, ServerGrantOverrides } from '@nyabase/common';
+import {
+  GRANT_EXPIRY_GRACE_DAYS,
+  type GrantBundleDto,
+  type PatchServerGrantRequest,
+  type ServerGrantDto,
+  type ServerGrantOverrides,
+} from '@nyabase/common';
 import { useActionMutation } from '../../hooks/use-action-mutation.js';
 import { api } from '../../lib/api.js';
+import { poolDisplayName } from '../../lib/data-disks.js';
 import { grantedGpuIndexLabel } from '../../lib/grant-quota.js';
+import { useServerPools } from '../../lib/server-queries.js';
 import { cn } from '../../lib/utils.js';
 import { useGpuDevices } from '../gpu/gpu-picker.js';
 import {
@@ -15,11 +23,14 @@ import {
   overriddenFields,
   parseOverrideDraft,
 } from '../../lib/grant-bundle-form.js';
+import { diffDataDisks, sameDataDisks } from '../../lib/grant-data-disks.js';
+import { ConfirmDialog } from '../layout/confirm-dialog.js';
 import { SectionCard } from '../layout/section-card.js';
+import { truncateId } from '../refs/technical-id.js';
 import { Badge } from '../ui/badge.js';
 import { Button } from '../ui/button.js';
-import { DataDiskSection, type DataDiskDeleteTarget } from './data-disk-section.js';
-import { GrantExpiryInput, OverrideQuotaFields, PhaseBadge } from './grant-form-parts.js';
+import { useUserPoolData } from './data-disk-editor.js';
+import { GrantExpiryInput, OverrideDataDisks, OverrideQuotaFields, PhaseBadge } from './grant-form-parts.js';
 import {
   expiryLabel,
   expiryPhase,
@@ -42,14 +53,19 @@ export function knownBundleQuotas(grant: ServerGrantDto, bundle: GrantBundleDto 
   for (const field of GRANT_BUNDLE_FIELDS) {
     if (!overridden.has(field)) known[field] = grant[field];
   }
+  if (!overridden.has('dataDisks')) known.dataDisks = grant.dataDisks;
   return known;
 }
 
-/** Same override set: the same fields, each with the same value. */
+/** Same override set: the same fields, each with the same value (a data-disk list in any order). */
 export function sameOverrides(left: ServerGrantOverrides, right: ServerGrantOverrides): boolean {
   const fields = overriddenFields(left);
   return fields.length === overriddenFields(right).length
-    && fields.every((field) => Object.hasOwn(right, field) && (left[field] ?? null) === (right[field] ?? null));
+    && fields.every((field) => {
+      if (!Object.hasOwn(right, field)) return false;
+      if (field === 'dataDisks') return sameDataDisks(left.dataDisks ?? [], right.dataDisks ?? []);
+      return (left[field] ?? null) === (right[field] ?? null);
+    });
 }
 
 /** A server grant picked for deletion. */
@@ -60,21 +76,19 @@ export interface ServerGrantDeleteTarget {
 
 /**
  * The user's server grants, one row per server: its name, the bundle, the
- * effective quotas and the data disks summed, the expiry. A row expands in
- * place into its editor (quotas, expiry), the GPUs picked and the data disks.
+ * effective quotas and data disks, the expiry. A row expands in place into
+ * its editor (quotas, data disks, expiry) and the GPUs picked.
  */
 export function ServerGrantList({
   userId,
   grants,
   bundles,
   onDelete,
-  onDeleteDisk,
 }: {
   userId: string;
   grants: ServerGrantDto[];
   bundles: GrantBundleDto[];
   onDelete: (target: ServerGrantDeleteTarget) => void;
-  onDeleteDisk: (target: DataDiskDeleteTarget) => void;
 }) {
   const servers = useGrantServers().data ?? [];
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set());
@@ -135,7 +149,6 @@ export function ServerGrantList({
                         serverId: grant.serverId,
                         label: `${grant.bundleName} · ${serverName(grant.serverId, servers)}`,
                       })}
-                      onDeleteDisk={onDeleteDisk}
                     />
                   </div>
                 ) : null}
@@ -154,10 +167,17 @@ function GrantedGpus({ serverId, pciAddresses }: { serverId: string; pciAddresse
   return <>{grantedGpuIndexLabel(pciAddresses, inventory)}</>;
 }
 
+/** The disks of `before` that `after` (unknown while the bundle loads) no longer lists. */
+function revokedPools(before: ServerGrantDto['dataDisks'], after: ServerGrantDto['dataDisks'] | undefined): string[] {
+  return after === undefined ? [] : diffDataDisks(before, after).removed.map((disk) => disk.poolId);
+}
+
 /**
  * One server grant, expanded: its quotas as inputs (a switch per field turns
- * an override on and enables the input; off follows the bundle), the expiry,
- * the GPUs picked for the user, and the data disks that live under it.
+ * an override on and enables the input; off follows the bundle), its data
+ * disks (the same switch for the whole list), the expiry and the GPUs picked
+ * for the user. Saving a change that drops a data disk asks first: the user's
+ * volume there lapses.
  */
 function ServerGrantDetail({
   userId,
@@ -165,24 +185,30 @@ function ServerGrantDetail({
   bundle,
   gpuEnabled,
   onDelete,
-  onDeleteDisk,
 }: {
   userId: string;
   grant: ServerGrantDto;
   bundle: GrantBundleDto | undefined;
   gpuEnabled: boolean | undefined;
   onDelete: () => void;
-  onDeleteDisk: (target: DataDiskDeleteTarget) => void;
 }) {
   const access = useLiveServerAccess(userId, grant.serverId);
   const invalidate = useInvalidateGrants(userId);
+  const usedByPool = useUserPoolData(userId, grant.serverId);
+  const pools = useServerPools(grant.serverId).data ?? [];
   const known = knownBundleQuotas(grant, bundle);
   const [draft, setDraft] = useState(() => overrideDraftFrom(grant.overrides));
   const [expiresAt, setExpiresAt] = useState(() => initialExpiry(grant.expiresAt));
+  const [confirming, setConfirming] = useState(false);
   const overrides = parseOverrideDraft(draft, { overrides: grant.overrides, bundle: known });
   // The expiry input has minute precision, so it is compared as text against the stored one.
   const expiryChanged = expiresAt !== initialExpiry(grant.expiresAt);
   const dirty = overrides === undefined || !sameOverrides(overrides, grant.overrides) || expiryChanged;
+  const revoked = overrides ? revokedPools(grant.dataDisks, overrides.dataDisks ?? known.dataDisks) : [];
+  const nameOf = (poolId: string) => {
+    const pool = pools.find((row) => row.id === poolId);
+    return pool ? poolDisplayName(pool) : truncateId(poolId);
+  };
   const reset = () => {
     setDraft(overrideDraftFrom(grant.overrides));
     setExpiresAt(initialExpiry(grant.expiresAt));
@@ -197,7 +223,10 @@ function ServerGrantDetail({
     },
     successTitle: '授权已保存',
     errorTitle: '授权保存失败',
-    onSuccess: invalidate,
+    onSuccess: () => {
+      setConfirming(false);
+      invalidate();
+    },
   });
   return (
     <div className="space-y-5 text-sm">
@@ -214,6 +243,15 @@ function ServerGrantDetail({
         onChange={setDraft}
         gpuEnabled={gpuEnabled}
       />
+      <OverrideDataDisks
+        idPrefix={`grant-${grant.serverId}`}
+        serverId={grant.serverId}
+        bundle={known}
+        draft={draft}
+        onChange={setDraft}
+        usedByPool={usedByPool}
+        stored={grant.overrides.dataDisks}
+      />
       <div className="grid gap-3 sm:grid-cols-2">
         <GrantExpiryInput id={`grant-${grant.serverId}-expires-at`} value={expiresAt} onChange={setExpiresAt} />
         <div className="flex items-center gap-2 rounded-md border px-3 py-2 sm:self-start">
@@ -227,7 +265,7 @@ function ServerGrantDetail({
         <div className="flex justify-end gap-2">
           <Button variant="outline" onClick={reset} disabled={save.isPending}>还原</Button>
           <Button
-            onClick={() => save.mutate()}
+            onClick={() => { if (revoked.length > 0) setConfirming(true); else save.mutate(); }}
             disabled={overrides === undefined || save.isPending}
             data-testid={`grant-save-${grant.serverId}`}
           >
@@ -235,7 +273,16 @@ function ServerGrantDetail({
           </Button>
         </div>
       ) : null}
-      <DataDiskSection userId={userId} grant={grant} access={access} onDelete={onDeleteDisk} />
+      <ConfirmDialog
+        open={confirming}
+        title="撤销数据盘？"
+        description={`保存后 ${revoked.map(nameOf).join('、')} 不再在该用户的授权内：该用户在这些盘上的数据卷立即从所有容器卸载，${GRANT_EXPIRY_GRACE_DAYS} 天后删除（期间重新授权可保留）。`}
+        confirmLabel="确认保存"
+        pendingLabel="保存中..."
+        pending={save.isPending}
+        onConfirm={() => save.mutate()}
+        onOpenChange={(open) => { if (!open) setConfirming(false); }}
+      />
     </div>
   );
 }

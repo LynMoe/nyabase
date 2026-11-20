@@ -33,7 +33,7 @@ import { useMySshKeys } from '../../hooks/use-my-ssh-keys.js';
 import { SshKeyNotice } from '../ssh/ssh-key-notice.js';
 import { Checkbox } from '../ui/checkbox.js';
 import { ContainerCreateGpu } from '../gpu/gpu-sections.js';
-import { GIB, gibToBytes } from '../../lib/utils.js';
+import { GIB, formatBytes, gibToBytes } from '../../lib/utils.js';
 import { SizeField, parsePositiveGib } from '../ui/size-slider.js';
 import { QuotaLine, type QuotaLineQuota, quotaFrom } from '../quota/quota-line.js';
 import { sizeScale } from '../../lib/size-ladder.js';
@@ -203,7 +203,12 @@ function SpecFields({ form }: { form: CreateContainerForm }) {
           ?? (diskOver && diskLeft !== null ? `超出剩余容量 ${bytesText(diskLeft)}` : undefined)}
       >
         {selectedAccess ? (
-          <QuotaLine quota={form.limits.diskQuota} over={diskOver} testId="create-remaining-disk" />
+          <>
+            <QuotaLine quota={form.limits.diskQuota} over={diskOver} testId="create-remaining-disk" />
+            {form.limits.diskNote ? (
+              <p className="text-xs text-muted-foreground" data-testid="create-disk-shared">{form.limits.diskNote}</p>
+            ) : null}
+          </>
         ) : null}
       </SizeField>
     </>
@@ -443,20 +448,24 @@ type CreateContainerData = ReturnType<typeof useCreateContainerData>;
 
 /**
  * Slider ranges and quota lines of the chosen server. Memory runs to the grant
- * limit, or the host's memory when unlimited; the root disk to the system-disk grant,
- * or the 4 TiB ladder when unlimited (its pool is not exposed to users).
+ * limit, or the host's memory when unlimited; the root disk to the disk total
+ * (or the system-disk ceiling, when lower). What is left for a system disk
+ * already counts the data on the user's data disks: they share the total.
  */
 function specLimits(data: CreateContainerData, memLeft: number | null): {
   memScale: ReturnType<typeof sizeScale>;
   diskScale: ReturnType<typeof sizeScale>;
   memQuota: QuotaLineQuota;
   diskQuota: QuotaLineQuota;
+  diskNote: string | null;
 } {
   const { selectedAccess, capacityQuery, containersQuery } = data;
   const memLimit = selectedAccess?.memBytes || null;
   const memMaxBytes = memLimit ?? data.hostMemBytes;
   const capacity = capacityQuery.data;
-  const diskLimit = capacity?.rootDiskLimitBytes || null;
+  const total = capacity?.diskLimitBytes ?? null;
+  const ceiling = capacity?.rootDiskLimitBytes ?? null;
+  const diskLimit = total === null ? ceiling : ceiling === null ? total : Math.min(total, ceiling);
   return {
     memScale: sizeScale('memory', memMaxBytes === null ? null : memMaxBytes / GIB),
     diskScale: sizeScale('disk', diskLimit === null ? null : diskLimit / GIB),
@@ -465,8 +474,17 @@ function specLimits(data: CreateContainerData, memLeft: number | null): {
       : quotaFrom(selectedAccess ? memLimit : undefined, memLeft),
     diskQuota: capacityQuery.isError
       ? { kind: 'unknown' }
-      : quotaFrom(capacity ? capacity.rootDiskLimitBytes : undefined, capacity?.rootDiskAvailableBytes),
+      : quotaFrom(capacity ? diskLimit : undefined, capacity?.rootDiskAvailableBytes),
+    diskNote: capacity ? sharedDiskNote(capacity) : null,
   };
+}
+
+/** How the disk total is shared, under the system-disk slider. */
+function sharedDiskNote(capacity: { diskLimitBytes: number | null; rootDiskLimitBytes: number | null; dataDiskUsedBytes: number }): string | null {
+  if (capacity.diskLimitBytes === null) return null;
+  const parts = [`与数据盘共用磁盘总额 ${formatBytes(capacity.diskLimitBytes)}，数据盘已有数据 ${formatBytes(capacity.dataDiskUsedBytes)}`];
+  if (capacity.rootDiskLimitBytes !== null) parts.push(`系统盘上限 ${formatBytes(capacity.rootDiskLimitBytes)}`);
+  return `${parts.join('；')}。`;
 }
 
 type FormState = {

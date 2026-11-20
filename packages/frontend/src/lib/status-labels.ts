@@ -41,11 +41,9 @@ const SERVER_STATUS_ZH: Record<string, string> = {
 
 const FAILURE_CODE_ZH: Partial<Record<string, string>> = {
   [FailureCode.RevisionConflict]: '版本冲突，请刷新后重试',
-  [FailureCode.StorageGrantExceeded]: '存储授权不足',
+  [FailureCode.StorageGrantExceeded]: '磁盘额度不足（系统盘与数据盘共用磁盘总额）',
   [FailureCode.MemoryGrantExceeded]: '内存授权不足',
   [FailureCode.ServerGrantExists]: '该用户在此服务器上已有授权模板',
-  [FailureCode.ServerGrantRequired]: '请先为该用户分配这台服务器的授权模板',
-  [FailureCode.DataDiskPoolGranted]: '部分盘已属于该用户的其他数据盘授权',
   [FailureCode.StorageMountPathConflict]: '挂载点与其他盘的挂载点相同或互相嵌套',
   [FailureCode.StorageMountUnsupported]: '该存储池不能作为数据盘（需已登记、在线配额且配额生效）',
   [FailureCode.SystemDiskUnsupported]: '该存储池不能作为系统盘（需已登记、能放系统盘的本地池）',

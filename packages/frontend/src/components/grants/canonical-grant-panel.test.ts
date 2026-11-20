@@ -91,18 +91,17 @@ describe('grant panel copy', () => {
     expect(source).toContain('容器立即停止，${GRANT_EXPIRY_GRACE_DAYS} 天后清除');
   });
 
-  it('warns that deleting a data-disk grant unmounts its volumes and deletes them after the grace', () => {
-    expect(source).toContain("上的数据卷立即从所有容器卸载，${GRANT_EXPIRY_GRACE_DAYS} 天后删除");
-    expect(source).toContain('data-disk-grants');
+  it('asks before a change drops a data disk: its volumes unmount now and go after the grace', () => {
+    expect(source).toContain('该用户在这些盘上的数据卷立即从所有容器卸载，${GRANT_EXPIRY_GRACE_DAYS} 天后删除');
+    expect(source).toContain('其下的数据盘一并撤销');
+    expect(source).not.toContain('data-disk-grants');
     expect(source).not.toContain('storage-pool-grants');
+    expect(source).not.toContain('movePools');
   });
 
-  it('confirms disks moved out of another grant and warns in red about revoked ones', () => {
-    expect(source).toContain('将从「');
-    expect(source).toContain('」中移出');
-    expect(source).toContain('movePools');
-    expect(source).toContain('variant="destructive" data-testid="data-disk-revoked"');
+  it('flags a data-disk ceiling below the user\'s data on the disk', () => {
     expect(source).toContain('超出部分只能删除，不会停机或卸载');
+    expect(source).toContain('与系统盘共用磁盘总额');
   });
 
   it('gives shared storage grants a required size', () => {
@@ -124,5 +123,14 @@ describe('sameOverrides', () => {
     expect(sameOverrides({ memBytes: null }, {})).toBe(false);
     expect(sameOverrides({ memBytes: 1 }, { memBytes: 2 })).toBe(false);
     expect(sameOverrides({ memBytes: 1 }, { memBytes: 1, cpuCores: 4 })).toBe(false);
+  });
+
+  it('compares data-disk lists as sets, and [] apart from following the bundle', async () => {
+    const { sameOverrides } = await import('./server-grant-list.js');
+    const a = { poolId: 'a', capBytes: null };
+    const b = { poolId: 'b', capBytes: 1 };
+    expect(sameOverrides({ dataDisks: [a, b] }, { dataDisks: [b, a] })).toBe(true);
+    expect(sameOverrides({ dataDisks: [a] }, { dataDisks: [a, b] })).toBe(false);
+    expect(sameOverrides({ dataDisks: [] }, {})).toBe(false);
   });
 });

@@ -4,6 +4,7 @@ import { AuditAction, FailureCode, Role } from '@nyabase/common';
 import { describe, expect, it, vi } from 'vitest';
 import { testActor } from '../iam/actor.test-helper.js';
 import {
+  LARGE_GRANT_BYTES,
   grantBackend,
   grantPool,
   grantServer,
@@ -100,9 +101,11 @@ describePg('VolumeProvisioner', () => {
       const first = await provisioner.run(new Map());
       expect(first).toMatchObject({ created: 2, mounted: 0, resized: 0 });
       const created = await volumesOf(database, userId);
+      // The owner's 100-byte system disk on the server comes out of the total; the rest is split.
+      const half = String(Math.floor((300 * GiB - 100) / 2));
       expect(created).toEqual([
-        expect.objectContaining({ pool_id: data1, name: '/data1', size_bytes: String(150 * GiB), lifecycle_phase: 'provisioning' }),
-        expect.objectContaining({ pool_id: data2, name: '/data2', size_bytes: String(150 * GiB), lifecycle_phase: 'provisioning' }),
+        expect.objectContaining({ pool_id: data1, name: '/data1', size_bytes: half, lifecycle_phase: 'provisioning' }),
+        expect.objectContaining({ pool_id: data2, name: '/data2', size_bytes: half, lifecycle_phase: 'provisioning' }),
       ]);
       for (const volume of created) {
         const ensure = await database.selectFrom('control.intents').select(['kind', 'requested_by'])
@@ -160,7 +163,7 @@ describePg('VolumeProvisioner', () => {
     });
   });
 
-  it('follows the grant: below the data where the filesystem takes it, by ratchet where it does not', async () => {
+  it('follows a lowered ceiling: below the data where the filesystem takes it, by ratchet where it does not', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const { provisioner, audit } = services(database);
       const userId = await seedUser(database);
@@ -168,15 +171,14 @@ describePg('VolumeProvisioner', () => {
       const dirDisk = await seedDisk(database, serverId, '/data1');
       const zfsDisk = await seedDisk(database, serverId, '/data2', 'zfs');
       await grantServer(database, { user: userId }, serverId);
-      await grantPool(database, { user: userId }, dirDisk, 20 * GiB);
-      await grantPool(database, { user: userId }, zfsDisk, 20 * GiB);
+      await grantPool(database, { user: userId }, [dirDisk, zfsDisk], LARGE_GRANT_BYTES, 20 * GiB);
       await provisioner.run(new Map());
       const [dirVolume, zfsVolume] = await volumesOf(database, userId);
       await activate(database, [dirVolume!.id, zfsVolume!.id]);
       await database.updateTable('control.volumes').set({ size_bytes: 100 * GiB, revision: 5 })
         .where('id', 'in', [dirVolume!.id, zfsVolume!.id]).execute();
 
-      // The ratchet needs the data: unknown, nothing happens to the ZFS volume.
+      // Usage unknown: the ceiling still holds where the filesystem takes it; the ratchet needs the data.
       await expect(provisioner.run(new Map())).resolves.toMatchObject({ resized: 1 });
       await provisioner.run(new Map([[zfsVolume!.id, 60 * GiB]]));
       const after = await volumesOf(database, userId);
@@ -210,6 +212,46 @@ describePg('VolumeProvisioner', () => {
       await provisioner.run(new Map([[a!.id, 40 * GiB], [b!.id, 0]]));
       const sizes = (await volumesOf(database, userId)).map((volume) => Number(volume.size_bytes) / GiB);
       expect(sizes).toEqual([70, 30]);
+    });
+  });
+
+  it('takes the owner\'s system disks out of the total, and passes a capped disk\'s share to the others', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const { provisioner } = services(database);
+      const userId = await seedUser(database);
+      const serverId = await seedServer(database);
+      const image = await seedImage(database);
+      const disks = [await seedDisk(database, serverId, '/data1'), await seedDisk(database, serverId, '/data2')];
+      const grantId = await grantServer(database, { user: userId }, serverId, {
+        diskBytes: 100 * GiB,
+        dataDisks: [{ poolId: disks[0]!, capBytes: 10 * GiB }, { poolId: disks[1]!, capBytes: null }],
+      });
+      const containerId = await seedContainer(database, { ownerId: userId, serverId, poolId: disks[0]!, imageId: image });
+      await database.updateTable('control.containers').set({ root_size_bytes: 40 * GiB }).where('id', '=', containerId).execute();
+      await provisioner.run(new Map());
+      const [a, b] = await volumesOf(database, userId);
+      await activate(database, [a!.id, b!.id]);
+      // 60 GiB left beside the system disk: /data1 stops at its 10 GiB ceiling, /data2 takes the other 50.
+      await provisioner.run(new Map([[a!.id, 0], [b!.id, 0]]));
+      await database.updateTable('control.volumes').set({ shrink_reserved_bytes: null }).execute();
+      await provisioner.run(new Map([[a!.id, 0], [b!.id, 0]]));
+      expect((await volumesOf(database, userId)).map((volume) => Number(volume.size_bytes) / GiB)).toEqual([10, 50]);
+
+      // A grow planned before the system disk grew waits a pass: the next plan shrinks instead.
+      const before = await database.selectFrom('control.volumes').select(['revision', 'size_bytes']).where('id', '=', b!.id)
+        .executeTakeFirstOrThrow();
+      const grow = (provisioner as unknown as {
+        applyResize(resize: object): Promise<boolean>;
+      }).applyResize.bind(provisioner);
+      await expect(grow({
+        volumeId: b!.id, revision: before.revision, sizeBytes: 55 * GiB,
+        quota: { ownerId: userId, serverId, rootBytes: 35 * GiB },
+      })).resolves.toBe(false);
+      await expect(grow({
+        volumeId: b!.id, revision: before.revision, sizeBytes: 55 * GiB,
+        quota: { ownerId: userId, serverId, rootBytes: 40 * GiB },
+      })).resolves.toBe(true);
+      expect(grantId).toEqual(expect.any(String));
     });
   });
 
@@ -330,23 +372,34 @@ describePg('VolumeProvisioner', () => {
     });
   });
 
-  it('reports a grant\'s whole group in the owner\'s capacity view', async () => {
+  it('reports the owner\'s disk total, data disks and system-disk room in the capacity view', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const { provisioner, capacity } = services(database);
       const userId = await seedUser(database);
       const serverId = await seedServer(database);
+      const image = await seedImage(database);
       const disks = [await seedDisk(database, serverId, '/data1'), await seedDisk(database, serverId, '/data2')];
-      await grantServer(database, { user: userId }, serverId);
-      const grantId = await grantPool(database, { user: userId }, disks, 100 * GiB);
+      await grantServer(database, { user: userId }, serverId, { rootDiskBytes: 90 * GiB });
+      await grantPool(database, { user: userId }, disks, 100 * GiB);
+      await database.updateTable('iam.storage_pool_grants').set({ cap_bytes: 40 * GiB }).where('pool_id', '=', disks[1]!).execute();
+      const containerId = await seedContainer(database, { ownerId: userId, serverId, poolId: disks[0]!, imageId: image });
+      await database.updateTable('control.containers').set({ root_size_bytes: 20 * GiB }).where('id', '=', containerId).execute();
       await provisioner.run(new Map());
       await database.updateTable('control.volumes').set({ used_bytes: 30 * GiB }).where('pool_id', '=', disks[0]!).execute();
 
       const view = await capacity(testActor(userId), serverId);
-      const groups = view.pools.filter((pool) => disks.includes(pool.poolId)).map((pool) => pool.grant);
-      const expected = {
-        grantId, poolIds: [...disks].sort(), limitBytes: 100 * GiB, usedBytes: 30 * GiB, availableBytes: 70 * GiB,
-      };
-      expect(groups).toEqual([expected, expected]);
+      expect(view).toMatchObject({
+        diskLimitBytes: 100 * GiB,
+        rootDiskLimitBytes: 90 * GiB,
+        usedByRootDisksBytes: 20 * GiB,
+        dataDiskUsedBytes: 30 * GiB,
+        // min(90 − 20 under the ceiling, 100 − 20 − 30 under the total)
+        rootDiskAvailableBytes: 50 * GiB,
+      });
+      expect(disks.map((poolId) => view.pools.find((pool) => pool.poolId === poolId)?.dataDisk)).toEqual([
+        { poolId: disks[0], capBytes: null, usedBytes: 30 * GiB },
+        { poolId: disks[1], capBytes: 40 * GiB, usedBytes: 0 },
+      ]);
       expect(view.pools.find((pool) => pool.poolId === disks[0])).toMatchObject({ mountPath: '/data1', maintenance: false });
     });
   });
@@ -369,7 +422,7 @@ describePg('VolumeProvisioner', () => {
 
       await expect(remove(admin, volume!.id, 'local'))
         .rejects.toMatchObject({ status: 409, response: { code: FailureCode.VolumeStillGranted } });
-      await database.deleteFrom('iam.data_disk_grants').where('id', '=', grantId).execute();
+      await database.deleteFrom('iam.storage_pool_grants').where('server_grant_id', '=', grantId).execute();
       await expect(remove(admin, volume!.id, 'local'))
         .rejects.toMatchObject({ status: 409, response: { code: FailureCode.VolumeRequiresUnbind } });
       await database.deleteFrom('control.volume_attachments').where('container_id', '=', containerId).execute();

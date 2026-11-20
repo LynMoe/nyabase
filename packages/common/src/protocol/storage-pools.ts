@@ -74,16 +74,21 @@ export interface StorageCapacityPoolDto {
   mountPath: string | null;
   maintenance: boolean;
   /**
-   * `scope=mine`: the caller's data-disk grant covering this pool, for its whole
-   * group of disks; null without one (and always in the `scope=all` view).
+   * `scope=mine`: the caller's data disk on this pool (its ceiling and data);
+   * null when the grant does not cover the pool (and always in `scope=all`).
    */
-  grant: DataDiskUsageDto | null;
+  dataDisk: DataDiskUsageDto | null;
 }
 
 export interface StorageCapacityDto {
-  /** `scope=mine`: the caller's system-disk quota on the server (null = unlimited, and in `scope=all`). */
+  /** `scope=mine`: the caller's disk total on the server (system disks and data disks); null in `scope=all`. */
+  diskLimitBytes: number | null;
+  /** `scope=mine`: the caller's system-disk ceiling (null = only the total, and in `scope=all`). */
   rootDiskLimitBytes: number | null;
   usedByRootDisksBytes: number;
+  /** `scope=mine`: the data on the caller's data disks of the server, as the total counts it; 0 in `scope=all`. */
+  dataDiskUsedBytes: number;
+  /** `scope=mine`: what a new or grown system disk may still take (`systemDiskRoom`); null in `scope=all`. */
   rootDiskAvailableBytes: number | null;
   usedByLocalVolumesBytes: number;
   pools: StorageCapacityPoolDto[];

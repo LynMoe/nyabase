@@ -1,8 +1,8 @@
-// A bundle is a set of server quotas bound to one server; a user holds at
-// most one per server, may override any field of it, and follows every
-// field it does not override. Data disks are quotas per pool under the
-// server grant. No container is created; the compute caps are enforced at
-// admission, before anything reaches Incus.
+// A bundle is a set of server quotas and data disks bound to one server; a
+// user holds at most one per server, may override any field of it (the
+// data-disk list as a whole), and follows every field it does not override.
+// No container is created; the compute caps and the disk total are enforced
+// at admission, before anything reaches Incus.
 import assert from 'node:assert/strict';
 import { after, before, describe, it } from 'node:test';
 import {
@@ -61,6 +61,8 @@ describe('grant bundles', () => {
     assert.equal(access.cpuCores, 1);
     assert.equal(access.memBytes, GIB);
     assert.equal(access.rootDiskBytes, 30 * GIB);
+    assert.equal(access.diskBytes, 256 * GIB, 'the disk total the harness bundle gives');
+    assert.equal(access.rootDiskAvailableBytes, 30 * GIB, 'a new system disk may take what the ceiling leaves');
     assert.equal(access.gpuCount, 0);
     assert.ok(Math.abs(Date.parse(access.expiresAt!) - Date.parse(inDays(30))) < 120_000);
     assert.ok(access.allowedImageIds.includes(h.state.image.id));
@@ -95,9 +97,24 @@ describe('grant bundles', () => {
     assert.equal(access.rootDiskBytes, 30 * GIB, 'the override is kept');
   });
 
-  it('asks before replacing the bundle on a server, keeps the data disks, and never lapses', async () => {
-    await h.grantDataDisks(user, server, [server.poolId], 5 * GIB);
-    const larger = await h.newBundle(server, { cpuCores: null, memBytes: 2 * GIB, rootDiskBytes: 40 * GIB });
+  it('lists data disks in the bundle: followers get them at once, each under its own ceiling', async () => {
+    bundle = await h.patchBundle(bundle, { dataDisks: [{ poolId: server.poolId, capBytes: 5 * GIB }] });
+    assert.deepEqual(bundle.dataDisks, [{ poolId: server.poolId, capBytes: 5 * GIB }]);
+    const access = (await effective())!;
+    assert.deepEqual(access.dataDisks.map((disk) => [disk.poolId, disk.capBytes]), [[server.poolId, 5 * GIB]]);
+    const foreign = h.state.servers.find((entry) => entry.id !== server.id);
+    if (foreign) {
+      assert.equal(await h.api.status('PATCH', `/admin/grant-bundles/${bundle.id}`, {
+        expectedRevision: bundle.revision, dataDisks: [{ poolId: foreign.poolId, capBytes: null }],
+      }), 404, 'a bundle lists only pools of its own server');
+    }
+  });
+
+  it('asks before replacing the bundle on a server, takes the new bundle\'s disks, and never lapses one both list', async () => {
+    const larger = await h.newBundle(server, {
+      cpuCores: null, memBytes: 2 * GIB, diskBytes: 300 * GIB, rootDiskBytes: 40 * GIB,
+      dataDisks: [{ poolId: server.poolId, capBytes: null }],
+    });
     const refused = await assign({ bundleId: larger.id }).then(() => undefined, (error: unknown) => error);
     assert.ok(refused instanceof ApiError);
     assert.equal(refused.status, 409);
@@ -110,27 +127,41 @@ describe('grant bundles', () => {
     assert.equal(psql(h.state.databaseUrl, `
       SELECT 1 FROM control.access_lapses WHERE user_id = '${uuid(user.id)}'
     `).length, 0, 'coverage never lapsed');
-    assert.deepEqual(replaced.dataDisks.map((grant) => [grant.poolIds, grant.limitBytes]), [[[server.poolId], 5 * GIB]]);
+    assert.deepEqual(replaced.dataDisks, [{ poolId: server.poolId, capBytes: null }]);
     const access = (await effective())!;
     assert.equal(access.cpuCores, null, 'null CPU is unlimited');
     assert.equal(access.memBytes, 2 * GIB);
-    assert.deepEqual(access.dataDisks.map((grant) => grant.limitBytes), [5 * GIB]);
+    assert.equal(access.diskBytes, 300 * GIB);
+    assert.deepEqual(access.dataDisks.map((disk) => [disk.poolId, disk.capBytes]), [[server.poolId, null]]);
 
     assert.equal(await h.api.status('DELETE', `/admin/grant-bundles/${larger.id}`), 409, 'a bundle in use stays');
+    const zero = { serverId: server.id, cpuCores: null, memBytes: 0, diskBytes: GIB, rootDiskBytes: null, gpuCount: 0, dataDisks: [] };
+    assert.equal(await h.api.status('POST', '/admin/grant-bundles', { ...zero, name: h.name('zero') }), 400,
+      'zero is not a way to spell unlimited');
     assert.equal(await h.api.status('POST', '/admin/grant-bundles', {
-      serverId: server.id, name: h.name('zero'), cpuCores: null, memBytes: 0, rootDiskBytes: null, gpuCount: 0,
-    }), 400, 'zero is not a way to spell unlimited');
+      ...zero, name: h.name('no-total'), memBytes: null, diskBytes: null,
+    }), 400, 'the disk total always has a size');
   });
 
-  it('takes data-disk grants only under a server grant', async () => {
-    const other = await h.newUser('no-server');
-    const status = await h.api.status('POST', `/users/${other.id}/data-disk-grants`, {
-      serverId: server.id, poolIds: [server.poolId], limitBytes: GIB,
-    });
-    assert.equal(status, 409);
-    assert.equal(await h.api.status('POST', `/users/${other.id}/data-disk-grants`, {
-      serverId: server.id, poolIds: [server.poolId], limitBytes: null,
-    }), 400, 'storage grants always have a size');
+  it('keeps the grant\'s own data-disk list and total through bundle edits, and admits system disks under the total', async () => {
+    const own = await h.overrideGrant(user, server, { diskBytes: h.state.rootSizeBytes - 1, dataDisks: [] });
+    assert.deepEqual(own.dataDisks, [], 'an empty own list is a real override');
+    await h.patchBundle({ id: own.bundleId }, { dataDisks: [{ poolId: server.poolId, capBytes: GIB }] });
+    const access = (await effective())!;
+    assert.deepEqual(access.dataDisks, [], 'the override shields the grant from the bundle\'s list');
+    assert.equal(access.diskBytes, h.state.rootSizeBytes - 1);
+    assert.equal(access.rootDiskAvailableBytes, h.state.rootSizeBytes - 1);
+
+    const denied = await (await login(h.state.baseUrl, user.username, user.password)).api.post('/containers', {
+      serverId: server.id, imageId: h.state.image.id, name: h.name('total'),
+      rootSizeBytes: h.state.rootSizeBytes, memBytes: GIB, powerIntent: 'stopped',
+    }).then(() => undefined, (error: unknown) => error);
+    assert.ok(denied instanceof ApiError);
+    assert.equal(denied.status, 409);
+    assert.equal(denied.code, FailureCode.StorageGrantExceeded);
+    const back = await h.overrideGrant(user, server, { diskBytes: undefined, dataDisks: undefined });
+    assert.deepEqual(back.overrides, {});
+    assert.deepEqual(back.dataDisks, [{ poolId: server.poolId, capBytes: GIB }], 'following the bundle again');
   });
 
   it('picks the cards of a GPU count when a GPU host is configured', async (t) => {

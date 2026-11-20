@@ -64,7 +64,7 @@ describe('lapse: revoke, grace, purge and disable', () => {
     if (volume) assert.equal(await user.session.api.status('GET', `/volumes/${volume.id}`), 200);
 
     // Coverage back inside the grace cancels it; the container stays stopped.
-    // (The data-disk grant went with the server grant, so it is granted again too.)
+    // (The data-disk list went with the server grant, so it is granted again too.)
     await h.grantServer(user, h.server);
     if (dataPoolId) await h.grantDataDisks(user, h.server, [dataPoolId], GIB);
     await pollUntil(async () => (lapseRow(user) === undefined ? true : undefined),
@@ -101,7 +101,7 @@ describe('lapse: revoke, grace, purge and disable', () => {
     await h.addSshKey(user);
     await h.grantServer(user, h.server);
     await h.enableDataDisk(h.server, '/lapsing-e2e');
-    const grantId = await h.grantDataDisks(user, h.server, [dataPoolId], GIB);
+    await h.grantDataDisks(user, h.server, [dataPoolId], GIB);
     const container = await h.createContainer(user, h.server);
     await h.waitMount(user.session.api, container.id, 'volumes', '/lapsing-e2e');
     const [volume] = await user.session.api.get<VolumeDto[]>('/volumes');
@@ -112,7 +112,7 @@ describe('lapse: revoke, grace, purge and disable', () => {
         AND resource_id = '${uuid(dataPoolId)}'
     `)[0];
 
-    await h.api.delete(`/users/${user.id}/data-disk-grants/${grantId}`);
+    await h.revokeDataDisks(user, h.server);
     await pollUntil(async () => (poolLapse()?.[0] === 't' ? true : undefined),
       { what: 'the pool grace to open', timeoutMs: 240_000, intervalMs: 3_000 });
     // Unmounted live: the container keeps running, the guest no longer sees the mount.

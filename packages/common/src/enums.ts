@@ -154,10 +154,6 @@ export enum FailureCode {
   StorageGrantExceeded = 'STORAGE_GRANT_EXCEEDED',
   /** The user already holds a bundle on the server; resend with `replace: true` to swap it. */
   ServerGrantExists = 'SERVER_GRANT_EXISTS',
-  /** A data-disk grant needs the user's server grant on the pool's server. */
-  ServerGrantRequired = 'SERVER_GRANT_REQUIRED',
-  /** A requested disk already belongs to another data-disk grant of the user; resend with `movePools: true`. */
-  DataDiskPoolGranted = 'DATA_DISK_POOL_GRANTED',
   /** The mount path collides with (equals or nests in) another disk's mount path. */
   StorageMountPathConflict = 'STORAGE_MOUNT_PATH_CONFLICT',
   /** The pool cannot be a data disk (not a registered local pool with an effective online quota). */
@@ -296,6 +292,7 @@ export enum AuditAction {
   /** Before 000012: one data-disk quota per pool (kept for the audit history). */
   UpsertStoragePoolGrant = 'grant.storage_pool.upsert',
   DeleteStoragePoolGrant = 'grant.storage_pool.delete',
+  /** Data-disk grants before 000014 (data disks are part of bundles now); kept for old audit rows. */
   CreateDataDiskGrant = 'grant.data_disk.create',
   UpdateDataDiskGrant = 'grant.data_disk.update',
   DeleteDataDiskGrant = 'grant.data_disk.delete',

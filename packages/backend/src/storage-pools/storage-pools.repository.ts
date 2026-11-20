@@ -402,15 +402,16 @@ export class StoragePoolsRepository {
   }
 
   /**
-   * Whether the pool still carries anything. Shared (CephFS) executors never
-   * appear in `volumes.pool_id`, so their volumes show up as placements.
+   * Whether the pool still carries anything (a bundle or grant listing it as a
+   * data disk counts). Shared (CephFS) executors never appear in
+   * `volumes.pool_id`, so their volumes show up as placements.
    */
   async hasDependencies(
     id: string,
     executor: StorageExecutor = this.database,
     options: { ignoreSystemRole?: boolean } = {},
   ): Promise<boolean> {
-    const [containers, volumes, placements, systemPool, grants] = await Promise.all([
+    const [containers, volumes, placements, systemPool, grants, bundles] = await Promise.all([
       executor
         .selectFrom('control.containers')
         .select('id')
@@ -443,8 +444,14 @@ export class StoragePoolsRepository {
         .where('pool_id', '=', id)
         .limit(1)
         .executeTakeFirst(),
+      executor
+        .selectFrom('iam.grant_bundle_disks')
+        .select('bundle_id')
+        .where('pool_id', '=', id)
+        .limit(1)
+        .executeTakeFirst(),
     ]);
-    return Boolean(containers || volumes || placements || systemPool || grants);
+    return Boolean(containers || volumes || placements || systemPool || grants || bundles);
   }
 
   /** Live root disks (neither failed nor deleting) per pool, for the admin view. */

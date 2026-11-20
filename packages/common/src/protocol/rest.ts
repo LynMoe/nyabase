@@ -65,8 +65,7 @@ export type {
   PatchGrantBundleRequest,
   ServerGrantOverrides,
   PutSharedBackendGrantRequest,
-  CreateDataDiskGrantRequest,
-  PatchDataDiskGrantRequest,
+  GrantDataDisk,
   StorageMountPreviewRequest,
   RetryIntentRequest,
   RotateRefreshTokenRequest,
@@ -546,13 +545,19 @@ export interface LiveServerAccessDto {
   cpuCores: number | null;
   serverCpuCores: number | null;
   memBytes: number | null;
-  /** Sum of the user's system disks on the server; null = unlimited. */
+  /** System disks (committed size) and data disks (their data) together. */
+  diskBytes: number;
+  /** Ceiling of the system disks alone; null = only `diskBytes`. */
   rootDiskBytes: number | null;
+  /** Committed size of the user's system disks on the server, as admission counts it. */
+  rootDiskCommittedBytes: number;
+  /** What a new or grown system disk may still take (`systemDiskRoom`). */
+  rootDiskAvailableBytes: number;
   /** GPUs the grant asks for; null = every card. */
   gpuCount: number | null;
   /** The cards picked for the user from the server's observed GPUs; empty means no GPU access. */
   gpuPciAddresses: string[];
-  /** The user's data-disk grants on the server, with the data on their disks. */
+  /** The data disks the grant covers, with the data on the user's volume there. */
   dataDisks: DataDiskUsageDto[];
   expiresAt: string | null;
   allowedImageIds: string[];

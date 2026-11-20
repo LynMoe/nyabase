@@ -7,7 +7,6 @@ import {
   type LiveServerAccessDto,
   type EffectiveSharedBackendAccessDto,
   type SharedBackendDto,
-  type StorageCapacityDto,
   type StoragePoolDto,
   type UserServerDto,
 } from '@nyabase/common';
@@ -32,13 +31,15 @@ import { poolDisplayName } from '../../lib/data-disks.js';
 import { graceServerAccess, liveServerAccess } from '../../lib/effective-access.js';
 import { queryKeys } from '../../lib/query-keys.js';
 import { queryPollInterval } from '../../lib/query-lifecycle.js';
+import { formatBytes } from '../../lib/utils.js';
 import { ResourceRef } from '../refs/resource-ref.js';
 
 /**
  * What the signed-in user is granted and how much of it is already taken:
- * memory and system disks as allocated by containers (已分配, not live usage,
- * which is on the 使用情况 page); data disks and shared storage as the data
- * on the volumes, since the platform sizes those volumes itself.
+ * memory as allocated by running containers (not live usage, which is on the
+ * 使用情况 page); the disk total as system disks 已分配 plus the data on the
+ * data disks (the platform sizes those volumes itself), the two sharing it;
+ * shared storage as the data on the volume.
  */
 export function QuotaSummary() {
   const serversQuery = useQuery({
@@ -117,14 +118,13 @@ function QuotaBody({
       ) : null}
       {grants.length > 0 ? (
         <div data-testid="quota-servers">
-          <Table className="min-w-[980px]">
+          <Table className="min-w-[900px]">
             <TableHeader>
               <TableRow>
                 <TableHead>服务器</TableHead>
                 <TableHead>CPU</TableHead>
                 <TableHead>内存（运行中占用）</TableHead>
-                <TableHead>系统盘</TableHead>
-                <TableHead>数据盘</TableHead>
+                <TableHead>磁盘（系统盘与数据盘共用）</TableHead>
                 <TableHead>GPU</TableHead>
                 <TableHead>到期</TableHead>
               </TableRow>
@@ -192,16 +192,8 @@ function ServerQuotaRow({
   name: string;
   containers: ContainerDto[];
 }) {
-  const capacityQuery = useQuery({
-    queryKey: queryKeys.storageCapacity(grant.serverId),
-    queryFn: () => api.get<StorageCapacityDto>(`/servers/${grant.serverId}/storage-capacity`),
-    refetchInterval: (query) => queryPollInterval(query.state, { activeIntervalMs: 30_000 }),
-  });
   const memUsed = runningMemBytes(containers);
-  const capacity = capacityQuery.data;
-  const rootUsed = capacity?.usedByRootDisksBytes ?? 0;
   const mem = formatQuotaDimension(grant.memBytes, memUsed);
-  const root = formatQuotaDimension(grant.rootDiskBytes, rootUsed);
   const gpu = formatGpuGrantSummary(grant.gpuPciAddresses);
   return (
     <TableRow>
@@ -213,14 +205,7 @@ function ServerQuotaRow({
         <QuotaCell used={mem.used} limit={mem.limit} remaining={mem.remaining} grant={grant.memBytes} consumed={memUsed} />
       </TableCell>
       <TableCell>
-        {capacity ? (
-          <QuotaCell used={root.used} limit={root.limit} remaining={root.remaining} grant={grant.rootDiskBytes} consumed={rootUsed} />
-        ) : (
-          <span className="text-muted-foreground">额度 {root.limit}</span>
-        )}
-      </TableCell>
-      <TableCell>
-        <DataDiskQuotas grant={grant} />
+        <DiskQuota grant={grant} />
       </TableCell>
       <TableCell className="text-muted-foreground">
         {gpu ?? '无'}
@@ -241,31 +226,45 @@ function QuotaExpiry({ expiresAt }: { expiresAt: string | null }) {
   );
 }
 
-/** One meter per data-disk grant: the disks sharing the quota and the data on them. */
-function DataDiskQuotas({ grant }: { grant: LiveServerAccessDto }) {
+/**
+ * The disk total: one meter of system disks 已分配 plus the data on the data
+ * disks, then the split, the system-disk ceiling (and what a new system disk
+ * may still take under it), and each data disk with its data and ceiling.
+ */
+function DiskQuota({ grant }: { grant: LiveServerAccessDto }) {
   const poolsQuery = useQuery({
     queryKey: queryKeys.servers.pools(grant.serverId, 'mine'),
     queryFn: () => api.get<StoragePoolDto[]>(`/servers/${grant.serverId}/storage-pools`),
     enabled: grant.dataDisks.length > 0,
   });
-  if (grant.dataDisks.length === 0) return <span className="text-muted-foreground">无</span>;
   const nameOf = (poolId: string) => {
     const row = poolsQuery.data?.find((item) => item.id === poolId);
     return row ? poolDisplayName(row) : truncateId(poolId);
   };
+  const data = grant.dataDisks.reduce((sum, disk) => sum + disk.usedBytes, 0);
+  const consumed = grant.rootDiskCommittedBytes + data;
+  const disk = formatQuotaDimension(grant.diskBytes, consumed);
   return (
-    <div className="space-y-2" data-testid="quota-data-disks">
-      {grant.dataDisks.map((group) => {
-        const disk = formatQuotaDimension(group.limitBytes, group.usedBytes);
-        return (
-          <div key={group.grantId} className="space-y-0.5">
-            <p className="text-xs text-muted-foreground">
-              {group.poolIds.map(nameOf).join(' + ')}{group.poolIds.length > 1 ? '（共用）' : ''}
-            </p>
-            <QuotaCell used={disk.used} limit={disk.limit} remaining={disk.remaining} grant={group.limitBytes} consumed={group.usedBytes} />
-          </div>
-        );
-      })}
+    <div className="space-y-1" data-testid="quota-disk">
+      <QuotaCell used={disk.used} limit={disk.limit} remaining={disk.remaining} grant={grant.diskBytes} consumed={consumed} />
+      <p className="text-xs text-muted-foreground tabular-nums">
+        系统盘已分配 {formatBytes(grant.rootDiskCommittedBytes)} · 数据盘数据 {formatBytes(data)}
+      </p>
+      {grant.rootDiskBytes !== null ? (
+        <p className="text-xs text-muted-foreground tabular-nums">
+          系统盘上限 {formatBytes(grant.rootDiskBytes)}，还可分配 {formatBytes(grant.rootDiskAvailableBytes)}
+        </p>
+      ) : null}
+      {grant.dataDisks.length > 0 ? (
+        <ul className="space-y-0.5 text-xs text-muted-foreground tabular-nums" data-testid="quota-data-disks">
+          {grant.dataDisks.map((item) => (
+            <li key={item.poolId}>
+              {nameOf(item.poolId)} 数据 {formatBytes(item.usedBytes)}
+              {item.capBytes === null ? '' : ` / 上限 ${formatBytes(item.capBytes)}`}
+            </li>
+          ))}
+        </ul>
+      ) : null}
     </div>
   );
 }

@@ -1,4 +1,4 @@
-import type { GrantBundleField, GrantExpiryPhase } from '@nyabase/common';
+import type { GrantBundleScalarField, GrantDataDisk, GrantExpiryPhase } from '@nyabase/common';
 import { grantExpiryPhaseLabel } from '../../lib/display-labels.js';
 import {
   GRANT_BUNDLE_FIELDS,
@@ -7,12 +7,16 @@ import {
   type KnownQuotas,
   type OverrideDraft,
   type QuotaTexts,
+  emptyQuotaLabel,
   formatQuotaValue,
+  isByteField,
   parseQuotaText,
   quotaTextError,
   quotaToText,
   toggleOverride,
 } from '../../lib/grant-bundle-form.js';
+import { dataDiskDraftFrom, dataDiskSummary } from '../../lib/grant-data-disks.js';
+import { DataDiskEditor } from './data-disk-editor.js';
 import { approxSizeHint } from '../../lib/utils.js';
 import { FormField } from '../layout/form-field.js';
 import { Badge } from '../ui/badge.js';
@@ -130,8 +134,8 @@ export function NumberField({
   );
 }
 
-function quotaHint(field: GrantBundleField, text: string): string | undefined {
-  if (field !== 'memBytes' && field !== 'rootDiskBytes') return undefined;
+function quotaHint(field: GrantBundleScalarField, text: string): string | undefined {
+  if (!isByteField(field)) return undefined;
   const bytes = parseQuotaText(field, text);
   return typeof bytes === 'number' ? approxSizeHint(bytes) : undefined;
 }
@@ -139,13 +143,12 @@ function quotaHint(field: GrantBundleField, text: string): string | undefined {
 const GPU_DISABLED_HINT = '该服务器未启用 GPU';
 
 /** A GPU field on a server without GPU passthrough: nothing to grant, so it is fixed at 无. */
-function gpuLocked(field: GrantBundleField, gpuEnabled: boolean | undefined): boolean {
+function gpuLocked(field: GrantBundleScalarField, gpuEnabled: boolean | undefined): boolean {
   return field === 'gpuCount' && gpuEnabled === false;
 }
 
-function placeholderFor(field: GrantBundleField, locked: boolean): string {
-  if (field !== 'gpuCount') return '不限';
-  return locked ? '无' : '全部';
+function placeholderFor(field: GrantBundleScalarField, locked: boolean): string {
+  return locked ? '无' : emptyQuotaLabel(field);
 }
 
 function QuotaInput({
@@ -156,7 +159,7 @@ function QuotaInput({
   locked = false,
 }: {
   id: string;
-  field: GrantBundleField;
+  field: GrantBundleScalarField;
   value: string;
   onChange: (value: string) => void;
   locked?: boolean;
@@ -167,7 +170,7 @@ function QuotaInput({
       label={GRANT_FIELD_INPUT_LABELS[field]}
       value={value}
       onChange={onChange}
-      step={field === 'memBytes' || field === 'rootDiskBytes' ? 'any' : '1'}
+      step={isByteField(field) ? 'any' : '1'}
       placeholder={placeholderFor(field, locked)}
       disabled={locked}
       hint={locked ? GPU_DISABLED_HINT : quotaHint(field, value)}
@@ -177,8 +180,9 @@ function QuotaInput({
 }
 
 /**
- * The four quotas of a bundle, every one editable (empty = 不限). On a server
- * without GPU passthrough (`gpuEnabled: false`) the GPU field is fixed.
+ * The quotas of a bundle, every one editable (empty = 不限; the disk total is
+ * required). On a server without GPU passthrough (`gpuEnabled: false`) the
+ * GPU field is fixed.
  */
 export function BundleQuotaFields({
   idPrefix,
@@ -208,7 +212,7 @@ export function BundleQuotaFields({
 }
 
 /**
- * The four quotas of a user's grant: fields with「修改」off follow the bundle
+ * The quotas of a user's grant: fields with「修改」off follow the bundle
  * and show its value; switching it on enables the input for the user's own.
  * `bundle` fields may be unknown (undefined) while the bundle loads.
  */
@@ -262,7 +266,7 @@ export function OverrideQuotaFields({
               id={inputId}
               type="number"
               min="0"
-              step={field === 'memBytes' || field === 'rootDiskBytes' ? 'any' : '1'}
+              step={isByteField(field) ? 'any' : '1'}
               value={text}
               disabled={!overridden}
               placeholder={!overridden && known === undefined ? '' : placeholderFor(field, locked)}
@@ -275,6 +279,78 @@ export function OverrideQuotaFields({
           </div>
         );
       })}
+    </div>
+  );
+}
+
+/**
+ * The data disks of a user's grant: with「修改」off it follows the bundle's
+ * list (shown read-only); switched on, the grant keeps its own list, starting
+ * from the bundle's. Ceilings below the user's data on a disk are flagged.
+ */
+export function OverrideDataDisks({
+  idPrefix,
+  serverId,
+  bundle,
+  draft,
+  onChange,
+  usedByPool,
+  stored,
+}: {
+  idPrefix: string;
+  serverId: string;
+  bundle: KnownQuotas;
+  draft: OverrideDraft;
+  onChange: (draft: OverrideDraft) => void;
+  usedByPool?: ReadonlyMap<string, number>;
+  /** The grant's stored own list, so untouched ceilings keep their exact bytes. */
+  stored?: readonly GrantDataDisk[];
+}) {
+  const overridden = draft.overridden.dataDisks;
+  const known = bundle.dataDisks;
+  const switchId = `${idPrefix}-dataDisks-override`;
+  const note = overridden
+    ? (known ? `模板 ${dataDiskSummary(known)}` : null)
+    : (known ? '跟随模板' : '模板值加载中…');
+  return (
+    <div className="space-y-2" data-testid={`${idPrefix}-data-disks`}>
+      <div className="flex items-center justify-between gap-2">
+        <div className="min-w-0">
+          <p className="text-sm font-medium">{GRANT_FIELD_LABELS.dataDisks}</p>
+          <p className="text-xs text-muted-foreground">
+            每块盘上平台为用户建一个卷并挂载到他在这台服务器上的所有容器；数据盘与系统盘共用磁盘总额。
+            {note ? ` ${note}` : ''}
+          </p>
+        </div>
+        <div className="flex shrink-0 items-center gap-1.5">
+          <Label htmlFor={switchId} className="text-xs font-normal text-muted-foreground">修改</Label>
+          <Switch
+            id={switchId}
+            checked={overridden}
+            disabled={!overridden && known === undefined}
+            onCheckedChange={(checked) => onChange(toggleOverride(draft, 'dataDisks', checked, bundle))}
+            aria-label={`修改${GRANT_FIELD_LABELS.dataDisks}`}
+          />
+        </div>
+      </div>
+      {overridden ? (
+        <DataDiskEditor
+          id={`${idPrefix}-data-disks-editor`}
+          serverId={serverId}
+          draft={draft.disks}
+          onChange={(disks) => onChange({ ...draft, disks })}
+          usedByPool={usedByPool}
+          known={[stored, known]}
+        />
+      ) : known ? (
+        <DataDiskEditor
+          id={`${idPrefix}-data-disks-bundle`}
+          serverId={serverId}
+          draft={dataDiskDraftFrom(known)}
+          usedByPool={usedByPool}
+          known={[known]}
+        />
+      ) : null}
     </div>
   );
 }

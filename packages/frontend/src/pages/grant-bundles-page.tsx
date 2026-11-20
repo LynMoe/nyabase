@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { Plus } from 'lucide-react';
-import type { GrantBundleDto, UserServerDto } from '@nyabase/common';
+import type { GrantBundleDto, GrantDataDisk, UserServerDto } from '@nyabase/common';
 import { Button } from '../components/ui/button.js';
 import { EmptyState } from '../components/layout/empty-state.js';
 import { Page, PageHeader } from '../components/layout/page-header.js';
@@ -9,7 +9,11 @@ import { SectionCard } from '../components/layout/section-card.js';
 import { ResourceRef } from '../components/refs/resource-ref.js';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../components/ui/table.js';
 import { serverName, useGrantBundles, useGrantServers } from '../components/grants/use-grant-panel-data.js';
+import { truncateId } from '../components/refs/technical-id.js';
+import { poolDisplayName } from '../lib/data-disks.js';
 import { GRANT_BUNDLE_FIELDS, GRANT_FIELD_LABELS, formatQuotaValue } from '../lib/grant-bundle-form.js';
+import { formatDiskCap } from '../lib/grant-data-disks.js';
+import { useServerPools } from '../lib/server-queries.js';
 import { BundleCreateDialog, BundleEditDialog } from './grant-bundles-page/bundle-form-dialogs.js';
 import { BundleDeleteFlow } from './grant-bundles-page/bundle-delete-flow.js';
 
@@ -22,7 +26,26 @@ function groupByServer(bundles: GrantBundleDto[], servers: UserServerDto[]): Arr
     .map(([serverId, rows]) => [serverId, rows.sort((a, b) => a.name.localeCompare(b.name, 'zh-CN'))]);
 }
 
-/** 授权模板: named server quotas per server that users are given on their grant page. */
+/** A bundle's data disks by name, each with its ceiling. */
+function BundleDisksCell({ serverId, disks }: { serverId: string; disks: GrantDataDisk[] }) {
+  const pools = useServerPools(serverId).data ?? [];
+  if (disks.length === 0) return <span className="text-muted-foreground">无</span>;
+  return (
+    <ul className="space-y-0.5">
+      {disks.map((disk) => {
+        const pool = pools.find((row) => row.id === disk.poolId);
+        return (
+          <li key={disk.poolId}>
+            {pool ? poolDisplayName(pool) : truncateId(disk.poolId)}
+            {disk.capBytes === null ? null : <span className="text-muted-foreground"> {formatDiskCap(disk.capBytes)}</span>}
+          </li>
+        );
+      })}
+    </ul>
+  );
+}
+
+/** 授权模板: named server quotas and data disks per server that users are given on their grant page. */
 export default function GrantBundlesPage() {
   const bundlesQuery = useGrantBundles();
   const servers = useGrantServers().data ?? [];
@@ -47,7 +70,7 @@ export default function GrantBundlesPage() {
         resourceName="授权模板"
         loadingLabel="加载授权模板..."
         showEmpty={count === 0}
-        empty={<EmptyState title="暂无授权模板。" description="模板是一台服务器上的一组额度，在用户的授权页分配。" action={createButton} />}
+        empty={<EmptyState title="暂无授权模板。" description="模板是一台服务器上的一组额度和数据盘，在用户的授权页分配。" action={createButton} />}
       >
         {(bundles) => (
           <div className="space-y-6">
@@ -63,11 +86,12 @@ export default function GrantBundlesPage() {
                 flush
                 testId={`grant-bundles-${serverId}`}
               >
-                <Table className="min-w-[760px]">
+                <Table className="min-w-[960px]">
                   <TableHeader>
                     <TableRow>
                       <TableHead>名称</TableHead>
                       {GRANT_BUNDLE_FIELDS.map((field) => <TableHead key={field}>{GRANT_FIELD_LABELS[field]}</TableHead>)}
+                      <TableHead>{GRANT_FIELD_LABELS.dataDisks}</TableHead>
                       <TableHead>用户</TableHead>
                       <TableHead className="text-right">操作</TableHead>
                     </TableRow>
@@ -81,6 +105,9 @@ export default function GrantBundlesPage() {
                             {formatQuotaValue(field, bundle[field], servers.find((server) => server.id === serverId) ?? {})}
                           </TableCell>
                         ))}
+                        <TableCell className="whitespace-normal tabular-nums">
+                          <BundleDisksCell serverId={serverId} disks={bundle.dataDisks} />
+                        </TableCell>
                         <TableCell className="tabular-nums">{bundle.grantCount}</TableCell>
                         <TableCell className="text-right">
                           <div className="flex justify-end gap-2">

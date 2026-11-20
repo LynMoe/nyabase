@@ -238,36 +238,61 @@ describePg('iam.effective_server_access', () => {
 });
 
 describePg('iam.effective_pool_access and iam.effective_shared_backend_access', () => {
-  it('makes a data-disk grant current exactly while its server grant is, its pools sharing its quota', async () => {
+  it('covers a grant\'s data disks exactly while it is current: the bundle\'s list, or its own while it overrides it', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const userId = await seedUser(database);
       const serverId = await seedServer(database);
       const poolId = await seedPool(database, serverId);
       const otherPoolId = await seedPool(database, serverId);
-      const grantId = await grantServer(database, { user: userId }, serverId, { expiresAt: days(7) });
-      const shared = await grantPool(database, { user: userId }, [poolId, otherPoolId], 500);
-
-      // Both pools are covered by one grant and share its quota.
+      const expiresAt = days(7);
+      const grantId = await grantServer(database, { user: userId }, serverId, {
+        expiresAt,
+        diskBytes: 900,
+        dataDisks: [{ poolId, capBytes: 300 }],
+      });
+      await expect(resolveServerAccess(database, userId, serverId)).resolves.toMatchObject({ diskBytes: 900 });
       await expect(resolvePoolAccess(database, userId, poolId))
-        .resolves.toMatchObject({ limitBytes: 500, dataDiskGrantId: shared });
-      expect((await listPoolAccess(database, userId)).map((access) => [access.limitBytes, access.dataDiskGrantId]))
-        .toEqual([[500, shared], [500, shared]]);
+        .resolves.toEqual({ capBytes: 300, expiresAt, serverId, serverGrantId: grantId });
+      await expect(resolvePoolAccess(database, userId, otherPoolId)).resolves.toBeNull();
+
+      // Its own list (an override) replaces the bundle's, and so does its total.
+      await grantPool(database, { user: userId }, [otherPoolId], 500);
+      await expect(resolveServerAccess(database, userId, serverId)).resolves.toMatchObject({ diskBytes: 500 });
+      expect((await listPoolAccess(database, userId)).map((access) => [access.poolId, access.capBytes]))
+        .toEqual([[otherPoolId, null]]);
 
       await database.updateTable('iam.server_grants')
         .set({ expires_at: days(-1) })
         .where('id', '=', grantId)
         .execute();
-      await expect(resolvePoolAccess(database, userId, poolId)).resolves.toBeNull();
+      await expect(resolvePoolAccess(database, userId, otherPoolId)).resolves.toBeNull();
       await expect(listPoolAccess(database, userId)).resolves.toEqual([]);
 
       await database.updateTable('iam.server_grants').set({ expires_at: null }).where('id', '=', grantId).execute();
       await database.deleteFrom('iam.server_grants').where('id', '=', grantId).execute();
       await expect(database.selectFrom('iam.storage_pool_grants').select('id').execute()).resolves.toEqual([]);
-      await expect(database.selectFrom('iam.data_disk_grants').select('id').execute()).resolves.toEqual([]);
     });
   });
 
-  it('keeps a data-disk grant on a pool of its server grant\'s server', async () => {
+  it('ignores a grant\'s own rows unless it overrides the data-disk list', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const userId = await seedUser(database);
+      const serverId = await seedServer(database);
+      const poolId = await seedPool(database, serverId);
+      const grantId = await grantServer(database, { user: userId }, serverId);
+      await database.insertInto('iam.storage_pool_grants').values({
+        id: randomUUID(),
+        server_grant_id: grantId,
+        user_id: userId,
+        server_id: serverId,
+        pool_id: poolId,
+        cap_bytes: null,
+      }).execute();
+      await expect(resolvePoolAccess(database, userId, poolId)).resolves.toBeNull();
+    });
+  });
+
+  it('keeps a grant\'s data disk on a pool of its server', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const userId = await seedUser(database);
       const serverId = await seedServer(database);
@@ -279,8 +304,8 @@ describePg('iam.effective_pool_access and iam.effective_shared_backend_access', 
         server_grant_id: grantId,
         user_id: userId,
         server_id: serverId,
-        data_disk_grant_id: randomUUID(),
         pool_id: foreignPool,
+        cap_bytes: null,
       }).execute()).rejects.toMatchObject({ code: '23503' });
     });
   });

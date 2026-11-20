@@ -87,7 +87,7 @@ describePg('AccessResolverService', () => {
       await grantServer(database, { user: userId }, serverId, {
         cpuCores: 4, memBytes: 8, rootDiskBytes: 300, gpuCount: 0,
       });
-      const dataDiskGrantId = await grantPool(database, { user: userId }, poolId, 500);
+      await grantPool(database, { user: userId }, poolId, 500);
       const volumeId = await seedVolume(database, { ownerId: userId, poolId, serverId });
       await database.updateTable('control.volumes').set({ used_bytes: 70 }).where('id', '=', volumeId).execute();
       await grantServer(database, { user: await seedUser(database) }, otherServer);
@@ -102,11 +102,15 @@ describePg('AccessResolverService', () => {
         cpuCores: 4,
         serverCpuCores: 3,
         memBytes: 8,
+        diskBytes: 500,
         rootDiskBytes: 300,
+        rootDiskCommittedBytes: 0,
+        // min(300 under the system-disk ceiling, 500 − 70 of data under the total)
+        rootDiskAvailableBytes: 300,
         gpuCount: 0,
         gpuPciAddresses: [],
         // The data on the volume, not its quota: the platform sizes the quota.
-        dataDisks: [{ grantId: dataDiskGrantId, poolIds: [poolId], limitBytes: 500, usedBytes: 70, availableBytes: 430 }],
+        dataDisks: [{ poolId, capBytes: null, usedBytes: 70 }],
         expiresAt: null,
         accessPhase: 'live',
         allowedImageIds: [image],

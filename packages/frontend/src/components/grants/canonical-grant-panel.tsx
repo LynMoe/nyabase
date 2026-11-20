@@ -26,23 +26,23 @@ import {
 /** A grant picked for deletion, awaiting confirmation. */
 type DeleteTarget =
   | { kind: 'server'; id: string; label: string }
-  | { kind: 'disk'; id: string; label: string; poolNames: string[] }
   | { kind: 'backend'; id: string; label: string };
 
 const DELETE_PATHS: Record<DeleteTarget['kind'], string> = {
   server: 'server-grants',
-  disk: 'data-disk-grants',
   backend: 'shared-backend-grants',
 };
 
-/** What a lapse does on each kind of grant: servers stop and purge, data disks and shared storage only lose volumes. */
+/**
+ * What a lapse does on each kind of grant: a server grant takes its data disks
+ * with it (containers stop, then containers and volumes are purged); shared
+ * storage only loses its volume. A single data disk goes by editing the
+ * grant's (or the bundle's) data-disk list.
+ */
 export function deleteConsequence(target: DeleteTarget | null): string {
   if (!target) return '';
   if (target.kind === 'server') {
-    return `其下的数据盘授权一并删除；该服务器上的容器立即停止，${GRANT_EXPIRY_GRACE_DAYS} 天后清除容器和数据卷。`;
-  }
-  if (target.kind === 'disk') {
-    return `该用户在 ${target.poolNames.join('、')} 上的数据卷立即从所有容器卸载，${GRANT_EXPIRY_GRACE_DAYS} 天后删除（期间重新授权可保留）。`;
+    return `其下的数据盘一并撤销；该服务器上的容器立即停止，${GRANT_EXPIRY_GRACE_DAYS} 天后清除容器和数据卷。`;
   }
   return `该用户在这个共享存储上的共享卷立即从所有容器卸载，${GRANT_EXPIRY_GRACE_DAYS} 天后删除（期间重新授权可保留）。`;
 }
@@ -66,7 +66,7 @@ function GraceCard({ userId }: { userId: string }) {
   );
 }
 
-/** All grants of one user: assign a bundle, the bundle held on each server (with data disks), shared storage. */
+/** All grants of one user: assign a bundle, the bundle held on each server (with its data disks), shared storage. */
 export function CanonicalGrantPanel({ user }: { user: UserDto }) {
   const serverGrants = useServerGrants(user.id);
   const backendGrants = useBackendGrants(user.id);
@@ -114,7 +114,6 @@ export function CanonicalGrantPanel({ user }: { user: UserDto }) {
         grants={grants}
         bundles={bundles}
         onDelete={({ serverId, label }) => setDeleteTarget({ kind: 'server', id: serverId, label })}
-        onDeleteDisk={({ grantId, label, poolNames }) => setDeleteTarget({ kind: 'disk', id: grantId, label: `数据盘 ${label}`, poolNames })}
       />
       <BackendGrantsCard
         userId={user.id}

@@ -16,6 +16,7 @@ import {
   seedPool,
   seedServer,
   seedUser,
+  seedVolume,
 } from '../iam/access.pg-test-helper.js';
 import { resolvePoolAccess, resolveServerAccess, resolveSharedBackendAccess } from '../iam/effective-access.js';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
@@ -23,7 +24,6 @@ import { withPostgresTestDatabase } from '../platform/persistence-pg/postgres-te
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
 import { GrantBundlesService } from './grant-bundles.service.js';
 import { pickGrantGpus } from './grant-fields.js';
-import { DataDiskGrantsService } from './data-disk-grants.service.js';
 import { GrantsService } from './grants.service.js';
 
 const describePg = process.env.NYABASE_TEST_DATABASE_URL ? describe : describe.skip;
@@ -39,7 +39,6 @@ function services(database: Db) {
   const claims = new GpuClaimsRepository(database);
   return {
     grants: new GrantsService(database, transactions, audit, claims, changes),
-    dataDisks: new DataDiskGrantsService(database, transactions, audit, changes),
     bundles: new GrantBundlesService(database, transactions, audit, claims, changes),
     signals: () => signals,
   };
@@ -50,7 +49,7 @@ async function manager(database: Db, role: Role = Role.UserAdmin) {
 }
 
 const assignment = (bundleId: string, extra: Partial<{
-  overrides: Record<string, number | null>;
+  overrides: Record<string, number | null | Array<{ poolId: string; capBytes: number | null }>>;
   expiresAt: string | null;
   replace: boolean;
 }> = {}) => ({ bundleId, overrides: {}, expiresAt: null, replace: false, ...extra });
@@ -106,20 +105,20 @@ describePg('GrantsService', () => {
     });
   });
 
-  it('refuses a second bundle on the same server unless replacing, which keeps the grant and its data disks', async () => {
+  it('refuses a second bundle on the same server unless replacing, which keeps the grant row', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
-      const { grants, dataDisks, signals } = services(database);
+      const { grants, signals } = services(database);
       const actor = await manager(database);
       const userId = await seedUser(database);
       const serverId = await seedServer(database);
       const poolId = await seedPool(database, serverId);
-      const small = await seedBundle(database, serverId, { cpuCores: 2 });
-      const large = await seedBundle(database, serverId, { cpuCores: 32 });
+      const small = await seedBundle(database, serverId, { cpuCores: 2, dataDisks: [{ poolId, capBytes: 500 }] });
+      const large = await seedBundle(database, serverId, { cpuCores: 32, dataDisks: [{ poolId, capBytes: null }] });
 
       const first = await grants.putServerGrant(actor, userId, serverId, assignment(small, {
         overrides: { memBytes: 8 },
       }));
-      await dataDisks.create(actor, userId, { serverId, poolIds: [poolId], limitBytes: 500 });
+      expect(first.dataDisks).toEqual([{ poolId, capBytes: 500 }]);
       const before = signals();
       await expect(grants.putServerGrant(actor, userId, serverId, assignment(large)))
         .rejects.toMatchObject({
@@ -132,9 +131,53 @@ describePg('GrantsService', () => {
 
       const replaced = await grants.putServerGrant(actor, userId, serverId, assignment(large, { replace: true }));
       expect(replaced).toMatchObject({ id: first.id, bundleId: large, cpuCores: 32, overrides: {}, memBytes: null });
-      expect(replaced.dataDisks).toMatchObject([{ poolIds: [poolId], limitBytes: 500 }]);
+      // The disks now follow the new bundle; a disk both list stays covered throughout.
+      expect(replaced.dataDisks).toEqual([{ poolId, capBytes: null }]);
       expect(signals()).toBe(before + 1);
-      await expect(resolvePoolAccess(database, userId, poolId)).resolves.toMatchObject({ limitBytes: 500 });
+      await expect(resolvePoolAccess(database, userId, poolId)).resolves.toMatchObject({ capBytes: null });
+    });
+  });
+
+  it('overrides the data-disk list as a whole and follows the bundle\'s again when the override goes', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const { grants } = services(database);
+      const actor = await manager(database);
+      const userId = await seedUser(database);
+      const serverId = await seedServer(database);
+      const [shared, own, foreign] = [
+        await seedPool(database, serverId),
+        await seedPool(database, serverId),
+        await seedPool(database, await seedServer(database)),
+      ];
+      const bundleId = await seedBundle(database, serverId, { diskBytes: 1_000, dataDisks: [{ poolId: shared, capBytes: null }] });
+
+      const grant = await grants.putServerGrant(actor, userId, serverId, assignment(bundleId, {
+        overrides: { diskBytes: 5_000, dataDisks: [{ poolId: own, capBytes: 300 }] },
+      }));
+      expect(grant).toMatchObject({
+        diskBytes: 5_000,
+        overrides: { diskBytes: 5_000, dataDisks: [{ poolId: own, capBytes: 300 }] },
+        dataDisks: [{ poolId: own, capBytes: 300 }],
+      });
+      await expect(resolvePoolAccess(database, userId, shared)).resolves.toBeNull();
+      await expect(resolvePoolAccess(database, userId, own)).resolves.toMatchObject({ capBytes: 300, serverGrantId: grant.id });
+      await expect(resolveServerAccess(database, userId, serverId)).resolves.toMatchObject({ diskBytes: 5_000 });
+
+      // A disk of another server is refused before anything changes.
+      await expect(grants.patchServerGrant(actor, userId, serverId, {
+        overrides: { dataDisks: [{ poolId: foreign, capBytes: null }] },
+      })).rejects.toMatchObject({ status: 404, response: { details: { poolIds: [foreign] } } });
+
+      const followed = await grants.patchServerGrant(actor, userId, serverId, { overrides: {} });
+      expect(followed).toMatchObject({ overrides: {}, diskBytes: 1_000, dataDisks: [{ poolId: shared, capBytes: null }] });
+      await expect(database.selectFrom('iam.storage_pool_grants').select('id').execute()).resolves.toEqual([]);
+      await expect(resolvePoolAccess(database, userId, own)).resolves.toBeNull();
+      await expect(resolvePoolAccess(database, userId, shared)).resolves.toMatchObject({ capBytes: null });
+
+      // An empty own list is a real override: no data disks at all.
+      const none = await grants.patchServerGrant(actor, userId, serverId, { overrides: { dataDisks: [] } });
+      expect(none).toMatchObject({ overrides: { dataDisks: [] }, dataDisks: [] });
+      await expect(resolvePoolAccess(database, userId, shared)).resolves.toBeNull();
     });
   });
 
@@ -174,15 +217,16 @@ describePg('GrantsService', () => {
     });
   });
 
-  it('deletes a server grant with its data disks, so both kinds of coverage lapse', async () => {
+  it('deletes a server grant with its own data disks, so both kinds of coverage lapse', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
-      const { grants, dataDisks, signals } = services(database);
+      const { grants, signals } = services(database);
       const actor = await manager(database);
       const userId = await seedUser(database);
       const serverId = await seedServer(database);
       const poolId = await seedPool(database, serverId);
-      await grants.putServerGrant(actor, userId, serverId, assignment(await seedBundle(database, serverId)));
-      await dataDisks.create(actor, userId, { serverId, poolIds: [poolId], limitBytes: 100 });
+      await grants.putServerGrant(actor, userId, serverId, assignment(await seedBundle(database, serverId), {
+        overrides: { dataDisks: [{ poolId, capBytes: 100 }] },
+      }));
       const before = signals();
 
       await grants.deleteServerGrant(actor, userId, serverId);
@@ -190,7 +234,6 @@ describePg('GrantsService', () => {
       await expect(resolveServerAccess(database, userId, serverId)).resolves.toBeNull();
       await expect(resolvePoolAccess(database, userId, poolId)).resolves.toBeNull();
       await expect(database.selectFrom('iam.storage_pool_grants').select('id').execute()).resolves.toEqual([]);
-      await expect(database.selectFrom('iam.data_disk_grants').select('id').execute()).resolves.toEqual([]);
       // Deleting a grant that does not exist changes nothing.
       await grants.deleteServerGrant(actor, userId, serverId);
       expect(signals()).toBe(before + 1);
@@ -256,8 +299,26 @@ describePg('GrantsService', () => {
       await expect(seedBundle(database, serverId, { rootDiskBytes: 0 }))
         .rejects.toThrow(/grant_bundles_root_disk_bytes_check/);
       await expect(seedBundle(database, serverId, { cpuCores: 0 })).rejects.toThrow(/grant_bundles_cpu_cores_check/);
-      await seedBundle(database, serverId, { gpuCount: 0, memBytes: 1 });
+      await expect(seedBundle(database, serverId, { diskBytes: 0 })).rejects.toThrow(/grant_bundles_disk_bytes_check/);
+      await expect(database.insertInto('iam.grant_bundles').values({
+        id: randomUUID(), server_id: serverId, name: 'no-total', disk_bytes: null as never, revision: 1,
+      }).execute()).rejects.toMatchObject({ code: '23502' });
+      const poolId = await seedPool(database, serverId);
+      await expect(seedBundle(database, serverId, { dataDisks: [{ poolId, capBytes: 0 }] }))
+        .rejects.toThrow(/grant_bundle_disks_cap_check/);
+      // A bundle lists only pools of its own server.
+      await expect(seedBundle(database, serverId, { dataDisks: [{ poolId: await seedPool(database, await seedServer(database)), capBytes: null }] }))
+        .rejects.toThrow(/grant_bundle_disks_pool_fkey/);
+      const bundleId = await seedBundle(database, serverId, { gpuCount: 0, memBytes: 1 });
       const userId = await seedUser(database);
+      // A grant's disk total is set exactly when it overrides `disk`.
+      const grantRow = (overridden: string[], diskBytes: number | null) => database.insertInto('iam.server_grants').values({
+        id: randomUUID(), user_id: userId, server_id: serverId, bundle_id: bundleId, overridden, disk_bytes: diskBytes,
+      }).execute();
+      await expect(grantRow(['disk'], null)).rejects.toThrow(/server_grants_disk_bytes_check/);
+      await expect(grantRow([], 10)).rejects.toThrow(/server_grants_disk_bytes_check/);
+      await expect(grantRow(['disk'], 0)).rejects.toThrow(/server_grants_disk_bytes_check/);
+      await expect(grantRow(['volume'], null)).rejects.toThrow(/server_grants_overridden_check/);
       await expect(grantBackend(database, { user: userId }, await seedBackend(database), 0))
         .rejects.toThrow(/shared_backend_grants_limit_check/);
       await expect(database.insertInto('iam.shared_backend_grants').values({
@@ -278,7 +339,8 @@ describePg('GrantBundlesService', () => {
       const actor = await manager(database);
       const serverId = await seedServer(database, 'alpha');
       const otherServer = await seedServer(database, 'beta');
-      const quotas = { cpuCores: 16, memBytes: 32, rootDiskBytes: 100, gpuCount: 0 };
+      const poolId = await seedPool(database, serverId);
+      const quotas = { cpuCores: 16, memBytes: 32, diskBytes: 1_000, rootDiskBytes: 100, gpuCount: 0, dataDisks: [] };
 
       const bundle = await bundles.create(actor, { serverId, name: 'GPU A', ...quotas });
       expect(bundle).toMatchObject({ serverId, name: 'GPU A', ...quotas, revision: 1, grantCount: 0 });
@@ -295,6 +357,11 @@ describePg('GrantBundlesService', () => {
         .rejects.toMatchObject({ status: 404 });
       await expect(bundles.create(testActor(await seedUser(database)), { serverId, name: 'y', ...quotas }))
         .rejects.toMatchObject({ response: { code: 'ROLE_REQUIRED' } });
+      // Data disks: pools of the bundle's own server only.
+      const withDisks = await bundles.create(actor, { serverId, name: 'disks', ...quotas, dataDisks: [{ poolId, capBytes: 50 }] });
+      expect(withDisks).toMatchObject({ dataDisks: [{ poolId, capBytes: 50 }] });
+      await expect(bundles.create(actor, { serverId: otherServer, name: 'foreign', ...quotas, dataDisks: [{ poolId, capBytes: null }] }))
+        .rejects.toMatchObject({ status: 404, response: { details: { poolIds: [poolId] } } });
     });
   });
 
@@ -303,7 +370,7 @@ describePg('GrantBundlesService', () => {
       const { bundles } = services(database);
       const actor = await manager(database);
       const serverId = await seedServer(database);
-      const base = { serverId, cpuCores: null, memBytes: null, rootDiskBytes: null };
+      const base = { serverId, cpuCores: null, memBytes: null, diskBytes: 100, rootDiskBytes: null, dataDisks: [] };
       await expect(bundles.create(actor, { ...base, name: 'two', gpuCount: 2 }))
         .rejects.toMatchObject({ response: { code: FailureCode.GpuGrantNotApplicable } });
       await bundles.create(actor, { ...base, name: 'none', gpuCount: 0 });
@@ -324,7 +391,7 @@ describePg('GrantBundlesService', () => {
       const follower = await seedUser(database);
       const overrider = await seedUser(database);
       const bundle = await bundles.create(actor, {
-        serverId, name: 'b', cpuCores: 16, memBytes: 32, rootDiskBytes: 100, gpuCount: 0,
+        serverId, name: 'b', cpuCores: 16, memBytes: 32, diskBytes: 1_000, rootDiskBytes: 100, gpuCount: 0, dataDisks: [],
       });
       await grants.putServerGrant(actor, follower, serverId, assignment(bundle.id));
       await grants.putServerGrant(actor, overrider, serverId, assignment(bundle.id, {
@@ -377,7 +444,8 @@ describePg('GrantBundlesService', () => {
       const overrider = await seedUser(database, 'b-overrider');
       const untouched = await seedUser(database, 'c-untouched');
       const bundle = await bundles.create(actor, {
-        serverId, name: 'b', cpuCores: 16, memBytes: 4 * 1_073_741_824, rootDiskBytes: 1_000, gpuCount: 4,
+        serverId, name: 'b', cpuCores: 16, memBytes: 4 * 1_073_741_824, diskBytes: 10_000, rootDiskBytes: 1_000, gpuCount: 4,
+        dataDisks: [],
       });
       await grants.putServerGrant(actor, follower, serverId, assignment(bundle.id));
       await grants.putServerGrant(actor, overrider, serverId, assignment(bundle.id, { overrides: { memBytes: null } }));
@@ -411,8 +479,12 @@ describePg('GrantBundlesService', () => {
             { field: 'gpuCount', before: 4, after: 1 },
           ],
           overridden: [],
+          dataDisks: null,
           memBytesInUse: 2 * 1_073_741_824,
           rootDiskBytesInUse: 200,
+          diskBytesInUse: null,
+          dataDisksRevoked: [],
+          dataDisksOverCap: [],
           gpusInUseRemoved: cards.filter((card) => !kept.includes(card)),
         },
         {
@@ -425,8 +497,12 @@ describePg('GrantBundlesService', () => {
             { field: 'gpuCount', before: 4, after: 1 },
           ],
           overridden: [{ field: 'memBytes', value: null }],
+          dataDisks: null,
           memBytesInUse: null,
           rootDiskBytesInUse: null,
+          diskBytesInUse: null,
+          dataDisksRevoked: [],
+          dataDisksOverCap: [],
           gpusInUseRemoved: [],
         },
         {
@@ -440,14 +516,116 @@ describePg('GrantBundlesService', () => {
             { field: 'rootDiskBytes', value: null },
             { field: 'gpuCount', value: 4 },
           ],
+          dataDisks: null,
           memBytesInUse: null,
           rootDiskBytesInUse: null,
+          diskBytesInUse: null,
+          dataDisksRevoked: [],
+          dataDisksOverCap: [],
           gpusInUseRemoved: [],
         },
       ]);
       // Nothing changed: the preview is read-only, and a no-op proposal lists no one.
       await expect(bundles.get(bundle.id)).resolves.toMatchObject({ revision: 1, gpuCount: 4 });
       await expect(bundles.preview(bundle.id, { cpuCores: 16 })).resolves.toMatchObject({ entries: [] });
+    });
+  });
+});
+
+describePg('Bundle data disks', () => {
+  it('provisions a disk added to the bundle for every follower and lapses one taken out, leaving overriders alone', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const { bundles, grants, signals } = services(database);
+      const actor = await manager(database);
+      const serverId = await seedServer(database);
+      const [kept, added, dropped] = [
+        await seedPool(database, serverId),
+        await seedPool(database, serverId),
+        await seedPool(database, serverId),
+      ];
+      const follower = await seedUser(database);
+      const overrider = await seedUser(database);
+      const bundle = await bundles.create(actor, {
+        serverId, name: 'b', cpuCores: null, memBytes: null, diskBytes: 1_000, rootDiskBytes: null, gpuCount: null,
+        dataDisks: [{ poolId: kept, capBytes: null }, { poolId: dropped, capBytes: 400 }],
+      });
+      await grants.putServerGrant(actor, follower, serverId, assignment(bundle.id));
+      await grants.putServerGrant(actor, overrider, serverId, assignment(bundle.id, {
+        overrides: { dataDisks: [{ poolId: dropped, capBytes: null }] },
+      }));
+      const before = signals();
+
+      const updated = await bundles.update(actor, bundle.id, {
+        expectedRevision: 1,
+        dataDisks: [{ poolId: kept, capBytes: 200 }, { poolId: added, capBytes: null }],
+      });
+      expect(updated).toMatchObject({ revision: 2, dataDisks: [{ poolId: kept, capBytes: 200 }, { poolId: added, capBytes: null }].sort((a, b) => (a.poolId < b.poolId ? -1 : 1)) });
+      expect(signals()).toBe(before + 1);
+      await expect(resolvePoolAccess(database, follower, kept)).resolves.toMatchObject({ capBytes: 200 });
+      await expect(resolvePoolAccess(database, follower, added)).resolves.toMatchObject({ capBytes: null });
+      await expect(resolvePoolAccess(database, follower, dropped)).resolves.toBeNull();
+      await expect(resolvePoolAccess(database, overrider, dropped)).resolves.toMatchObject({ capBytes: null });
+      await expect(resolvePoolAccess(database, overrider, kept)).resolves.toBeNull();
+      // A pool in a bundle's list cannot be deleted from under it.
+      await expect(database.deleteFrom('infra.storage_pools').where('id', '=', kept).execute())
+        .rejects.toThrow(/grant_bundle_disks_pool_fkey/);
+      // Name-only edits keep the list.
+      await expect(bundles.update(actor, bundle.id, { expectedRevision: 2, name: 'renamed' }))
+        .resolves.toMatchObject({ dataDisks: updated.dataDisks });
+    });
+  });
+
+  it('previews the disk changes per grant: lapsing volumes, data over a ceiling, a total too small', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const { bundles, grants } = services(database);
+      const actor = await manager(database);
+      const serverId = await seedServer(database);
+      const imageId = await seedImage(database);
+      const [first, second] = [await seedPool(database, serverId), await seedPool(database, serverId)];
+      const follower = await seedUser(database, 'a-follower');
+      const overrider = await seedUser(database, 'b-overrider');
+      const bundle = await bundles.create(actor, {
+        serverId, name: 'b', cpuCores: null, memBytes: null, diskBytes: 10_000, rootDiskBytes: null, gpuCount: null,
+        dataDisks: [{ poolId: first, capBytes: null }, { poolId: second, capBytes: null }],
+      });
+      await grants.putServerGrant(actor, follower, serverId, assignment(bundle.id));
+      await grants.putServerGrant(actor, overrider, serverId, assignment(bundle.id, {
+        overrides: { diskBytes: 10_000, dataDisks: [{ poolId: second, capBytes: null }] },
+      }));
+      // The follower: a 100-byte system disk, 700 bytes on the first disk and 0 on the second.
+      await seedContainer(database, { ownerId: follower, serverId, poolId: first, imageId });
+      const volume = await seedVolume(database, { ownerId: follower, poolId: first, serverId });
+      await database.updateTable('control.volumes').set({ used_bytes: 700 }).where('id', '=', volume).execute();
+      await seedVolume(database, { ownerId: follower, poolId: second, serverId });
+
+      const preview = await bundles.preview(bundle.id, {
+        diskBytes: 500,
+        dataDisks: [{ poolId: first, capBytes: 600 }],
+      });
+      expect(preview.proposed).toMatchObject({ diskBytes: 500, dataDisks: [{ poolId: first, capBytes: 600 }] });
+      expect(preview.entries).toEqual([
+        expect.objectContaining({
+          userId: follower,
+          changes: [{ field: 'diskBytes', before: 10_000, after: 500 }],
+          dataDisks: 'follows',
+          diskBytesInUse: 800,
+          dataDisksRevoked: [second],
+          dataDisksOverCap: [{ poolId: first, usedBytes: 700, capBytes: 600 }],
+        }),
+        expect.objectContaining({
+          userId: overrider,
+          changes: [],
+          overridden: [{ field: 'diskBytes', value: 10_000 }],
+          dataDisks: 'overridden',
+          diskBytesInUse: null,
+          dataDisksRevoked: [],
+          dataDisksOverCap: [],
+        }),
+      ]);
+      // The same list in another order changes nothing.
+      await expect(bundles.preview(bundle.id, {
+        dataDisks: [{ poolId: second, capBytes: null }, { poolId: first, capBytes: null }],
+      })).resolves.toMatchObject({ entries: [] });
     });
   });
 });

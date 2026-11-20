@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { Kysely } from 'kysely';
+import { sql, type Kysely } from 'kysely';
 import { Role, UserStatus } from '@nyabase/common';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 
@@ -188,8 +188,11 @@ export async function seedBundle(
     name?: string;
     cpuCores?: number | null;
     memBytes?: number | null;
+    /** The disk total; a large one by default, so `rootDiskBytes` alone acts as the system-disk quota. */
+    diskBytes?: number;
     rootDiskBytes?: number | null;
     gpuCount?: number | null;
+    dataDisks?: Array<{ poolId: string; capBytes: number | null }>;
   } = {},
 ): Promise<string> {
   const id = randomUUID();
@@ -199,10 +202,19 @@ export async function seedBundle(
     name: values.name ?? `bundle-${nextName++}`,
     cpu_cores: values.cpuCores ?? null,
     mem_bytes: values.memBytes ?? null,
+    disk_bytes: values.diskBytes ?? LARGE_GRANT_BYTES,
     root_disk_bytes: values.rootDiskBytes ?? null,
     gpu_count: values.gpuCount ?? null,
     revision: 1,
   }).execute();
+  for (const disk of values.dataDisks ?? []) {
+    await database.insertInto('iam.grant_bundle_disks').values({
+      bundle_id: id,
+      server_id: serverId,
+      pool_id: disk.poolId,
+      cap_bytes: disk.capBytes,
+    }).execute();
+  }
   return id;
 }
 
@@ -225,8 +237,10 @@ export async function grantServer(
   values: {
     cpuCores?: number | null;
     memBytes?: number | null;
+    diskBytes?: number;
     rootDiskBytes?: number | null;
     gpuCount?: number | null;
+    dataDisks?: Array<{ poolId: string; capBytes: number | null }>;
     expiresAt?: Date | null;
     bundleId?: string;
   } = {},
@@ -257,15 +271,18 @@ export async function ensureServerGrant(database: Db, userId: string, serverId: 
 export const LARGE_GRANT_BYTES = 2 ** 50;
 
 /**
- * A data-disk grant of the given pools (all on one server) sharing
- * `limitBytes`, under the user's existing grant on that server. Returns the
- * data-disk grant id.
+ * Puts the pools (all on one server) on the user's existing grant there as
+ * data disks — the grant's own list, so it overrides `data_disks` — each with
+ * `capBytes` (null = only the total), and overrides the grant's disk total
+ * with `diskBytes`. The pools share that total with the user's system disks
+ * there. Returns the server grant id.
  */
 export async function grantPool(
   database: Db,
   who: Subject,
   poolIds: string | readonly string[],
-  limitBytes: number = LARGE_GRANT_BYTES,
+  diskBytes: number = LARGE_GRANT_BYTES,
+  capBytes: number | null = null,
 ): Promise<string> {
   const ids = typeof poolIds === 'string' ? [poolIds] : [...poolIds];
   const pools = await database.selectFrom('infra.storage_pools')
@@ -281,25 +298,25 @@ export async function grantPool(
     .where('server_id', '=', serverId)
     .executeTakeFirst();
   if (!serverGrant) throw new Error('grantPool needs the user\'s server grant on the pool\'s server first');
-  const id = randomUUID();
-  await database.insertInto('iam.data_disk_grants').values({
-    id,
-    server_grant_id: serverGrant.id,
-    user_id: who.user,
-    server_id: serverId,
-    limit_bytes: limitBytes,
-  }).execute();
+  await database.updateTable('iam.server_grants')
+    .set({
+      overridden: sql<string[]>`array(select distinct unnest(overridden || array['disk', 'data_disks']::text[]) order by 1)`,
+      disk_bytes: diskBytes,
+    })
+    .where('id', '=', serverGrant.id)
+    .execute();
   for (const poolId of ids) {
     await database.insertInto('iam.storage_pool_grants').values({
       id: randomUUID(),
       server_grant_id: serverGrant.id,
-      data_disk_grant_id: id,
       user_id: who.user,
       server_id: serverId,
       pool_id: poolId,
-    }).execute();
+      cap_bytes: capBytes,
+    }).onConflict((conflict) => conflict.columns(['user_id', 'pool_id']).doUpdateSet({ cap_bytes: capBytes }))
+      .execute();
   }
-  return id;
+  return serverGrant.id;
 }
 
 export async function grantBackend(

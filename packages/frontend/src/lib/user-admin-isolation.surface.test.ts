@@ -125,7 +125,8 @@ describe('user panel pages stay on scope=mine', () => {
     expect(src).toMatch(/api\.get<UserServerDto\[\]>\('\/servers'\)/);
     expect(src).toMatch(/api\.get<ContainerDto\[\]>\('\/containers'\)/);
     expect(src).toMatch(/api\.get<SharedBackendDto\[\]>\('\/shared-backends'\)/);
-    expect(src).toMatch(/storage-capacity/);
+    // The access DTO carries what the system disks hold: no capacity call per server.
+    expect(src).toMatch(/rootDiskCommittedBytes/);
   });
 
   it('http-proxy-page never calls /admin/* and stays on user HTTP 发布 APIs', () => {

@@ -1,17 +1,20 @@
 // Data disks: one volume per user and disk, created and mounted by the
-// platform, sized by the grant (forced below the data, never by stopping).
+// platform, sized by the grant: the disk's ceiling and the disk total the
+// user's system disks share (forced below the data, never by stopping).
 import assert from 'node:assert/strict';
 import { after, before, describe, it } from 'node:test';
 import {
   ContainerStatus,
   ResourceLifecyclePhase,
   type ContainerDto,
-  type DataDiskGrantChangeDto,
+  FailureCode,
+  type GrantBundleDto,
   type LiveServerAccessDto,
   type StorageCapacityDto,
   type StorageMountPreviewDto,
   type VolumeDto,
 } from '@nyabase/common';
+import { ApiError } from '../client/api.js';
 import { GIB, Harness, type TestUser } from '../client/harness.js';
 import { pollUntil } from '../client/poll.js';
 import { tryLoadState } from '../client/state.js';
@@ -28,7 +31,7 @@ describe('data disk: created, mounted and sized by the platform', { skip }, () =
   let h: Harness;
   let user: TestUser;
   let container: ContainerDto;
-  let grantId: string;
+  let bundle: GrantBundleDto;
   let volume: VolumeDto;
 
   const server = () => h.state.servers.find((entry) => entry.dataPoolId)!;
@@ -43,8 +46,10 @@ describe('data disk: created, mounted and sized by the platform', { skip }, () =
     h = await Harness.start();
     user = await h.newUser('disk');
     await h.addSshKey(user);
-    await h.grantServer(user, server());
-    grantId = await h.grantDataDisks(user, server(), [server().dataPoolId!], 2 * GIB);
+    bundle = await h.grantServer(user, server(), {
+      diskBytes: 64 * GIB,
+      dataDisks: [{ poolId: server().dataPoolId!, capBytes: 2 * GIB }],
+    });
     container = await h.createContainer(user, server());
   });
   after(async () => h?.cleanup());
@@ -75,24 +80,29 @@ describe('data disk: created, mounted and sized by the platform', { skip }, () =
     assert.equal(await user.session.api.status('DELETE', `/volumes/${volume.id}`), 403);
   });
 
-  it('shows the grant as a group with the data written', async () => {
+  it('reports the data written, charged to the disk total beside the system disk', async () => {
     await h.ssh(user, container, `dd if=/dev/urandom of=${MOUNT}/blob bs=1M count=300 status=none && sync`);
     const access = await pollUntil(async () => {
       const servers = await user.session.api.get<{ servers: LiveServerAccessDto[] }>('/me/access');
-      const group = servers.servers.find((entry) => entry.serverId === server().id)?.dataDisks?.[0];
-      return group && group.usedBytes > 250 * MIB ? group : undefined;
-    }, { what: 'the group to report the data', timeoutMs: 120_000 });
-    assert.equal(access.grantId, grantId);
-    assert.equal(access.limitBytes, 2 * GIB);
+      const entry = servers.servers.find((item) => item.serverId === server().id);
+      return entry && (entry.dataDisks[0]?.usedBytes ?? 0) > 250 * MIB ? entry : undefined;
+    }, { what: 'the disk to report the data', timeoutMs: 120_000 });
+    assert.deepEqual(access.dataDisks.map((disk) => [disk.poolId, disk.capBytes]), [[server().dataPoolId, 2 * GIB]]);
+    assert.equal(access.diskBytes, 64 * GIB);
+    assert.equal(access.rootDiskCommittedBytes, h.state.rootSizeBytes);
+    const used = access.dataDisks[0]!.usedBytes;
+    assert.equal(access.rootDiskAvailableBytes, Math.min(
+      access.rootDiskBytes! - h.state.rootSizeBytes,
+      64 * GIB - h.state.rootSizeBytes - used,
+    ));
     const capacity = await user.session.api.get<StorageCapacityDto>(`/servers/${server().id}/storage-capacity`);
-    assert.equal(capacity.pools.find((pool) => pool.poolId === server().dataPoolId)?.grant?.grantId, grantId);
+    assert.equal(capacity.diskLimitBytes, 64 * GIB);
+    assert.ok(capacity.dataDiskUsedBytes > 250 * MIB);
+    assert.equal(capacity.pools.find((pool) => pool.poolId === server().dataPoolId)?.dataDisk?.capBytes, 2 * GIB);
   });
 
-  it('enforces a smaller grant below the data at once: read and delete only, nothing stops', async () => {
-    const change = await h.api.patch<DataDiskGrantChangeDto>(`/users/${user.id}/data-disk-grants/${grantId}`, {
-      limitBytes: 200 * MIB,
-    });
-    assert.equal(change.grant?.limitBytes, 200 * MIB);
+  it('enforces a ceiling lowered in the bundle below the data at once: read and delete only, nothing stops', async () => {
+    bundle = await h.patchBundle(bundle, { dataDisks: [{ poolId: server().dataPoolId!, capBytes: 200 * MIB }] });
     await sizeIs(200 * MIB);
     const blocked = await pollUntil(async () => {
       const out = await h.ssh(user, container,
@@ -105,10 +115,23 @@ describe('data disk: created, mounted and sized by the platform', { skip }, () =
     assert.equal(live.actual.status, ContainerStatus.Running, 'the container keeps running');
 
     await h.ssh(user, container, `rm -f ${MOUNT}/blob ${MOUNT}/more && sync`);
-    await h.api.patch(`/users/${user.id}/data-disk-grants/${grantId}`, { limitBytes: 2 * GIB });
+    bundle = await h.patchBundle(bundle, { dataDisks: [{ poolId: server().dataPoolId!, capBytes: 2 * GIB }] });
     await sizeIs(2 * GIB);
     assert.match(await h.ssh(user, container,
       `dd if=/dev/zero of=${MOUNT}/more bs=1M count=8 status=none && echo wrote`), /wrote/);
+  });
+
+  it('shares the total with the system disks: the data disk gets what they leave, a new one must fit', async () => {
+    await h.overrideGrant(user, server(), { diskBytes: h.state.rootSizeBytes + GIB });
+    await sizeIs(GIB);
+    const refused = await user.session.api.post('/containers', {
+      serverId: server().id, imageId: h.state.image.id, name: h.name('no-room'),
+      rootSizeBytes: h.state.rootSizeBytes, memBytes: GIB, powerIntent: 'stopped',
+    }).then(() => undefined, (error: unknown) => error);
+    assert.ok(refused instanceof ApiError);
+    assert.equal(refused.code, FailureCode.StorageGrantExceeded);
+    await h.overrideGrant(user, server(), { diskBytes: undefined });
+    await sizeIs(2 * GIB);
   });
 
   it('mounts the volume into a new container at creation', async () => {
@@ -134,8 +157,8 @@ describe('data disk: created, mounted and sized by the platform', { skip }, () =
     }, { what: 'the disk to come back', timeoutMs: 180_000, intervalMs: 5_000 });
   });
 
-  it('unmounts the volume when the grant is revoked, and lets the administrator delete it then', async () => {
-    await h.api.delete(`/users/${user.id}/data-disk-grants/${grantId}`);
+  it('unmounts the volume when the bundle drops the disk, and lets the administrator delete it then', async () => {
+    bundle = await h.patchBundle(bundle, { dataDisks: [] });
     await pollUntil(async () => {
       const mounts = await user.session.api.get<unknown[]>(`/containers/${container.id}/volumes`);
       return mounts.length === 0 ? true : undefined;

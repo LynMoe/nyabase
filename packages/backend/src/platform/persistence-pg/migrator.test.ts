@@ -38,6 +38,7 @@ describe('SQL migration discovery', () => {
       { version: '000011', name: 'container-scripts' },
       { version: '000012', name: 'singleton-volumes' },
       { version: '000013', name: 'storage-pool-roles' },
+      { version: '000014', name: 'disk-quota' },
     ]);
     const [initial] = migrations;
     expect(initial.sql).toContain('CREATE TABLE iam.users');

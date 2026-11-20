@@ -8,6 +8,7 @@ import {
   Role,
   type IntentAcceptedDto,
   StoragePoolResizeFamily,
+  systemDiskRoom,
   type DataDiskUsageDto,
   type ListScope,
   type SharedVolumeDto,
@@ -23,6 +24,7 @@ import { acceptedIntent } from '../reconcile/accepted-intent.js';
 import { IntentRepository } from '../reconcile/intent.repository.js';
 import { numberValue } from '../platform/domain-utils.js';
 import { committedRootBytesSql } from '../platform/persistence-pg/committed-bytes.js';
+import { loadServerDiskCharge } from '../platform/persistence-pg/disk-charge.js';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
 import { isLocalPoolRow, storagePoolCapability } from '../storage-pools/storage-pool-capability.js';
@@ -256,48 +258,14 @@ export class VolumesService {
     return volumes + roots;
   }
 
-  /**
-   * The owner's data-disk grants by pool: each pool maps to its whole group
-   * (the pools sharing the quota and the data on their volumes).
-   */
-  private async ownerDataDisks(ownerId: string): Promise<Map<string, DataDiskUsageDto>> {
-    const access = await listPoolAccess(this.database, ownerId);
-    const result = new Map<string, DataDiskUsageDto>();
-    if (access.length === 0) return result;
-    const used = await this.database.selectFrom('control.volumes')
-      .select(['pool_id', sql<string>`coalesce(sum(coalesce(used_bytes, 0)), 0)`.as('used')])
-      .where('owner_id', '=', ownerId)
-      .where('pool_id', 'in', access.map((row) => row.poolId))
-      .where('lifecycle_phase', 'not in', ['failed', 'deleting'])
-      .groupBy('pool_id')
-      .execute();
-    const usedByPool = new Map(used.map((row) => [row.pool_id!, numberValue(row.used)]));
-    const groups = new Map<string, DataDiskUsageDto>();
-    for (const row of access) {
-      const group = groups.get(row.dataDiskGrantId) ?? {
-        grantId: row.dataDiskGrantId,
-        poolIds: [],
-        limitBytes: row.limitBytes,
-        usedBytes: 0,
-        availableBytes: 0,
-      };
-      group.poolIds.push(row.poolId);
-      group.usedBytes += usedByPool.get(row.poolId) ?? 0;
-      group.availableBytes = Math.max(0, group.limitBytes - group.usedBytes);
-      groups.set(row.dataDiskGrantId, group);
-      result.set(row.poolId, group);
-    }
-    return result;
-  }
-
-  /** Each local pool of the server; with `ownerId`, also that owner's data-disk grant (as a group) on it. */
+  /** Each local pool of the server; with `owner`, also the owner's data disk on it (ceiling and data). */
   private async poolCapacities(
     serverId: string,
-    ownerId?: string,
+    owner?: { id: string; dataDisks: Map<string, DataDiskUsageDto> },
   ): Promise<PoolCapacityDto[]> {
+    const ownerId = owner?.id;
     const pools = (await this.pools.list(serverId)).filter(isLocalPoolRow);
     const overcommitRatio = await this.serverOvercommit(serverId);
-    const groups = ownerId === undefined ? new Map<string, DataDiskUsageDto>() : await this.ownerDataDisks(ownerId);
     const result: PoolCapacityDto[] = [];
     for (const pool of pools) {
       const committed = await this.committedPoolBytes(pool.id);
@@ -323,7 +291,7 @@ export class VolumesService {
         ),
         mountPath: pool.mount_path,
         maintenance: pool.maintenance,
-        grant: groups.get(pool.id) ?? null,
+        dataDisk: owner?.dataDisks.get(pool.id) ?? null,
       });
     }
     return result;
@@ -335,13 +303,30 @@ export class VolumesService {
     serverId: string,
   ): Promise<StorageCapacityDto> {
     const grant = await requireServerAccess(this.database, ownerId, serverId);
-    const pools = await this.poolCapacities(serverId, ownerId);
+    const [charge, access] = await Promise.all([
+      loadServerDiskCharge(this.database, ownerId, serverId),
+      listPoolAccess(this.database, ownerId),
+    ]);
+    const dataDisks = new Map(access
+      .filter((row) => row.serverId === serverId)
+      .map((row) => [row.poolId, {
+        poolId: row.poolId,
+        capBytes: row.capBytes,
+        usedBytes: charge.dataByPool.get(row.poolId) ?? 0,
+      }]));
+    const pools = await this.poolCapacities(serverId, { id: ownerId, dataDisks });
     const sums = await this.ownerServerCommittedBytes(ownerId, serverId);
-    const limit = grant.rootDiskBytes;
     return {
-      rootDiskLimitBytes: limit,
+      diskLimitBytes: grant.diskBytes,
+      rootDiskLimitBytes: grant.rootDiskBytes,
       usedByRootDisksBytes: sums.root,
-      rootDiskAvailableBytes: limit === null ? null : Math.max(0, limit - sums.root),
+      dataDiskUsedBytes: charge.dataUsedBytes,
+      rootDiskAvailableBytes: systemDiskRoom({
+        diskBytes: grant.diskBytes,
+        rootDiskBytes: grant.rootDiskBytes,
+        rootCommittedBytes: charge.rootCommittedBytes,
+        dataUsedBytes: charge.dataUsedBytes,
+      }),
       usedByLocalVolumesBytes: sums.local,
       pools,
     };
@@ -354,8 +339,10 @@ export class VolumesService {
     const pools = await this.poolCapacities(serverId);
     const sums = await this.serverCommittedBytes(serverId);
     return {
+      diskLimitBytes: null,
       rootDiskLimitBytes: null,
       usedByRootDisksBytes: sums.root,
+      dataDiskUsedBytes: 0,
       rootDiskAvailableBytes: null,
       usedByLocalVolumesBytes: sums.local,
       pools,

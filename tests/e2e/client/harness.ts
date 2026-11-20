@@ -10,8 +10,6 @@ import {
   ContainerStatus,
   type ContainerDto,
   type CreateContainerRequest,
-  type CreateDataDiskGrantRequest,
-  type DataDiskGrantChangeDto,
   type SharedBackendDto,
   type SharedVolumeDto,
   type StoragePoolDto,
@@ -20,7 +18,12 @@ import {
   type GrantBundleDto,
   type GrantBundleQuotas,
   type IntentAcceptedDto,
+  type PatchGrantBundleRequest,
+  type PatchServerGrantRequest,
+  type PreviewGrantBundleRequest,
   type PutServerGrantRequest,
+  type ServerGrantDto,
+  type ServerGrantOverrides,
   type Role,
   type SshClientConfigDto,
   type SshPublicKeyDto,
@@ -120,8 +123,10 @@ export class Harness {
       name: this.name('bundle'),
       cpuCores: 2,
       memBytes: 8 * GIB,
+      diskBytes: 256 * GIB,
       rootDiskBytes: 64 * GIB,
       gpuCount: 0,
+      dataDisks: [],
       ...quotas,
     });
     this.defer(`delete bundle ${bundle.name}`, () => this.api.delete(`/admin/grant-bundles/${bundle.id}`));
@@ -142,28 +147,54 @@ export class Harness {
     return bundle;
   }
 
+  /** Edits a bundle at its current revision; the grants that follow a field change with it. */
+  async patchBundle(bundle: Pick<GrantBundleDto, 'id'>, changes: PreviewGrantBundleRequest): Promise<GrantBundleDto> {
+    const current = await this.api.get<GrantBundleDto>(`/admin/grant-bundles/${bundle.id}`);
+    const body: PatchGrantBundleRequest = { ...changes, expectedRevision: current.revision };
+    return this.api.patch<GrantBundleDto>(`/admin/grant-bundles/${bundle.id}`, body);
+  }
+
+  /** The user's grant on the server, as the administrator sees it. */
+  async serverGrant(user: Pick<TestUser, 'id'>, server: RunServer): Promise<ServerGrantDto> {
+    const grants = await this.api.get<ServerGrantDto[]>(`/users/${user.id}/server-grants`);
+    const grant = grants.find((entry) => entry.serverId === server.id);
+    if (!grant) throw new Error(`user ${user.id} holds no grant on ${server.slug}`);
+    return grant;
+  }
+
+  /** Changes some of the user's overrides on the server (the others are kept; `undefined` drops one). */
+  async overrideGrant(
+    user: Pick<TestUser, 'id'>,
+    server: RunServer,
+    changes: { [K in keyof ServerGrantOverrides]?: ServerGrantOverrides[K] | undefined },
+  ): Promise<ServerGrantDto> {
+    const overrides: Record<string, unknown> = { ...(await this.serverGrant(user, server)).overrides };
+    for (const [key, value] of Object.entries(changes)) {
+      if (value === undefined) delete overrides[key];
+      else overrides[key] = value;
+    }
+    const body: PatchServerGrantRequest = { overrides: overrides as ServerGrantOverrides };
+    return this.api.patch<ServerGrantDto>(`/users/${user.id}/server-grants/${server.id}`, body);
+  }
+
   /**
-   * A data-disk grant of `poolIds` (pools of `server`) sharing `limitBytes`,
-   * under the user's grant on the server (taking the pools from any other
-   * grant of the user); revoked again on cleanup. Returns the grant id.
+   * Gives the user data disks on `poolIds` (pools of `server`) through their
+   * grant there: its own data-disk list (an override), each disk capped at
+   * `capBytes` (null = only the grant's disk total). Taken away again with the
+   * grant on cleanup.
    */
   async grantDataDisks(
     user: Pick<TestUser, 'id'>,
     server: RunServer,
     poolIds: readonly string[],
-    limitBytes: number,
-  ): Promise<string> {
-    const body: CreateDataDiskGrantRequest = { serverId: server.id, poolIds: [...poolIds], limitBytes, movePools: true };
-    const change = await this.api.post<DataDiskGrantChangeDto>(`/users/${user.id}/data-disk-grants`, body);
-    const id = change.grant!.id;
-    this.defer(`revoke data-disk grant ${user.id}/${id}`, async () => {
-      try {
-        await this.api.delete(`/users/${user.id}/data-disk-grants/${id}`);
-      } catch (error) {
-        if (!(error instanceof ApiError && error.status === 404)) throw error;
-      }
-    });
-    return id;
+    capBytes: number | null,
+  ): Promise<ServerGrantDto> {
+    return this.overrideGrant(user, server, { dataDisks: poolIds.map((poolId) => ({ poolId, capBytes })) });
+  }
+
+  /** Takes every data disk away from the user's grant on the server (they lapse). */
+  async revokeDataDisks(user: Pick<TestUser, 'id'>, server: RunServer): Promise<ServerGrantDto> {
+    return this.overrideGrant(user, server, { dataDisks: [] });
   }
 
   /** The user's grant on the run's shared backend (always sized); revoked again on cleanup. */

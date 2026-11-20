@@ -26,7 +26,12 @@ import type { Actor } from '../iam/actor.js';
 import { AuditService } from '../iam/audit.service.js';
 import { GpuClaimsRepository } from '../gpu/gpu-claims.repository.js';
 import { hasRole } from '../iam/actor.js';
-import { loadDataDiskGrantDtos } from './data-disk-grants.service.js';
+import {
+  assertDataDisksOnServer,
+  loadBundleDataDisks,
+  loadGrantDataDisks,
+  writeGrantDataDisks,
+} from './grant-data-disks.js';
 import { beginGrantMutation, requireGrantUser } from './grant-mutation.js';
 import {
   effectiveQuotas,
@@ -51,13 +56,12 @@ function iso(value: Date | string | null): string | null {
 }
 
 /**
- * A user's grants: one bundle per server (with overrides), the data-disk
- * grants under each server grant (`DataDiskGrantsService`), and
- * shared-backend grants. Deleting a grant
- * never refuses because the user owns resources: it is an immediate lapse,
- * handled by the access-lapse processor after commit. Replacing a server
- * grant's bundle keeps the grant (and its data disks), so coverage never
- * lapses in between.
+ * A user's grants: one bundle per server (with overrides, the data-disk list
+ * among them), and shared-backend grants. Deleting a grant never refuses
+ * because the user owns resources: it is an immediate lapse, handled by the
+ * access-lapse processor after commit; so is a data disk leaving the grant's
+ * effective list. Replacing a server grant's bundle keeps the grant row, so
+ * the disks both bundles list never lapse in between.
  */
 @Injectable()
 export class GrantsService {
@@ -101,6 +105,9 @@ export class GrantsService {
         .executeTakeFirst();
       if (!bundle || bundle.server_id !== serverId) throw new NotFoundException('Bundle not found');
       await this.assertGpuApplicable(transaction, serverId, effectiveQuotas(quotasFromColumns(bundle), input.overrides).gpuCount, input.overrides);
+      if (input.overrides.dataDisks !== undefined) {
+        await assertDataDisksOnServer(transaction, serverId, input.overrides.dataDisks);
+      }
       const existing = await transaction.selectFrom('iam.server_grants')
         .select(['id', 'bundle_id'])
         .where('user_id', '=', userId)
@@ -129,6 +136,7 @@ export class GrantsService {
           .values({ id: randomUUID(), user_id: userId, server_id: serverId, ...values })
           .returning('id')
           .executeTakeFirstOrThrow()).id;
+      await writeGrantDataDisks(transaction, { id, userId, serverId }, input.overrides.dataDisks ?? null);
       await this.audit.append(
         transaction,
         actor.userId,
@@ -163,6 +171,7 @@ export class GrantsService {
           'grant.id',
           'bundle.cpu_cores',
           'bundle.mem_bytes',
+          'bundle.disk_bytes',
           'bundle.root_disk_bytes',
           'bundle.gpu_count',
         ])
@@ -174,6 +183,9 @@ export class GrantsService {
       if (input.overrides !== undefined) {
         const gpuCount = effectiveQuotas(quotasFromColumns(grant), input.overrides).gpuCount;
         await this.assertGpuApplicable(transaction, serverId, gpuCount, input.overrides);
+        if (input.overrides.dataDisks !== undefined) {
+          await assertDataDisksOnServer(transaction, serverId, input.overrides.dataDisks);
+        }
       }
       await transaction.updateTable('iam.server_grants')
         .set({
@@ -182,6 +194,9 @@ export class GrantsService {
         })
         .where('id', '=', grant.id)
         .execute();
+      if (input.overrides !== undefined) {
+        await writeGrantDataDisks(transaction, { id: grant.id, userId, serverId }, input.overrides.dataDisks ?? null);
+      }
       await this.audit.append(
         transaction,
         actor.userId,
@@ -196,7 +211,7 @@ export class GrantsService {
     return this.requireServerGrantDto(grantId);
   }
 
-  /** Its data-disk grants go with it (foreign key cascade); server and pool coverage lapse. */
+  /** Its own data-disk list goes with it (foreign key cascade); server and pool coverage lapse. */
   async deleteServerGrant(actor: Actor, userId: string, serverId: string): Promise<void> {
     await this.transactions.run(async (transaction) => {
       await this.beginMutation(transaction, actor, userId);
@@ -332,6 +347,7 @@ export class GrantsService {
         'grant.overridden',
         'grant.cpu_cores',
         'grant.mem_bytes',
+        'grant.disk_bytes',
         'grant.root_disk_bytes',
         'grant.gpu_count',
         'grant.expires_at',
@@ -340,6 +356,7 @@ export class GrantsService {
         'bundle.name as bundle_name',
         'bundle.cpu_cores as bundle_cpu_cores',
         'bundle.mem_bytes as bundle_mem_bytes',
+        'bundle.disk_bytes as bundle_disk_bytes',
         'bundle.root_disk_bytes as bundle_root_disk_bytes',
         'bundle.gpu_count as bundle_gpu_count',
       ]);
@@ -353,12 +370,16 @@ export class GrantsService {
     }
     const rows = await query.orderBy('grant.user_id').orderBy('grant.server_id').execute();
     if (rows.length === 0) return [];
-    const dataDisksByGrant = await loadDataDiskGrantDtos(executor, rows.map((row) => row.id));
+    const [bundleDisks, ownDisks] = await Promise.all([
+      loadBundleDataDisks(executor, rows.map((row) => row.bundle_id)),
+      loadGrantDataDisks(executor, rows.map((row) => row.id)),
+    ]);
     return rows.map((row) => {
-      const overrides = overridesFromColumns(row);
+      const overrides = overridesFromColumns(row, ownDisks.get(row.id) ?? []);
       const bundle: QuotaColumns = {
         cpu_cores: row.bundle_cpu_cores,
         mem_bytes: row.bundle_mem_bytes,
+        disk_bytes: row.bundle_disk_bytes,
         root_disk_bytes: row.bundle_root_disk_bytes,
         gpu_count: row.bundle_gpu_count,
       };
@@ -369,9 +390,8 @@ export class GrantsService {
         bundleId: row.bundle_id,
         bundleName: row.bundle_name,
         overrides,
-        ...effectiveQuotas(quotasFromColumns(bundle), overrides),
+        ...effectiveQuotas({ ...quotasFromColumns(bundle), dataDisks: bundleDisks.get(row.bundle_id) ?? [] }, overrides),
         expiresAt: iso(row.expires_at),
-        dataDisks: dataDisksByGrant.get(row.id) ?? [],
         createdAt: row.created_at.toISOString(),
         updatedAt: row.updated_at.toISOString(),
       };

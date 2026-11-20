@@ -11,6 +11,7 @@ function volume(id: string, values: Partial<AllocationVolume> & { usedBytes: num
     committedBytes: values.sizeBytes,
     belowUsage: true,
     capBytes: null,
+    ceilingBytes: null,
     ...values,
   };
 }
@@ -140,5 +141,54 @@ describe('allocateQuotas: several disks sharing a limit', () => {
       volume('b', { usedBytes: 0, sizeBytes: MIN_VOLUME_BYTES }),
     ]);
     expect(sizes(second)).toEqual({ b: 45 });
+  });
+});
+
+describe('allocateQuotas: per-disk ceilings', () => {
+  it('caps a group of one at its ceiling below the limit, exactly', () => {
+    expect(sizes(allocateQuotas(100 * GiB, [volume('a', { usedBytes: null, sizeBytes: 50 * GiB, ceilingBytes: 30 * GiB })])))
+      .toEqual({ a: 30 });
+    expect(allocateQuotas(100 * GiB, [volume('a', { usedBytes: null, sizeBytes: 30 * GiB, ceilingBytes: 30 * GiB })]).size)
+      .toBe(0);
+    // The limit, when it is lower, wins.
+    expect(sizes(allocateQuotas(20 * GiB, [volume('a', { usedBytes: null, sizeBytes: 50 * GiB, ceilingBytes: 30 * GiB })])))
+      .toEqual({ a: 20 });
+  });
+
+  it('passes a capped disk\'s share of the headroom to the others', () => {
+    const result = allocateQuotas(100 * GiB, [
+      volume('a', { usedBytes: 0, sizeBytes: 50 * GiB, ceilingBytes: 10 * GiB }),
+      volume('b', { usedBytes: 0, sizeBytes: 50 * GiB }),
+    ]);
+    // a shrinks to its ceiling; b's grow waits for a's reservation (committed sizes fill the limit).
+    expect(sizes(result)).toEqual({ a: 10 });
+    const settled = allocateQuotas(100 * GiB, [
+      volume('a', { usedBytes: 0, sizeBytes: 10 * GiB, ceilingBytes: 10 * GiB }),
+      volume('b', { usedBytes: 0, sizeBytes: 50 * GiB }),
+    ]);
+    expect(sizes(settled)).toEqual({ b: 90 });
+  });
+
+  it('holds data over a lowered ceiling at the ceiling, or ratchets it down on a filesystem that refuses that', () => {
+    const over = (belowUsage: boolean, usedBytes: number | null) => allocateQuotas(1_000 * GiB, [
+      volume('a', { usedBytes, sizeBytes: 100 * GiB, ceilingBytes: 20 * GiB, belowUsage }),
+      volume('b', { usedBytes: 0, sizeBytes: 10 * GiB }),
+    ]);
+    expect(sizes(over(true, 60 * GiB)).a).toBe(20);
+    expect(sizes(over(false, 60 * GiB)).a).toBe(60);
+    // Usage unknown: the ceiling holds where the filesystem takes it, nothing else moves.
+    expect(sizes(over(true, null))).toEqual({ a: 20 });
+    expect(over(false, null).size).toBe(0);
+  });
+
+  it('never floors a volume above its ceiling', () => {
+    expect(sizes(allocateQuotas(100 * GiB, [volume('a', { usedBytes: null, sizeBytes: 5 * GiB, ceilingBytes: GiB / 2 })])))
+      .toEqual({ a: 0.5 });
+    expect(quotaFloor(0, 1)).toBe(1024 ** 2);
+  });
+
+  it('gives the data disks a floor when the system disks took the whole total', () => {
+    expect(sizes(allocateQuotas(0, [volume('a', { usedBytes: 5 * GiB, sizeBytes: 50 * GiB })])))
+      .toEqual({ a: 1 / 1024 });
   });
 });

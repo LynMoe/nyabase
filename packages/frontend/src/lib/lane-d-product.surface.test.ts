@@ -217,7 +217,8 @@ describe('lane D product UI copy', () => {
     expect(inspect).not.toMatch(/强制/);
     expect(inspect).not.toMatch(/修复/);
     expect(inspect).not.toMatch(/mutate/);
-    expect(read('lib/grant-bundle-form.ts')).toMatch(/系统盘（GiB，留空为不限，不含数据盘）/);
+    expect(read('lib/grant-bundle-form.ts')).toMatch(/磁盘总额（GiB，系统盘与数据盘共用）/);
+    expect(read('lib/grant-bundle-form.ts')).toMatch(/系统盘上限（GiB，留空为只受总额限制）/);
     expect(grants).toMatch(/数据盘/);
     expect(backends).toMatch(/发现执行端/);
     expect(backends).toMatch(/执行端/);
@@ -295,10 +296,12 @@ describe('lane D product UI copy', () => {
     expect(grants).toMatch(/SectionCard/);
     expect(grants).toMatch(/grant-assign/);
     expect(grants).toMatch(/grant-servers/);
-    expect(grants).toMatch(/grant-pools-/);
     expect(grants).toMatch(/grant-backends/);
-    expect(grants).toMatch(/grant-add-pool-/);
     expect(grants).toMatch(/grant-add-backend/);
+    // Data disks are a field of the bundle: a grant follows the list or overrides it whole.
+    expect(grants).toMatch(/OverrideDataDisks/);
+    expect(grants).toMatch(/toggleOverride\(draft, 'dataDisks'/);
+    expect(grants).toMatch(/撤销数据盘？/);
     // The top form: pick a bundle, switch on「修改」to override a field, replace on 409.
     expect(grants).toMatch(/bundleOptionGroups/);
     expect(grants).toMatch(/>修改</);
@@ -307,9 +310,9 @@ describe('lane D product UI copy', () => {
     expect(grants).toMatch(/replace: true/);
     expect(grants).toMatch(/替换后立即生效/);
     expect(grants).toMatch(/\/server-grants\//);
-    expect(grants).toMatch(/\/data-disk-grants/);
+    expect(grants).not.toMatch(/\/data-disk-grants/);
     expect(grants).not.toMatch(/\/storage-pool-grants\//);
-    expect(grants).toMatch(/movePools/);
+    expect(grants).not.toMatch(/movePools/);
     // GPUs are a count now; no card picker in the grant editor.
     expect(grants).not.toMatch(/GpuPicker|ServerGrantGpu/);
     expect(grants).not.toMatch(/\btoolbar=/);
@@ -361,7 +364,9 @@ describe('lane D product UI copy', () => {
     expect(read('routes/quota/index.tsx')).toMatch(/redirect\(\{ to: '\/', hash: 'quota'/);
     expect(quotaPage).toMatch(/formatQuotaDimension/);
     expect(quotaPage).toMatch(/formatGpuGrantSummary/);
-    expect(quotaPage).toMatch(/storage-capacity/);
+    // System disks and data share one disk total, read from the access DTO.
+    expect(quotaPage).toMatch(/rootDiskCommittedBytes/);
+    expect(quotaPage).toMatch(/系统盘与数据盘共用/);
     expect(quotaPage).toMatch(/sharedBackends/);
     expect(quotaPage).toMatch(/额度/);
     expect(quotaPage).toMatch(/已分配/);

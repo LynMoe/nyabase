@@ -1,15 +1,12 @@
 import {
   FailureCode,
   StoragePoolResizeFamily,
-  type DataDiskGrantDto,
-  type PatchDataDiskGrantRequest,
   type StoragePoolDto,
   type VolumeAttachmentDto,
   type VolumeDto,
   zStorageMountPath,
 } from '@nyabase/common';
 import { ApiError, apiErrorDetails, errorMessage } from './api-error.js';
-import { formatGrantBytes } from './grant-quota.js';
 import { volumeInProgress } from './in-progress.js';
 import { volumeAttentionHint } from './status-labels.js';
 
@@ -18,72 +15,7 @@ export function poolDisplayName(pool: Pick<StoragePoolDto, 'displayName' | 'incu
   return pool.displayName ?? pool.incusName;
 }
 
-/** 「A+B+C 共用 1 TiB」, or 「A 1 TiB」 for a group of one disk. */
-export function dataDiskGroupLabel(
-  grant: Pick<DataDiskGrantDto, 'poolIds' | 'limitBytes'>,
-  nameOf: (poolId: string) => string,
-): string {
-  const names = grant.poolIds.map(nameOf).join('+');
-  return grant.poolIds.length > 1
-    ? `${names} 共用 ${formatGrantBytes(grant.limitBytes)}`
-    : `${names} ${formatGrantBytes(grant.limitBytes)}`;
-}
-
-/** Disks a write takes out of another grant of the user, by that grant. */
-export interface DataDiskMove {
-  from: DataDiskGrantDto;
-  poolIds: string[];
-  /** Every disk of `from` moves: the server deletes the emptied grant. */
-  emptied: boolean;
-}
-
-export interface DataDiskChangePlan {
-  moves: DataDiskMove[];
-  /** Disks of the edited grant left out of the new set: the user's volumes there lapse. */
-  revoked: string[];
-}
-
-/**
- * What saving `poolIds` as the disks of `editing` (or of a new grant) does to
- * the user's other data-disk grants on the server, before the server is
- * asked: the disks it moves out of them (sent with `movePools: true`) and,
- * when editing, the disks it revokes.
- */
-export function planDataDiskChange(
-  dataDisks: readonly DataDiskGrantDto[],
-  poolIds: readonly string[],
-  editing?: Pick<DataDiskGrantDto, 'id' | 'poolIds'>,
-): DataDiskChangePlan {
-  const wanted = new Set(poolIds);
-  const moves: DataDiskMove[] = [];
-  for (const grant of dataDisks) {
-    if (grant.id === editing?.id) continue;
-    const taken = grant.poolIds.filter((poolId) => wanted.has(poolId));
-    if (taken.length === 0) continue;
-    moves.push({ from: grant, poolIds: taken, emptied: taken.length === grant.poolIds.length });
-  }
-  const revoked = editing ? editing.poolIds.filter((poolId) => !wanted.has(poolId)) : [];
-  return { moves, revoked };
-}
-
-/** The PATCH body for an edited grant: only what changed; null when nothing did. */
-export function dataDiskPatch(
-  editing: Pick<DataDiskGrantDto, 'poolIds' | 'limitBytes'>,
-  poolIds: readonly string[],
-  limitBytes: number,
-  movePools: boolean,
-): PatchDataDiskGrantRequest | null {
-  const samePools = poolIds.length === editing.poolIds.length
-    && poolIds.every((poolId) => editing.poolIds.includes(poolId));
-  const body: PatchDataDiskGrantRequest = {};
-  if (limitBytes !== editing.limitBytes) body.limitBytes = limitBytes;
-  if (!samePools) body.poolIds = [...poolIds];
-  if (body.limitBytes === undefined && body.poolIds === undefined) return null;
-  if (movePools && body.poolIds) body.movePools = true;
-  return body;
-}
-
-/** Local pools of the server that can go into a data-disk grant, plus the ones the grant already holds. */
+/** Local pools of the server that can be listed as data disks, plus the ones the list already holds. */
 export function grantablePools(
   pools: readonly StoragePoolDto[],
   serverId: string,
@@ -156,10 +88,6 @@ export function userDiskState(
 export function storageErrorMessage(error: unknown): string {
   if (error instanceof ApiError) {
     switch (error.code) {
-      case FailureCode.DataDiskPoolGranted:
-        return '部分盘已属于该用户的其他数据盘授权（列表已刷新），请确认后重新保存。';
-      case FailureCode.ServerGrantRequired:
-        return '请先为该用户分配这台服务器的授权模板。';
       case FailureCode.StorageMountPathConflict: {
         const path = apiErrorDetails(error)?.mountPath;
         return `挂载点${typeof path === 'string' ? ` ${path} ` : ''}与其他盘的挂载点相同或互相嵌套（同一台服务器的本地盘与所有共享存储不能重叠）。`;

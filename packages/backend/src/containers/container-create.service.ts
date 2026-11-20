@@ -6,6 +6,7 @@ import {
   IntentKind,
   IntentResourceType,
   RootPlacementExclusion,
+  systemDiskRoom,
   type CreateContainerRequest,
   type RootPlacement,
 } from '@nyabase/common';
@@ -22,6 +23,8 @@ import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.
 import { IntentRepository } from '../reconcile/intent.repository.js';
 import { lockOwnerServerQuota } from '../platform/persistence-pg/advisory-locks.js';
 import { committedVolumeBytesSql } from '../platform/persistence-pg/committed-bytes.js';
+import { loadServerDiskCharge } from '../platform/persistence-pg/disk-charge.js';
+import type { ServerAccess } from '../iam/effective-access.js';
 import { VolumeProvisioner } from '../volumes/volume-provisioner.service.js';
 import { overcommitAvailableBytes } from '../volumes/volume-rules.js';
 import {
@@ -56,28 +59,46 @@ async function lockServerForRootAdmission(transaction: Transaction<NyabaseDataba
 }
 
 /** The owner's system-disk quota on the server: system disks on every pool, not data volumes. */
+/**
+ * The owner's disk quota on the server (AGENTS.md, 授权模型): the system disks
+ * stay under their own ceiling, and the system disks plus the data on the
+ * grant's data disks under the total (`systemDiskRoom`). Without a grant
+ * (administrators' `scope=all` actions) nothing is checked. The caller holds
+ * the owner's server quota lock, which the quota balancer's grows take too.
+ */
 async function assertRootGrant(
-  repository: ContainerControlRepository,
   transaction: Transaction<NyabaseDatabase>,
   ownerId: string,
   serverId: string,
   delta: number,
-  grantLimit: number | null,
+  grant: DiskGrant | null,
 ): Promise<void> {
-  if (grantLimit === null) return;
-  const used = await repository.sumLiveRootBytes({ ownerId, serverId }, transaction);
-  if (used + delta > grantLimit) {
+  if (grant === null) return;
+  const charge = await loadServerDiskCharge(transaction, ownerId, serverId);
+  const available = systemDiskRoom({
+    diskBytes: grant.diskBytes,
+    rootDiskBytes: grant.rootDiskBytes,
+    rootCommittedBytes: charge.rootCommittedBytes,
+    dataUsedBytes: charge.dataUsedBytes,
+  });
+  if (delta > available) {
     throw new ConflictException({
       code: FailureCode.StorageGrantExceeded,
-      message: 'System disk grant exceeded',
+      message: 'Disk grant exceeded',
       details: {
         requestedBytes: delta,
-        availableBytes: Math.max(0, grantLimit - used),
-        grantLimitBytes: grantLimit,
+        availableBytes: available,
+        grantLimitBytes: grant.diskBytes,
+        rootDiskLimitBytes: grant.rootDiskBytes,
+        rootDiskBytes: charge.rootCommittedBytes,
+        dataDiskBytes: charge.dataUsedBytes,
       },
     });
   }
 }
+
+/** The disk quotas of a server grant that root admission reads. */
+export type DiskGrant = Pick<ServerAccess, 'diskBytes' | 'rootDiskBytes'>;
 
 /**
  * What the pool's overcommitted capacity still admits for the owner (whose own
@@ -120,11 +141,14 @@ export async function assertRootCapacity(
   serverId: string,
   poolId: string,
   delta: number,
-  grantLimit: number | null,
+  grant: DiskGrant | null,
 ): Promise<void> {
   if (delta <= 0) return;
+  // Server row first, then the owner's quota lock (the order a create takes
+  // them in); the quota balancer's grows of this owner's data disks take the latter.
   const ratio = await lockServerForRootAdmission(transaction, serverId);
-  await assertRootGrant(repository, transaction, ownerId, serverId, delta, grantLimit);
+  await lockOwnerServerQuota(transaction, ownerId, serverId);
+  await assertRootGrant(transaction, ownerId, serverId, delta, grant);
   const pool = await transaction.selectFrom('infra.storage_pools')
     .select(['total_bytes'])
     .where('id', '=', poolId)
@@ -309,7 +333,7 @@ export class ContainerCreateService {
     ownerId: string,
     request: CreateContainerRequest,
     image: ImageRow,
-    grantLimit: number | null,
+    grant: DiskGrant,
   ): Promise<string> {
     const ratio = await lockServerForRootAdmission(transaction, request.serverId);
     const rows = await transaction.selectFrom('infra.storage_pools')
@@ -333,7 +357,7 @@ export class ContainerCreateService {
         },
       });
     }
-    await assertRootGrant(this.repository, transaction, ownerId, request.serverId, request.rootSizeBytes, grantLimit);
+    await assertRootGrant(transaction, ownerId, request.serverId, request.rootSizeBytes, grant);
     const pools: RootPlacementPool[] = [];
     for (const row of rows) {
       pools.push({
@@ -444,7 +468,7 @@ export class ContainerCreateService {
       ownerId,
       request,
       image,
-      access.grant.rootDiskBytes ?? null,
+      access.grant,
     );
     const { networkKey, address } = await this.allocateAddress(
       transaction,
