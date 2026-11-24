@@ -57,4 +57,28 @@ describe('gpuCardCharts', () => {
     expect(card?.lines.map((line) => line.key)).toEqual([eve.id]);
     expect(card?.utilization.sm.map((line) => line.points.map((point) => point.v))).toEqual([[0, 0]]);
   });
+
+  it('charts a busy server over 6h without rescanning every sample per point', () => {
+    // 14 containers, 8 cards, 361 one-minute steps: ~130k samples, the size of a
+    // full A800 host. A per-point scan of each family took ~15 s here and froze
+    // the event loop (every in-flight timer, VictoriaMetrics fetches included,
+    // then fired as a timeout).
+    const timeline = Array.from({ length: 361 }, (_, step) => step * 60_000);
+    const cards = Array.from({ length: 8 }, (_, index) => ({ pci: `00000000:${(0x18 + index * 0x10).toString(16)}:00.0`, index, totalBytes: 80 }));
+    const busy = Array.from({ length: 14 }, (_, index) => ({
+      ...container({ id: `${String(index).padStart(8, '0')}-1111-4111-8111-111111111111`, ownerId: `${String(index).padStart(8, '0')}-2222-4222-8222-222222222222`, displayName: `u${index}` }),
+      pciAddresses: cards.map((card) => card.pci),
+    }));
+    const families = new Map<string, Point[]>();
+    for (const family of ['gpu_process_bytes', 'gpu_process_sm', 'gpu_process_mem_bw']) {
+      families.set(family, busy.flatMap((item) => cards.flatMap((card) => timeline.map((ts) => (
+        { ts, labels: { container_id: item.id, gpu_pci: card.pci, pid: '1' }, value: 1 }
+      )))));
+    }
+    const started = performance.now();
+    const charts = gpuCardCharts({ containers: busy, series: families, timeline }, cards);
+    expect(performance.now() - started).toBeLessThan(1_500);
+    expect(charts).toHaveLength(8);
+    expect(charts[0]?.lines.at(-1)?.points.at(-1)?.v).toBe(busy.length - 8);
+  });
 });

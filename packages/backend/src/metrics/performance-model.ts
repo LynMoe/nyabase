@@ -628,18 +628,20 @@ export function absoluteUsed(
   if (metric === 'cpu') return sumAt(series.get('cpu_usage_cores') ?? [], containers, ts);
   if (metric === 'memory') return sumAt(series.get('mem_used_bytes') ?? [], containers, ts);
   if (metric === 'disk') {
-    const localIds = new Set(containers.flatMap((container) =>
-      container.volumes.filter((volume) => !volume.shared).map((volume) => volume.volumeId)));
-    const volumeUsed = (series.get('volume_used_bytes') ?? [])
-      .filter((point) => localIds.has(point.labels.volume_id ?? ''));
     return sumNullable([
       sumAt(series.get('root_used_bytes') ?? [], containers, ts),
-      sumAt(volumeUsed, containers, ts),
+      sumAt(series.get('volume_used_bytes') ?? [], containers, ts, localVolumeFilter(containers)),
     ]);
   }
-  const points = (series.get(gpuFamily) ?? [])
-    .filter((point) => pci === undefined || point.labels.gpu_pci === pci);
-  return sumAt(points, containers, ts);
+  const onCard = pci === undefined ? undefined : (point: SeriesPoint) => point.labels.gpu_pci === pci;
+  return sumAt(series.get(gpuFamily) ?? [], containers, ts, onCard);
+}
+
+/** Keeps samples of the containers' local (non-shared) volumes. */
+function localVolumeFilter(containers: readonly InventoryContainer[]): (point: SeriesPoint) => boolean {
+  const localIds = new Set(containers.flatMap((container) =>
+    container.volumes.filter((volume) => !volume.shared).map((volume) => volume.volumeId)));
+  return (point) => localIds.has(point.labels.volume_id ?? '');
 }
 
 function metricAt(
@@ -670,19 +672,14 @@ function metricAt(
     return used !== null && limit !== null && limit > 0 ? used / limit : null;
   }
   if (metric === 'disk') {
-    const localIds = new Set(containers.flatMap((container) =>
-      container.volumes.filter((volume) => !volume.shared).map((volume) => volume.volumeId)));
-    const volumeUsed = (series.get('volume_used_bytes') ?? [])
-      .filter((point) => localIds.has(point.labels.volume_id ?? ''));
-    const volumeSize = (series.get('volume_size_bytes') ?? [])
-      .filter((point) => localIds.has(point.labels.volume_id ?? ''));
+    const local = localVolumeFilter(containers);
     const used = sumNullable([
       sumAt(series.get('root_used_bytes') ?? [], containers, ts),
-      sumAt(volumeUsed, containers, ts),
+      sumAt(series.get('volume_used_bytes') ?? [], containers, ts, local),
     ]);
     const size = sumNullable([
       sumAt(series.get('root_size_bytes') ?? [], containers, ts),
-      sumAt(volumeSize, containers, ts),
+      sumAt(series.get('volume_size_bytes') ?? [], containers, ts, local),
     ]);
     return used !== null && size !== null && size > 0 ? used / size : null;
   }
@@ -692,14 +689,45 @@ function metricAt(
   return (used ?? 0) / limit;
 }
 
+type SeriesPoint = { ts: number; labels: Record<string, string>; value: number };
+
+/**
+ * container_id -> ts -> samples (in series order), built once per range-query
+ * result. Charts look up every (timestamp, container) pair; scanning the whole
+ * family each time was quadratic in the timeline and blocked the event loop
+ * for seconds on a busy server's 6h charts.
+ */
+const seriesIndexes = new WeakMap<readonly SeriesPoint[], Map<string, Map<number, SeriesPoint[]>>>();
+
+function seriesIndex(points: readonly SeriesPoint[]): Map<string, Map<number, SeriesPoint[]>> {
+  let index = seriesIndexes.get(points);
+  if (index) return index;
+  index = new Map();
+  for (const point of points) {
+    const containerId = point.labels.container_id;
+    if (containerId === undefined) continue;
+    let byTs = index.get(containerId);
+    if (!byTs) {
+      byTs = new Map();
+      index.set(containerId, byTs);
+    }
+    const bucket = byTs.get(point.ts);
+    if (bucket) bucket.push(point);
+    else byTs.set(point.ts, [point]);
+  }
+  seriesIndexes.set(points, index);
+  return index;
+}
+
 function sumAt(
-  points: readonly { ts: number; labels: Record<string, string>; value: number }[],
+  points: readonly SeriesPoint[],
   containers: readonly InventoryContainer[],
   ts: number,
+  keep?: (point: SeriesPoint) => boolean,
 ): number | null {
   const matched = new Map<string, number>();
   for (const container of containers) {
-    const value = valueAt(points, container, ts);
+    const value = valueAt(points, container, ts, keep);
     if (value === null) continue;
     matched.set(container.id, (matched.get(container.id) ?? 0) + value);
   }
@@ -708,14 +736,14 @@ function sumAt(
 }
 
 function valueAt(
-  points: readonly { ts: number; labels: Record<string, string>; value: number }[],
+  points: readonly SeriesPoint[],
   container: InventoryContainer,
   ts: number,
+  keep?: (point: SeriesPoint) => boolean,
 ): number | null {
-  const matched = points.filter((point) =>
-    point.ts === ts
-    && point.labels.container_id === container.id
-    && ownsSample(point.labels.user_id, container.ownerId));
+  const candidates = seriesIndex(points).get(container.id)?.get(ts) ?? [];
+  const matched = candidates.filter((point) =>
+    ownsSample(point.labels.user_id, container.ownerId) && (!keep || keep(point)));
   if (matched.length === 0) return null;
   const bySeries = new Map<string, number>();
   for (const point of matched) {
