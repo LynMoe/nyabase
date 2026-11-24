@@ -9,7 +9,7 @@ import {
   type LiveServerAccessDto,
 } from '@nyabase/common';
 import { numberValue } from '../platform/domain-utils.js';
-import { loadServerDiskCharge, type ServerDiskCharge } from '../platform/persistence-pg/disk-charge.js';
+import { loadServerDiskCharges, type ServerDiskCharge } from '../platform/persistence-pg/disk-charge.js';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
@@ -219,14 +219,14 @@ export class AccessResolverService {
     live: ReadonlyArray<{ serverId: string }>,
   ): Promise<Map<string, ServerDiskCharge & { dataDisks: LiveServerAccessDto['dataDisks'] }>> {
     const pools = live.length === 0 ? [] : await listPoolAccess(this.database, userId);
-    const entries = await Promise.all(live.map(async ({ serverId }) => {
-      const charge = await loadServerDiskCharge(this.database, userId, serverId);
+    const charges = await loadServerDiskCharges(this.database, userId, live.map(({ serverId }) => serverId));
+    return new Map(live.map(({ serverId }) => {
+      const charge = charges.get(serverId)!;
       const dataDisks = pools
         .filter((pool) => pool.serverId === serverId)
         .map((pool) => ({ poolId: pool.poolId, capBytes: pool.capBytes, usedBytes: charge.dataByPool.get(pool.poolId) ?? 0 }));
       return [serverId, { ...charge, dataDisks }] as const;
     }));
-    return new Map(entries);
   }
 
   /** Current shared-backend coverage with the data observed on the user's volume; grace backends are omitted. */

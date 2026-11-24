@@ -10,6 +10,7 @@ import {
   grantBackend,
   grantServer,
   seedBackend,
+  seedContainer,
   grantPool,
   seedImage,
   seedPool,
@@ -116,6 +117,54 @@ describePg('AccessResolverService', () => {
         allowedImageIds: [image],
       }]);
       await expect(access.listAccessibleServers(userId)).resolves.toEqual([serverId]);
+    });
+  });
+
+  it('charges each covered server with its own system disks and data', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const access = resolver(database);
+      const userId = await seedUser(database);
+      const image = await seedImage(database);
+      const first = await seedServer(database);
+      const second = await seedServer(database);
+      const firstPool = await seedPool(database, first);
+      const secondPool = await seedPool(database, second);
+      await grantServer(database, { user: userId }, first, {
+        diskBytes: 1_000, rootDiskBytes: 300, dataDisks: [{ poolId: firstPool, capBytes: null }],
+      });
+      await grantServer(database, { user: userId }, second, {
+        diskBytes: 1_000, rootDiskBytes: 300, dataDisks: [{ poolId: secondPool, capBytes: null }],
+      });
+      const sized = async (id: string, rootBytes: number, phase: 'active' | 'failed' = 'active') => {
+        await database.updateTable('control.containers')
+          .set({ root_size_bytes: rootBytes, lifecycle_phase: phase, failure_code: phase === 'failed' ? 'TEST_FAILED' : null })
+          .where('id', '=', id)
+          .execute();
+      };
+      await sized(await seedContainer(database, { ownerId: userId, serverId: first, poolId: firstPool, imageId: image }), 250);
+      await sized(await seedContainer(database, { ownerId: userId, serverId: second, poolId: secondPool, imageId: image }), 100);
+      await sized(await seedContainer(database, { ownerId: userId, serverId: second, poolId: secondPool, imageId: image }), 999, 'failed');
+      const used = async (poolId: string, serverId: string, bytes: number) => {
+        const volumeId = await seedVolume(database, { ownerId: userId, poolId, serverId });
+        await database.updateTable('control.volumes').set({ used_bytes: bytes }).where('id', '=', volumeId).execute();
+      };
+      await used(firstPool, first, 70);
+      await used(secondPool, second, 400);
+
+      const byServer = new Map((await access.getEffectiveAccess(userId)).map((entry) => [entry.serverId, entry]));
+      expect(byServer.get(first)).toMatchObject({
+        rootDiskCommittedBytes: 250,
+        dataDisks: [{ poolId: firstPool, capBytes: null, usedBytes: 70 }],
+        // min(300 − 250 under the ceiling, 1000 − 250 − 70 under the total)
+        rootDiskAvailableBytes: 50,
+      });
+      expect(byServer.get(second)).toMatchObject({
+        // the failed container is not charged
+        rootDiskCommittedBytes: 100,
+        dataDisks: [{ poolId: secondPool, capBytes: null, usedBytes: 400 }],
+        // min(300 − 100, 1000 − 100 − 400)
+        rootDiskAvailableBytes: 200,
+      });
     });
   });
 
