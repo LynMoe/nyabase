@@ -69,6 +69,7 @@ describe('container state samples', () => {
   it('does not wait for a hung server before writing the other', async () => {
     const writes: string[] = [];
     let releaseSlow: (() => void) | undefined;
+    let failSlow: ((error: Error) => void) | undefined;
     const slowStarted = new Promise<void>((resolve) => {
       releaseSlow = resolve;
     });
@@ -78,6 +79,7 @@ describe('container state samples', () => {
           if (serverId === 'slow') {
             releaseSlow?.();
             await new Promise((_resolve, reject) => {
+              failSlow = reject;
               options.signal?.addEventListener('abort', () => reject(new Error('aborted')));
             });
           }
@@ -114,6 +116,7 @@ describe('container state samples', () => {
     await slowStarted;
     await new Promise((resolve) => setTimeout(resolve, 50));
     expect(writes).toEqual(['fast']);
+    failSlow?.(new Error('hung'));
     await done;
     expect(writes).toEqual(['fast']);
   }, 10_000);

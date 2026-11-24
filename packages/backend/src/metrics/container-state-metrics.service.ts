@@ -24,7 +24,11 @@ import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
 import { INCUS_CLIENT_FACTORY, type IncusClientFactory } from '../incus/incus-client.factory.js';
 import { type MetricPoint, type MetricsWriteOptions, MetricsWriter } from './metrics-writer.js';
 
-const PUBLISH_TIMEOUT_MS = 3_000;
+// Incus waits up to 5 s for an unresponsive lxc monitor while rendering an
+// instance's state (`getLxcState`), so `instances?recursion=2` on a busy host
+// can legitimately take that long; a shorter deadline dropped the whole
+// server's sample. Stays under the 15 s period (one publish per server in flight).
+const PUBLISH_TIMEOUT_MS = 10_000;
 const POOL_READ_TIMEOUT_MS = 2_000;
 const POOL_READS_PER_TICK = 8;
 const MAX_VOLUME_SERIES = 32;
