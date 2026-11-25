@@ -124,8 +124,9 @@ export function buildUsage(input: {
       personRow(userId, group, byContainer, unattributedByServer));
     const newest = newestSample(server.serverId, samples, input.scrapeUp);
     const scrape = input.scrapeUp.get(server.serverId);
+    // Per-process GPU series end with their process: an old one is a finished job, not lag.
     const containerSamples = samples.filter((sample) =>
-      sample.labels.server_id === server.serverId
+      sample.labels.server_id === server.serverId && !sample.family.startsWith('gpu_process_')
       && sample.labels.container_id
       && sample.labels.container_id !== '__unattributed__');
     const staleSamples = containerSamples.filter((sample) => input.now - sample.ts > PERFORMANCE_FRESHNESS_MS);

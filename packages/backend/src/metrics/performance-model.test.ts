@@ -113,6 +113,23 @@ describe('performance model', () => {
     expect(usage.servers[0]?.stale).toBe(true);
   });
 
+  it('does not mark a server stale for a GPU process that has ended', () => {
+    const now = Date.now();
+    const labels = { container_id: containerId, server_id: serverId, user_id: userId, gpu_pci: '00000000:81:00.0' };
+    const usage = buildUsage({
+      containers: [container()],
+      samples: [
+        { family: 'cpu_usage_cores', labels: { container_id: containerId, server_id: serverId, user_id: userId }, value: 0.1, ts: now },
+        { family: 'gpu_process_bytes', labels, value: 10, ts: now - 90_000 },
+        { family: 'gpu_process_sm', labels, value: 0.5, ts: now - 90_000 },
+      ],
+      scrapeUp: new Map([[serverId, { value: 1, ts: now }]]),
+      now,
+      admin: true,
+    });
+    expect(usage.servers[0]?.stale).toBe(false);
+  });
+
   it('drops a previous owner series and does not chart unlimited memory as a percent', () => {
     const usage = buildUsage({
       containers: [container()],
