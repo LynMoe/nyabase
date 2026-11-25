@@ -1,5 +1,5 @@
 import { Link } from '@tanstack/react-router';
-import { ChevronRight } from 'lucide-react';
+import { ChevronRight, CircleAlert, CirclePlay, CircleStop, LoaderCircle } from 'lucide-react';
 import { canonicalPciAddress, ContainerPhase, type ContainerDto, type PerformanceServerUsage } from '@nyabase/common';
 import { GpuStrip } from './gpu-strip.js';
 import { useGpuNames } from '../performance/host-occupancy.js';
@@ -12,7 +12,6 @@ import {
   type DashboardServer,
 } from '../../lib/dashboard-servers.js';
 import { freeGpuCount } from '../../lib/gpu-occupancy.js';
-import { grantedGpuIndexLabel } from '../../lib/grant-quota.js';
 import { containerStatusLabel, lifecyclePhaseLabel } from '../../lib/status-labels.js';
 import { cn, relativeTime } from '../../lib/utils.js';
 
@@ -23,7 +22,7 @@ export function ServerCard({ server }: { server: DashboardServer }) {
   const { access, grace, usage } = server;
   return (
     <section
-      className={cn('min-w-0 space-y-4 rounded-lg border bg-card px-5 py-4', grace && 'border-warning/40 bg-warning/5')}
+      className={cn('min-w-0 space-y-4 rounded-lg border bg-card px-4 py-4 sm:px-5', grace && 'border-warning/40 bg-warning/5')}
       data-testid="dashboard-server"
     >
       <ServerHeader server={server} />
@@ -32,7 +31,7 @@ export function ServerCard({ server }: { server: DashboardServer }) {
       {grace ? (
         <p className="text-sm text-warning tabular-nums">{new Date(grace.purgeAt).toLocaleString('zh-CN')} 清除</p>
       ) : null}
-      <MyContainers containers={server.containers} usage={usage} />
+      <MyContainers containers={server.containers} />
     </section>
   );
 }
@@ -74,12 +73,13 @@ function GpuRow({ server }: { server: DashboardServer }) {
   const model = gpuModel(names, server.gpus[0]?.pci);
   const free = freeGpuCount(server.gpus);
   const known = server.gpus.some((card) => card.state !== 'unknown');
+  // Phone: label and count on one line, the squares on the next; wider: one row.
   return (
-    <div className="flex items-center gap-1.5">
+    <div className="flex flex-wrap items-center gap-x-1.5 gap-y-2 sm:flex-nowrap">
       <span className={LABEL}>GPU</span>
-      <GpuStrip cards={server.gpus} model={model} />
+      <GpuStrip cards={server.gpus} model={model} className="order-last w-full sm:order-none sm:w-auto" />
       {known ? (
-        <span className="ml-auto flex shrink-0 items-baseline gap-1 whitespace-nowrap pl-2" data-testid="dashboard-gpu-free">
+        <span className="ml-auto flex shrink-0 items-baseline gap-1 whitespace-nowrap sm:pl-2" data-testid="dashboard-gpu-free">
           <span className={cn('text-2xl font-semibold leading-none tabular-nums', free > 0 ? 'text-success' : 'text-muted-foreground')}>
             {free}
           </span>
@@ -118,10 +118,9 @@ function LoadBar({ label, ratio }: { label: string; ratio: number | null }) {
   );
 }
 
-function MyContainers({ containers, usage }: { containers: readonly ContainerDto[]; usage: PerformanceServerUsage | null }) {
+function MyContainers({ containers }: { containers: readonly ContainerDto[] }) {
   const shown = containers.slice(0, DASHBOARD_CONTAINER_LIMIT);
   const more = containers.length - shown.length;
-  const inventory = (usage?.host.gpus ?? []).map((card) => ({ index: card.index, pciAddress: card.pci }));
   return (
     <div className="flex items-start gap-1.5">
       <span className={cn(LABEL, 'pt-1.5')}>我的</span>
@@ -130,7 +129,7 @@ function MyContainers({ containers, usage }: { containers: readonly ContainerDto
         <ul className="-mx-2">
           {shown.map((container) => (
             <li key={container.id}>
-              <ContainerRow container={container} gpu={gpuLabel(container, inventory)} />
+              <ContainerRow container={container} />
             </li>
           ))}
           {more > 0 ? (
@@ -147,14 +146,16 @@ function MyContainers({ containers, usage }: { containers: readonly ContainerDto
 }
 
 const TONE = {
-  running: { dot: 'bg-success', text: 'text-success' },
-  attention: { dot: 'bg-destructive', text: 'text-destructive' },
-  pending: { dot: 'bg-warning', text: 'text-warning' },
-  idle: { dot: 'bg-muted-foreground/50', text: 'text-muted-foreground' },
+  running: { icon: CirclePlay, className: 'text-success' },
+  attention: { icon: CircleAlert, className: 'text-destructive' },
+  pending: { icon: LoaderCircle, className: 'animate-spin text-warning' },
+  idle: { icon: CircleStop, className: 'text-muted-foreground' },
 } as const;
 
-function ContainerRow({ container, gpu }: { container: ContainerDto; gpu: string | null }) {
+/** Status icon, then the name; the whole row opens the container. */
+function ContainerRow({ container }: { container: ContainerDto }) {
   const tone = TONE[containerTone(container)];
+  const Icon = tone.icon;
   const status = container.lifecyclePhase === ContainerPhase.Active
     ? containerStatusLabel(container.actual.status)
     : lifecyclePhaseLabel(container.lifecyclePhase);
@@ -165,24 +166,13 @@ function ContainerRow({ container, gpu }: { container: ContainerDto; gpu: string
       search={{ tab: 'overview' }}
       className="flex min-w-0 items-center gap-2 rounded-md px-2 py-1.5 text-sm hover:bg-accent"
     >
-      <span aria-hidden className={cn('h-2 w-2 shrink-0 rounded-full', tone.dot)} />
-      <span className="truncate font-medium">{container.name}</span>
-      <span className={cn('shrink-0 text-xs', tone.text)}>{status}</span>
-      {gpu ? <span className="ml-auto shrink-0 text-xs text-muted-foreground tabular-nums">{gpu}</span> : null}
-      <ChevronRight aria-hidden className={cn('h-3.5 w-3.5 shrink-0 text-muted-foreground', !gpu && 'ml-auto')} />
+      <Icon role="img" aria-label={status} className={cn('h-4 w-4 shrink-0', tone.className)}>
+        <title>{status}</title>
+      </Icon>
+      <span className="min-w-0 truncate font-medium">{container.name}</span>
+      <ChevronRight aria-hidden className="ml-auto h-3.5 w-3.5 shrink-0 text-muted-foreground" />
     </Link>
   );
-}
-
-function gpuLabel(
-  container: ContainerDto,
-  inventory: ReadonlyArray<{ index: number | null; pciAddress: string }>,
-): string | null {
-  const pcis = container.gpu?.pciAddresses ?? [];
-  if (pcis.length === 0) return null;
-  // While the server reports no cards the indexes are unknown: the label is the count.
-  const label = grantedGpuIndexLabel(pcis, inventory).replace(/, /g, '、');
-  return label.startsWith('GPU') ? label : `${label} GPU`;
 }
 
 function gpuModel(names: ReadonlyMap<string, string>, pci: string | undefined): string | null {

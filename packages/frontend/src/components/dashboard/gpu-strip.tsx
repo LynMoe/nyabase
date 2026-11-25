@@ -1,3 +1,4 @@
+import { useRef, useState } from 'react';
 import { Tooltip, TooltipContent, TooltipTrigger } from '../ui/tooltip.js';
 import type { GpuCardState, GrantedGpuCard } from '../../lib/gpu-occupancy.js';
 import { cn, formatBytesCompact } from '../../lib/utils.js';
@@ -19,10 +20,13 @@ export function GpuLegendSwatch({ state }: { state: GpuCardState }) {
   return <span aria-hidden className={cn('inline-block h-3 w-3 rounded-[3px] border-2', SQUARE[state])} />;
 }
 
-/** The granted cards as numbered squares; hovering one lists who uses it. */
-export function GpuStrip({ cards, model }: { cards: readonly GrantedGpuCard[]; model: string | null }) {
+/**
+ * The granted cards as numbered squares; hovering (or tapping) one lists who
+ * uses it. On a phone they fill a row of eight so a full server fits one line.
+ */
+export function GpuStrip({ cards, model, className }: { cards: readonly GrantedGpuCard[]; model: string | null; className?: string }) {
   return (
-    <div className="flex flex-wrap gap-1.5" data-testid="dashboard-gpus">
+    <div className={cn('grid grid-cols-8 gap-1 sm:flex sm:flex-wrap sm:gap-1.5', className)} data-testid="dashboard-gpus">
       {cards.map((card, position) => (
         <GpuSquare key={card.pci} card={card} label={String(card.index ?? position)} model={model} />
       ))}
@@ -30,16 +34,29 @@ export function GpuStrip({ cards, model }: { cards: readonly GrantedGpuCard[]; m
   );
 }
 
+/**
+ * Radix opens a tooltip on hover and focus only, never on touch, and closes it
+ * on click: the open state is ours so a tap toggles it (a tap elsewhere or a
+ * scroll still closes it) and a mouse click keeps the hovered one open.
+ */
 function GpuSquare({ card, label, model }: { card: GrantedGpuCard; label: string; model: string | null }) {
+  const [open, setOpen] = useState(false);
+  const press = useRef({ touch: false, wasOpen: false });
   return (
-    <Tooltip delayDuration={0} disableHoverableContent>
+    <Tooltip open={open} onOpenChange={setOpen} delayDuration={0} disableHoverableContent>
       <TooltipTrigger asChild>
         <button
           type="button"
           aria-label={`GPU ${label}`}
           data-state-kind={card.state}
+          onPointerDown={(event) => { press.current = { touch: event.pointerType !== 'mouse', wasOpen: open }; }}
+          onClick={(event) => {
+            event.preventDefault();
+            setOpen(press.current.touch ? !press.current.wasOpen : true);
+            press.current = { touch: false, wasOpen: false };
+          }}
           className={cn(
-            'flex h-10 w-10 cursor-default items-center justify-center rounded-md border-2 text-sm font-semibold tabular-nums',
+            'flex aspect-square w-full items-center justify-center rounded-md border-2 text-sm font-semibold tabular-nums sm:h-10 sm:w-10',
             'focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2',
             SQUARE[card.state],
           )}
@@ -47,7 +64,7 @@ function GpuSquare({ card, label, model }: { card: GrantedGpuCard; label: string
           {label}
         </button>
       </TooltipTrigger>
-      <TooltipContent side="top" align="start" className="w-72 max-w-none space-y-1.5 px-3 py-2">
+      <TooltipContent side="top" align="start" collisionPadding={8} className="w-72 max-w-[calc(100vw-1rem)] space-y-1.5 px-3 py-2">
         <div className="flex items-baseline gap-2">
           <span className="font-semibold">GPU {label}</span>
           {model ? <span className="ml-auto truncate text-muted-foreground">{model}</span> : null}

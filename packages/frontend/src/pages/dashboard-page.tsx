@@ -134,7 +134,7 @@ function DashboardBody({
         </span>
         <span><b className="text-xl font-semibold text-foreground tabular-nums">{online}</b> / {granted.length} 台服务器在线</span>
         {hasGpus ? (
-          <span className="flex flex-wrap items-center gap-3.5 text-xs sm:ml-auto">
+          <span className="flex w-full flex-wrap items-center gap-3.5 text-xs sm:ml-auto sm:w-auto">
             {GPU_LEGEND.map((item) => (
               <span key={item.state} className="inline-flex items-center gap-1"><GpuLegendSwatch state={item.state} />{item.label}</span>
             ))}
