@@ -40,13 +40,29 @@ export interface PerformanceHostSnapshot {
     sizeBytes: number | null;
     ratio: number | null;
   }>;
-  gpus: Array<{
-    pci: string;
-    index: number | null;
-    usedBytes: number | null;
-    totalBytes: number | null;
-    ratio: number | null;
-  }>;
+  gpus: PerformanceHostGpu[];
+}
+
+/** One card's compute processes, summed per owner. */
+export interface PerformanceGpuUser {
+  /** Null: processes outside any of the platform's containers. */
+  userId: string | null;
+  displayName: string | null;
+  memoryBytes: number;
+  /** SM time share over the last `pmon` sample, 0..1; null when never sampled. */
+  smRatio: number | null;
+}
+
+export interface PerformanceHostGpu {
+  pci: string;
+  index: number | null;
+  usedBytes: number | null;
+  totalBytes: number | null;
+  ratio: number | null;
+  /** Whole-card utilization (nvidia-smi `utilization.gpu`), 0..1. */
+  utilRatio: number | null;
+  /** Owners of the processes on the card, most memory first, `userId: null` last. */
+  users: PerformanceGpuUser[];
 }
 
 export interface PerformanceSparkline {

@@ -29,6 +29,7 @@ import {
   type ObservedSample,
 } from './performance-model.js';
 import { gpuCardCharts } from './performance-gpu-charts.js';
+import { gpuCardUsers, hostGpuCards } from './performance-host-gpus.js';
 
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -146,8 +147,8 @@ export class PerformanceQueryService {
     if (servers.length === 0) {
       return { sampledAt: null, truncated: false, servers: [] };
     }
-    const containers = (await this.loadContainers(servers)).filter((container) =>
-      !userId || container.ownerId === userId);
+    const inventory = await this.loadContainers(servers);
+    const containers = inventory.filter((container) => !userId || container.ownerId === userId);
     const samples = servers.length === 0
       ? []
       : await this.queryInstant(servers.map((server) => server.id));
@@ -170,7 +171,7 @@ export class PerformanceQueryService {
       });
     }
     usage.servers.sort((left, right) => left.serverName.localeCompare(right.serverName));
-    await this.attachHost(usage, samples, admin ? null : actorId);
+    await this.attachHost(usage, samples, admin ? null : actorId, inventory);
     if (query.spark === '1') await this.attachSparklines(usage);
     return usage;
   }
@@ -341,7 +342,7 @@ export class PerformanceQueryService {
       cpuCount: valueFor(cpuCount, serverId),
       memoryTotal: valueFor(memTotal, serverId),
       diskTotal: diskSizes.length === 0 ? null : diskSizes.reduce((sum, row) => sum + row.value, 0),
-      gpus: gpuCards(gpuUsedNow, gpuTotal, gpuIndex, serverId).map((card) => ({
+      gpus: hostGpuCards(serverId, { used: gpuUsedNow, total: gpuTotal, index: gpuIndex, util: [] }).map((card) => ({
         pci: card.pci,
         index: card.index,
         totalBytes: card.totalBytes,
@@ -351,8 +352,9 @@ export class PerformanceQueryService {
 
   private async attachHost(
     usage: PerformanceAdminUsageResponse,
-    samples: readonly import('./performance-model.js').ObservedSample[],
+    samples: readonly ObservedSample[],
     userId: string | null,
+    inventory: readonly InventoryContainer[],
   ): Promise<void> {
     const serverIds = usage.servers.map((server) => server.serverId);
     if (serverIds.length === 0) return;
@@ -360,7 +362,7 @@ export class PerformanceQueryService {
     const pools = userId
       ? await this.storagePools.listVisible(userId)
       : (await this.storagePools.list()).filter(isLocalPoolDto);
-    const [cpu, cpuCount, memUsed, memTotal, poolUsed, poolSize, gpuUsed, gpuTotal, gpuIndex] = selector
+    const [cpu, cpuCount, memUsed, memTotal, poolUsed, poolSize, gpuUsed, gpuTotal, gpuIndex, gpuUtil] = selector
       ? await Promise.all([
         this.vector(`avg by (server_id) (nyabase_node_cpu_usage_ratio${selector})`),
         this.vector(`count by (server_id) (nyabase_node_cpu_usage_ratio${selector})`),
@@ -371,8 +373,10 @@ export class PerformanceQueryService {
         this.vector(`nyabase_node_gpu_mem_used_bytes${selector}`),
         this.vector(`nyabase_node_gpu_mem_total_bytes${selector}`),
         this.vector(`nyabase_node_gpu_smi_index${selector}`),
+        this.vector(`nyabase_node_gpu_util_ratio${selector}`),
       ])
-      : [[], [], [], [], [], [], [], [], []];
+      : [[], [], [], [], [], [], [], [], [], []];
+    const gpuUsers = gpuCardUsers(samples, inventory, Date.now());
     for (const server of usage.servers) {
       const used = valueFor(memUsed, server.serverId);
       const total = valueFor(memTotal, server.serverId);
@@ -403,7 +407,7 @@ export class PerformanceQueryService {
               : null,
           };
         }),
-        gpus: gpuCards(gpuUsed, gpuTotal, gpuIndex, server.serverId),
+        gpus: hostGpuCards(server.serverId, { used: gpuUsed, total: gpuTotal, index: gpuIndex, util: gpuUtil }, gpuUsers),
       };
     }
   }
@@ -676,30 +680,6 @@ function sumServer(
   const rows = samples.filter((sample) => sample.family === family && sample.labels.server_id === serverId);
   if (rows.length === 0) return null;
   return rows.reduce((sum, row) => sum + row.value, 0);
-}
-
-function gpuCards(
-  used: readonly { labels: Record<string, string>; value: number }[],
-  total: readonly { labels: Record<string, string>; value: number }[],
-  index: readonly { labels: Record<string, string>; value: number }[],
-  serverId: string,
-) {
-  const pcis = new Set<string>();
-  for (const row of [...used, ...total, ...index]) {
-    if (row.labels.server_id === serverId && row.labels.gpu_pci) pcis.add(row.labels.gpu_pci);
-  }
-  return [...pcis].map((pci) => {
-    const usedBytes = valueFor(used, serverId, undefined, pci);
-    const totalBytes = valueFor(total, serverId, undefined, pci);
-    const smi = valueFor(index, serverId, undefined, pci);
-    return {
-      pci,
-      index: smi === null ? null : smi,
-      usedBytes,
-      totalBytes,
-      ratio: usedBytes !== null && totalBytes !== null && totalBytes > 0 ? usedBytes / totalBytes : null,
-    };
-  }).sort((left, right) => (left.index ?? 999) - (right.index ?? 999) || left.pci.localeCompare(right.pci));
 }
 
 function alignValue(

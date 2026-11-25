@@ -366,7 +366,13 @@ describe('lane D product UI copy', () => {
     expect(quotaPage).toMatch(/formatGpuGrantSummary/);
     // System disks and data share one disk total, read from the access DTO.
     expect(quotaPage).toMatch(/rootDiskCommittedBytes/);
-    expect(quotaPage).toMatch(/系统盘与数据盘共用/);
+    expect(quotaPage).toMatch(/系统盘/);
+    // Plain numbers folded under 额度明细: no meter that turns red once a container takes the grant.
+    expect(quotaPage).toMatch(/额度明细/);
+    expect(quotaPage).not.toMatch(/UsageMeter/);
+    // The dashboard leads with the granted servers: who uses each card, the machine's load, my containers.
+    expect(dashboard).toMatch(/<ServerCard /);
+    expect(dashboard).toMatch(/'\/performance\/usage'/);
     expect(quotaPage).toMatch(/sharedBackends/);
     expect(quotaPage).toMatch(/额度/);
     expect(quotaPage).toMatch(/已分配/);
