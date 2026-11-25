@@ -14,6 +14,12 @@ import { freeGpuCount, grantedGpuCards, type GrantedGpuCard } from './gpu-occupa
 /** The containers a server card lists before linking to the container page. */
 export const DASHBOARD_CONTAINER_LIMIT = 3;
 
+/**
+ * Sample age past which a card says how old its data is. The server's
+ * `stale` flag trips at 45 s, which ordinary query lag already approaches.
+ */
+export const DASHBOARD_STALE_HINT_MS = 120_000;
+
 /** Grant expiry close enough to show on the card. */
 export const DASHBOARD_EXPIRY_SOON_MS = 14 * 86_400_000;
 

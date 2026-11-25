@@ -8,6 +8,7 @@ import {
   containerTone,
   DASHBOARD_CONTAINER_LIMIT,
   DASHBOARD_EXPIRY_SOON_MS,
+  DASHBOARD_STALE_HINT_MS,
   type DashboardServer,
 } from '../../lib/dashboard-servers.js';
 import { freeGpuCount } from '../../lib/gpu-occupancy.js';
@@ -38,6 +39,9 @@ export function ServerCard({ server }: { server: DashboardServer }) {
 
 function ServerHeader({ server }: { server: DashboardServer }) {
   const { access, grace, usage } = server;
+  const lagging = usage?.stale && usage.sampledAt && Date.now() - Date.parse(usage.sampledAt) > DASHBOARD_STALE_HINT_MS
+    ? usage.sampledAt
+    : null;
   const expiresAt = access?.expiresAt ?? null;
   const soon = expiresAt && new Date(expiresAt).getTime() - Date.now() <= DASHBOARD_EXPIRY_SOON_MS
     ? remainingLabel(expiresAt)
@@ -47,8 +51,8 @@ function ServerHeader({ server }: { server: DashboardServer }) {
       <span aria-hidden className={cn('h-2 w-2 shrink-0 rounded-full', server.online ? 'bg-success' : 'bg-muted-foreground/50')} />
       <h2 className="truncate text-base font-semibold">{server.name}</h2>
       {!server.online ? <span className="shrink-0 text-xs text-muted-foreground">离线</span> : null}
-      {server.online && usage?.stale && usage.sampledAt ? (
-        <span className="shrink-0 text-xs text-muted-foreground">数据 {relativeTime(usage.sampledAt)}</span>
+      {server.online && lagging ? (
+        <span className="shrink-0 text-xs text-muted-foreground">数据 {relativeTime(lagging)}</span>
       ) : null}
       {soon ? <span className="shrink-0 text-xs text-warning">{soon}后到期</span> : null}
       {grace ? <span className="shrink-0 rounded-full bg-warning/15 px-2 py-0.5 text-xs font-medium text-warning">宽限中</span> : null}

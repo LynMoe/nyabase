@@ -3,6 +3,7 @@ import { cardKey, gpuCardUsers, hostGpuCards } from './performance-host-gpus.js'
 import type { InventoryContainer, ObservedSample } from './performance-model.js';
 
 const NOW = 1_000_000;
+const SCRAPED = new Map([['srv-1', NOW]]);
 const SERVER = 'srv-1';
 const PCI_A = '0000:01:00.0';
 const PCI_B = '0000:02:00.0';
@@ -25,7 +26,7 @@ function container(id: string, ownerId: string, displayName: string): InventoryC
   };
 }
 
-function sample(family: string, containerId: string, pci: string, value: number, ts = NOW - 5_000): ObservedSample {
+function sample(family: string, containerId: string, pci: string, value: number, ts = NOW): ObservedSample {
   return { family, labels: { server_id: SERVER, gpu_pci: pci, container_id: containerId }, value, ts };
 }
 
@@ -46,7 +47,7 @@ describe('gpuCardUsers', () => {
       sample('gpu_process_sm', 'c3', PCI_A, 0.1),
       sample('gpu_process_bytes', '__unattributed__', PCI_A, 99),
       sample('gpu_process_bytes', 'c3', PCI_B, 7),
-    ], containers, NOW);
+    ], containers, SCRAPED);
     expect(users.get(cardKey(SERVER, PCI_A))).toEqual([
       { userId: 'bob', displayName: '李娜', memoryBytes: 40, smRatio: 0.1 },
       { userId: 'alice', displayName: '张伟', memoryBytes: 30, smRatio: 1 },
@@ -58,25 +59,37 @@ describe('gpuCardUsers', () => {
   });
 
   it('counts a container the inventory no longer has as others', () => {
-    const users = gpuCardUsers([sample('gpu_process_bytes', 'gone', PCI_A, 5)], containers, NOW);
+    const users = gpuCardUsers([sample('gpu_process_bytes', 'gone', PCI_A, 5)], containers, SCRAPED);
     expect(users.get(cardKey(SERVER, PCI_A))).toEqual([
       { userId: null, displayName: null, memoryBytes: 5, smRatio: null },
     ]);
   });
 
-  it('drops processes whose last sample is older than the freshness window', () => {
+  it('keeps the processes of the last two scrapes and drops older ones, however old the newest scrape is', () => {
+    const scraped = new Map([[SERVER, NOW - 40_000]]);
     const users = gpuCardUsers([
-      sample('gpu_process_bytes', 'c1', PCI_A, 10, NOW - 60_000),
-      sample('gpu_process_sm', 'c1', PCI_A, 0.9, NOW - 60_000),
-    ], containers, NOW);
-    expect(users.size).toBe(0);
+      sample('gpu_process_bytes', 'c1', PCI_A, 10, NOW - 40_000),
+      sample('gpu_process_bytes', 'c3', PCI_A, 20, NOW - 55_000),
+      sample('gpu_process_bytes', 'c3', PCI_B, 30, NOW - 61_000),
+    ], containers, scraped);
+    expect(users.get(cardKey(SERVER, PCI_A))?.map((user) => user.userId)).toEqual(['bob', 'alice']);
+    expect(users.has(cardKey(SERVER, PCI_B))).toBe(false);
+  });
+
+  it('measures against the newest process sample while the latest scrape failed', () => {
+    const users = gpuCardUsers([
+      sample('gpu_process_bytes', 'c1', PCI_A, 10, NOW - 300_000),
+      sample('gpu_process_bytes', 'c3', PCI_B, 30, NOW - 400_000),
+    ], containers, new Map());
+    expect(users.has(cardKey(SERVER, PCI_A))).toBe(true);
+    expect(users.has(cardKey(SERVER, PCI_B))).toBe(false);
   });
 
   it('reads one series per container and card, the newest one', () => {
     const users = gpuCardUsers([
-      sample('gpu_process_bytes', 'c3', PCI_A, 3, NOW - 20_000),
-      sample('gpu_process_bytes', 'c3', PCI_A, 8, NOW - 2_000),
-    ], containers, NOW);
+      sample('gpu_process_bytes', 'c3', PCI_A, 3, NOW - 15_000),
+      sample('gpu_process_bytes', 'c3', PCI_A, 8, NOW),
+    ], containers, SCRAPED);
     expect(users.get(cardKey(SERVER, PCI_A))?.[0]?.memoryBytes).toBe(8);
   });
 });

@@ -171,7 +171,7 @@ export class PerformanceQueryService {
       });
     }
     usage.servers.sort((left, right) => left.serverName.localeCompare(right.serverName));
-    await this.attachHost(usage, samples, admin ? null : actorId, inventory);
+    await this.attachHost(usage, samples, admin ? null : actorId, inventory, scrapeUp);
     if (query.spark === '1') await this.attachSparklines(usage);
     return usage;
   }
@@ -355,6 +355,7 @@ export class PerformanceQueryService {
     samples: readonly ObservedSample[],
     userId: string | null,
     inventory: readonly InventoryContainer[],
+    scrapeUp: ReadonlyMap<string, { value: number; ts: number }>,
   ): Promise<void> {
     const serverIds = usage.servers.map((server) => server.serverId);
     if (serverIds.length === 0) return;
@@ -376,7 +377,8 @@ export class PerformanceQueryService {
         this.vector(`nyabase_node_gpu_util_ratio${selector}`),
       ])
       : [[], [], [], [], [], [], [], [], [], []];
-    const gpuUsers = gpuCardUsers(samples, inventory, Date.now());
+    const scrapedAt = new Map([...scrapeUp].flatMap(([serverId, scrape]) => scrape.value > 0 ? [[serverId, scrape.ts] as const] : []));
+    const gpuUsers = gpuCardUsers(samples, inventory, scrapedAt);
     for (const server of usage.servers) {
       const used = valueFor(memUsed, server.serverId);
       const total = valueFor(memTotal, server.serverId);

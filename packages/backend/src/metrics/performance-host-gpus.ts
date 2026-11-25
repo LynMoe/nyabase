@@ -1,5 +1,13 @@
-import type { PerformanceGpuUser, PerformanceHostGpu } from '@nyabase/common';
-import { PERFORMANCE_FRESHNESS_MS, type InventoryContainer, type ObservedSample } from './performance-model.js';
+import { NODE_METRICS_SCRAPE_INTERVAL_MS, type PerformanceGpuUser, type PerformanceHostGpu } from '@nyabase/common';
+import type { InventoryContainer, ObservedSample } from './performance-model.js';
+
+/**
+ * How far behind the server's newest scrape a process sample may be and still
+ * count: every scrape stamps all its samples alike, so this keeps the processes
+ * of the last two scrapes (one failed `nvidia-smi` read does not blank a card)
+ * and drops a finished job within one interval.
+ */
+const PROCESS_SCRAPE_WINDOW_MS = NODE_METRICS_SCRAPE_INTERVAL_MS + 5_000;
 
 interface NodeRow {
   labels: Record<string, string>;
@@ -46,23 +54,32 @@ export function hostGpuCards(serverId: string, series: NodeGpuSeries, users?: Gp
 }
 
 /**
- * Who runs on each card: the fresh per-process memory and SM samples (one per
+ * Who runs on each card: the current per-process memory and SM samples (one per
  * container and card) summed per container owner. A process outside the
  * platform's containers (`__unattributed__`, or a container the inventory no
- * longer has) counts toward one `userId: null` row. A sample older than
- * {@link PERFORMANCE_FRESHNESS_MS} is a process that has ended.
+ * longer has) counts toward one `userId: null` row. "Current" is relative to
+ * the server's newest successful scrape (`scrapedAt`; else its newest process
+ * sample), never the wall clock: instant queries lag real time by the metrics
+ * store's latency offset.
  */
 export function gpuCardUsers(
   samples: readonly ObservedSample[],
   containers: readonly InventoryContainer[],
-  now: number,
+  scrapedAt: ReadonlyMap<string, number>,
 ): Map<string, PerformanceGpuUser[]> {
   const owners = new Map(containers.map((container) => [container.id, container]));
+  const processes = samples.filter((sample) =>
+    (sample.family === 'gpu_process_bytes' || sample.family === 'gpu_process_sm')
+    && sample.labels.server_id && sample.labels.gpu_pci && sample.labels.container_id);
+  const reference = new Map(scrapedAt);
+  for (const sample of processes) {
+    const serverId = sample.labels.server_id ?? '';
+    if (!scrapedAt.has(serverId)) reference.set(serverId, Math.max(reference.get(serverId) ?? 0, sample.ts));
+  }
   const latest = new Map<string, ObservedSample>();
-  for (const sample of samples) {
-    if (sample.family !== 'gpu_process_bytes' && sample.family !== 'gpu_process_sm') continue;
-    const { server_id: serverId, gpu_pci: pci, container_id: containerId } = sample.labels;
-    if (!serverId || !pci || !containerId || now - sample.ts > PERFORMANCE_FRESHNESS_MS) continue;
+  for (const sample of processes) {
+    const { server_id: serverId = '', gpu_pci: pci = '', container_id: containerId = '' } = sample.labels;
+    if (sample.ts < (reference.get(serverId) ?? 0) - PROCESS_SCRAPE_WINDOW_MS) continue;
     const key = [sample.family, serverId, pci, containerId].join('\0');
     const current = latest.get(key);
     if (!current || sample.ts >= current.ts) latest.set(key, sample);
