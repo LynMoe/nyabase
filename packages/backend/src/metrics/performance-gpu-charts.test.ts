@@ -49,6 +49,18 @@ describe('gpuCardCharts', () => {
     expect(card?.utilization.otherCount).toBe(0);
   });
 
+  it('lists whoever holds memory on the utilization chart, at 0% too, and no one else', () => {
+    const idleHolder = new Map<string, Point[]>([
+      ['gpu_process_bytes', [at(ada.id, 1_000, 10), at(ada.id, 2_000, 10)]],
+      ['gpu_process_sm', [at(ada.id, 1_000, 0), at(ada.id, 2_000, 0), at(bob.id, 2_000, 0.5)]],
+      ['gpu_process_mem_bw', [at(ada.id, 1_000, 0), at(ada.id, 2_000, 0), at(bob.id, 2_000, 0.2)]],
+    ]);
+    const [card] = gpuCardCharts({ containers, series: idleHolder, timeline: [1_000, 2_000] }, [{ pci, index: 0, totalBytes: 80 }]);
+    expect(card?.lines.map((line) => line.label)).toEqual(['Ada']);
+    expect(card?.utilization.sm.map((line) => [line.label, line.points.map((point) => point.v)])).toEqual([['Ada', [0, 0]]]);
+    expect(card?.utilization.memoryBandwidth.map((line) => [line.label, line.points.map((point) => point.v)])).toEqual([['Ada', [0, 0]]]);
+  });
+
   it('keeps the requested container even while it is idle', () => {
     const [card] = gpuCardCharts(
       { containers, series, containerId: eve.id, timeline: [1_000, 2_000] },
