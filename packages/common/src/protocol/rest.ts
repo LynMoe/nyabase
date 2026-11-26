@@ -105,6 +105,11 @@ export interface UserDto {
   /** The last password login, null when none is known; only in user-admin views. */
   lastLoginAt?: string | null;
   /**
+   * The last use of the web panel (a login or a session refresh, so within about
+   * the access token's lifetime), null when none is known; only in user-admin views.
+   */
+  lastActiveAt?: string | null;
+  /**
    * Only in your own session (login / refresh / `GET /auth/me`): an administrator
    * created the account or reset its password, and the UI requires a new one.
    */

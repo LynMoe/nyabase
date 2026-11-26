@@ -59,6 +59,47 @@ describePg('credential revocation on password change, reset and account changes'
     });
   });
 
+  it('counts a login and every session refresh as activity, never waiting for the user row', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const context = await setup(database);
+      const listed = async () => (await context.users.listDtos()).find((user) => user.id === context.user.id);
+      expect((await listed())?.lastActiveAt).toBeNull();
+      const { refreshToken } = await context.auth.login({ id: context.user.id });
+      const loggedIn = await listed();
+      expect(loggedIn?.lastActiveAt).toBe(loggedIn?.lastLoginAt);
+
+      const longAgo = new Date('2026-01-01T00:00:00Z');
+      await database.updateTable('iam.users').set({ last_active_at: longAgo }).where('id', '=', context.user.id).execute();
+      const refreshed = await context.auth.refreshTokens(refreshToken, 'a'.repeat(64));
+      const active = await listed();
+      expect(new Date(active?.lastActiveAt ?? 0).getTime()).toBeGreaterThan(longAgo.getTime());
+      expect(active?.lastLoginAt).toBe(loggedIn?.lastLoginAt);
+      const fresh = await context.users.findById(context.user.id);
+      expect((await context.users.toDto(fresh, { administrative: true })).lastActiveAt).toBe(active?.lastActiveAt);
+      expect(await context.users.toDto(fresh)).not.toHaveProperty('lastActiveAt');
+
+      // A login or an account change holding the user row: the refresh goes through and skips the sample.
+      await database.updateTable('iam.users').set({ last_active_at: longAgo }).where('id', '=', context.user.id).execute();
+      let release!: () => void;
+      const released = new Promise<void>((resolve) => { release = resolve; });
+      let locked!: () => void;
+      const lockHeld = new Promise<void>((resolve) => { locked = resolve; });
+      const holder = database.transaction().execute(async (transaction) => {
+        await transaction.selectFrom('iam.users').select('id').where('id', '=', context.user.id).forUpdate().execute();
+        locked();
+        await released;
+      });
+      await lockHeld;
+      try {
+        await context.auth.refreshTokens(refreshed.refreshToken, 'b'.repeat(64));
+      } finally {
+        release();
+        await holder;
+      }
+      expect((await listed())?.lastActiveAt).toBe(longAgo.toISOString());
+    });
+  });
+
   it('requires a new password after an administrator chose it, until the user changes it', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const context = await setup(database);
@@ -131,6 +172,7 @@ async function setup(database: Kysely<NyabaseDatabase>) {
         'auth.jwtSecret': 'revocation-jwt-secret-revocation-jwt-secret',
         'auth.refreshTokenExpiresDays': 7,
         'auth.sessionMaxLifetimeDays': 30,
+        'auth.jwtExpiresIn': '15m',
       };
       return values[key] as T;
     },

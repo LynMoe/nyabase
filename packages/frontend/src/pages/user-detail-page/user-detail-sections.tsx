@@ -73,6 +73,9 @@ function UserIdentityCard({ user }: { user: UserDto }) {
             />
             <Field label="角色" value={roleLabel(user.role)} />
             <Field label="创建时间" value={relativeTime(user.createdAt)} />
+            {user.lastActiveAt !== undefined ? (
+              <Field label="最近活跃" value={user.lastActiveAt ? relativeTime(user.lastActiveAt) : '—'} />
+            ) : null}
             {user.lastLoginAt !== undefined ? (
               <Field label="最后登录" value={user.lastLoginAt ? relativeTime(user.lastLoginAt) : '—'} />
             ) : null}

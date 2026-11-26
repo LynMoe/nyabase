@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { Plus } from 'lucide-react';
-import { Role, type UserDto } from '@nyabase/common';
+import { Role, type ContainerDto, type UserDto } from '@nyabase/common';
 import { api } from '../lib/api.js';
 import { Button } from '../components/ui/button.js';
 import { EmptyState } from '../components/layout/empty-state.js';
@@ -32,6 +32,12 @@ export default function UsersPage() {
   });
   const grants = useAllServerGrants(canManageUsers).data ?? [];
   const servers = useGrantServers().data ?? [];
+  // Shared with the containers admin page: a granted server turns green where its user has a container.
+  const containers = useQuery({
+    queryKey: queryKeys.containers.adminList,
+    queryFn: () => api.get<ContainerDto[]>('/containers?scope=all'),
+    enabled: canManageUsers,
+  }).data;
   return (
     <Page testId="users-management">
       <PageHeader
@@ -74,7 +80,7 @@ export default function UsersPage() {
             flush
             toolbar={<ListSearch value={query} onChange={setQuery} placeholder="搜索用户名、显示名、备注" />}
           >
-            <UsersTable users={visibleUsers} grants={grants} servers={servers} />
+            <UsersTable users={visibleUsers} grants={grants} servers={servers} containers={containers} />
           </SectionCard>
           );
         }}

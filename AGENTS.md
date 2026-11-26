@@ -56,6 +56,9 @@ Vite 通过 alias 将 `@nyabase/common` 指向 `src/index.ts`，但 `index.ts` �
 - 用户备注（`iam.users.note`）是管理员对用户的备注：`UserDto.note` 只在 user_admin 及以上请求的 `GET /users`、`GET` / `PATCH` / `POST /users[/:id]` 里出现，
   登录 / 会话里的 `UserDto` 不带；自助路径不能改备注（user_admin 改不了自己的，admin 走管理员路径）。
 - 最后登录（`iam.users.last_login_at`，000010）：只记密码登录（refresh 和代操作不算），`UserDto.lastLoginAt` 与备注一样只在 user_admin 及以上的视图里出现；从审计回填，审计有保留期，所以 NULL = 未知（前端显示「—」），不是从未登录。
+  最近活跃（`iam.users.last_active_at`，000015，用户列表显示的是它）：登录与每次 refresh 轮换都记（面板冷加载和访问令牌过期后会 refresh，所以精度约为 `auth.jwtExpiresIn`），代操作只算 admin 自己的会话，SSH 不算；
+  轮换事务已持会话行，而登录 / 改账户先锁用户行再删会话，所以写入用 `FOR UPDATE SKIP LOCKED`，用户行被锁时跳过这一次（`IamAuthRepository.recordActivity`）。
+  `UserDto.lastActiveAt` 可见范围同上；从最后登录与现存会话回填，NULL = 未知。
 - 强制改密（`iam.users.must_change_password`，000006）：管理员新建用户、或重置别人的密码时置位（启动补救的 `admin`、管理员改自己的密码不置位），用户自助改密时清除。
   只在会话里的 `UserDto.mustChangePassword`（login / refresh / `GET /auth/me`）出现；前端 `AppLayout` 据此弹出不可关闭的改密对话框（只能改密或退出登录）。后端不据此拦截其他 API。
 - intents 只有 `GET /intents`、`GET /intents/:id`、`POST /intents/:id/retry` 一个 controller；

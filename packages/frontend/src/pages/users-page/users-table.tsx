@@ -1,5 +1,12 @@
 import { Link, useNavigate } from '@tanstack/react-router';
-import type { ServerGrantDto, UserDto, UserServerDto } from '@nyabase/common';
+import {
+  ContainerPhase,
+  ContainerStatus,
+  type ContainerDto,
+  type ServerGrantDto,
+  type UserDto,
+  type UserServerDto,
+} from '@nyabase/common';
 import { StatusBadge } from '../../components/layout/status-badge.js';
 import { Badge } from '../../components/ui/badge.js';
 import { Hint } from '../../components/ui/hint.js';
@@ -18,10 +25,44 @@ import { userDeleting } from '../../lib/in-progress.js';
 import { relativeTime } from '../../lib/utils.js';
 import { ResourceRef } from '../../components/refs/resource-ref.js';
 
-/** One server a user holds a grant on; hovering shows the bundle and its effective quotas. */
-function ServerGrantBadge({ grant, servers }: { grant: ServerGrantDto; servers: UserServerDto[] }) {
+/** A user's containers on one server (any but those being deleted), and how many of them run. */
+interface ContainerTally {
+  total: number;
+  running: number;
+}
+
+const tallyKey = (userId: string, serverId: string) => `${userId}/${serverId}`;
+
+function tallyContainers(containers: ContainerDto[]): Map<string, ContainerTally> {
+  const tallies = new Map<string, ContainerTally>();
+  for (const container of containers) {
+    if (container.lifecyclePhase === ContainerPhase.Deleting) continue;
+    const key = tallyKey(container.ownerId, container.serverId);
+    const tally = tallies.get(key) ?? { total: 0, running: 0 };
+    tally.total += 1;
+    if (container.actual.status === ContainerStatus.Running) tally.running += 1;
+    tallies.set(key, tally);
+  }
+  return tallies;
+}
+
+/**
+ * One server a user holds a grant on; hovering shows the bundle, its effective quotas and the
+ * user's containers there. Green when the user has a container on it, amber once the grant expired.
+ */
+function ServerGrantBadge({
+  grant,
+  servers,
+  containers,
+}: {
+  grant: ServerGrantDto;
+  servers: UserServerDto[];
+  /** null: no containers there; undefined: the container list has not loaded. */
+  containers: ContainerTally | undefined | null;
+}) {
   const server = servers.find((row) => row.id === grant.serverId);
   const phase = expiryPhase(grant.expiresAt);
+  const variant = phase !== 'live' ? 'warning' : containers ? 'success' : 'outline';
   return (
     <Hint
       content={(
@@ -29,12 +70,15 @@ function ServerGrantBadge({ grant, servers }: { grant: ServerGrantDto; servers: 
           <p className="font-medium">{serverName(grant.serverId, servers)} · 模板 {grant.bundleName}</p>
           {quotaSummaryParts(grant, server ?? {}).map((part) => <p key={part}>{part}</p>)}
           <p>{dataDiskSummary(grant.dataDisks)}</p>
+          {containers !== undefined ? (
+            <p>{containers ? `容器 ${containers.total} 个，运行中 ${containers.running} 个` : '没有容器'}</p>
+          ) : null}
           <p className="text-muted-foreground">到期 {expiryLabel(grant.expiresAt)}</p>
         </div>
       )}
     >
       <Badge
-        variant={phase === 'live' ? 'outline' : 'warning'}
+        variant={variant}
         className="px-1.5 py-0 text-xs font-normal"
         data-testid={`user-grant-${grant.userId}-${grant.serverId}`}
       >
@@ -44,17 +88,29 @@ function ServerGrantBadge({ grant, servers }: { grant: ServerGrantDto; servers: 
   );
 }
 
-/** Users, one compact row each: name, role, status, the servers granted, last login, the administrators' note. */
+function activityTitle(user: UserDto): string | undefined {
+  const lines = [
+    user.lastActiveAt ? `最近活跃 ${new Date(user.lastActiveAt).toLocaleString('zh-CN')}` : null,
+    user.lastLoginAt ? `最后登录 ${new Date(user.lastLoginAt).toLocaleString('zh-CN')}` : null,
+  ].filter((line) => line !== null);
+  return lines.length > 0 ? lines.join('\n') : undefined;
+}
+
+/** Users, one compact row each: name, role, status, the servers granted, last activity, the administrators' note. */
 export function UsersTable({
   users,
   grants,
   servers,
+  containers,
 }: {
   users: UserDto[];
   grants: ServerGrantDto[];
   servers: UserServerDto[];
+  /** Every user's containers (`scope=all`); undefined until loaded. */
+  containers: ContainerDto[] | undefined;
 }) {
   const navigate = useNavigate();
+  const tallies = containers ? tallyContainers(containers) : undefined;
   const grantsOf = new Map<string, ServerGrantDto[]>();
   for (const grant of grants) {
     const list = grantsOf.get(grant.userId) ?? [];
@@ -72,7 +128,7 @@ export function UsersTable({
           <TableHead className="py-2">角色</TableHead>
           <TableHead className="py-2">状态</TableHead>
           <TableHead className="py-2">授权服务器</TableHead>
-          <TableHead className="py-2">最后登录</TableHead>
+          <TableHead className="py-2">最近活跃</TableHead>
           <TableHead className="py-2">备注</TableHead>
         </TableRow>
       </TableHeader>
@@ -115,15 +171,20 @@ export function UsersTable({
             <TableCell className="whitespace-normal py-2">
               <div className="flex max-w-[22rem] flex-wrap gap-1">
                 {(grantsOf.get(user.id) ?? []).sort(byServerName).map((grant) => (
-                  <ServerGrantBadge key={grant.id} grant={grant} servers={servers} />
+                  <ServerGrantBadge
+                    key={grant.id}
+                    grant={grant}
+                    servers={servers}
+                    containers={tallies ? tallies.get(tallyKey(user.id, grant.serverId)) ?? null : undefined}
+                  />
                 ))}
               </div>
             </TableCell>
             <TableCell
               className="whitespace-nowrap py-2 text-muted-foreground"
-              title={user.lastLoginAt ? new Date(user.lastLoginAt).toLocaleString('zh-CN') : undefined}
+              title={activityTitle(user)}
             >
-              {user.lastLoginAt ? relativeTime(user.lastLoginAt) : '—'}
+              {user.lastActiveAt ? relativeTime(user.lastActiveAt) : '—'}
             </TableCell>
             <TableCell className="max-w-[18rem] py-2">
               <p className="truncate text-muted-foreground" title={user.note ?? undefined}>{user.note ?? ''}</p>

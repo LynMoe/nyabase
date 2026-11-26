@@ -144,7 +144,10 @@ export class IamAuthRepository implements AuthPersistence {
           created_at: now,
         })
         .executeTakeFirstOrThrow();
-      await transaction.updateTable('iam.users').set({ last_login_at: now }).where('id', '=', userId).execute();
+      await transaction.updateTable('iam.users')
+        .set({ last_login_at: now, last_active_at: now })
+        .where('id', '=', userId)
+        .execute();
       const user = this.toUser(userRow as UserRow);
       await onIssued?.(transaction, user);
       return user;
@@ -213,6 +216,7 @@ export class IamAuthRepository implements AuthPersistence {
         .where('hash', '=', input.hash)
         .executeTakeFirst();
       if (Number(updated.numUpdatedRows) !== 1) return { kind: 'invalid' };
+      await this.recordActivity(transaction, current.user_id, now);
       return {
         kind: 'rotated',
         sessionId: current.token_id,
@@ -324,6 +328,25 @@ export class IamAuthRepository implements AuthPersistence {
     const reuse = { userId: retired.user_id, sessionId: retired.token_id };
     await input.onReuse?.(transaction, reuse);
     return { kind: 'reused', ...reuse };
+  }
+
+  /**
+   * A rotation is the user's latest use of the panel (`last_active_at`): it
+   * refreshes on load and whenever its access token has expired. SKIP LOCKED
+   * because this transaction already holds a session row, while a login or an
+   * account change locks the user row and then deletes sessions: waiting here
+   * could deadlock, skipping loses one sample (a login sets it anyway).
+   */
+  private async recordActivity(transaction: IamTransaction, userId: string, now: Date): Promise<void> {
+    await transaction.updateTable('iam.users')
+      .set({ last_active_at: now })
+      .where('id', 'in', (expression) => expression
+        .selectFrom('iam.users')
+        .select('id')
+        .where('id', '=', userId)
+        .forUpdate()
+        .skipLocked())
+      .execute();
   }
 
   /**
