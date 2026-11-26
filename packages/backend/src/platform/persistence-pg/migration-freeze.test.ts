@@ -35,6 +35,8 @@ const RELEASED_MIGRATION_CHECKSUMS: Readonly<Record<string, string>> = {
   '000013_storage-pool-roles': '9ce531d708a67fcdd0206ffa816577ea1dd6aaab1b04b2d830fedd4bc4bbf788',
   // Deployed to production on 2026-11-21 with 825e6d8.
   '000014_disk-quota': '5e0609b9cfff706933e1fb5652d7e302066e0fa9e92a7c4f594d122ec5665e80',
+  // Deployed to production on 2026-11-26 with a732546.
+  '000015_user-last-active': '935ab97856e0f6b38dae1d7817e11438e2ad0f4a7f6519d9d52e45430fdd9026',
 };
 
 describe('released SQL migrations', () => {
