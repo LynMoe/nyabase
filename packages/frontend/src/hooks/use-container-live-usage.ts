@@ -16,9 +16,11 @@ export type ContainerLiveUsageIndex = {
   byContainer: ReadonlyMap<string, ContainerLiveUsage>;
   /** Servers whose latest samples are older than the freshness window. */
   staleServers: ReadonlySet<string>;
+  /** Cards each server reported in its latest sample; absent while unknown. */
+  gpuCardsByServer: ReadonlyMap<string, number>;
 };
 
-const EMPTY: ContainerLiveUsageIndex = { byContainer: new Map(), staleServers: new Set() };
+const EMPTY: ContainerLiveUsageIndex = { byContainer: new Map(), staleServers: new Set(), gpuCardsByServer: new Map() };
 
 /**
  * Live per-container samples for a container list. The user list reads its
@@ -40,8 +42,10 @@ export function useContainerLiveUsage(scope: ListScope): ContainerLiveUsageIndex
 function indexUsage(response: PerformanceUsageResponse | PerformanceAdminUsageResponse): ContainerLiveUsageIndex {
   const byContainer = new Map<string, ContainerLiveUsage>();
   const staleServers = new Set<string>();
+  const gpuCardsByServer = new Map<string, number>();
   for (const server of response.servers) {
     if (server.stale) staleServers.add(server.serverId);
+    if (server.host.gpus.length > 0) gpuCardsByServer.set(server.serverId, server.host.gpus.length);
     if ('containers' in server) {
       for (const row of server.containers) byContainer.set(row.containerId, row);
     }
@@ -49,5 +53,5 @@ function indexUsage(response: PerformanceUsageResponse | PerformanceAdminUsageRe
   if ('ownContainers' in response) {
     for (const row of response.ownContainers ?? []) byContainer.set(row.containerId, row);
   }
-  return { byContainer, staleServers };
+  return { byContainer, staleServers, gpuCardsByServer };
 }

@@ -193,6 +193,45 @@ const stoppedContainer = {
   actions: { ...container.actions, start: actionOn, stop: actionOff, restart: actionOff },
 };
 
+/** The 全平台 list: a few servers and owners, so its folds have something to fold. */
+const fleetContainer = (id, name, serverId, serverName, owner, extra = {}) => ({
+  ...container,
+  id,
+  name,
+  instanceName: `c-${name}`,
+  serverId,
+  serverName,
+  ownerId: `user-${owner[0]}`,
+  ownerName: owner[0],
+  ownerDisplayName: owner[1],
+  routedIp: `10.20.${id.slice(-1)}.21`,
+  actual: { ...container.actual, instanceName: `c-${name}`, routedIp: `10.20.${id.slice(-1)}.21` },
+  access: { phase: 'live', expiresAt: null },
+  ...extra,
+});
+const ALICE = ['alice', '爱丽丝'];
+const BOB = ['bob', '鲍勃'];
+const CAROL = ['carol', '卡萝'];
+const fleetContainers = [
+  container,
+  stoppedContainer,
+  fleetContainer('ctr-3', 'alice-gpu-node-b', 'srv-2', 'gpu-node-b', ALICE, {
+    gpu: { nvidiaRuntime: true, pciAddresses: ['0000:4f:00.0', '0000:52:00.0'] },
+  }),
+  fleetContainer('ctr-4', 'alice-exp', 'srv-2', 'gpu-node-b', ALICE, {
+    gpu: { nvidiaRuntime: true, pciAddresses: ['0000:52:00.0'] },
+  }),
+  fleetContainer('ctr-5', 'bob-train', 'srv-2', 'gpu-node-b', BOB, {
+    needsAttention: true,
+    gpu: { nvidiaRuntime: true, pciAddresses: ['0000:56:00.0', '0000:57:00.0'] },
+  }),
+  fleetContainer('ctr-6', 'bob-lab-node-a', 'srv-1', 'lab-node-a', BOB),
+  fleetContainer('ctr-7', 'carol-l40', 'srv-3', 'l40-node-c', CAROL, {
+    lifecyclePhase: 'provisioning',
+    routedIp: null,
+  }),
+];
+
 const volume = {
   id: 'vol-1',
   ownerId: 'user-admin',
@@ -315,7 +354,10 @@ const hostSnapshot = {
   memory: { usedBytes: 48 * 1024 ** 3, limitBytes: 128 * 1024 ** 3, ratio: 0.375 },
   network: { rxBytesPerSec: 2.4 * 1024 ** 2, txBytesPerSec: 0.8 * 1024 ** 2 },
   disks: [{ id: 'pool-1', name: '本地盘', usedBytes: 120 * 1024 ** 3, sizeBytes: 500 * 1024 ** 3, ratio: 0.24 }],
-  gpus: [{ pci: '0000:01:00.0', index: 0, usedBytes: 6 * 1024 ** 3, totalBytes: 24 * 1024 ** 3, ratio: 0.25 }],
+  gpus: [{
+    pci: '0000:01:00.0', index: 0, usedBytes: 6 * 1024 ** 3, totalBytes: 24 * 1024 ** 3, ratio: 0.25, utilRatio: 0.4,
+    users: [{ userId: 'user-admin', displayName: '平台管理员', memoryBytes: 6 * 1024 ** 3, smRatio: 0.3 }],
+  }],
 };
 
 const ownContainerUsage = {
@@ -420,7 +462,7 @@ function mockApi(urlString, method) {
     return json({ items: [{ pciAddress: '0000:01:00.0', index: 0, model: 'RTX 4090' }], enabled: true });
   }
 
-  if (p === '/containers') return json([container, stoppedContainer]);
+  if (p === '/containers') return json(all ? fleetContainers : [container, stoppedContainer]);
   if (p === '/containers/ctr-1') return json(container);
   if (p.endsWith('/containers/ctr-1/volumes')) return json(container.volumes);
   if (p === '/intents' && url.searchParams.get('resourceId') === 'ctr-1') return json({ items: [{
@@ -721,6 +763,8 @@ const PAGES = [
   { name: 'shared-backends', path: '/shared-backends' },
   { name: 'images', path: '/images' },
   { name: 'manage-containers', path: '/manage/containers' },
+  { name: 'manage-containers-by-owner', path: '/manage/containers?group=owner' },
+  { name: 'manage-containers-folded', path: '/manage/containers?collapsed=srv-2' },
   { name: 'ssh-proxy', path: '/ssh-proxy' },
   { name: 'http-proxy-ops', path: '/http-proxy-ops' },
   { name: 'users', path: '/users' },
