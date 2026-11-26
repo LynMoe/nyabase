@@ -1,6 +1,6 @@
 import { Link } from '@tanstack/react-router';
-import { ChevronRight, CircleAlert, CirclePlay, CircleStop, LoaderCircle } from 'lucide-react';
-import { canonicalPciAddress, ContainerPhase, type ContainerDto, type PerformanceServerUsage } from '@nyabase/common';
+import { ChevronRight, Pause } from 'lucide-react';
+import { canonicalPciAddress, type ContainerDto, type PerformanceServerUsage } from '@nyabase/common';
 import { GpuStrip } from './gpu-strip.js';
 import { useGpuNames } from '../performance/host-occupancy.js';
 import { remainingLabel } from '../grants/use-grant-panel-data.js';
@@ -12,7 +12,7 @@ import {
   type DashboardServer,
 } from '../../lib/dashboard-servers.js';
 import { freeGpuCount } from '../../lib/gpu-occupancy.js';
-import { containerStatusLabel, lifecyclePhaseLabel } from '../../lib/status-labels.js';
+import { containerStatusLabel } from '../../lib/status-labels.js';
 import { cn, relativeTime } from '../../lib/utils.js';
 
 const LABEL = 'w-11 shrink-0 text-xs text-muted-foreground';
@@ -123,9 +123,10 @@ function MyContainers({ containers }: { containers: readonly ContainerDto[] }) {
   const more = containers.length - shown.length;
   return (
     <div className="flex items-start gap-1.5">
-      <span className={cn(LABEL, 'pt-1.5')}>我的</span>
+      {/* Same padding and line box as a container row, so 我的 sits on the first row's line. */}
+      <span className={cn(LABEL, 'py-1.5 leading-5')}>我的</span>
       <div className="min-w-0 flex-1">
-        {shown.length === 0 ? <p className="pt-1 text-sm text-muted-foreground">没有容器</p> : null}
+        {shown.length === 0 ? <p className="py-1.5 text-sm text-muted-foreground">没有容器</p> : null}
         <ul className="-mx-2">
           {shown.map((container) => (
             <li key={container.id}>
@@ -145,31 +146,23 @@ function MyContainers({ containers }: { containers: readonly ContainerDto[] }) {
   );
 }
 
-const TONE = {
-  running: { icon: CirclePlay, className: 'text-success' },
-  attention: { icon: CircleAlert, className: 'text-destructive' },
-  pending: { icon: LoaderCircle, className: 'animate-spin text-warning' },
-  idle: { icon: CircleStop, className: 'text-muted-foreground' },
-} as const;
-
-/** Status icon, then the name; the whole row opens the container. */
+/** The name, then a small pause mark when the container is stopped; the whole row opens the container. */
 function ContainerRow({ container }: { container: ContainerDto }) {
-  const tone = TONE[containerTone(container)];
-  const Icon = tone.icon;
-  const status = container.lifecyclePhase === ContainerPhase.Active
-    ? containerStatusLabel(container.actual.status)
-    : lifecyclePhaseLabel(container.lifecyclePhase);
+  const stopped = containerTone(container) === 'idle';
+  const status = containerStatusLabel(container.actual.status);
   return (
     <Link
       to="/containers/$containerId"
       params={{ containerId: container.id }}
       search={{ tab: 'overview' }}
-      className="flex min-w-0 items-center gap-2 rounded-md px-2 py-1.5 text-sm hover:bg-accent"
+      className="flex min-w-0 items-center gap-1.5 rounded-md px-2 py-1.5 text-sm hover:bg-accent"
     >
-      <Icon role="img" aria-label={status} className={cn('h-4 w-4 shrink-0', tone.className)}>
-        <title>{status}</title>
-      </Icon>
       <span className="min-w-0 truncate font-medium">{container.name}</span>
+      {stopped ? (
+        <Pause role="img" aria-label={status} className="h-3 w-3 shrink-0 fill-current text-muted-foreground">
+          <title>{status}</title>
+        </Pause>
+      ) : null}
       <ChevronRight aria-hidden className="ml-auto h-3.5 w-3.5 shrink-0 text-muted-foreground" />
     </Link>
   );
